@@ -10,7 +10,7 @@ import {
   resolveInboxWaitControls,
   type InboxWaitResult,
 } from "../lib/inbox-wait-options.ts"
-import { inboxWaitErrorKind } from "../lib/inbox-wait-errors.ts"
+import { InboxWaitGapController } from "../lib/inbox-wait-gap.ts"
 
 // The retryable transport-error classifier has ONE owner now
 // (../lib/inbox-wait-errors.ts, also exported as tribe-wire/lib/inbox-wait-errors
@@ -1880,7 +1880,9 @@ export async function waitForInboxWithReconnect(opts: {
   unavailableGraceMs?: number
   wakeOnCorrelatedReply?: boolean
 }): Promise<InboxWaitResult> {
-  const now = opts.now ?? Date.now
+  // The deadline is measured on ONE monotonic clock, the same one the boundary
+  // controller uses; never Date.now (27397 / #27416 addition 2).
+  const now = opts.now ?? (() => performance.now())
   const sleep =
     opts.sleep ??
     ((ms: number) =>
@@ -1896,29 +1898,30 @@ export async function waitForInboxWithReconnect(opts: {
   })
   const startedAt = now()
   const deadline = startedAt + controls.timeoutMs
+  const gap = new InboxWaitGapController({
+    deadlineMs: deadline,
+    monotonicNow: now,
+    backoff: { kind: "exponential", initialMs: retryDelayMs, capMs: INBOX_WAIT_MAX_RETRY_DELAY_MS },
+    unavailableGraceMs,
+  })
   let latestResult: InboxWaitResult | undefined
   let lastRetryableError: unknown
-  let attempted = false
   let afterSeq: number | undefined
-  let consecutiveRetryableErrors = 0
-  let unavailableSince: number | undefined
 
   while (true) {
-    const remainingMs = Math.max(0, deadline - now())
-    if (attempted && remainingMs <= 0) {
+    const gate = gap.beforeCall()
+    if (!gate.proceed) {
       return logicalTimeoutInboxWaitResult(latestResult, lastRetryableError, startedAt, now, controls.timeoutMs)
     }
 
     try {
-      attempted = true
       const result = await opts.call({
         session: opts.session,
-        timeoutMs: Math.min(maxChunkMs, remainingMs),
+        timeoutMs: Math.min(maxChunkMs, gate.remainingMs),
         wakeOnCorrelatedReply: controls.wakeOnCorrelatedReply,
         ...(afterSeq === undefined ? {} : { afterSeq }),
       })
-      consecutiveRetryableErrors = 0
-      unavailableSince = undefined
+      gap.afterSuccess()
       if (Number.isSafeInteger(result.baseline_seq) && Number(result.baseline_seq) >= 0) {
         afterSeq = Number(result.baseline_seq)
       }
@@ -1938,28 +1941,17 @@ export async function waitForInboxWithReconnect(opts: {
       }
       continue
     } catch (err) {
-      const kind = inboxWaitErrorKind(err)
-      if (!kind) throw err
+      // The boundary controller classifies once and throws a non-retryable
+      // error unchanged; it owns the backoff, the absence grace and the bounds.
+      const action = gap.afterError(err)
       lastRetryableError = err
-      if (kind === "daemon-unavailable") {
-        // A restart's socket gap begins after the established wait closes;
-        // the logical wait's age must not consume this absence grace.
-        unavailableSince ??= now()
-        if (latestResult === undefined && now() - unavailableSince >= unavailableGraceMs) throw err
-      } else {
-        unavailableSince = undefined
-      }
-      const afterErrorRemainingMs = Math.max(0, deadline - now())
-      if (afterErrorRemainingMs <= 0) {
+      if (action.action === "terminal") {
+        // The CLI fails loud on the absent-daemon grace and otherwise collapses
+        // the deadline into a logical timeout, exactly as before.
+        if (action.reason === "unavailable-grace") throw err
         return logicalTimeoutInboxWaitResult(latestResult, lastRetryableError, startedAt, now, controls.timeoutMs)
       }
-      const retryBackoffMs = Math.min(
-        INBOX_WAIT_MAX_RETRY_DELAY_MS,
-        retryDelayMs * 2 ** Math.min(consecutiveRetryableErrors, 30),
-      )
-      consecutiveRetryableErrors += 1
-      const pauseMs = Math.min(retryBackoffMs, afterErrorRemainingMs)
-      if (pauseMs > 0) await sleep(pauseMs)
+      if (action.ms > 0) await sleep(action.ms)
     }
   }
 }
