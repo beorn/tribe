@@ -1439,7 +1439,9 @@ function ensureDeliveryLedger(now: number): void {
   }
   const loaded = loadDeliveryLedger(path)
   const opened = openDeliveryLedgerWindow({ existing: loaded.state, coverage: loaded.coverage, pane, now })
-  deliveryCounter.restore(opened.ids)
+  // #27459 REVISE — seed the cumulative same-window totals too, not just the
+  // id set, or the first persist of a resumed window reads as all-zero.
+  deliveryCounter.restore(opened.ids, opened.counters)
   forwardedAttention.restore(opened.ids)
   // #27459 gap-7 — the summary throttle is restored too, or a restart re-presents
   // an unchanged "You own N balls ..." line (the class the id set just closed).

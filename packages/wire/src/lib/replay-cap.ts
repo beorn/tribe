@@ -151,7 +151,13 @@ export type DeliveryCounter = {
   /** Bounded first-successful-handoff ids, for the durable per-pane ledger. */
   firstHandoffIds(): string[]
   /** Seed presentation + handoff identity from a restored ledger. */
-  restore(ids: Iterable<string>): void
+  /**
+   * Seed presentation + handoff identity, and the cumulative same-window
+   * totals, from a restored ledger (#27459 REVISE). Restoring identity alone
+   * let the next persist overwrite a resumed window with a fresh zero while
+   * windowStart stayed put — a silent under-count the report read as a clean 0.
+   */
+  restore(ids: Iterable<string>, counters?: DeliveryCounters): void
   /** Roll the 4h window: zero the counters, keep the identity. */
   resetCounters(): void
 }
@@ -235,11 +241,12 @@ export function createDeliveryCounter(opts?: { maxIds?: number }): DeliveryCount
     firstHandoffIds() {
       return handedOff.ids()
     },
-    restore(ids) {
+    restore(ids, restored) {
       for (const id of ids) {
         presented.add(id)
         handedOff.add(id)
       }
+      if (restored !== undefined) counters = { ...restored }
     },
     resetCounters() {
       counters = zero()

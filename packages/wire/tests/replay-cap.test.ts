@@ -384,6 +384,31 @@ describe("createDeliveryCounter (#27459 per-pane delivery counter)", () => {
     expect(counter.snapshot().duplicateBytes).toBe(7)
   })
 
+  it("restores the cumulative same-window totals too, so a resumed window is not re-zeroed (#27459 REVISE)", () => {
+    const counter = createDeliveryCounter()
+    counter.restore(["row-a"], {
+      presentations: 120,
+      newPresentations: 100,
+      duplicatePresentations: 20,
+      deliveries: 100,
+      newDeliveries: 80,
+      duplicateDeliveries: 20,
+      duplicateBytes: 700,
+      suppressed: 20,
+    })
+    expect(counter.snapshot()).toMatchObject({
+      presentations: 120,
+      deliveries: 100,
+      duplicateDeliveries: 20,
+      duplicateBytes: 700,
+      suppressed: 20,
+    })
+    // New activity still counts on top of the resumed totals.
+    counter.present("row-b")
+    counter.deliver("row-b", 5)
+    expect(counter.snapshot()).toMatchObject({ presentations: 121, deliveries: 101 })
+  })
+
   it("resetCounters zeroes the window but keeps the identity, so a re-present still reads duplicate", () => {
     const counter = createDeliveryCounter()
     counter.present("row-a")

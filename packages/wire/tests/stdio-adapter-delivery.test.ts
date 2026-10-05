@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -1944,6 +1944,87 @@ describe("stdio adapter delivery modes", () => {
     expect(ledger.counters.duplicatePresentations).toBe(2)
     expect(ledger.counters.suppressed).toBe(2)
     expect([...ledger.ids].sort()).toEqual(["count-row-a", "count-row-b"])
+  })
+
+  // #27459 REVISE (@dev/11): a restart RESUMES the in-flight 4h window, so the
+  // first persist after it must carry the ledger cumulative same-window totals
+  // forward — not overwrite them from the fresh in-memory counter. Before the
+  // fix, `restore` seeded only the id set, so the next snapshot read all-zero
+  // while windowStart stayed put: a silent under-count the 4h report would
+  // render as a clean 0 with gap:false.
+  it("keeps the resumed same-window counter totals across an adapter restart (#27459 REVISE)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    const windowStartMs = Date.now() - 60_000
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        version: 1,
+        pane: "@agent/test",
+        windowStartMs,
+        updatedAtMs: windowStartMs,
+        ids: ["seed-row-a", "seed-row-b"],
+        counters: {
+          presentations: 120,
+          newPresentations: 100,
+          duplicatePresentations: 20,
+          deliveries: 100,
+          newDeliveries: 80,
+          duplicateDeliveries: 20,
+          duplicateBytes: 700,
+          suppressed: 20,
+        },
+        pendingBallSummary: null,
+        coverage: { restarts: 1, gap: false, gapReason: "none" },
+      }),
+      "utf8",
+    )
+    // No new activity: this drain exists only to make the adapter load and
+    // re-persist the resumed window.
+    const fetchAttention = { actionable_unread: [], pending_balls: [] }
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    collectStdoutJson(child)
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    const before = daemon.requests.filter((request) => request.method === "tribe.fetch").length
+    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+    await waitForCondition(
+      () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+      "REVISE restore drain",
+    )
+    await new Promise((resolveTick) => setTimeout(resolveTick, 250))
+
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
+      windowStartMs: number
+      ids: string[]
+      counters: Record<string, number>
+      coverage: { restarts: number; gap: boolean }
+    }
+    // Still inside the first 4h: the window is unchanged, so the totals must be
+    // the resumed ones, not a fresh zero.
+    expect(ledger.windowStartMs).toBe(windowStartMs)
+    expect(ledger.counters.presentations).toBe(120)
+    expect(ledger.counters.deliveries).toBe(100)
+    expect(ledger.counters.duplicateDeliveries).toBe(20)
+    expect(ledger.counters.duplicateBytes).toBe(700)
+    expect(ledger.counters.suppressed).toBe(20)
+    expect([...ledger.ids].sort()).toEqual(["seed-row-a", "seed-row-b"])
+    expect(ledger.coverage.restarts).toBe(2)
+    expect(ledger.coverage.gap).toBe(false)
   })
 
   // #27459 - the ambient `events` path is the same pane inbox as attention: a
