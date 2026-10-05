@@ -242,6 +242,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     // roster made every live seat read as never-registered here.
     for (const name of tribeAmbientEnvironmentNames()) delete env[name]
     env.TRIBE_BRIDGE_LOST_OWNERS = "@chief,@cto"
+    env.TRIBE_BRIDGE_LOST_GRACE_SEC = "180"
     const daemon = spawn(
       BUN_BIN,
       [DAEMON, "--socket", socketPath, "--db", dbPath, "--quit-timeout", "-1", "--no-lore"],
