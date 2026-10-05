@@ -88,7 +88,23 @@ function startSupervisor(): ChildProcess {
 function spawnRecord(): { entry: string; cwd: string; marker: string | null } | null {
   try {
     const line = readFileSync(markerPath, "utf8").trim().split("\n").at(-1)
-    return line === undefined || line === "" ? null : JSON.parse(line)
+    if (line === undefined || line === "") return null
+    const record: unknown = JSON.parse(line)
+    if (
+      typeof record !== "object" ||
+      record === null ||
+      !("entry" in record) ||
+      typeof record.entry !== "string" ||
+      !("cwd" in record) ||
+      typeof record.cwd !== "string" ||
+      !("marker" in record) ||
+      (record.marker !== null && typeof record.marker !== "string")
+    ) {
+      throw new Error(
+        `invalid spawn marker record in ${markerPath}: expected string entry/cwd and string or null marker`,
+      )
+    }
+    return { entry: record.entry, cwd: record.cwd, marker: record.marker }
   } catch (error) {
     // The marker file does not exist until the stub entry writes its first line; the caller polls for that.
     // Anything else (a permission error, a torn line) is not "no spawn yet" and must surface.
@@ -98,6 +114,22 @@ function spawnRecord(): { entry: string; cwd: string; marker: string | null } | 
 }
 
 describe("the supervisor spawns the adapter from the daemon's landing root", () => {
+  it("refuses malformed spawn records instead of treating them as no spawn", () => {
+    expect(spawnRecord()).toBeNull()
+    for (const record of [
+      null,
+      {},
+      { entry: null, cwd: "cwd", marker: null },
+      { entry: "entry", cwd: 1, marker: null },
+      { entry: "entry", cwd: "cwd", marker: false },
+    ]) {
+      writeFileSync(markerPath, JSON.stringify(record) + "\n")
+      expect(() => spawnRecord()).toThrow("invalid spawn marker record")
+    }
+    writeFileSync(markerPath, "{\n")
+    expect(() => spawnRecord()).toThrow(SyntaxError)
+  })
+
   it("entry is <root>/plugins/claude/server.ts, and the child cwd stays the host's", async () => {
     await startFakeDaemon({
       sessions: [],
