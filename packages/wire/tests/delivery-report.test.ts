@@ -104,6 +104,29 @@ describe("delivery report alert rule (#27459)", () => {
     expect(row.duplicateBytes).toBe(4096)
     expect(row.suppressed).toBe(7)
   })
+
+  it("never alerts a coverage-gap row: an incomplete denominator cannot prove the rule", () => {
+    const gapCounters = counters({ deliveries: 200, newDeliveries: 150, duplicateDeliveries: 50 })
+    const gappy = buildSeatDeliveryReport(
+      ledger({ counters: gapCounters, coverage: { restarts: 1, gap: true, gapReason: "unreadable" } }),
+      NOW,
+    )
+    expect(gappy.duplicateRate).toBeCloseTo(0.25)
+    expect(gappy.deliveries).toBe(200) // observed counters stay visible
+    expect(gappy.alert).toBe(false)
+    expect(gappy.alertInconclusive).toBe(true)
+
+    const control = buildSeatDeliveryReport(ledger({ counters: gapCounters }), NOW)
+    expect(control.alert).toBe(true)
+    expect(control.alertInconclusive).toBe(false)
+
+    const fleet = buildFleetDeliveryReport({
+      states: [ledger({ counters: gapCounters, coverage: { restarts: 1, gap: true, gapReason: "unreadable" } })],
+      now: NOW,
+      source: "/tmp/kpi",
+    })
+    expect(fleet.alerts).toEqual([])
+  })
 })
 
 describe("delivery report coverage (#27459)", () => {
@@ -145,6 +168,26 @@ describe("delivery report coverage (#27459)", () => {
     expect(read.gaps).toHaveLength(0)
     expect(read.dirExists).toBe(false)
   })
+
+  it("names an inaccessible location as a gap instead of reading it as no ledgers", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-delivery-report-err-"))
+    try {
+      const notADir = join(dir, "not-a-dir")
+      writeFileSync(notADir, "", "utf8")
+      const read = readDeliveryLedgers(join(notADir, "kpi")) // ENOTDIR, never ENOENT
+      expect(read.dirExists).toBe(true)
+      expect(read.states).toHaveLength(0)
+      expect(read.gaps).toHaveLength(1)
+      expect(read.gaps[0]?.gapReason).toBe("unreadable")
+      const text = formatFleetDeliveryReport(
+        buildFleetDeliveryReport({ states: [], gaps: read.gaps, now: NOW, source: join(notADir, "kpi") }),
+      )
+      expect(text).toContain("no readable ledgers")
+      expect(text).not.toContain("no ledgers found")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("delivery report output (#27459)", () => {
@@ -173,5 +216,27 @@ describe("delivery report output (#27459)", () => {
     const text = formatFleetDeliveryReport(fleet)
     expect(text.toLowerCase()).toContain("no ledgers")
     expect(text).toContain("/tmp/kpi")
+  })
+
+  it("shows each pane own window start/end so a briefing cannot imply aligned windows", () => {
+    const early = ledger({ pane: "@a", windowStartMs: NOW - 3 * 3_600_000, updatedAtMs: NOW })
+    const late = ledger({ pane: "@b", windowStartMs: NOW - 60_000, updatedAtMs: NOW })
+    const text = formatFleetDeliveryReport(
+      buildFleetDeliveryReport({ states: [early, late], now: NOW, source: "/tmp/kpi" }),
+    )
+    expect(text).toContain(new Date(early.windowStartMs).toISOString())
+    expect(text).toContain(new Date(early.windowStartMs + 4 * 3_600_000).toISOString())
+    expect(text).toContain(new Date(late.windowStartMs).toISOString())
+  })
+
+  it("renders a gap row rate as observed but inconclusive, and never as an alert", () => {
+    const gappy = ledger({
+      counters: counters({ deliveries: 200, newDeliveries: 150, duplicateDeliveries: 50 }),
+      coverage: { restarts: 1, gap: true, gapReason: "unreadable" },
+    })
+    const text = formatFleetDeliveryReport(buildFleetDeliveryReport({ states: [gappy], now: NOW, source: "/tmp/kpi" }))
+    expect(text).toContain("25.0% (inconclusive)")
+    expect(text).toContain("GAP:unreadable")
+    expect(text).not.toContain("ALERT")
   })
 })

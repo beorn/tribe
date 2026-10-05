@@ -9,10 +9,12 @@
  *   - duplicateBytes counts handoffs only, and suppressed is reported apart;
  *   - a gap window reads as incomplete, never as a clean total (NO INVENTED
  *     ZERO); a ledger that cannot be read back is listed as a gap, not skipped;
+ *   - an incomplete denominator cannot prove the >20% rule, so a gap row marks
+ *     its rate/alert inconclusive and never fires the alert (counters still shown);
  *   - the page-edge half is owned by @chief/hab and is left null here for the
  *     4h report owner to join, per @cto ("not this wire package").
  */
-import { existsSync, readdirSync, statSync } from "node:fs"
+import { readdirSync, statSync } from "node:fs"
 import { basename, join } from "node:path"
 import {
   DELIVERY_LEDGER_WINDOW_MS,
@@ -49,6 +51,8 @@ export type SeatDeliveryReport = {
   /** False while this window cannot be read as a complete total (a declared gap). */
   complete: boolean
   alert: boolean
+  /** True when a coverage gap makes the rate/alert undecidable (the counters stay visible). */
+  alertInconclusive: boolean
   /** The page-edge half (@chief/hab); null in wire, joined by the 4h report owner. */
   pageEdges: null
 }
@@ -99,28 +103,39 @@ export function buildSeatDeliveryReport(state: DeliveryLedgerState, now: number)
     coverage,
     complete: !coverage.gap,
     alert:
+      !coverage.gap &&
       duplicateRate !== null &&
       duplicateRate > DELIVERY_DUPLICATE_ALERT_RATE &&
       counters.deliveries >= DELIVERY_DUPLICATE_ALERT_MIN_DELIVERIES,
+    alertInconclusive: coverage.gap,
     pageEdges: null,
   }
 }
 
-/** Read every `tribe-delivery-*.json` under a directory (or one file). Pure I/O. */
-export function readDeliveryLedgers(path: string): DeliveryLedgerRead {
-  if (!existsSync(path)) return { dirExists: false, states: [], gaps: [] }
-  let isFile = false
-  let isDir = false
-  try {
-    const st = statSync(path)
-    isFile = st.isFile()
-    isDir = st.isDirectory()
-  } catch {
+/**
+ * A stat/readdir failure: ENOENT means nothing is there YET (a fresh location,
+ * not a gap); any other errno means a location that exists but cannot be read,
+ * which must be NAMED as a gap rather than collapsed into "no ledgers".
+ */
+function locationReadError(path: string, error: unknown): DeliveryLedgerRead {
+  if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
     return { dirExists: false, states: [], gaps: [] }
   }
-  if (isFile) {
+  const file = basename(path)
+  return { dirExists: true, states: [], gaps: [{ file, paneKey: file, gapReason: "unreadable" }] }
+}
+
+/** Read every `tribe-delivery-*.json` under a directory (or one file). Pure I/O. */
+export function readDeliveryLedgers(path: string): DeliveryLedgerRead {
+  let stat: ReturnType<typeof statSync>
+  try {
+    stat = statSync(path)
+  } catch (error) {
+    return locationReadError(path, error)
+  }
+  const file = basename(path)
+  if (stat.isFile()) {
     const loaded = loadDeliveryLedger(path)
-    const file = basename(path)
     if (loaded.state) return { dirExists: true, states: [loaded.state], gaps: [] }
     return {
       dirExists: true,
@@ -128,22 +143,28 @@ export function readDeliveryLedgers(path: string): DeliveryLedgerRead {
       gaps: [{ file, paneKey: file, gapReason: loaded.coverage.gap ? loaded.coverage.gapReason : "unreadable" }],
     }
   }
-  if (!isDir) return { dirExists: false, states: [], gaps: [] }
+  if (!stat.isDirectory()) {
+    return { dirExists: true, states: [], gaps: [{ file, paneKey: file, gapReason: "unreadable" }] }
+  }
 
   const states: DeliveryLedgerState[] = []
   const gaps: DeliveryReportGap[] = []
-  for (const file of readdirSync(path)
-    .filter((name) => LEDGER_FILE.test(name))
-    .sort()) {
-    const loaded = loadDeliveryLedger(join(path, file))
+  let entries: string[]
+  try {
+    entries = readdirSync(path)
+  } catch (error) {
+    return locationReadError(path, error)
+  }
+  for (const name of entries.filter((entry) => LEDGER_FILE.test(entry)).sort()) {
+    const loaded = loadDeliveryLedger(join(path, name))
     if (loaded.state) {
       states.push(loaded.state)
       continue
     }
     // A file we just listed but could not parse is a LOST window: name it, never skip it.
     gaps.push({
-      file,
-      paneKey: LEDGER_FILE.exec(file)?.[1] ?? file,
+      file: name,
+      paneKey: LEDGER_FILE.exec(name)?.[1] ?? name,
       gapReason: loaded.coverage.gap ? loaded.coverage.gapReason : "unreadable",
     })
   }
@@ -185,15 +206,21 @@ export function formatFleetDeliveryReport(report: FleetDeliveryReport): string {
   const hours = (report.windowMs / 3_600_000).toFixed(0)
   const source = report.source ?? "(unset)"
   const lines = [
-    `Tribe delivery report - ${hours}h window, generated ${new Date(report.generatedAtMs).toISOString()}, source ${source}`,
+    `Tribe delivery report - ${hours}h per-pane window (each starts at its pane restart/roll), generated ${new Date(report.generatedAtMs).toISOString()}, source ${source}`,
   ]
   if (report.seats.length === 0) {
-    lines.push(`  no ledgers found at ${source}`)
+    lines.push(
+      report.gaps.length > 0
+        ? `  no readable ledgers at ${source} (${report.gaps.length} unreadable)`
+        : `  no ledgers found at ${source}`,
+    )
   } else {
     for (const seat of report.seats) {
       const flags = [seat.complete ? "" : `GAP:${seat.coverage.gapReason}`, seat.alert ? "ALERT" : ""].filter(Boolean)
+      const rate = `${formatPercent(seat.duplicateRate)}${seat.alertInconclusive ? " (inconclusive)" : ""}`
+      const window = `${new Date(seat.windowStartMs).toISOString()}..${new Date(seat.windowEndMs).toISOString()}`
       lines.push(
-        `  ${seat.pane}  ${seat.deliveries} delivered (${seat.newDeliveries} new, ${seat.duplicateDeliveries} duplicate, ${formatPercent(seat.duplicateRate)}) - ${formatBytes(seat.duplicateBytes)} duplicate bytes - ${seat.suppressed} suppressed - restarts ${seat.coverage.restarts}${flags.length > 0 ? `  [${flags.join(" ")}]` : ""}`,
+        `  ${seat.pane}  ${seat.deliveries} delivered (${seat.newDeliveries} new, ${seat.duplicateDeliveries} duplicate, ${rate}) - ${formatBytes(seat.duplicateBytes)} duplicate bytes - ${seat.suppressed} suppressed - restarts ${seat.coverage.restarts} - window ${window}${flags.length > 0 ? `  [${flags.join(" ")}]` : ""}`,
       )
     }
   }
