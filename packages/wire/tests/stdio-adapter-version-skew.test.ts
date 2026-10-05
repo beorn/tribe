@@ -22,6 +22,8 @@ import {
 
 const PLUGIN_SERVER = resolve(dirname(fileURLToPath(import.meta.url)), "../../../plugins/claude/server.ts")
 const STDIO_ADAPTER = resolve(dirname(fileURLToPath(import.meta.url)), "../src/stdio-adapter.ts")
+/** The landing root these fixtures publish (27531); the supervisor spawns the adapter from it. */
+const TRIBE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
 const STANDALONE_PLUGIN_ENV = {
   TRIBE_LAUNCH_ID: "",
@@ -50,6 +52,12 @@ function spawnSkewedDaemon(socketPath: string): Promise<{ server: Server; client
         }
         if (msg.method === "tribe.members") {
           socket.write(makeResponse(msg.id, { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }))
+          return
+        }
+        if (msg.method === "cli_status") {
+          socket.write(
+            makeResponse(msg.id, { sessions: [], daemon: { code_identity: { cert: "test-cert", root: TRIBE_ROOT } } }),
+          )
           return
         }
         socket.write(makeResponse(msg.id, { ok: true }))
@@ -93,6 +101,15 @@ function spawnGenerationDaemon(socketPath: string): Promise<{
         }
         if (msg.method === "tribe.members") {
           socket.write(makeResponse(msg.id, { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }))
+          return
+        }
+        if (msg.method === "cli_status") {
+          socket.write(
+            makeResponse(msg.id, {
+              sessions: [],
+              daemon: { pid: daemonPid, code_identity: { cert: "test-cert", root: TRIBE_ROOT } },
+            }),
+          )
           return
         }
         socket.write(makeResponse(msg.id, { ok: true }))
@@ -155,6 +172,15 @@ function spawnCompatibleDaemon(socketPath: string): Promise<{
               chief: "",
               protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
               daemon: { pid: 3003, uptime: 0 },
+            }),
+          )
+          return
+        }
+        if (msg.method === "cli_status") {
+          socket.write(
+            makeResponse(msg.id, {
+              sessions: [],
+              daemon: { pid: 3003, code_identity: { cert: "test-cert", root: TRIBE_ROOT } },
             }),
           )
           return

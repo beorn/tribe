@@ -1,4 +1,5 @@
 import { decorrelatedJitter, type RandomUnit } from "@bearly/pacing"
+import { isAbsolute, join } from "node:path"
 import { HAB_ID_TOKEN_ENV } from "tribe-wire/lib/hab-session-env"
 import { TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV } from "tribe-wire/lib/session-identity-env"
 
@@ -6,6 +7,83 @@ import { TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV } from "tribe-wire/lib/session-ide
 export const ADAPTER_STABLE_MS = 90_000
 export const REEXEC_BACKOFF_BASE_MS = 250
 export const REEXEC_BACKOFF_MAX_MS = 30_000
+
+/**
+ * The window a COLD START waits for the daemon to publish the landing root it runs from (27531). It must cover a
+ * cold daemon's start and stay shorter than the host's MCP startup timeout, because the host is waiting on this
+ * supervisor for its MCP handshake.
+ *
+ * Measured 2026-10-05 on this host, 3/3: a cold `tribe-daemon --socket <tmp>` answers `cli_status` in 149-156 ms
+ * (/hh/var/@dev/luna6/27531/measure-daemon-cold-start.ts). The host's own budget is harness-owned: hh declares no
+ * MCP_TIMEOUT anywhere, and the only numeric startup default readable from the installed host (Claude Code 2.1.289)
+ * is 1e4 ms on its plugin-sync MCP path — so this window stays well under 10 s while keeping ~38x margin over the
+ * measured cold start. A respawn is NOT bounded by it: see evaluateCodeRootWait.
+ */
+export const SUPERVISOR_CODE_ROOT_WINDOW_MS = 6_000
+export const CODE_ROOT_WAIT_BASE_MS = 250
+export const CODE_ROOT_WAIT_MAX_MS = 2_000
+/** Test/ops override for the cold-start window; an absent or malformed value falls back to the measured default. */
+export const PLUGIN_CODE_ROOT_WINDOW_ENV = "TRIBE_PLUGIN_CODE_ROOT_WINDOW_MS"
+
+export function codeRootWaitWindowMs(env: Readonly<NodeJS.ProcessEnv>): number {
+  const raw = env[PLUGIN_CODE_ROOT_WINDOW_ENV]?.trim()
+  if (raw === undefined || raw === "") return SUPERVISOR_CODE_ROOT_WINDOW_MS
+  const parsed = Number(raw)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : SUPERVISOR_CODE_ROOT_WINDOW_MS
+}
+
+export interface CodeRootWaitDecision {
+  readonly retry: boolean
+  readonly giveUp: boolean
+  readonly retryDelayMs: number
+  readonly reason: string
+}
+
+/**
+ * How long the supervisor waits for the daemon to answer with a landing root. A COLD START gives up after the
+ * window, so the host gets a decided refusal instead of a hang; a RESPAWN never gives up, because the host's MCP
+ * endpoint must survive a daemon that is merely restarting.
+ */
+export function evaluateCodeRootWait(
+  input: { readonly firstSpawn: boolean; readonly waitedMs: number; readonly attempt: number },
+  opts: { readonly windowMs: number; readonly random?: RandomUnit },
+): CodeRootWaitDecision {
+  if (input.firstSpawn && input.waitedMs >= opts.windowMs) {
+    return {
+      retry: false,
+      giveUp: true,
+      retryDelayMs: 0,
+      reason: `the daemon published no code root within ${opts.windowMs} ms of the cold start`,
+    }
+  }
+  const random = opts.random ?? Math.random
+  const previous = Math.max(CODE_ROOT_WAIT_BASE_MS, Math.min(CODE_ROOT_WAIT_MAX_MS, input.attempt * CODE_ROOT_WAIT_BASE_MS))
+  const retryDelayMs = Math.round(
+    decorrelatedJitter(CODE_ROOT_WAIT_BASE_MS, CODE_ROOT_WAIT_MAX_MS, previous, random),
+  )
+  return {
+    retry: true,
+    giveUp: false,
+    retryDelayMs,
+    reason: input.firstSpawn
+      ? `waiting ${input.waitedMs} ms of ${opts.windowMs} ms for the daemon's landing root`
+      : `a respawn waits for the daemon's landing root (${input.waitedMs} ms so far)`,
+  }
+}
+
+/**
+ * Where the supervisor spawns its adapter child: the landing root the DAEMON runs from, learned from the daemon.
+ * Never the supervisor's own tree (shared main or a stale landing) and never a guessed root.
+ */
+export function adapterEntryForRoot(root: string | null): string {
+  if (root === null || root.trim() === "" || !isAbsolute(root)) {
+    throw new Error(
+      "tribe plugin supervisor: refusing to spawn the adapter from a guessed root; " +
+        `the daemon published no landing root (${root === null ? "absent" : `"${root}"`})`,
+    )
+  }
+  return join(root, "plugins", "claude", "server.ts")
+}
 
 /**
  * Whether the wrapper restarts its adapter, and after how long. The delay is decorrelated jitter (25663, @cto

@@ -14,8 +14,18 @@
 
 import { spawn, type ChildProcess } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { readDaemonCodeView } from "tribe-wire/lib/code-identity"
+import { parseTribeArgs } from "tribe-wire/lib/config"
+import { resolveSocketPath } from "tribe-wire/lib/socket"
 import { isTribeNameShape } from "tribe-wire/lib/persona-name"
-import { evaluateAdapterRestart, PROVIDER_PARENT_REMEDY, resolveProviderParentPid } from "./supervisor-policy.ts"
+import {
+  adapterEntryForRoot,
+  codeRootWaitWindowMs,
+  evaluateAdapterRestart,
+  evaluateCodeRootWait,
+  PROVIDER_PARENT_REMEDY,
+  resolveProviderParentPid,
+} from "./supervisor-policy.ts"
 import {
   buildPluginAdapterEnvironment,
   PLUGIN_PERSONA_REFUSAL_EXIT_CODE,
@@ -39,6 +49,8 @@ const GENERATION_REEXEC_OFFSET = 2
 const LAST_REEXEC_EXIT_CODE = REEXEC_EXIT_CODE + GENERATION_REEXEC_OFFSET + REEXEC_JOINED_OFFSET
 const REMEDY =
   "tribe plugin adapter refused a repeated deterministic replacement; run /mcp reconnect after repairing the reported cause or reinstall the Tribe plugin."
+/** The same socket the adapter child resolves: this argv's `--socket`, else TRIBE_SOCKET, else the XDG default. */
+const DAEMON_SOCKET_PATH = resolveSocketPath(parseTribeArgs().socket)
 
 function supervisedIdentity(message: unknown): { name: string; joined: boolean } | undefined {
   if (typeof message !== "object" || message === null || !("tribePluginIdentity" in message)) return undefined
@@ -74,6 +86,39 @@ function processExists(pid: number): boolean {
   }
 }
 
+/**
+ * The landing root the daemon publishes, waited for with one named stderr line per attempt (27531). A COLD START
+ * gives up after the measured window, because the host is waiting on this process for its MCP handshake; a RESPAWN
+ * never gives up, because the host's MCP endpoint has to survive a daemon that is merely restarting. Returns null
+ * only when a cold start exhausted its window.
+ */
+async function resolveAdapterCodeRoot(isFirstSpawn: () => boolean): Promise<string | null> {
+  const windowMs = codeRootWaitWindowMs(process.env)
+  const waitStartedAt = Date.now()
+  let attempt = 0
+  for (;;) {
+    let failure: string
+    try {
+      const view = await readDaemonCodeView(DAEMON_SOCKET_PATH)
+      if (view.root !== null) return view.root
+      failure = "the daemon answered but published no code root (daemon.code_identity.root absent)"
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error)
+    }
+    const decision = evaluateCodeRootWait(
+      { firstSpawn: isFirstSpawn(), waitedMs: Date.now() - waitStartedAt, attempt },
+      { windowMs },
+    )
+    process.stderr.write(
+      `tribe plugin supervisor: no landing root to spawn the adapter from (${failure}); attempt ${attempt + 1}` +
+        (decision.giveUp ? `; ${decision.reason}\n` : `, retrying in ${decision.retryDelayMs} ms\n`),
+    )
+    if (decision.giveUp) return null
+    await waitForRetry(decision.retryDelayMs)
+    attempt += 1
+  }
+}
+
 async function superviseAdapter(): Promise<void> {
   // The wrapper is an implementation detail between the provider host and
   // the adapter. A managed Hab launch supplies the authoritative harness PID;
@@ -93,6 +138,7 @@ async function superviseAdapter(): Promise<void> {
   let stopping = false
   let consecutiveReexecs = 0
   let lastRetryDelayMs = 0
+  let firstSpawn = true
   let resumeJoined = false
   let reportedJoined = false
   let claimWatch: SupervisorClaimWatch | null = null
@@ -138,9 +184,18 @@ async function superviseAdapter(): Promise<void> {
 
   while (!stopping) {
     const startedAt = Date.now()
+    const codeRoot = await resolveAdapterCodeRoot(() => firstSpawn)
+    if (codeRoot === null) {
+      process.stderr.write(
+        "tribe plugin supervisor: refused to start the adapter without a daemon-published landing root; " +
+          "the host session needs a running tribe daemon (exit 2)\n",
+      )
+      process.exitCode = 2
+      return
+    }
     const canResumeJoined = resumeJoined && resumeName !== undefined
     const stdio: Array<"inherit" | "ignore" | "ipc" | number> = ["inherit", "inherit", "inherit", "ipc"]
-    active = spawn(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
+    active = spawn(process.execPath, [adapterEntryForRoot(codeRoot), ...process.argv.slice(2)], {
       stdio,
       env: buildPluginAdapterEnvironment(
         process.env,
@@ -149,6 +204,7 @@ async function superviseAdapter(): Promise<void> {
         exitRecord.path,
       ),
     })
+    firstSpawn = false
     active.on("message", (message) => {
       const identity = supervisedIdentity(message)
       if (identity !== undefined) {

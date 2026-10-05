@@ -17,9 +17,12 @@ import { HAB_ID_TOKEN_ENV } from "tribe-wire/lib/hab-session-env"
 import { TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV } from "tribe-wire/lib/session-identity-env"
 import { AG_HOST_SESSION_STATE_DIR_ENV } from "tribe-wire/lib/ag-host-env"
 import { PLUGIN_SUPERVISOR_CLAIM_FILE } from "../supervisor-claim.ts"
+import { createLineParser } from "../../../packages/wire/src/parser.ts"
+import { isRequest, makeResponse } from "../../../packages/wire/src/rpc.ts"
 
 const PLUGIN_ROOT = resolve(import.meta.dirname, "..")
 const SERVER = join(PLUGIN_ROOT, "server.ts")
+const TRIBE_ROOT = resolve(PLUGIN_ROOT, "../..")
 
 let dir: string
 let claimPath: string
@@ -78,8 +81,22 @@ beforeEach(async () => {
   socketPath = join(dir, "tribe.sock")
   sockets = new Set()
   server = createServer((socket) => {
-    // Accept and idle: the adapter stays connected and never sees EOF.
+    // Accept and idle: the adapter stays connected and never sees EOF. `cli_status`
+    // answers with this checkout as the daemon's landing root (27531), so the
+    // supervisor spawns the adapter from here, as it did before that change.
     sockets.add(socket)
+    const parse = createLineParser((msg) => {
+      if (!isRequest(msg)) return
+      if (msg.method === "cli_status") {
+        socket.write(
+          makeResponse(msg.id, {
+            sessions: [],
+            daemon: { code_identity: { cert: "test-cert", root: TRIBE_ROOT } },
+          }),
+        )
+      }
+    })
+    socket.on("data", parse)
     socket.on("close", () => sockets.delete(socket))
   })
   await new Promise<void>((res) => server.listen(socketPath, res))
