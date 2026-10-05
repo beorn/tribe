@@ -43,6 +43,7 @@ function createTestInboxWaitManager(readStatus: (session: string) => InboxStatus
         topic: null,
         room_id: null,
         summary: null,
+        is_incident: false,
         from_authority: null,
         from_session_id: null,
       })),
