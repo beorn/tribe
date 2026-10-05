@@ -30,6 +30,7 @@ import {
   planReloadDelay,
   reloadCapacityRefusal,
   reloadRank,
+  type ReloadDecision,
   type ReloadDaemonView,
   type ReloadPeers,
 } from "../src/lib/reload-pacing.ts"
@@ -213,10 +214,12 @@ describe("pacedReexec", () => {
     const log: string[] = []
     const infos: string[] = []
     const sleeps: number[] = []
+    const emitted: ReloadDecision[] = []
     return {
       log,
       infos,
       sleeps,
+      emitted,
       elapsed: () => now,
       deps: {
         self: "@dev/3",
@@ -240,6 +243,9 @@ describe("pacedReexec", () => {
         warn: (message: string) => log.push(`warn: ${message}`),
         info: (message: string) => infos.push(message),
         reexec: (reason: string) => log.push(`reexec: ${reason}`),
+        emitDecision: (decision: ReloadDecision) => {
+          emitted.push(decision)
+        },
         random: () => 0,
       },
     }
@@ -420,5 +426,120 @@ describe("pacedReexec", () => {
     )
     expect(run.log.join("\n")).not.toMatch(/reexec/u)
     expect(run.elapsed()).toBeLessThanOrEqual(RELOAD_DEADLINE_MS)
+  })
+
+  test("the reexec decision is emitted once with its structured fields (27548)", async () => {
+    const run = harness([daemonOn(["@chief", "@dev/2", "@dev/3"], "/hh/dev-landings/r2", "abc")])
+    await pacedReexec(run.deps, "source changed")
+    expect(run.emitted).toHaveLength(1)
+    expect(run.emitted[0]).toEqual({
+      decision: "reexec",
+      reason: "source changed",
+      self: "@dev/3",
+      daemonRoot: "/hh/dev-landings/r2",
+      daemonCert: "abc",
+      selfRoot: "/landing",
+      selfCert: "abc",
+      rank: 2,
+      peerCount: 3,
+    })
+  })
+
+  test("a same-landing restart emits a no-reexec decision (27548)", async () => {
+    const run = harness([daemonOn(["@dev/3"], "/landing", "abc")])
+    await pacedReexec(run.deps, "generation changed")
+    expect(run.emitted).toHaveLength(1)
+    expect(run.emitted[0]).toEqual({
+      decision: "no-reexec",
+      reason: "generation changed",
+      self: "@dev/3",
+      daemonRoot: "/landing",
+      daemonCert: "abc",
+      selfRoot: "/landing",
+      selfCert: "abc",
+      rank: 0,
+      peerCount: 1,
+    })
+  })
+
+  test("a same-root cert mismatch emits a stay decision (27548)", async () => {
+    const run = harness([daemonOn(["@dev/3"], "/landing", "old")], "new")
+    await pacedReexec(run.deps, "generation changed")
+    expect(run.emitted).toHaveLength(1)
+    expect(run.emitted[0]).toMatchObject({
+      decision: "stay",
+      daemonRoot: "/landing",
+      daemonCert: "old",
+      selfRoot: "/landing",
+      selfCert: "new",
+    })
+  })
+
+  test("an unreadable daemon emits a stay decision with null roots (27548)", async () => {
+    const run = harness([new Error("socket gone"), new Error("socket gone")])
+    await pacedReexec(run.deps, "generation changed")
+    expect(run.emitted).toHaveLength(1)
+    expect(run.emitted[0]).toEqual({
+      decision: "stay",
+      reason: "generation changed",
+      self: "@dev/3",
+      daemonRoot: null,
+      daemonCert: null,
+      selfRoot: "/landing",
+      selfCert: "abc",
+      rank: null,
+      peerCount: 0,
+    })
+  })
+
+  test("a failed reexec emit warns and does not throw; the re-exec proceeds (27548)", async () => {
+    const run = harness([daemonOn(["@dev/3"], "/hh/dev-landings/r2", "abc")])
+    await pacedReexec(
+      {
+        ...run.deps,
+        emitDecision: () => {
+          throw new Error("no daemon connection")
+        },
+      },
+      "source changed",
+    )
+    expect(run.log).toContain("reexec: source changed")
+    expect(
+      run.log.some(
+        (line) => line.includes("could not emit the reexec decision") && line.includes("no daemon connection"),
+      ),
+    ).toBe(true)
+  })
+
+  test("a reexec emit that never lands is bounded and warns; the re-exec proceeds (27548)", async () => {
+    const run = harness([daemonOn(["@dev/3"], "/hh/dev-landings/r2", "abc")])
+    await pacedReexec({ ...run.deps, emitDecision: () => new Promise<void>(() => {}) }, "source changed")
+    expect(run.log).toContain("reexec: source changed")
+    expect(run.log.some((line) => line.includes(`did not land within ${RELOAD_PROBE_TIMEOUT_MS} ms`))).toBe(true)
+  })
+
+  test("a detached no-reexec emit that rejects warns, named, and never throws (27548)", async () => {
+    const run = harness([daemonOn(["@dev/3"], "/landing", "abc")])
+    await pacedReexec(
+      { ...run.deps, emitDecision: () => Promise.reject(new Error("journal closed")) },
+      "generation changed",
+    )
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(run.log).toEqual([
+      "warn: reload pacing: could not emit the no-reexec decision (journal closed); the decision stands",
+    ])
+  })
+
+  test("a detached stay emit that rejects warns, named, and never throws (27548)", async () => {
+    const run = harness([daemonOn(["@dev/3"], "/landing", "old")], "new")
+    await pacedReexec(
+      { ...run.deps, emitDecision: () => Promise.reject(new Error("journal closed")) },
+      "generation changed",
+    )
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(run.log).toEqual([
+      "warn: reload pacing: the daemon runs commit old at /landing, this adapter's tree is at new; this adapter stays put, because a re-exec cannot change what the daemon runs",
+      "warn: reload pacing: could not emit the stay decision (journal closed); the decision stands",
+    ])
   })
 })

@@ -127,6 +127,28 @@ export interface ReloadDaemonView {
   readonly runningRoot: string | null
 }
 
+/**
+ * How one paced re-exec round ended (27548). `reexec` is the only branch that tears this process down; `no-reexec` is
+ * a daemon already on this adapter's landing; `stay` is an unreadable daemon, an unresolved self root, or a same-root
+ * identity mismatch, where a re-exec could not change what the daemon runs. A promotion receipt reads this event
+ * instead of inferring the decision from a /proc argv census.
+ */
+export type ReloadDecisionKind = "reexec" | "no-reexec" | "stay"
+
+/** The structured payload of one `adapter_reload_decision` event (27548). `rank` is null and `peerCount` 0 only when
+ * the rank read itself failed, so the round had no place in the rolling restart. */
+export interface ReloadDecision {
+  readonly decision: ReloadDecisionKind
+  readonly reason: string
+  readonly self: string
+  readonly daemonRoot: string | null
+  readonly selfRoot: string | null
+  readonly daemonCert: string | null
+  readonly selfCert: string | null
+  readonly rank: number | null
+  readonly peerCount: number
+}
+
 export interface PacedReexecDeps {
   readonly self: string
   /** One cli_status read. Throws when the daemon cannot be read; pacedReexec bounds it with `timeout`. */
@@ -142,6 +164,12 @@ export interface PacedReexecDeps {
   /** The rank and slot each reload takes, so an operator (and the journey witness) can see who shared a slot. */
   readonly info: (message: string) => void
   readonly reexec: (reason: string) => void
+  /**
+   * The decision this round reached, as one daemon-visible event (27548). Optional so unit tests need not wire a
+   * daemon; the production caller always supplies it. A failed or timed-out emit warns through `warn` and never
+   * throws; the `reexec` branch awaits it, bounded, before tearing the process down.
+   */
+  readonly emitDecision?: (decision: ReloadDecision) => void | Promise<void>
   readonly random?: RandomUnit
 }
 
@@ -249,6 +277,32 @@ export async function pacedReexec(deps: PacedReexecDeps, reason: string): Promis
   }
   await deps.sleep(delay)
 
+  const selfRoot = deps.selfRoot()
+  const selfCert = deps.onDiskCert()
+  const round = { reason, self: deps.self, rank, peerCount }
+
+  // One event per decision (27548). A decision that does not tear the process down fires and forgets; only `reexec`
+  // awaits the emit, bounded, because the child is about to replace this process.
+  const emit = (decision: ReloadDecision): void | Promise<void> => {
+    if (deps.emitDecision === undefined) return
+    try {
+      return deps.emitDecision(decision)
+    } catch (error) {
+      deps.warn(
+        `reload pacing: could not emit the ${decision.decision} decision (${errorText(error)}); the decision stands`,
+      )
+    }
+  }
+  const emitDetached = (decision: ReloadDecision): void => {
+    const sent = emit(decision)
+    if (sent === undefined) return
+    void Promise.resolve(sent).catch((error: unknown) => {
+      deps.warn(
+        `reload pacing: could not emit the ${decision.decision} decision (${errorText(error)}); the decision stands`,
+      )
+    })
+  }
+
   // One bounded read decides (27531). A daemon we cannot read leaves us where we are: re-execing blind would run the
   // next child from a root the supervisor cannot hold (it never guesses, and never reuses the last child's).
   let view: ReloadDaemonView
@@ -258,14 +312,48 @@ export async function pacedReexec(deps: PacedReexecDeps, reason: string): Promis
     deps.warn(
       `reload pacing: cli_status read failed (${errorText(error)}); cannot tell which landing the daemon runs, so this adapter stays put`,
     )
+    emitDetached({ ...round, decision: "stay", daemonRoot: null, daemonCert: null, selfRoot, selfCert })
     return
   }
   const daemonRoot = view.runningRoot
-  const selfRoot = deps.selfRoot()
   if (daemonRoot !== null && selfRoot !== null && daemonRoot !== selfRoot) {
     deps.info(
       `reload pacing: the daemon moved to ${daemonRoot}; this adapter runs ${selfRoot} and re-execs onto the daemon's landing`,
     )
+    const sent = emit({
+      ...round,
+      decision: "reexec",
+      daemonRoot,
+      daemonCert: view.runningCert,
+      selfRoot,
+      selfCert,
+    })
+    if (sent !== undefined) {
+      let settled = false
+      const warnOnce = (message: string): undefined => {
+        if (settled) return undefined
+        settled = true
+        deps.warn(message)
+        return undefined
+      }
+      await Promise.race([
+        Promise.resolve(sent).then(
+          () => {
+            settled = true
+            return undefined
+          },
+          (error: unknown) =>
+            warnOnce(`reload pacing: could not emit the reexec decision (${errorText(error)}); re-exec proceeds`),
+        ),
+        deps
+          .timeout(RELOAD_PROBE_TIMEOUT_MS)
+          .then(() =>
+            warnOnce(
+              `reload pacing: the reexec decision event did not land within ${RELOAD_PROBE_TIMEOUT_MS} ms; re-exec proceeds`,
+            ),
+          ),
+      ])
+    }
     deps.reexec(reason)
     return
   }
@@ -273,11 +361,13 @@ export async function pacedReexec(deps: PacedReexecDeps, reason: string): Promis
     daemonRoot,
     daemonCert: view.runningCert,
     selfRoot,
-    selfCert: deps.onDiskCert(),
+    selfCert,
   })
   if (mismatch === null) {
     deps.info(`reload pacing: this adapter already runs the daemon's landing (${selfRoot}); no re-exec`)
+    emitDetached({ ...round, decision: "no-reexec", daemonRoot, daemonCert: view.runningCert, selfRoot, selfCert })
     return
   }
   deps.warn(`reload pacing: ${mismatch}; this adapter stays put, because a re-exec cannot change what the daemon runs`)
+  emitDetached({ ...round, decision: "stay", daemonRoot, daemonCert: view.runningCert, selfRoot, selfCert })
 }

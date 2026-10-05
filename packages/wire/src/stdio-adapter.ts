@@ -677,6 +677,17 @@ function requestPacedReexec(reason: string, supervisedExitCode: () => number | n
       warn: (message) => log.warn?.(message),
       info: (message) => log.info?.(message),
       reexec: (why) => requestPluginReexec(why, supervisedExitCode()),
+      // The decision reaches the daemon's journal (27548) so a promotion receipt reads it, not a /proc census. No
+      // swallow here: a missing connection warns, and a rejected call is caught and warned by pacedReexec itself.
+      emitDecision: (decision) => {
+        if (!daemon) {
+          log.warn?.(`reload pacing: no daemon connection; could not emit the ${decision.decision} decision event`)
+          return
+        }
+        return daemon
+          .call("log_event", { type: "adapter_reload_decision", meta: { ...decision } })
+          .then(() => undefined)
+      },
     },
     reason,
   ).catch((error: unknown) =>
