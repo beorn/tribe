@@ -1037,9 +1037,15 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       throughParent: true,
     })
     expect(foreignRead.exitCode, foreignRead.stderr).toBe(0)
-    const foreignEvents = (JSON.parse(foreignRead.stdout) as { events: Array<{ content: string }> }).events
-    expect(foreignEvents.some((event) => event.content === "foreign launch request")).toBe(true)
-    expect(foreignEvents.some((event) => event.content === "own launch request")).toBe(false)
+    const foreignReadJson = JSON.parse(foreignRead.stdout) as {
+      attention?: { actionable_unread?: Array<{ content: string }> }
+      events?: Array<{ content: string }>
+    }
+    // 27488 must-hold A — an actionable body is carried by
+    // attention.actionable_unread and is not repeated in events.
+    const foreignRows = [...(foreignReadJson.attention?.actionable_unread ?? []), ...(foreignReadJson.events ?? [])]
+    expect(foreignRows.some((event) => event.content === "foreign launch request")).toBe(true)
+    expect(foreignRows.some((event) => event.content === "own launch request")).toBe(false)
     const postForeignObserver = await connectToDaemon(socketPath)
     await expect(postForeignObserver.call("cli_inbox_status", { session: runtimeName })).resolves.toMatchObject({
       session: runtimeName,
@@ -1055,7 +1061,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       events: Array<{ content: string }>
     }
     expect(drained.attention.actionable_unread).toEqual([expect.objectContaining({ content: "own launch request" })])
-    expect(drained.events.some((event) => event.content === "own launch request")).toBe(true)
+    // 27488 must-hold A — the body appears once: in attention, not repeated in events.
+    expect(drained.events.some((event) => event.content === "own launch request")).toBe(false)
     expect(drained.events.some((event) => event.content === "foreign launch request")).toBe(false)
 
     const secondRead = await runCli(["inbox", "--json"], cliEnv, { throughParent: true })

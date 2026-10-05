@@ -160,9 +160,17 @@ function insertAmbientFlood(stmts: TribeStatements, ts: number): void {
   }
 }
 
-function fetchEvents(ctx: TribeContext, opts: HandlerOpts, args: Record<string, unknown> = {}): FetchEvent[] {
+/**
+ * The rows a default fetch DELIVERS to this seat, each body once (27488
+ * must-hold A). A recovered actionable is carried by
+ * `attention.actionable_unread` and is NOT repeated in `events`; the
+ * chronological page is the rest. This is the same projection `tribe inbox`
+ * and the wire adapter already render (attention first, then events minus the
+ * attention ids).
+ */
+function fetchDeliveredRows(ctx: TribeContext, opts: HandlerOpts, args: Record<string, unknown> = {}): FetchEvent[] {
   const out = parseToolJson(handleToolCall(ctx, "tribe.fetch", { limit: 50, ...args }, opts)) as FetchJson
-  return out.events ?? []
+  return [...(out.attention?.actionable_unread ?? []), ...(out.events ?? [])]
 }
 
 function fetchJson(
@@ -241,7 +249,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
 
     // Successor session claims the name (register → cursor at tail → join).
     const b = connectAs("sess-b", NAME)
-    const events = fetchEvents(b, opts)
+    const events = fetchDeliveredRows(b, opts)
 
     expect(events.map((e) => e.id)).toEqual(["the-assignment"])
     expect(events[0]!.rowid).toBe(requestRowid)
@@ -251,7 +259,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(events.some((e) => e.content.includes("log-redacted"))).toBe(false)
 
     // Acked: the second default drain is empty.
-    expect(fetchEvents(b, opts)).toEqual([])
+    expect(fetchDeliveredRows(b, opts)).toEqual([])
   })
 
   it("keeps a recently active mailbox addressable while its persona is stopped", () => {
@@ -352,7 +360,8 @@ describe("19442 mailbox-cursor actionable recovery", () => {
         content: "use the durable attention seam",
       }),
     ])
-    expect(first.events?.map((event) => event.id)).toEqual([response.id])
+    // must-hold A — the response body is carried by attention, not repeated here.
+    expect(first.events?.map((event) => event.id)).toEqual([])
 
     const second = fetchJson(successor, opts).json
     expect(second.attention?.actionable_unread).toEqual([])
@@ -404,7 +413,8 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(stmts.getMailboxCursor.get({ $recipient: NAME })).toEqual(before)
     const fetched = fetchJson(worker, opts).json
     expect(fetched.attention?.actionable_unread?.map((event) => event.id)).toEqual([older.id])
-    expect(fetched.events?.map((event) => event.id)).toEqual([older.id])
+    // must-hold A — the older actionable is surfaced once (attention), not twice.
+    expect(fetched.events?.map((event) => event.id)).toEqual([])
   })
 
   it("keeps a push-delivered response in attention until the parked seat fetches it", () => {
@@ -943,7 +953,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     })
 
     const b = connectAs("sess-b", NAME)
-    expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["r1"])
+    expect(fetchDeliveredRows(b, opts).map((e) => e.id)).toEqual(["r1"])
     disconnect("sess-b")
 
     // New unheld-gap actionable, then a third claim: only the NEW one arrives.
@@ -957,8 +967,8 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       ts: now - 30_000,
     })
     const c = connectAs("sess-c", NAME)
-    expect(fetchEvents(c, opts).map((e) => e.id)).toEqual(["r2"])
-    expect(fetchEvents(c, opts)).toEqual([])
+    expect(fetchDeliveredRows(c, opts).map((e) => e.id)).toEqual(["r2"])
+    expect(fetchDeliveredRows(c, opts)).toEqual([])
   })
 
   it("recovers via rename (claiming an unheld loaded name)", () => {
@@ -978,7 +988,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     const b = connectAs("sess-b", "@temp/1")
     const renamed = parseToolJson(handleToolCall(b, "tribe.rename", { new_name: NAME }, opts))
     expect(renamed.recovered_actionables).toBe(1)
-    expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["a1"])
+    expect(fetchDeliveredRows(b, opts).map((e) => e.id)).toEqual(["a1"])
   })
 
   it("an ACTIVE holder keeps both its name and mailbox when a second live session tries to join", () => {
@@ -1001,8 +1011,8 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     const joined = parseToolJson(handleToolCall(d, "tribe.join", { name: NAME }, opts))
 
     expect(joined.error).toContain(`Name "${NAME}" is already taken`)
-    expect(fetchEvents(d, opts)).toEqual([])
-    expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["r-live"])
+    expect(fetchDeliveredRows(d, opts)).toEqual([])
+    expect(fetchDeliveredRows(b, opts).map((e) => e.id)).toEqual(["r-live"])
     expect(db.prepare("SELECT name FROM sessions WHERE id = 'sess-b'").get()).toEqual({ name: NAME })
     expect(
       db.prepare(assertSingleStatement(`SELECT name FROM sessions WHERE name LIKE '${NAME}-dead-%'`)).all(),
@@ -1021,11 +1031,11 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       ts: now - 10_000,
     })
     // Live default drain returns it through the ordinary window…
-    expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["r-normal"])
+    expect(fetchDeliveredRows(b, opts).map((e) => e.id)).toEqual(["r-normal"])
     disconnect("sess-b")
     // …and the mailbox remembers: the successor recovers nothing.
     const c = connectAs("sess-c", NAME)
-    expect(fetchEvents(c, opts)).toEqual([])
+    expect(fetchDeliveredRows(c, opts)).toEqual([])
   })
 
   it("recovery is lossless with NO age horizon — a 3-day-old missed request still arrives", () => {
@@ -1042,10 +1052,10 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       ts: now - 3 * 24 * 60 * 60_000,
     })
     const b = connectAs("sess-b", NAME)
-    expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["old-request"])
+    expect(fetchDeliveredRows(b, opts).map((e) => e.id)).toEqual(["old-request"])
   })
 
-  it("a bounded event page stays lossless because attention returns every actionable before acknowledgement", () => {
+  it("a bounded page read stays lossless because attention returns every actionable before acknowledgement (27488 must-hold A)", () => {
     const a = connectAs("sess-a", NAME)
     disconnect("sess-a")
     void a
@@ -1062,9 +1072,13 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     }
     const b = connectAs("sess-b", NAME)
     const first = fetchJson(b, opts, { limit: 2 }).json
-    expect(first.events?.map((event) => event.id)).toEqual(["p1", "p2"])
+    // 27488 must-hold A — a body appears once per read: the bounded page rows
+    // are carried by attention, never repeated in events.
+    expect(first.events?.map((event) => event.id)).toEqual([])
+    // Lossless: the page limit (2) no longer bounds what the read surfaces —
+    // attention returns every actionable before acknowledgement.
     expect(first.attention?.actionable_unread?.map((event) => event.id)).toEqual(["p1", "p2", "p3"])
-    expect(fetchEvents(b, opts)).toEqual([])
+    expect(fetchDeliveredRows(b, opts)).toEqual([])
   })
 
   it("advance:false returns recovered actionables WITHOUT acknowledging them", () => {
@@ -1081,10 +1095,10 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       ts: now - 60_000,
     })
     const b = connectAs("sess-b", NAME)
-    expect(fetchEvents(b, opts, { advance: false }).map((e) => e.id)).toEqual(["peek"])
+    expect(fetchDeliveredRows(b, opts, { advance: false }).map((e) => e.id)).toEqual(["peek"])
     // Not acked — the next acknowledging drain still returns it.
-    expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["peek"])
-    expect(fetchEvents(b, opts)).toEqual([])
+    expect(fetchDeliveredRows(b, opts).map((e) => e.id)).toEqual(["peek"])
+    expect(fetchDeliveredRows(b, opts)).toEqual([])
   })
 
   it("receipt:false returns attention, advances the ambient cursor, but neither acknowledges the mailbox nor stamps an attention read (21757)", () => {
@@ -1121,8 +1135,8 @@ describe("19442 mailbox-cursor actionable recovery", () => {
         .get(NAME),
     ).toEqual(before)
     // Still owed to the model: the seat's own read returns it, and THAT read acknowledges.
-    expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["drained-verdict"])
-    expect(fetchEvents(b, opts)).toEqual([])
+    expect(fetchDeliveredRows(b, opts).map((e) => e.id)).toEqual(["drained-verdict"])
+    expect(fetchDeliveredRows(b, opts)).toEqual([])
     expect(
       (
         db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ?").get(NAME) as {
@@ -1177,7 +1191,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       ts: now - 50_000,
     })
     const b = connectAs("sess-b", NAME)
-    expect(fetchEvents(b, opts)).toEqual([])
+    expect(fetchDeliveredRows(b, opts)).toEqual([])
     expect((stmts.getUnreadDms.get({ $name: NAME }) as { count: number }).count).toBe(0)
     const health = parseToolJson(handleToolCall(b, "tribe.health", {}, opts)) as {
       unread?: Array<{ recipient: string; count: number }>
@@ -1297,10 +1311,10 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       content: "seen once",
       ts: now - 60_000,
     })
-    expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["seen"])
+    expect(fetchDeliveredRows(b, opts).map((e) => e.id)).toEqual(["seen"])
     const rejoin = parseToolJson(handleToolCall(b, "tribe.join", { name: NAME }, opts))
     expect(rejoin.recovered_actionables).toBeUndefined()
-    expect(fetchEvents(b, opts)).toEqual([])
+    expect(fetchDeliveredRows(b, opts)).toEqual([])
   })
 
   it("keeps an untaken direct request actionable without rewinding its mailbox cursor (22203)", () => {
