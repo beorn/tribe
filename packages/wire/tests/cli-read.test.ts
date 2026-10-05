@@ -17,6 +17,7 @@ import {
   formatInboxStatus,
   registerReadCommands,
   resolveRepairOptions,
+  tribeLogScope,
   waitForInboxWithReconnect,
 } from "../src/cli/read.ts"
 import {
@@ -912,5 +913,28 @@ describe("waitForInboxWithReconnect", () => {
       aborted: false,
       attention,
     })
+  })
+})
+
+// 27537: `tribe log` must never report its own window as the world. A saturated bounded read says older messages
+// exist; an exhaustive read says so. Each arm pins one shape, because the defect was the saturated case reading
+// exactly like the exhaustive one.
+describe("tribeLogScope", () => {
+  test("a saturated bounded window says older messages exist", () => {
+    expect(tribeLogScope(20, 20, false)).toBe("last 20 — WINDOW FULL, older messages exist (use --limit N or --all)")
+    expect(tribeLogScope(30, 20, false)).toBe(
+      "last 30 — WINDOW FULL, older messages exist (use --limit N or --all)",
+    )
+  })
+
+  test("an exhaustive read says so — with --all, and when a small window held everything", () => {
+    expect(tribeLogScope(6670, 20, true)).toBe("6670 messages")
+    expect(tribeLogScope(7, 20, false)).toBe("7 messages (all that exist)")
+    expect(tribeLogScope(1, 20, false)).toBe("1 message (all that exist)")
+  })
+
+  test("an empty bounded window warns that older messages may exist; an empty --all read does not", () => {
+    expect(tribeLogScope(0, 20, false)).toBe("No messages in the last 20. Older messages may exist — use --all.")
+    expect(tribeLogScope(0, 20, true)).toBe("No messages in tribe log.")
   })
 })
