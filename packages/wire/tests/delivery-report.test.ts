@@ -161,6 +161,33 @@ describe("delivery report coverage (#27459)", () => {
     }
   })
 
+  it("a valid-JSON corrupt timestamp becomes a named gap, and the healthy row still renders", () => {
+    // Reproduces the @dev/11 REVISE: windowStartMs 1e400 parses as Infinity, and the
+    // ISO formatter used to throw RangeError with every row — including this healthy
+    // one — lost. It must instead name the file a schema gap and keep the rest.
+    const dir = mkdtempSync(join(tmpdir(), "tribe-delivery-report-corrupt-"))
+    try {
+      writeFileSync(join(dir, "tribe-delivery-@dev_luna6.json"), JSON.stringify(ledger()), "utf8")
+      const corrupt =
+        `{"version":${DELIVERY_LEDGER_VERSION},"pane":"@dev/corrupt","windowStartMs":1e400,` +
+        `"updatedAtMs":${NOW},"ids":[],"counters":${JSON.stringify(counters())},` +
+        `"coverage":{"restarts":0,"gap":false,"gapReason":"none"}}`
+      writeFileSync(join(dir, "tribe-delivery-@dev_corrupt.json"), corrupt, "utf8")
+      const read = readDeliveryLedgers(dir)
+      expect(read.states.map((s) => s.pane)).toEqual(["@dev/luna6"])
+      expect(read.gaps).toHaveLength(1)
+      expect(read.gaps[0]?.file).toBe("tribe-delivery-@dev_corrupt.json")
+      expect(read.gaps[0]?.gapReason).toBe("schema")
+      const text = formatFleetDeliveryReport(
+        buildFleetDeliveryReport({ states: read.states, gaps: read.gaps, now: NOW, source: dir }),
+      )
+      expect(text).toContain("@dev/luna6")
+      expect(text).toContain("tribe-delivery-@dev_corrupt.json (schema)")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("says where it looked when no ledger exists, rather than printing a bare zero", () => {
     const missing = join(tmpdir(), "no-such-ledger-dir-27459")
     const read = readDeliveryLedgers(missing)

@@ -13,6 +13,8 @@
  *
  * NO INVENTED ZERO: a ledger that exists but cannot be read back yields coverage
  * `gap: true` with a reason, and the report must render that, never a clean 0.
+ * A non-representable `windowStartMs`/window end is a SCHEMA gap: the report
+ * formats those as ISO dates, and one such row must not crash every other row.
  * A missing file is a fresh window (a first run is not a gap), and the window's
  * own `windowStartMs`/`restarts` expose how far the counts reach.
  */
@@ -107,6 +109,17 @@ function isCounters(value: unknown): value is DeliveryCounters {
 }
 
 /**
+ * A Date-representable epoch-ms value: finite, and inside the ECMAScript
+ * TimeClip range (|t| <= 8.64e15) so `new Date(t).toISOString()` cannot throw.
+ * JSON admits 1e400 as Infinity and huge finite numbers whose ISO formatting
+ * RangeErrors; both must be a named gap, never a crash of every other row.
+ */
+const MAX_TIME_CLIP_MS = 8_640_000_000_000_000
+function isRepresentableTime(value: number): boolean {
+  return Number.isFinite(value) && Math.abs(value) <= MAX_TIME_CLIP_MS
+}
+
+/**
  * Read a pane's ledger. A missing file is a FRESH window (gap false); a file
  * that exists but cannot be read back is a LOST window (gap true, with reason).
  */
@@ -129,6 +142,10 @@ export function loadDeliveryLedger(path: string): {
       parsed?.version !== DELIVERY_LEDGER_VERSION ||
       typeof parsed.pane !== "string" ||
       typeof parsed.windowStartMs !== "number" ||
+      !isRepresentableTime(parsed.windowStartMs) ||
+      !isRepresentableTime(parsed.windowStartMs + DELIVERY_LEDGER_WINDOW_MS) ||
+      (parsed.updatedAtMs !== undefined &&
+        (typeof parsed.updatedAtMs !== "number" || !isRepresentableTime(parsed.updatedAtMs))) ||
       !Array.isArray(parsed.ids) ||
       parsed.ids.some((id) => typeof id !== "string") ||
       !isCounters(parsed.counters)
