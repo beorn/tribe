@@ -1441,6 +1441,9 @@ function ensureDeliveryLedger(now: number): void {
   const opened = openDeliveryLedgerWindow({ existing: loaded.state, coverage: loaded.coverage, pane, now })
   deliveryCounter.restore(opened.ids)
   forwardedAttention.restore(opened.ids)
+  // #27459 gap-7 — the summary throttle is restored too, or a restart re-presents
+  // an unchanged "You own N balls ..." line (the class the id set just closed).
+  pendingBallSummaryState = opened.pendingBallSummary
   deliveryLedgerFilePath = path
   deliveryLedgerState = opened
   deliveryLedgerReady = true
@@ -1462,6 +1465,9 @@ function persistDeliveryLedger(now: number): void {
     updatedAtMs: now,
     ids: deliveryCounter.firstHandoffIds(),
     counters: deliveryCounter.snapshot(),
+    // #27459 gap-7 — persisted with the ids so an adapter restart resumes the
+    // throttle instead of re-presenting an unchanged summary.
+    pendingBallSummary: pendingBallSummaryState,
   }
   try {
     saveDeliveryLedger(deliveryLedgerFilePath, deliveryLedgerState)

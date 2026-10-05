@@ -19,7 +19,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { HAB_SESSION_HABITAT_ROOT_ENV } from "./hab-session-env.ts"
-import type { DeliveryCounters } from "./replay-cap.ts"
+import type { DeliveryCounters, PendingBallSummaryState } from "./replay-cap.ts"
 
 /** The per-seat report window (@cto 5738438e): four hours. */
 export const DELIVERY_LEDGER_WINDOW_MS = 4 * 60 * 60 * 1_000
@@ -47,6 +47,14 @@ export type DeliveryLedgerState = {
   /** Bounded first-successful-handoff message ids (no content). */
   ids: string[]
   counters: DeliveryCounters
+  /**
+   * #27459 gap-7 - the open-ball summary throttle's fingerprint, so an adapter
+   * restart does not re-present an unchanged "You own N balls ..." line (the
+   * class the forwarded-id set closed for id'd rows). A throttle HINT only,
+   * never a delivery count: a missing or malformed value loads as null and the
+   * summary is sent once - fail open toward showing it, never toward hiding it.
+   */
+  pendingBallSummary: PendingBallSummaryState | null
   coverage: DeliveryLedgerCoverage
 }
 
@@ -87,6 +95,30 @@ function zeroCounters(): DeliveryCounters {
     duplicateDeliveries: 0,
     duplicateBytes: 0,
     suppressed: 0,
+  }
+}
+
+/**
+ * #27459 gap-7 - a lenient read of the persisted summary fingerprint. Anything
+ * unrecognisable is null (send the summary once); this is a throttle hint, so a
+ * lost value costs one extra line, never a delivered row.
+ */
+function parsePendingBallSummary(value: unknown): PendingBallSummaryState | null {
+  if (typeof value !== "object" || value === null) return null
+  const candidate = value as Record<string, unknown>
+  if (
+    typeof candidate.previewIds !== "string" ||
+    typeof candidate.total !== "number" ||
+    typeof candidate.withheld !== "number" ||
+    typeof candidate.sentAt !== "number"
+  ) {
+    return null
+  }
+  return {
+    previewIds: candidate.previewIds,
+    total: candidate.total,
+    withheld: candidate.withheld,
+    sentAt: candidate.sentAt,
   }
 }
 
@@ -151,6 +183,7 @@ export function loadDeliveryLedger(path: string): {
         updatedAtMs: typeof parsed.updatedAtMs === "number" ? parsed.updatedAtMs : parsed.windowStartMs,
         ids: parsed.ids as string[],
         counters: parsed.counters as DeliveryCounters,
+        pendingBallSummary: parsePendingBallSummary(parsed.pendingBallSummary),
         coverage: { restarts, gap, gapReason },
       },
       coverage: { restarts, gap, gapReason },
@@ -188,6 +221,9 @@ export function openDeliveryLedgerWindow(input: {
       updatedAtMs: now,
       ids: existing.ids,
       counters: zeroCounters(),
+      // The summary throttle is orthogonal to the 4h counter window: carry its
+      // fingerprint across a roll so a roll does not re-present an unchanged line.
+      pendingBallSummary: existing.pendingBallSummary,
       coverage: { restarts: 0, gap: false, gapReason: "none" },
     }
   }
@@ -198,6 +234,7 @@ export function openDeliveryLedgerWindow(input: {
     updatedAtMs: now,
     ids: [],
     counters: zeroCounters(),
+    pendingBallSummary: null,
     coverage: { restarts: 0, gap: coverage.gap, gapReason: coverage.gapReason },
   }
 }

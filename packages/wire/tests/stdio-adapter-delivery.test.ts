@@ -1717,6 +1717,100 @@ describe("stdio adapter delivery modes", () => {
     await waitForStdout(child, stdout, () => summaryLines().length === 2)
   })
 
+  // #27459 gap-7 acceptance (@chief, plat gap 7): the open-ball summary line is
+  // a pane handoff too, so an adapter RESTART must not re-present an unchanged
+  // "You own N balls ..." line. The throttle fingerprint lives in the same
+  // durable ledger as the forwarded-id set, and the throttle still fires on a
+  // real change after the restart.
+  it("does not re-present an unchanged pending-ball summary across an adapter restart (#27459 gap-7)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const fetchAttention = {
+      actionable_unread: [],
+      pending_balls_summary: { total: 1, oldest_age_ms: 60_000, truncated: false },
+      pending_balls: [{ request_id: "gap7-r1", sender: "@chief", age_ms: 60_000, summary: "The only ball" }],
+    }
+    const env = {
+      ...process.env,
+      TRIBE_DELIVERY: "push",
+      TRIBE_NO_AUTOSTART: "1",
+      TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+      // Keep the 10-minute recurrence out of the way: this test is about the
+      // restart, not the window reminder.
+      TRIBE_PENDING_BALL_SUMMARY_WINDOW_MS: "600000",
+      DEBUG_LOG: join(tmpDir, "adapter.log"),
+    }
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const forwarders: Array<() => string[]> = []
+    const collect = () => {
+      const stdout = collectStdoutJson(child!)
+      forwarders.push(() =>
+        stdout
+          .filter((line) => line.method === "notifications/claude/channel")
+          .map((line) => JSON.stringify(line) as string),
+      )
+    }
+    collect()
+    const text = () => forwarders.flatMap((forwarded) => forwarded())
+    const countOf = (needle: string) => text().filter((line) => line.includes(needle)).length
+    const summaryText = "You own 1 ball, oldest 1m. Top: The only ball"
+    const handshake = async () => {
+      await writeJsonAndWaitForLine(child!, initializePayload(1), (line) => line.id === 1)
+      writeJson(child!, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+      await writeJsonAndWaitForLine(
+        child!,
+        callToolPayload(2, "join", { name: "@agent/test" }),
+        (line) => line.id === 2,
+      )
+    }
+    const drain = async (label: string) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients.at(-1)?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 150))
+    }
+
+    await handshake()
+    await drain("gap-7 first drain")
+    expect(countOf(summaryText)).toBe(1)
+    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    await waitForCondition(() => existsSync(ledgerPath), "gap-7 delivery ledger")
+
+    child!.kill("SIGTERM")
+    await waitForExit(child!)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    collect()
+    await handshake()
+    await drain("gap-7 post-restart drain")
+
+    // RED before gap-7: the in-memory-only throttle reset on restart, so this read 2.
+    expect(countOf(summaryText)).toBe(1)
+
+    // The throttle still fires on a real change AFTER the restart.
+    fetchAttention.pending_balls_summary.total = 2
+    fetchAttention.pending_balls.push({
+      request_id: "gap7-r2",
+      sender: "@chief",
+      age_ms: 1_000,
+      summary: "A newly arrived ball",
+    })
+    await drain("gap-7 changed-set drain")
+    const grownText = "You own 2 balls, oldest 1m. Top: The only ball | A newly arrived ball"
+    await waitForCondition(() => countOf(grownText) >= 1, "gap-7 grown summary")
+    expect(countOf(summaryText)).toBe(1)
+  })
+
   it("forwards each attention row once, keeping re-presented rows and ambient twins out (#27346)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const recentTs = new Date().toISOString()

@@ -109,6 +109,56 @@ describe("loadDeliveryLedger (#27459)", () => {
     expect(loaded.state?.counters.newDeliveries).toBe(1)
     rmSync(path, { force: true })
   })
+
+  // #27459 gap-7 — the open-ball summary throttle's fingerprint is persisted in
+  // the same ledger, so an adapter restart resumes the throttle instead of
+  // re-presenting an unchanged "You own N balls ..." line.
+  it("round-trips the pending-ball summary fingerprint (#27459 gap-7)", () => {
+    const path = tempPath()
+    const state = openDeliveryLedgerWindow({
+      existing: null,
+      coverage: { restarts: 0, gap: false, gapReason: "none" },
+      pane: "@dev/luna6",
+      now: NOW,
+    })
+    state.pendingBallSummary = { previewIds: "r1,r2", total: 2, withheld: 0, sentAt: NOW }
+    saveDeliveryLedger(path, state)
+    const loaded = loadDeliveryLedger(path)
+    expect(loaded.state?.pendingBallSummary).toEqual({ previewIds: "r1,r2", total: 2, withheld: 0, sentAt: NOW })
+    rmSync(path, { force: true })
+  })
+
+  it("loads a ledger written before gap-7 as a null fingerprint — fail open, not a gap", () => {
+    const path = tempPath()
+    const state = openDeliveryLedgerWindow({
+      existing: null,
+      coverage: { restarts: 0, gap: false, gapReason: "none" },
+      pane: "@dev/luna6",
+      now: NOW,
+    })
+    const older = { ...state } as Record<string, unknown>
+    delete older.pendingBallSummary
+    writeFileSync(path, JSON.stringify(older), "utf8")
+    const loaded = loadDeliveryLedger(path)
+    expect(loaded.coverage).toEqual({ restarts: 0, gap: false, gapReason: "none" })
+    expect(loaded.state?.pendingBallSummary).toBeNull()
+    rmSync(path, { force: true })
+  })
+
+  it("reads a malformed fingerprint as null without losing the delivery counts", () => {
+    const path = tempPath()
+    const state = openDeliveryLedgerWindow({
+      existing: null,
+      coverage: { restarts: 0, gap: false, gapReason: "none" },
+      pane: "@dev/luna6",
+      now: NOW,
+    })
+    writeFileSync(path, JSON.stringify({ ...state, pendingBallSummary: { previewIds: 7 } }), "utf8")
+    const loaded = loadDeliveryLedger(path)
+    expect(loaded.coverage.gap).toBe(false)
+    expect(loaded.state?.pendingBallSummary).toBeNull()
+    rmSync(path, { force: true })
+  })
 })
 
 describe("openDeliveryLedgerWindow (#27459)", () => {
@@ -120,6 +170,7 @@ describe("openDeliveryLedgerWindow (#27459)", () => {
       updatedAtMs: NOW,
       ids: ["row-a"],
       counters: counters({ deliveries: 3, duplicateDeliveries: 1, duplicateBytes: 40 }),
+      pendingBallSummary: null,
       coverage: { restarts: 1, gap: false, gapReason: "none" },
     }
     const resumed = openDeliveryLedgerWindow({
@@ -142,6 +193,7 @@ describe("openDeliveryLedgerWindow (#27459)", () => {
       updatedAtMs: NOW,
       ids: ["row-a"],
       counters: counters({ deliveries: 9, duplicateDeliveries: 4 }),
+      pendingBallSummary: null,
       coverage: { restarts: 2, gap: true, gapReason: "unreadable" },
     }
     const rolled = openDeliveryLedgerWindow({
@@ -180,5 +232,33 @@ describe("openDeliveryLedgerWindow (#27459)", () => {
     const text = readFileSync(path, "utf8")
     expect(text).not.toContain("\n") // one line, one JSON object
     rmSync(path, { force: true })
+  })
+
+  it("carries the summary fingerprint across a restart and a 4h roll (#27459 gap-7)", () => {
+    const summary = { previewIds: "r1", total: 1, withheld: 0, sentAt: NOW }
+    const existing: DeliveryLedgerState = {
+      version: DELIVERY_LEDGER_VERSION,
+      pane: "@dev/luna6",
+      windowStartMs: NOW,
+      updatedAtMs: NOW,
+      ids: [],
+      counters: counters(),
+      pendingBallSummary: summary,
+      coverage: { restarts: 0, gap: false, gapReason: "none" },
+    }
+    const resumed = openDeliveryLedgerWindow({
+      existing,
+      coverage: existing.coverage,
+      pane: "@dev/luna6",
+      now: NOW + 60_000,
+    })
+    expect(resumed.pendingBallSummary).toEqual(summary)
+    const rolled = openDeliveryLedgerWindow({
+      existing,
+      coverage: existing.coverage,
+      pane: "@dev/luna6",
+      now: NOW + DELIVERY_LEDGER_WINDOW_MS + 1,
+    })
+    expect(rolled.pendingBallSummary).toEqual(summary)
   })
 })

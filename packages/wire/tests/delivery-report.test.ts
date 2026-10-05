@@ -48,6 +48,7 @@ function ledger(over: Partial<DeliveryLedgerState> = {}): DeliveryLedgerState {
     updatedAtMs: NOW,
     ids: [],
     counters: counters(),
+    pendingBallSummary: null,
     coverage: { restarts: 0, gap: false, gapReason: "none" },
     ...over,
   }
