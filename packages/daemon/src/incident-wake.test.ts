@@ -194,6 +194,21 @@ describe("an incident wakes its idle owner", () => {
     })
   })
 
+  test("fetch marks the row's KIND, so the adapter can tell an incident from a message (27488 phase 1, @cto Q3)", async () => {
+    const { owner, peer, page } = rig()
+    const incident = page("@dev/3's tribe bridge is lost", "lost 3 min")
+    const message = sendMessage(peer, OWNER, "ordinary peer message", "notify", undefined, undefined, "direct", {
+      summary: "ordinary peer message",
+    })
+    const parsed = JSON.parse(
+      (handleToolCall(owner, "tribe.fetch", { limit: 10 }, opts()) as { content: Array<{ text: string }> }).content[0]!
+        .text,
+    ) as { events?: Array<{ id: string; is_incident?: boolean }> }
+    const rows = parsed.events ?? []
+    expect(rows.find((row) => row.id === incident.id)?.is_incident).toBe(true)
+    expect(rows.find((row) => row.id === message.id)?.is_incident).toBe(false)
+  })
+
   test("a fresh wait wakes once for an unread edge, and not again after the owner's fetch returned it", async () => {
     const { manager, owner, page } = rig()
     page("@dev/3's tribe bridge is lost", "lost 3 min")

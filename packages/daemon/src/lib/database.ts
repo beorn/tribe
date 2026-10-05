@@ -1677,6 +1677,7 @@ const TRACKED_ATTENTION_FETCH_COLUMNS_SQL = `COALESCE(m.id, a.id) AS id,
   COALESCE(m.room_id, a.room_id) AS room_id,
   COALESCE(m.summary, a.summary) AS summary,
   COALESCE(m.attention_required, a.attention_required) AS attention_required,
+  COALESCE(m.is_incident, a.is_incident) AS is_incident,
   COALESCE(m.sender_authority, a.sender_authority) AS sender_authority,
   COALESCE(m.session_id, a.session_id) AS session_id`
 
@@ -2679,8 +2680,8 @@ export function createStatements(db: Database) {
     getInboxRows: db.prepare(
       assertSingleStatement(`
 		SELECT m.id, m.rowid, m.type, m.sender, m.recipient, m.content, m.bead_id, m.ref, m.ts,
-			m.delivery, m.topic, m.room_id, m.summary, m.attention_required, m.wakes_owner, m.sender_authority,
-			m.session_id
+			m.delivery, m.topic, m.room_id, m.summary, m.attention_required, m.wakes_owner, m.is_incident,
+			m.sender_authority, m.session_id
 		FROM messages AS m
 		WHERE m.rowid > $since
 			AND (m.recipient = $name OR m.recipient = '*')
@@ -2809,7 +2810,7 @@ export function createStatements(db: Database) {
     selectUnackedAttention: db.prepare(
       assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required, wakes_owner, sender_authority, session_id
+             attention_required, wakes_owner, is_incident, sender_authority, session_id
       FROM messages AS m
       WHERE m.recipient = $name
         AND m.kind = 'direct'
@@ -2837,10 +2838,10 @@ export function createStatements(db: Database) {
     selectAttention: db.prepare(
       assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required, sender_authority, session_id
+             attention_required, is_incident, sender_authority, session_id
       FROM (
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-               attention_required, sender_authority, session_id
+               attention_required, is_incident, sender_authority, session_id
         FROM messages AS m
         WHERE m.recipient = $name
           AND m.kind = 'direct'

@@ -345,6 +345,10 @@ type TribeFetchResultRow = {
   topic?: string | null
   ts?: string
   from_authority?: string | null
+  /** 27488 phase 1 — the row's durable kind. True on a watcher incident row,
+   *  which is state in `pending_balls`, never a message the pane is handed as
+   *  an envelope. False/absent on every message row. */
+  is_incident?: boolean
   /**
    * 27346 - the daemon sets this true when the mailbox cursor is already past
    * the row, so this presentation is a re-presentation of something the seat
@@ -1375,6 +1379,18 @@ function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[numb
   })
 }
 
+/**
+ * 27488 phase 1 (@cto Q3) — the row's own KIND decides what may become a pane
+ * envelope. An incident row is a live condition: it is the `pending_balls`
+ * state and the seat's own read is its content path, so it is never forwarded
+ * as a message. No predicate over machine sender names — a sender leaves the
+ * flood by using the rail, not by being added to a list the adapter keeps
+ * (derived-membership). A row without the field is a message and fails OPEN.
+ */
+function isForwardableRow(row: TribeFetchResultRow): boolean {
+  return row.is_incident !== true
+}
+
 function formatPendingBallAge(ageMs: number): string {
   const minutes = Math.max(0, Math.floor(ageMs / 60_000))
   if (minutes < 1) return "<1m"
@@ -1577,7 +1593,10 @@ function drainDaemonInbox(): void {
         // adapter-locally. Ids are remembered from ALL actionable rows, before
         // the admission filter, so a suppressed row cannot sneak back in through
         // the ambient-events path below.
-        const attentionEventsAll = result?.attention?.actionable_unread ?? []
+        // 27488 phase 1 — drop incident rows BEFORE the once-per-row admission
+        // filter below, so a suppressed row cannot return through the ambient
+        // events path either.
+        const attentionEventsAll = (result?.attention?.actionable_unread ?? []).filter(isForwardableRow)
         const attentionIds = new Set(attentionEventsAll.map((event) => event.id).filter(Boolean))
         // #27459 — every actionable row the daemon exposed this drain is a
         // PRESENTATION; a row the once-per-row filter admits is also a DELIVERY.
@@ -1606,7 +1625,9 @@ function drainDaemonInbox(): void {
         )
         pendingBallSummaryState = pendingBallDecision.state
         if (pendingBallDecision.send) forwardPendingBallSummary(currentPendingBalls, currentPendingBallSummary)
-        const events = (result?.events ?? []).filter((event) => !event.id || !attentionIds.has(event.id))
+        const events = (result?.events ?? []).filter(
+          (event) => isForwardableRow(event) && (!event.id || !attentionIds.has(event.id)),
+        )
         // #27459 - the ambient events path is the SAME pane inbox as attention.
         // A notify recovered from the mailbox cursor re-appears on every
         // receipt:false drain; it obeys the one forwarded-id record too, and both

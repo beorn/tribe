@@ -1533,6 +1533,89 @@ describe("stdio adapter delivery modes", () => {
     }
   })
 
+  it("never forwards an incident row as a channel envelope — the row's own kind decides (27488 phase 1, @cto Q3)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const recentTs = new Date().toISOString()
+    daemon = await spawnFakeDaemon(socketPath, {
+      // The incident OPEN edge is a wake edge, so the daemon returns it in the
+      // ambient events window; it sits beside an ordinary message row.
+      fetchEvents: [
+        {
+          id: "incident-open-edge",
+          type: "health:bridge-lost",
+          from: "tribe-health",
+          content: "MACHINE-BODY @dev/3's tribe bridge is lost",
+          ts: recentTs,
+          is_incident: true,
+        },
+        {
+          id: "peer-notice",
+          type: "status",
+          from: "@daemon",
+          content: "HUMAN-MESSAGE migrate finished",
+          ts: recentTs,
+          is_incident: false,
+        },
+      ],
+      fetchAttention: {
+        actionable_unread: [
+          // Defensive: even if an incident ever reached attention, the kind still suppresses it.
+          {
+            id: "incident-in-attention",
+            type: "request",
+            from: "vault-db-page",
+            content: "MACHINE-ATTENTION-LEAK",
+            ts: recentTs,
+            is_incident: true,
+          },
+          {
+            id: "peer-request",
+            type: "request",
+            from: "@chief",
+            content: "PEER-REQUEST-BODY",
+            ts: recentTs,
+            is_incident: false,
+          },
+        ],
+        pending_balls: [],
+      },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const channels = () =>
+      stdout.filter(
+        (line) =>
+          line.method === "notifications/claude/channel" &&
+          (line.params as { meta?: { from?: string } })?.meta?.from !== "tribe-startup",
+      )
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+
+    await waitForStdout(child, stdout, () =>
+      channels().some((line) => JSON.stringify(line).includes("PEER-REQUEST-BODY")),
+    )
+    await new Promise((resolveTick) => setTimeout(resolveTick, 250))
+    const payloads = channels().map((line) => JSON.stringify(line))
+    // The incident rows never become envelope content…
+    expect(payloads.some((payload) => payload.includes("MACHINE-BODY"))).toBe(false)
+    expect(payloads.some((payload) => payload.includes("MACHINE-ATTENTION-LEAK"))).toBe(false)
+    // …while ordinary message rows still do (positive control).
+    expect(payloads.some((payload) => payload.includes("HUMAN-MESSAGE"))).toBe(true)
+    expect(payloads.some((payload) => payload.includes("PEER-REQUEST-BODY"))).toBe(true)
+  })
+
   it("documents the authority hole: a CallTool fetch is a receipt whoever issued it — the adapter has no subagent-origin signal to honor (21757)", async () => {
     // An in-process subagent shares the seat's MCP connection. Its
     // tribe.fetch arrives as an ordinary CallTool, and the daemon treats a

@@ -3937,6 +3937,8 @@ export type FetchRow = {
   attention_required: number
   /** 25662 P3 3 — an incident edge: it woke the owner, so the owner's fetch that returns it acknowledges it. */
   wakes_owner: number
+  /** The durable incident classification (27488 phase 1). A fact fixed at insert, never inferred from the sender. */
+  is_incident?: number
   /** 25074 3d-1a — the sender's authority at insert, 'unrecorded' before v37; null for the daemon's own voice. */
   sender_authority?: SenderAuthority | null
   /** Daemon session that inserted this message. It is stable even after that session leaves. */
@@ -3957,6 +3959,15 @@ export type FetchEvent = {
   topic: string | null
   room_id: string | null
   summary: string | null
+  /**
+   * 27488 phase 1 — the row's KIND: an incident row is a live condition (its
+   * obligations live in `pending_balls`), never a message the pane is handed as
+   * an envelope. The durable `is_incident` column decides; no sender list. The
+   * attention projection excludes incidents by construction (selectAttention
+   * via noOpenIncidentAttentionPredicateSql), so this is false on every row
+   * there and the flag matters on the ambient/recovered event rows.
+   */
+  is_incident: boolean
   /**
    * Whether the sender was verified or only claimed its name (25074 3d-1a, @cto 2bfc1935 Q0); 'bearer' on a message
    * written before 3d-3 deleted the bearer, 'unrecorded' for one older than that record, null for the daemon's voice.
@@ -3990,6 +4001,7 @@ export function fetchEvent(row: FetchRow, replay?: boolean): FetchEvent {
     topic: row.topic,
     room_id: row.room_id,
     summary: row.summary,
+    is_incident: row.is_incident === 1,
     from_authority: row.sender_authority ?? null,
     from_session_id: row.sender_authority === null ? null : (row.session_id ?? null),
     ...(replay === undefined ? {} : { replay }),
@@ -4151,7 +4163,7 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
     .prepare(
       assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required, wakes_owner, sender_authority, session_id
+             attention_required, wakes_owner, is_incident, sender_authority, session_id
       FROM messages
       WHERE ${conditions.join("\n        AND ")}
       ORDER BY rowid ${order}
@@ -4306,7 +4318,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
       .prepare(
         assertSingleStatement(`
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-               attention_required, wakes_owner, sender_authority, session_id
+               attention_required, wakes_owner, is_incident, sender_authority, session_id
         FROM messages
         WHERE id IN (${placeholders})
           AND kind != 'event'
