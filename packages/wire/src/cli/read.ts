@@ -533,6 +533,22 @@ function fmtMsg(m: Msg): void {
   console.log(`  ${fmtTime(m.ts)}  ${pad(`${m.sender} → ${to}`, 28)}  [${m.type}]${bead} "${txt}"`)
 }
 
+/**
+ * The scope line for one `tribe log` read, never its window as the world (27537). A saturated bounded read must say
+ * older messages exist: on 2026-08-01 a `--limit 30` read hid a delivered verdict, and a default 20-message window
+ * hid eight open balls, because "last N messages" read as "all messages". Saturation is inferred client-side
+ * (`count >= limit`), so no protocol or daemon change is needed; when the window is not full the read IS exhaustive
+ * and says so.
+ */
+export function tribeLogScope(count: number, limit: number, all: boolean): string {
+  if (count === 0) {
+    return all ? "No messages in tribe log." : `No messages in the last ${limit}. Older messages may exist — use --all.`
+  }
+  const saturated = !all && count >= limit
+  if (saturated) return `last ${count} — WINDOW FULL, older messages exist (use --limit N or --all)`
+  return `${count} message${count !== 1 ? "s" : ""}${all ? "" : " (all that exist)"}`
+}
+
 async function cmdLog(
   limit: number,
   all: boolean,
@@ -565,10 +581,10 @@ async function cmdLog(
 
   if (!follow) {
     if (!rows.length) {
-      console.log("No messages in tribe log.")
+      console.log(tribeLogScope(0, limit, all))
       return
     }
-    console.log(`TRIBE LOG — last ${rows.length} message${rows.length !== 1 ? "s" : ""}\n`)
+    console.log(`TRIBE LOG — ${tribeLogScope(rows.length, limit, all)}\n`)
     for (const m of rows) {
       fmtMsg(m)
     }
