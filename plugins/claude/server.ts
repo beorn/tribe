@@ -22,6 +22,14 @@ import {
   PLUGIN_REEXEC_EXIT_CODE,
 } from "./supervisor-environment.ts"
 import { recordAdapterExit, resolveAdapterExitRecord } from "./supervisor-exit-record.ts"
+import {
+  newSupervisorToken,
+  resolveSupervisorClaimPath,
+  resolveSupervisorClaimPollMs,
+  startSupervisorClaimWatch,
+  writeSupervisorClaim,
+  type SupervisorClaimWatch,
+} from "./supervisor-claim.ts"
 import { TRIBE_NAME_ENV, TRIBE_PLUGIN_ADAPTER_CHILD_ENV } from "tribe-wire/lib/session-identity-env"
 
 const PLUGIN_CHILD = TRIBE_PLUGIN_ADAPTER_CHILD_ENV
@@ -87,15 +95,46 @@ async function superviseAdapter(): Promise<void> {
   let lastRetryDelayMs = 0
   let resumeJoined = false
   let reportedJoined = false
+  let claimWatch: SupervisorClaimWatch | null = null
   const exitRecord = resolveAdapterExitRecord(process.env)
   const launchName = process.env[TRIBE_NAME_ENV]?.trim()
   let resumeName = launchName && isTribeNameShape(launchName) ? launchName : undefined
   const forward = (signal: NodeJS.Signals) => {
     stopping = true
+    claimWatch?.stop()
     active?.kill(signal)
   }
   process.once("SIGINT", () => forward("SIGINT"))
   process.once("SIGTERM", () => forward("SIGTERM"))
+
+  // #27459 gap-5 - claim this launch's supervisor slot. A host can spawn a new
+  // MCP supervisor without closing the old stdio pipe; the old adapter then
+  // never sees EOF and the old pair lingers for days. The newest supervisor
+  // takes the claim over on its own start, and this one yields on the next poll.
+  const claimPath = resolveSupervisorClaimPath(process.env)
+  if (claimPath !== null) {
+    const token = newSupervisorToken()
+    try {
+      writeSupervisorClaim(claimPath, { token, pid: process.pid, atMs: Date.now() })
+      claimWatch = startSupervisorClaimWatch({
+        path: claimPath,
+        token,
+        pollMs: resolveSupervisorClaimPollMs(process.env),
+        onSuperseded: () => {
+          process.stderr.write(
+            "tribe plugin supervisor: a newer supervisor for this launch took over the claim; exiting\n",
+          )
+          forward("SIGTERM")
+        },
+      })
+    } catch (error) {
+      // NO SILENT ERRORS: no claim means no takeover, and the reason is named.
+      process.stderr.write(
+        `tribe plugin supervisor: could not claim ${claimPath} ` +
+          `(${error instanceof Error ? error.message : String(error)}); a superseded supervisor will not yield\n`,
+      )
+    }
+  }
 
   while (!stopping) {
     const startedAt = Date.now()
@@ -189,6 +228,7 @@ async function superviseAdapter(): Promise<void> {
     }
     await waitForRetry(decision.retryDelayMs)
   }
+  claimWatch?.stop()
 }
 
 if (process.env[PLUGIN_CHILD] === "1") await import("tribe-wire/stdio")
