@@ -1440,6 +1440,7 @@ function ensureDeliveryLedger(now: number): void {
   const loaded = loadDeliveryLedger(path)
   const opened = openDeliveryLedgerWindow({ existing: loaded.state, coverage: loaded.coverage, pane, now })
   deliveryCounter.restore(opened.ids)
+  forwardedAttention.restore(opened.ids)
   deliveryLedgerFilePath = path
   deliveryLedgerState = opened
   deliveryLedgerReady = true
@@ -1545,8 +1546,25 @@ function drainDaemonInbox(): void {
         pendingBallSummaryState = pendingBallDecision.state
         if (pendingBallDecision.send) forwardPendingBallSummary(currentPendingBalls, currentPendingBallSummary)
         const events = (result?.events ?? []).filter((event) => !event.id || !attentionIds.has(event.id))
-        const { forward, skippedOld, capped } = selectReplayEvents(events, { now: Date.now() })
-        for (const event of forward) forwardFetchedEvent(event)
+        // #27459 - the ambient events path is the SAME pane inbox as attention.
+        // A notify recovered from the mailbox cursor re-appears on every
+        // receipt:false drain; it obeys the one forwarded-id record too, and both
+        // paths feed the delivery counter/ledger, or the report misses the
+        // measured residual duplicate rate. The filter runs BEFORE the age/count
+        // cap, and a row with no id fails open (never withheld).
+        for (const event of events) {
+          deliveryCounter.present(event.id ? String(event.id) : undefined)
+        }
+        const freshEvents = events.filter((event) => !forwardedAttention.has(event.id ? String(event.id) : undefined))
+        const { forward, skippedOld, capped } = selectReplayEvents(freshEvents, { now: Date.now() })
+        for (const event of forward) {
+          forwardFetchedEvent(event)
+          forwardedAttention.remember(event.id ? String(event.id) : undefined)
+          deliveryCounter.deliver(
+            event.id ? String(event.id) : undefined,
+            Buffer.byteLength(String(event.content ?? ""), "utf8"),
+          )
+        }
         if (skippedOld > 0 || capped > 0) {
           log.warn?.(
             `tribe drain: surfaced ${attentionEvents.length} actionable + ${currentPendingBalls.length}/${currentPendingBallTotal} pending + ${forward.length}/${events.length} event(s) (skipped ${skippedOld} older than 1d, ${capped} over cap ${MAX_REPLAY_EVENTS}); rest drained but not replayed`,

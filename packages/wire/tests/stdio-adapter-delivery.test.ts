@@ -1852,6 +1852,145 @@ describe("stdio adapter delivery modes", () => {
     expect([...ledger.ids].sort()).toEqual(["count-row-a", "count-row-b"])
   })
 
+  // #27459 - the ambient `events` path is the same pane inbox as attention: a
+  // notify recovered from the mailbox cursor must obey the one forwarded-id
+  // record, and both paths must feed the ledger, or the report misses the
+  // measured residual duplicate rate.
+  it("hands off an ambient event row once across drains, counts it, and still forwards a new row (#27459)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const recentTs = new Date().toISOString()
+    const fetchAttention = { actionable_unread: [], pending_balls: [] }
+    const fetchEvents: Array<Record<string, unknown>> = [
+      { id: "ambient-notify-a", type: "notify", from: "@chief", content: "AMBIENT-COUNTED", ts: recentTs },
+    ]
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention, fetchEvents })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const channelText = () =>
+      stdout
+        .filter((line) => line.method === "notifications/claude/channel")
+        .map((line) => JSON.stringify(line) as string)
+    const drain = async (label: string) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients[0]?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 250))
+    }
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    await drain("first ambient drain")
+    await drain("second ambient drain")
+    expect(channelText().filter((line) => line.includes("AMBIENT-COUNTED"))).toHaveLength(1)
+
+    // A genuinely new row still forwards on arrival.
+    fetchEvents.push({ id: "ambient-notify-b", type: "notify", from: "@chief", content: "AMBIENT-FRESH", ts: recentTs })
+    await drain("third ambient drain")
+    expect(channelText().filter((line) => line.includes("AMBIENT-FRESH"))).toHaveLength(1)
+    expect(channelText().filter((line) => line.includes("AMBIENT-COUNTED"))).toHaveLength(1)
+
+    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    await waitForCondition(() => existsSync(ledgerPath), "ambient delivery ledger written")
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
+      ids: string[]
+      counters: Record<string, number>
+    }
+    expect([...ledger.ids].sort()).toEqual(["ambient-notify-a", "ambient-notify-b"])
+    expect(ledger.counters.deliveries).toBe(2)
+    expect(ledger.counters.newDeliveries).toBe(2)
+    expect(ledger.counters.duplicateDeliveries).toBe(0)
+    expect(ledger.counters.presentations).toBe(4)
+    expect(ledger.counters.duplicatePresentations).toBe(2)
+  })
+
+  // #27459 - restart behavior is explicit against the durable ledger: the
+  // forwarded-id record is seeded from the per-pane ledger, so an already-handed
+  // ambient row stays suppressed in a fresh adapter process.
+  it("does not re-forward an already-handed ambient row after an adapter restart (#27459)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const recentTs = new Date().toISOString()
+    const env = {
+      ...process.env,
+      TRIBE_DELIVERY: "push",
+      TRIBE_NO_AUTOSTART: "1",
+      TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+      DEBUG_LOG: join(tmpDir, "adapter.log"),
+    }
+    daemon = await spawnFakeDaemon(socketPath, {
+      fetchAttention: { actionable_unread: [], pending_balls: [] },
+      fetchEvents: [
+        { id: "ambient-restart-a", type: "notify", from: "@chief", content: "AMBIENT-RESTART", ts: recentTs },
+      ],
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const firstStdout = collectStdoutJson(child)
+    const firstText = () =>
+      firstStdout
+        .filter((line) => line.method === "notifications/claude/channel")
+        .map((line) => JSON.stringify(line) as string)
+    const drain = async (label: string) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients.at(-1)?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 250))
+    }
+    const handshake = async () => {
+      await writeJsonAndWaitForLine(child!, initializePayload(1), (line) => line.id === 1)
+      writeJson(child!, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+      await writeJsonAndWaitForLine(
+        child!,
+        callToolPayload(2, "join", { name: "@agent/test" }),
+        (line) => line.id === 2,
+      )
+    }
+
+    await handshake()
+    await drain("pre-restart drain")
+    expect(firstText().filter((line) => line.includes("AMBIENT-RESTART"))).toHaveLength(1)
+
+    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    await waitForCondition(() => existsSync(ledgerPath), "delivery ledger before restart")
+
+    child!.kill("SIGTERM")
+    await waitForExit(child!)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const secondStdout = collectStdoutJson(child)
+    const secondText = () =>
+      secondStdout
+        .filter((line) => line.method === "notifications/claude/channel")
+        .map((line) => JSON.stringify(line) as string)
+
+    await handshake()
+    await drain("post-restart drain")
+    expect(secondText().filter((line) => line.includes("AMBIENT-RESTART"))).toHaveLength(0)
+  })
+
   it("drains and pushes attention when wakeup arrives within the register round-trip (#26969 row 5)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const fetchAttention = {

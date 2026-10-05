@@ -96,21 +96,29 @@ export type ForwardedAttentionTracker = {
   has(id: string | undefined): boolean
   /** Record a COMPLETED handoff; never call before the forward succeeded. */
   remember(id: string | undefined): void
+  /** Seed the record from the durable ledger: a restart still suppresses. */
+  restore(ids: Iterable<string>): void
 }
 
 export function createForwardedAttentionTracker(maxIds = MAX_FORWARDED_ATTENTION_IDS): ForwardedAttentionTracker {
   const forwarded = new Set<string>()
+  const rememberId = (id: string | undefined): void => {
+    if (id === undefined || forwarded.has(id)) return
+    forwarded.add(id)
+    if (forwarded.size > maxIds) {
+      const oldest = forwarded.values().next().value
+      if (oldest !== undefined) forwarded.delete(oldest)
+    }
+  }
   return {
     has(id) {
       return id !== undefined && forwarded.has(id)
     },
     remember(id) {
-      if (id === undefined || forwarded.has(id)) return
-      forwarded.add(id)
-      if (forwarded.size > maxIds) {
-        const oldest = forwarded.values().next().value
-        if (oldest !== undefined) forwarded.delete(oldest)
-      }
+      rememberId(id)
+    },
+    restore(ids) {
+      for (const id of ids) rememberId(id)
     },
   }
 }
