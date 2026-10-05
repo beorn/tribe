@@ -147,6 +147,10 @@
         "types": "./dist/lib/identity-token.d.mts",
         "import": "./dist/lib/identity-token.mjs"
       },
+      "./lib/credential-file": {
+        "types": "./dist/lib/credential-file.d.mts",
+        "import": "./dist/lib/credential-file.mjs"
+      },
       "./lib/hab-session-env": {
         "types": "./dist/lib/hab-session-env.d.mts",
         "import": "./dist/lib/hab-session-env.mjs"
@@ -222,6 +226,7 @@
       "src/lib/code-identity.ts",
       "src/lib/reload-pacing.ts",
       "src/lib/identity-token.ts",
+      "src/lib/credential-file.ts",
       "src/lib/hab-session-env.ts",
       "src/lib/session-identity-env.ts",
       "src/lib/ag-host-env.ts",

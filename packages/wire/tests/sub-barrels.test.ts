@@ -109,12 +109,17 @@ describe("tribe-wire's consumer subpaths", () => {
     // 27089 adds one stall-time /proc sample on the generic 10 s CLI deadline.
     // Its stall-sample leaf is the sole additional file; the broad graph stays excluded.
     expect(client.files.has(realpathSync(resolve(PACKAGE, "src/stall-sample.ts")))).toBe(true)
-    expect(client.files.size).toBeLessThanOrEqual(18)
+    // 27314 B1 adds the credential-file leaf behind identity-token, which the client graph already
+    // carries. It is the sole additional file; the broad graph stays excluded.
+    expect(client.files.has(realpathSync(resolve(PACKAGE, "src/lib/credential-file.ts")))).toBe(true)
+    expect(client.files.size).toBeLessThanOrEqual(19)
     expect(records.files.size).toBeLessThanOrEqual(10)
     expect(sender.files.has(realpathSync(resolve(PACKAGE, "src/lib/delivery.ts")))).toBe(true)
     // stall-sample.ts rides the client graph into the sender subpath.
     expect(sender.files.has(realpathSync(resolve(PACKAGE, "src/stall-sample.ts")))).toBe(true)
-    expect(sender.files.size).toBeLessThanOrEqual(20)
+    // 27314 B1's credential-file leaf rides the client graph into the sender subpath too.
+    expect(sender.files.has(realpathSync(resolve(PACKAGE, "src/lib/credential-file.ts")))).toBe(true)
+    expect(sender.files.size).toBeLessThanOrEqual(21)
     expect(records.files.has(realpathSync(resolve(PACKAGE, "src/client.ts")))).toBe(false)
     for (const exclusive of ["src/service-send.ts", "src/launch-seat.ts", "src/cli/mcp-json-content.ts"]) {
       expect(client.files.has(realpathSync(resolve(PACKAGE, exclusive))), exclusive).toBe(false)
