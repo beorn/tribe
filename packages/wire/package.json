@@ -58,6 +58,7 @@
     "./lib/ag-host-env": "./src/lib/ag-host-env.ts",
     "./lib/daemon-environment": "./src/lib/daemon-environment.ts",
     "./lib/inbox-wait-errors": "./src/lib/inbox-wait-errors.ts",
+    "./lib/inbox-wait-transport": "./src/lib/inbox-wait-transport.ts",
     "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {
@@ -169,6 +170,10 @@
         "types": "./dist/lib/inbox-wait-errors.d.mts",
         "import": "./dist/lib/inbox-wait-errors.mjs"
       },
+      "./lib/inbox-wait-transport": {
+        "types": "./dist/lib/inbox-wait-transport.d.mts",
+        "import": "./dist/lib/inbox-wait-transport.mjs"
+      },
       "./http": {
         "types": "./dist/http-adapter.d.mts",
         "import": "./dist/http-adapter.mjs"
@@ -222,6 +227,7 @@
       "src/lib/ag-host-env.ts",
       "src/lib/daemon-environment.ts",
       "src/lib/inbox-wait-errors.ts",
+      "src/lib/inbox-wait-transport.ts",
       "src/http-adapter.ts"
     ],
     "format": "esm"
