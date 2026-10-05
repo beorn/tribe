@@ -144,6 +144,46 @@ describe("loadDeliveryLedger (#27459)", () => {
     rmSync(path, { force: true })
   })
 
+  it("names a non-representable costSinceMs as a schema gap, never a retained Infinity (@dev/11)", () => {
+    // Written as raw text: JSON.parse reads the literal 1e400 as Infinity. The report formats
+    // costSinceMs as an ISO date, and a retained Infinity made formatSeatCost throw for every row.
+    const path = tempPath()
+    writeFileSync(
+      path,
+      `{"version":${DELIVERY_LEDGER_VERSION},"pane":"@dev/luna6","windowStartMs":${NOW},"updatedAtMs":${NOW},"ids":[],` +
+        `"counters":${JSON.stringify(counters())},"costSinceMs":1e400,` +
+        `"coverage":{"restarts":0,"gap":false,"gapReason":"none"}}`,
+      "utf8",
+    )
+    const loaded = loadDeliveryLedger(path)
+    expect(loaded.state).toBeNull()
+    expect(loaded.coverage).toMatchObject({ gap: true, gapReason: "schema" })
+    rmSync(path, { force: true })
+  })
+
+  it("keeps a missing or null costSinceMs a readable window, not a gap (@dev/11)", () => {
+    // The v1-upgrade marker and a legacy null are legitimate "cost unmeasured" states; only a
+    // non-representable NUMBER is a schema gap.
+    for (const costSince of [undefined, null] as const) {
+      const path = tempPath()
+      const body: Record<string, unknown> = {
+        version: DELIVERY_LEDGER_VERSION,
+        pane: "@dev/luna6",
+        windowStartMs: NOW,
+        updatedAtMs: NOW,
+        ids: [],
+        counters: counters(),
+        coverage: { restarts: 0, gap: false, gapReason: "none" },
+      }
+      if (costSince !== undefined) body.costSinceMs = costSince
+      writeFileSync(path, JSON.stringify(body), "utf8")
+      const loaded = loadDeliveryLedger(path)
+      expect(loaded.state?.costSinceMs, `costSinceMs=${String(costSince)}`).toBeNull()
+      expect(loaded.coverage.gap, `costSinceMs=${String(costSince)}`).toBe(false)
+      rmSync(path, { force: true })
+    }
+  })
+
   it("round-trips a saved state", () => {
     const path = tempPath()
     const state = openDeliveryLedgerWindow({

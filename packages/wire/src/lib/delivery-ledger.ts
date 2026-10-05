@@ -13,8 +13,9 @@
  *
  * NO INVENTED ZERO: a ledger that exists but cannot be read back yields coverage
  * `gap: true` with a reason, and the report must render that, never a clean 0.
- * A non-representable `windowStartMs`/window end is a SCHEMA gap: the report
- * formats those as ISO dates, and one such row must not crash every other row.
+ * A non-representable `windowStartMs`/window end/`updatedAtMs`/`costSinceMs` is
+ * a SCHEMA gap: the report formats those as ISO dates, and one such row must not
+ * crash every other row.
  * A missing file is a fresh window (a first run is not a gap), and the window's
  * own `windowStartMs`/`restarts` expose how far the counts reach.
  */
@@ -213,6 +214,13 @@ export function loadDeliveryLedger(path: string): {
       !isRepresentableTime(parsed.windowStartMs + DELIVERY_LEDGER_WINDOW_MS) ||
       (parsed.updatedAtMs !== undefined &&
         (typeof parsed.updatedAtMs !== "number" || !isRepresentableTime(parsed.updatedAtMs))) ||
+      // #27488 phase 0 - the report formats costSinceMs as an ISO date; an
+      // unrepresentable value (JSON's 1e400 reads as Infinity) is a schema gap,
+      // never a retained Infinity that makes formatSeatCost throw for every row.
+      // Missing/null stays a legitimate "cost unmeasured" v1 upgrade marker.
+      (parsed.costSinceMs !== undefined &&
+        parsed.costSinceMs !== null &&
+        (typeof parsed.costSinceMs !== "number" || !isRepresentableTime(parsed.costSinceMs))) ||
       !Array.isArray(parsed.ids) ||
       parsed.ids.some((id) => typeof id !== "string") ||
       !isCounters(parsed.counters) ||

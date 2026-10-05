@@ -203,6 +203,32 @@ describe("delivery report coverage (#27459)", () => {
     }
   })
 
+  it("a costSinceMs that is not Date-representable is a named gap, and the healthy row still renders (@dev/11)", () => {
+    // @dev/11 2026-10-05: costSinceMs 1e400 parses as Infinity and was RETAINED (no schema check), then
+    // formatSeatCost's new Date(Infinity).toISOString() threw and took every healthy row with it.
+    const dir = mkdtempSync(join(tmpdir(), "tribe-delivery-report-cost-"))
+    try {
+      writeFileSync(join(dir, "tribe-delivery-@dev_luna6.json"), JSON.stringify(ledger()), "utf8")
+      const corrupt =
+        `{"version":${DELIVERY_LEDGER_VERSION},"pane":"@dev/corrupt","windowStartMs":${NOW},"updatedAtMs":${NOW},` +
+        `"ids":[],"counters":${JSON.stringify(counters())},"costSinceMs":1e400,` +
+        `"coverage":{"restarts":0,"gap":false,"gapReason":"none"}}`
+      writeFileSync(join(dir, "tribe-delivery-@dev_corrupt.json"), corrupt, "utf8")
+      const read = readDeliveryLedgers(dir)
+      expect(read.states.map((s) => s.pane)).toEqual(["@dev/luna6"])
+      expect(read.gaps.map((gap) => [gap.file, gap.gapReason])).toEqual([
+        ["tribe-delivery-@dev_corrupt.json", "schema"],
+      ])
+      const text = formatFleetDeliveryReport(
+        buildFleetDeliveryReport({ states: read.states, gaps: read.gaps, now: NOW, source: dir }),
+      )
+      expect(text).toContain("@dev/luna6")
+      expect(text).toContain("tribe-delivery-@dev_corrupt.json (schema)")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("says where it looked when no ledger exists, rather than printing a bare zero", () => {
     const missing = join(tmpdir(), "no-such-ledger-dir-27459")
     const read = readDeliveryLedgers(missing)
