@@ -115,6 +115,130 @@ export function createForwardedAttentionTracker(maxIds = MAX_FORWARDED_ATTENTION
   }
 }
 
+/** Whether one observation was the first of its kind or a repeat. */
+export type DeliveryOutcome = "new" | "duplicate"
+
+/** Per-pane counters for one 4h window (#27459). */
+export type DeliveryCounters = {
+  /** Every attention row exposed to this pane's adapter (forwarded or suppressed). */
+  presentations: number
+  newPresentations: number
+  duplicatePresentations: number
+  /** Successful pane handoffs. */
+  deliveries: number
+  newDeliveries: number
+  duplicateDeliveries: number
+  /** Content bytes over duplicate handoffs only (a token estimate). */
+  duplicateBytes: number
+  /** Presentations the once-per-row filter withheld. */
+  suppressed: number
+}
+
+export type DeliveryCounter = {
+  /** The daemon exposed this id to this pane's adapter this drain. */
+  present(id: string | undefined): DeliveryOutcome
+  /** A successful handoff of this id to the pane. */
+  deliver(id: string | undefined, bytes?: number): DeliveryOutcome
+  snapshot(): DeliveryCounters
+  /** Bounded first-successful-handoff ids, for the durable per-pane ledger. */
+  firstHandoffIds(): string[]
+  /** Seed presentation + handoff identity from a restored ledger. */
+  restore(ids: Iterable<string>): void
+  /** Roll the 4h window: zero the counters, keep the identity. */
+  resetCounters(): void
+}
+
+function boundedIdSet(maxIds: number): { has(id: string): boolean; add(id: string): void; ids(): string[] } {
+  const set = new Set<string>()
+  return {
+    has: (id) => set.has(id),
+    add: (id) => {
+      if (set.has(id)) return
+      set.add(id)
+      if (set.size > maxIds) {
+        const oldest = set.values().next().value
+        if (oldest !== undefined) set.delete(oldest)
+      }
+    },
+    ids: () => Array.from(set),
+  }
+}
+
+/**
+ * #27459 - the independent adapter/Tribe per-pane delivery counter (@cto 9a077460).
+ *
+ * Two named units, per recipient pane:
+ *  - a DUPLICATE PRESENTATION is the daemon exposing the same message id to this
+ *    pane's adapter again (forwarded or suppressed by the once-per-row filter);
+ *  - a DUPLICATE DELIVERY is a successful same-id handoff after the first.
+ *
+ * The ruled alert threshold (>20% duplicates with >=100 deliveries) applies ONLY
+ * to duplicateDelivery / deliveries; the presentation rate is a diagnostic and is
+ * never called attention cost. Content bytes are counted only for duplicate
+ * handoffs (a token estimate), and `suppressed` is reported separately.
+ *
+ * Pure: no clock, no I/O. The handoff identity set is the durable half - the
+ * caller seeds it via `restore` from the per-pane first-successful-handoff
+ * ledger - while the presentation set is adapter-process local. Both are bounded
+ * by insertion-order eviction, the same fail-open discipline as
+ * createForwardedAttentionTracker: a row with no id is never withheld or
+ * de-duplicated.
+ */
+export function createDeliveryCounter(opts?: { maxIds?: number }): DeliveryCounter {
+  const maxIds = opts?.maxIds ?? MAX_FORWARDED_ATTENTION_IDS
+  const presented = boundedIdSet(maxIds)
+  const handedOff = boundedIdSet(maxIds)
+  const zero = (): DeliveryCounters => ({
+    presentations: 0,
+    newPresentations: 0,
+    duplicatePresentations: 0,
+    deliveries: 0,
+    newDeliveries: 0,
+    duplicateDeliveries: 0,
+    duplicateBytes: 0,
+    suppressed: 0,
+  })
+  let counters = zero()
+  return {
+    present(id) {
+      counters.presentations++
+      if (id === undefined || !presented.has(id)) {
+        counters.newPresentations++
+        if (id !== undefined) presented.add(id)
+        return "new"
+      }
+      counters.duplicatePresentations++
+      return "duplicate"
+    },
+    deliver(id, bytes = 0) {
+      counters.deliveries++
+      if (id === undefined || !handedOff.has(id)) {
+        counters.newDeliveries++
+        if (id !== undefined) handedOff.add(id)
+        return "new"
+      }
+      counters.duplicateDeliveries++
+      counters.duplicateBytes += Math.max(0, Math.floor(bytes))
+      return "duplicate"
+    },
+    snapshot() {
+      return { ...counters, suppressed: counters.presentations - counters.deliveries }
+    },
+    firstHandoffIds() {
+      return handedOff.ids()
+    },
+    restore(ids) {
+      for (const id of ids) {
+        presented.add(id)
+        handedOff.add(id)
+      }
+    },
+    resetCounters() {
+      counters = zero()
+    },
+  }
+}
+
 /** The preview slice of a ball the summary line is built from. */
 export type PendingBallPreview = { request_id?: string | null }
 

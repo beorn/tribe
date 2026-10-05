@@ -1792,6 +1792,66 @@ describe("stdio adapter delivery modes", () => {
     expect(channelText().filter((line) => line.includes("FRESH-ROW"))).toHaveLength(1)
   })
 
+  // #27459 — the independent per-pane delivery counter. Two drains of the same
+  // two attention rows: four PRESENTATIONS, two DELIVERIES (the first of each id),
+  // and two SUPPRESSED re-presentations. The durable first-handoff ledger is
+  // written under the kpi dir so a restart can still call a re-handoff duplicate.
+  it("counts presentations and deliveries across two drains, and persists the per-pane ledger (#27459)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const recentTs = new Date().toISOString()
+    const fetchAttention = {
+      actionable_unread: [
+        { id: "count-row-a", type: "request", from: "@chief", content: "COUNT-A", ts: recentTs },
+        { id: "count-row-b", type: "verdict", from: "@ci", content: "COUNT-B", ts: recentTs },
+      ],
+      pending_balls: [],
+    }
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    collectStdoutJson(child)
+    const drain = async (label: string) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients[0]?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 250))
+    }
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    await drain("first counted drain")
+    await drain("second counted drain")
+
+    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    await waitForCondition(() => existsSync(ledgerPath), "delivery ledger written")
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
+      ids: string[]
+      counters: Record<string, number>
+      coverage: { restarts: number; gap: boolean }
+    }
+    expect(ledger.counters.presentations).toBe(4)
+    expect(ledger.counters.deliveries).toBe(2)
+    expect(ledger.counters.newDeliveries).toBe(2)
+    expect(ledger.counters.duplicateDeliveries).toBe(0)
+    expect(ledger.counters.duplicatePresentations).toBe(2)
+    expect(ledger.counters.suppressed).toBe(2)
+    expect([...ledger.ids].sort()).toEqual(["count-row-a", "count-row-b"])
+  })
+
   it("drains and pushes attention when wakeup arrives within the register round-trip (#26969 row 5)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const fetchAttention = {

@@ -57,6 +57,7 @@ import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
 import {
   createConnectReplayGate,
+  createDeliveryCounter,
   createForwardedAttentionTracker,
   decidePendingBallSummary,
   MAX_REPLAY_EVENTS,
@@ -64,6 +65,14 @@ import {
   selectReplayEvents,
   type PendingBallSummaryState,
 } from "./lib/replay-cap.ts"
+import {
+  DELIVERY_LEDGER_WINDOW_MS,
+  deliveryLedgerPath,
+  loadDeliveryLedger,
+  openDeliveryLedgerWindow,
+  saveDeliveryLedger,
+  type DeliveryLedgerState,
+} from "./lib/delivery-ledger.ts"
 import { evaluateCwdPolicy, probeCwd, readCwdPolicyFromEnv, type CwdEvaluation } from "./lib/cwd-guardrail.ts"
 import {
   deliveryCapabilityInstruction,
@@ -1408,6 +1417,59 @@ let pendingBallSummaryState: PendingBallSummaryState | null = null
 // never-delivered recovery row read `replay:true` (see createForwardedAttentionTracker).
 const forwardedAttention = createForwardedAttentionTracker()
 
+// #27459 — the per-pane delivery counter (@cto 9a077460): `presented` is every
+// actionable row the daemon exposes to this adapter (forwarded or suppressed);
+// `delivered` is a successful handoff. The durable half is the per-pane
+// first-successful-handoff ledger under habitat kpi state, so a handoff after a
+// restart still reads as a duplicate rather than a fresh delivery.
+const deliveryCounter = createDeliveryCounter()
+let deliveryLedgerFilePath: string | null = null
+let deliveryLedgerState: DeliveryLedgerState | null = null
+let deliveryLedgerReady = false
+
+function ensureDeliveryLedger(now: number): void {
+  if (deliveryLedgerReady) return
+  const pane = myName !== "" ? myName : process.env.TRIBE_NAME?.trim() || "@unknown"
+  const path = deliveryLedgerPath({ pane, env: process.env })
+  if (path === null) {
+    // No habitat kpi root and no override: count in memory only, and never invent
+    // a $HOME location (25231). The counters still work; only durability is off.
+    deliveryLedgerReady = true
+    return
+  }
+  const loaded = loadDeliveryLedger(path)
+  const opened = openDeliveryLedgerWindow({ existing: loaded.state, coverage: loaded.coverage, pane, now })
+  deliveryCounter.restore(opened.ids)
+  deliveryLedgerFilePath = path
+  deliveryLedgerState = opened
+  deliveryLedgerReady = true
+}
+
+function persistDeliveryLedger(now: number): void {
+  if (deliveryLedgerFilePath === null || deliveryLedgerState === null) return
+  if (now - deliveryLedgerState.windowStartMs >= DELIVERY_LEDGER_WINDOW_MS) {
+    deliveryCounter.resetCounters()
+    deliveryLedgerState = openDeliveryLedgerWindow({
+      existing: deliveryLedgerState,
+      coverage: deliveryLedgerState.coverage,
+      pane: deliveryLedgerState.pane,
+      now,
+    })
+  }
+  deliveryLedgerState = {
+    ...deliveryLedgerState,
+    updatedAtMs: now,
+    ids: deliveryCounter.firstHandoffIds(),
+    counters: deliveryCounter.snapshot(),
+  }
+  try {
+    saveDeliveryLedger(deliveryLedgerFilePath, deliveryLedgerState)
+  } catch (err) {
+    // NO SILENT ERRORS: a ledger we could not persist must not read as a clean 0.
+    log.warn?.(`Failed to persist tribe delivery ledger: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
 function drainDaemonInbox(): void {
   if (drainInFlight) {
     drainAgain = true
@@ -1425,6 +1487,7 @@ function drainDaemonInbox(): void {
       }
       const d = daemon ?? (await daemonReady.catch(() => undefined))
       if (!d) return
+      ensureDeliveryLedger(Date.now())
       do {
         drainAgain = false
         // 19442: against a current daemon this drain returns only unacked
@@ -1454,6 +1517,11 @@ function drainDaemonInbox(): void {
         // the ambient-events path below.
         const attentionEventsAll = result?.attention?.actionable_unread ?? []
         const attentionIds = new Set(attentionEventsAll.map((event) => event.id).filter(Boolean))
+        // #27459 — every actionable row the daemon exposed this drain is a
+        // PRESENTATION; a row the once-per-row filter admits is also a DELIVERY.
+        for (const event of attentionEventsAll) {
+          deliveryCounter.present(event.id ? String(event.id) : undefined)
+        }
         const attentionEvents = attentionEventsAll.filter(
           (event) => !forwardedAttention.has(event.id ? String(event.id) : undefined),
         )
@@ -1461,6 +1529,10 @@ function drainDaemonInbox(): void {
           forwardFetchedEvent(event)
           // Marked only AFTER the handoff, so a throw re-delivers next drain.
           forwardedAttention.remember(event.id ? String(event.id) : undefined)
+          deliveryCounter.deliver(
+            event.id ? String(event.id) : undefined,
+            Buffer.byteLength(String(event.content ?? ""), "utf8"),
+          )
         }
         const currentPendingBalls = result?.attention?.pending_balls ?? []
         const currentPendingBallSummary = result?.attention?.pending_balls_summary
@@ -1481,6 +1553,7 @@ function drainDaemonInbox(): void {
           )
         }
       } while (drainAgain)
+      persistDeliveryLedger(Date.now())
     } catch (err) {
       log.warn?.(`Failed to drain tribe inbox after wakeup: ${err instanceof Error ? err.message : String(err)}`)
     } finally {

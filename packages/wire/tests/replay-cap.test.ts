@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest"
 import {
   CONNECT_REPLAY_WINDOW_MS,
   createConnectReplayGate,
+  createDeliveryCounter,
   createForwardedAttentionTracker,
   decidePendingBallSummary,
   MAX_REPLAY_AGE_MS,
@@ -302,5 +303,102 @@ describe("createForwardedAttentionTracker (27346 per-pane delivery record)", () 
     tracker.remember("row-c") // evicts row-a
     expect(tracker.has("row-b")).toBe(true)
     expect(tracker.has("row-a")).toBe(false) // evicted, so admissible again
+  })
+})
+
+// #27459 — the adapter delivery counter. Two named units per @cto 9a077460:
+// a DUPLICATE PRESENTATION is the daemon exposing the same id again (forwarded
+// or suppressed); a DUPLICATE DELIVERY is a successful same-id handoff after the
+// first. The >20%/>=100 threshold is on duplicateDelivery/deliveries; the
+// presentation rate is a diagnostic. Bytes count only for actual handoffs.
+describe("createDeliveryCounter (#27459 per-pane delivery counter)", () => {
+  it("counts a first presentation as new and a second as a duplicate presentation", () => {
+    const counter = createDeliveryCounter()
+    expect(counter.present("row-a")).toBe("new")
+    expect(counter.present("row-a")).toBe("duplicate")
+    expect(counter.snapshot()).toMatchObject({
+      presentations: 2,
+      newPresentations: 1,
+      duplicatePresentations: 1,
+    })
+  })
+
+  it("counts a first handoff as new and a second as a duplicate, adding bytes only for the duplicate", () => {
+    const counter = createDeliveryCounter()
+    expect(counter.deliver("row-a", 100)).toBe("new")
+    expect(counter.deliver("row-a", 40)).toBe("duplicate")
+    expect(counter.snapshot()).toMatchObject({
+      deliveries: 2,
+      newDeliveries: 1,
+      duplicateDeliveries: 1,
+      duplicateBytes: 40,
+    })
+  })
+
+  it("reports suppressed = presentations - deliveries for a presented-but-withheld row", () => {
+    const counter = createDeliveryCounter()
+    counter.present("row-a")
+    counter.deliver("row-a", 10) // first handoff
+    counter.present("row-a") // re-presented...
+    // ...and withheld by the once-per-row filter (no deliver call)
+    const s = counter.snapshot()
+    expect(s.presentations).toBe(2)
+    expect(s.deliveries).toBe(1)
+    expect(s.suppressed).toBe(1)
+    expect(s.duplicatePresentations).toBe(1)
+    expect(s.duplicateDeliveries).toBe(0)
+  })
+
+  it("tracks presentation and handoff identity independently", () => {
+    const counter = createDeliveryCounter()
+    // presented but never handed off (a failed forward)
+    expect(counter.present("row-a")).toBe("new")
+    // ...then handed off later still reads as a first delivery
+    expect(counter.deliver("row-a", 5)).toBe("new")
+    // a second handoff of the same id is a duplicate delivery
+    expect(counter.deliver("row-a", 5)).toBe("duplicate")
+  })
+
+  it("never withholds an unkeyed row — an undefined id is always new", () => {
+    const counter = createDeliveryCounter()
+    expect(counter.present(undefined)).toBe("new")
+    expect(counter.present(undefined)).toBe("new")
+    expect(counter.deliver(undefined, 9)).toBe("new")
+    expect(counter.deliver(undefined, 9)).toBe("new")
+  })
+
+  it("keeps two panes independent", () => {
+    const a = createDeliveryCounter()
+    const b = createDeliveryCounter()
+    a.present("row-a")
+    a.deliver("row-a", 3)
+    expect(b.present("row-a")).toBe("new")
+    expect(b.snapshot().duplicateDeliveries).toBe(0)
+  })
+
+  it("restores first-handoff ids so a handoff after a restart is still a duplicate", () => {
+    const counter = createDeliveryCounter()
+    counter.restore(["row-a"])
+    expect(counter.present("row-a")).toBe("duplicate")
+    expect(counter.deliver("row-a", 7)).toBe("duplicate")
+    expect(counter.snapshot().duplicateBytes).toBe(7)
+  })
+
+  it("resetCounters zeroes the window but keeps the identity, so a re-present still reads duplicate", () => {
+    const counter = createDeliveryCounter()
+    counter.present("row-a")
+    counter.deliver("row-a", 4)
+    counter.resetCounters()
+    expect(counter.snapshot()).toMatchObject({ presentations: 0, deliveries: 0, duplicateBytes: 0 })
+    expect(counter.deliver("row-a", 4)).toBe("duplicate")
+  })
+
+  it("bounds the identity set, evicting the oldest first-handoff id", () => {
+    const counter = createDeliveryCounter({ maxIds: 2 })
+    counter.deliver("row-a", 1)
+    counter.deliver("row-b", 1)
+    counter.deliver("row-c", 1) // evicts row-a
+    expect(counter.firstHandoffIds().sort()).toEqual(["row-b", "row-c"])
+    expect(counter.deliver("row-a", 1)).toBe("new") // evicted, admissible again
   })
 })
