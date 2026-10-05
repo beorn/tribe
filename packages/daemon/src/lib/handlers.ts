@@ -4420,7 +4420,13 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
     if (attention.pruned !== undefined) ctx.stmts.deleteMailboxPrune.run({ $recipient: currentName })
   }
 
-  const events = filtered.map((row) => fetchEvent(row))
+  // 27488 must-hold A — one body per read. A row already in
+  // attention.actionable_unread is not repeated in the chronological events
+  // window, so a body appears once per response. The cursor move above uses
+  // `filtered`, so this changes only what the caller sees, never what the read
+  // acknowledges.
+  const attentionIds = new Set((attention?.actionable_unread ?? []).map((row) => row.id))
+  const events = filtered.filter((row) => !attentionIds.has(row.id)).map((row) => fetchEvent(row))
   return jsonResult(attention === null ? { events, cursor: outputCursor } : { attention, events, cursor: outputCursor })
 }
 

@@ -110,12 +110,17 @@ describe("every envelope carries its sender's authority (25074 3d-1a)", () => {
     )
     const reader = context("reader-launch", RECIPIENT)
     const result = handleToolCall(reader, "tribe.fetch", { limit: 10 }, opts()) as { content: Array<{ text: string }> }
-    const events = (
+    // 27488 must-hold A — the reply correlates to a request this reader owns, so
+    // it is actionable and appears ONCE, under attention.actionable_unread (a
+    // body is not repeated in events within one read).
+    const rows = (
       JSON.parse(result.content[0]?.text ?? "{}") as {
-        events?: Array<{ from: string; from_authority: string | null; from_session_id: string | null }>
+        attention?: {
+          actionable_unread?: Array<{ from: string; from_authority: string | null; from_session_id: string | null }>
+        }
       }
-    ).events
-    expect(events?.find((event) => event.from === "@dev/1")).toMatchObject({
+    ).attention?.actionable_unread
+    expect(rows?.find((event) => event.from === "@dev/1")).toMatchObject({
       from_authority: "verified",
       from_session_id: "current-launch",
     })
