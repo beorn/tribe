@@ -711,12 +711,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.fetch",
     title: "Fetch Messages",
     description:
-      "Read tribe messages. Default returns attention (unread actionables plus self-owned pending balls), drains the bounded chronological event window, and advances its cursor. ids/with/from/to reads are snapshots. since scans the journal and advances only with advance:true.",
+      "Read tribe messages. Default returns attention (unread actionables plus self-owned pending balls), drains the bounded chronological event window, and advances its cursor; `events` omits rows already carried in `attention.actionable_unread`, so a message body appears once per read. ids/with/from/to reads are snapshots. since scans the journal and advances only with advance:true.",
     lifetime: "live-session",
     mcp: {
       name: "fetch",
       description:
-        "Read tribe messages. Default returns attention (unread actionables plus self-owned pending balls), drains the bounded chronological event window, and advances its cursor. ids/with/from/to reads are snapshots. since scans the journal and advances only with advance:true.",
+        "Read tribe messages. Default returns attention (unread actionables plus self-owned pending balls), drains the bounded chronological event window, and advances its cursor; `events` omits rows already carried in `attention.actionable_unread`, so a message body appears once per read. ids/with/from/to reads are snapshots. since scans the journal and advances only with advance:true.",
       inputSchema: {
         type: "object",
         properties: {
@@ -755,7 +755,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           events: {
             type: "array",
             description:
-              "Visible messages. Each: { id, rowid, type, from, to, content, bead?, ref?, ts (ISO), delivery, topic?, room_id? }.",
+              "Visible messages. Each: { id, rowid, type, from, to, content, bead?, ref?, ts (ISO), delivery, topic?, room_id? }. Rows already carried in `attention.actionable_unread` are omitted, so a body appears once per read; attention ∪ events is the complete delivered set.",
             items: { type: "object", additionalProperties: true },
           },
           cursor: { type: "number", description: "Highest rowid returned (or unchanged when no rows matched)." },
