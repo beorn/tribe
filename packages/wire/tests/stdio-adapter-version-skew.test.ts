@@ -71,7 +71,10 @@ function spawnSkewedDaemon(socketPath: string): Promise<{ server: Server; client
   })
 }
 
-function spawnGenerationDaemon(socketPath: string, paced = false): Promise<{
+function spawnGenerationDaemon(
+  socketPath: string,
+  paced = false,
+): Promise<{
   server: Server
   clients: Socket[]
   registrations: number[]
@@ -110,7 +113,12 @@ function spawnGenerationDaemon(socketPath: string, paced = false): Promise<{
             makeResponse(msg.id, {
               sessions: [],
               ...(paced
-                ? { reload_peers: { declared: ["@agent/declared-0", "@agent/declared-1"], live_undeclared: ["generation-test"] } }
+                ? {
+                    reload_peers: {
+                      declared: ["@agent/declared-0", "@agent/declared-1"],
+                      live_undeclared: ["generation-test"],
+                    },
+                  }
                 : {}),
               daemon: { pid: daemonPid, code_identity: { cert: "test-cert", root: daemonRoot } },
             }),
@@ -118,9 +126,16 @@ function spawnGenerationDaemon(socketPath: string, paced = false): Promise<{
           return
         }
         if (msg.method === "tribe.join") {
-          socket.write(makeResponse(msg.id, {
-            content: [{ type: "text", text: JSON.stringify({ joined: true, name: "@cto", delivery: "pull", transportDelivery: "pull" }) }],
-          }))
+          socket.write(
+            makeResponse(msg.id, {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({ joined: true, name: "@cto", delivery: "pull", transportDelivery: "pull" }),
+                },
+              ],
+            }),
+          )
           return
         }
         socket.write(makeResponse(msg.id, { ok: true }))
@@ -551,44 +566,88 @@ describe("stdio adapter — protocol version skew", () => {
     const logPath = join(tmpDir, "joined-generation.log")
     const generationDaemon = await spawnGenerationDaemon(socketPath, true)
     daemon = generationDaemon
-    child = captureStderr(spawn(BUN_BIN, [STDIO_ADAPTER, "--socket", socketPath], {
-      cwd: tmpDir,
-      env: {
-        ...process.env,
-        ...STANDALONE_PLUGIN_ENV,
-        TRIBE_NAME: "",
-        TRIBE_REQUIRE_JOIN: "1",
-        TRIBE_PLUGIN_RESUME_JOINED: "",
-        TRIBE_PLUGIN_REEXEC_EXIT_CODE: "75",
-        TRIBE_DELIVERY: "pull",
-        TRIBE_PULL_TRANSPORT: "mcp",
-        DEBUG_LOG: logPath,
-        LOG_LEVEL: "info",
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    }) as ChildProcessWithoutNullStreams)
-    await waitForRegistrations(child, () => generationDaemon.registrations.length, 1, 15_000, "initial registration", logPath)
-    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
-      protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "paced-join", version: "0" },
-    } }) + "\n")
+    child = captureStderr(
+      spawn(BUN_BIN, [STDIO_ADAPTER, "--socket", socketPath], {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          ...STANDALONE_PLUGIN_ENV,
+          TRIBE_NAME: "",
+          TRIBE_REQUIRE_JOIN: "1",
+          TRIBE_PLUGIN_RESUME_JOINED: "",
+          TRIBE_PLUGIN_REEXEC_EXIT_CODE: "75",
+          TRIBE_DELIVERY: "pull",
+          TRIBE_PULL_TRANSPORT: "mcp",
+          DEBUG_LOG: logPath,
+          LOG_LEVEL: "info",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      }) as ChildProcessWithoutNullStreams,
+    )
+    await waitForRegistrations(
+      child,
+      () => generationDaemon.registrations.length,
+      1,
+      15_000,
+      "initial registration",
+      logPath,
+    )
+    child.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "paced-join", version: "0" },
+        },
+      }) + "\n",
+    )
     generationDaemon.setRoot(join(tmpDir, "next-landing"))
     generationDaemon.setPid(2002)
     for (const socket of generationDaemon.clients.splice(0)) socket.destroy()
-    await waitFor(() => existsSync(logPath) && /rank 2 of 3 peers, slot 2; waiting \d+ ms/u.test(readFileSync(logPath, "utf8")),
-      15_000, "ranked paced wait")
+    await waitFor(
+      () => existsSync(logPath) && /rank 2 of 3 peers, slot 2; waiting \d+ ms/u.test(readFileSync(logPath, "utf8")),
+      15_000,
+      "ranked paced wait",
+    )
     expect(child.exitCode).toBeNull()
     let output = ""
-    child.stdout.on("data", (data: Buffer | string) => { output += data.toString() })
-    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
-      name: "join", arguments: { name: "@cto", delivery: "pull" },
-    } }) + "\n")
-    await waitFor(() => output.split("\n").some((line) => {
-      if (!line.trim()) return false
-      const response = JSON.parse(line)
-      if (response.id !== 2) return false
-      return response.result?.content?.some((item: { type: string; text?: string }) =>
-        item.type === "text" && item.text && JSON.parse(item.text).joined === true)
-    }), 5_000, "explicit join during paced wait")
+    child.stdout.on("data", (data: Buffer | string) => {
+      output += data.toString()
+    })
+    child.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "join",
+          arguments: { name: "@cto", delivery: "pull" },
+        },
+      }) + "\n",
+    )
+    await waitFor(
+      () =>
+        output
+          .split("\n")
+          .slice(0, -1)
+          .some((line) => {
+            if (!line.trim()) return false
+            const response = JSON.parse(line) as {
+              id?: number
+              result?: { content?: { type: string; text?: string }[] }
+            }
+            if (response.id !== 2) return false
+            return response.result?.content?.some(
+              (item: { type: string; text?: string }) =>
+                item.type === "text" && item.text && (JSON.parse(item.text) as { joined?: boolean }).joined === true,
+            )
+          }),
+      5_000,
+      "explicit join during paced wait",
+    )
     expect(child.exitCode, "join completed before the re-exec decision").toBeNull()
     await waitFor(() => child!.exitCode !== null, 15_000, "different-root re-exec")
     expect(child.exitCode).toBe(78) // 75 + daemon-generation reason 2 + joined bit 1.

@@ -205,7 +205,12 @@ async function terminateTestProcess(pid: number): Promise<void> {
   await waitFor(() => !pidExists(pid), `test process ${pid} forced exit`, 2_000)
 }
 
-async function waitForSameRootReload(dbPath: string, persona: string, occurrence: number): Promise<void> {
+async function waitForSameRootReload(
+  dbPath: string,
+  persona: string,
+  occurrence: number,
+  timeoutMs = 15_000,
+): Promise<void> {
   // Membership can reconnect before pacing finishes. Observe the daemon's
   // actual decision for each generation before asserting that the PID stays.
   const db = new Database(dbPath, { readonly: true })
@@ -218,6 +223,7 @@ async function waitForSameRootReload(dbPath: string, persona: string, occurrence
     await waitFor(
       () => (decisions.get(persona)?.n ?? 0) >= occurrence,
       `${persona} same-root reload decision ${occurrence}`,
+      timeoutMs,
     ).catch((error: unknown) => {
       const events = db.query("SELECT content FROM messages WHERE type = 'event.adapter_reload_decision'").all()
       throw new Error(`${String(error)}; observed decisions: ${JSON.stringify(events)}`, { cause: error })
@@ -506,7 +512,11 @@ process.exit(await child.exited)
         pacedRestartBudgetMs(expectedPersonas.length),
       )
 
-      await Promise.all(expectedPersonas.map((persona) => waitForSameRootReload(dbPath, persona, restart)))
+      await Promise.all(
+        expectedPersonas.map((persona) =>
+          waitForSameRootReload(dbPath, persona, restart, pacedRestartBudgetMs(expectedPersonas.length)),
+        ),
+      )
 
       // 25663 P3: each adapter read cli_status just after its own re-register, yet every one ranked itself from the
       // declared roster, so each took its roster place and no two shared a slot. Ranking on sessions[].name collided.
@@ -1386,9 +1396,9 @@ process.exit(await child.exited)
     successor.client.close()
   }, 45_000)
 
-  // 25663 P4-1: the re-exec exit code carries the joined bit. It was computed when the reload was requested, so a
-  // launch-less seat that joined during the paced wait (up to 124 s) re-exec'd unjoined and came back unknown-*.
-  it("a launch-less seat that joins during the paced reload wait re-execs joined", async () => {
+  // A same-root restart retains the runtime name joined during the paced wait.
+  // Different-root joined-bit re-exec coverage lives in stdio-adapter-version-skew.test.ts (27552 AC2).
+  it("a launch-less seat that joins during the paced reload wait reconnects joined on the same root", async () => {
     const dbPath = join(tmpDir, "tribe-join-during-wait.db")
     const daemonLog = join(tmpDir, "daemon-join-during-wait.log")
     const adapterLog = join(tmpDir, "adapter-join-during-wait.log")
@@ -1463,7 +1473,7 @@ process.exit(await child.exited)
     writeJson(plugin, callToolPayload(31, "join", { name: "@cto" }))
     await waitFor(() => stdout.some((line) => line.id === 31), "join-during-wait explicit join")
     expect(mcpToolJson(stdout, 31)).toMatchObject({ joined: true, name: "@cto" })
-    expect(pidExists(initialTransportPid), "the join landed before the paced re-exec").toBe(true)
+    expect(pidExists(initialTransportPid), "the join landed before the paced reload decision").toBe(true)
 
     let rejoined: Member | undefined
     await waitFor(
@@ -1473,11 +1483,11 @@ process.exit(await child.exited)
           (session) =>
             session.transport_state === "connected" &&
             session.transport_pids?.length === 1 &&
-            session.transport_pids[0] !== initialTransportPid,
+            session.transport_pids[0] === initialTransportPid,
         )
         return rejoined !== undefined
       },
-      "join-during-wait re-exec'd adapter registration",
+      "join-during-wait same-root adapter registration",
       pacedRestartBudgetMs(3),
     ).catch((error: unknown) => {
       throw new Error(
@@ -1486,6 +1496,8 @@ process.exit(await child.exited)
     })
     expect(rejoined, pluginStderr).toMatchObject({ name: "@cto", transport_state: "connected" })
     for (const pid of rejoined?.transport_pids ?? []) adapterPids.add(pid)
+    await waitForSameRootReload(dbPath, unjoined!.name!, 1)
+    expect(pidExists(initialTransportPid)).toBe(true)
     expect(plugin.exitCode, pluginStderr).toBeNull()
     successor.client.close()
   }, 60_000)
@@ -1717,7 +1729,11 @@ process.exit(await child.exited)
         pacedRestartBudgetMs(expectedPersonas.length),
       )
 
-      await Promise.all(expectedPersonas.map((persona) => waitForSameRootReload(dbPath, persona, restart)))
+      await Promise.all(
+        expectedPersonas.map((persona) =>
+          waitForSameRootReload(dbPath, persona, restart, pacedRestartBudgetMs(expectedPersonas.length)),
+        ),
+      )
 
       for (const persona of expectedPersonas) {
         const member = rejoined.get(persona)!
