@@ -18,8 +18,8 @@ import { acquireIndexWriter, IndexWriterBusyError } from "../history/db.ts"
 
 /** Index writer already active: the scheduled index tick has nothing to do. */
 export const RECALL_INDEX_BUSY_EXIT = 4
-/** Index committed with ledgered skips: report the incomplete provenance. */
-export const RECALL_INDEX_SKIPS_EXIT = 5
+/** The incremental share-cap prune was refused: report the incomplete provenance (25462). */
+export const RECALL_INDEX_PRUNE_REFUSED_EXIT = 5
 
 export async function cmdIndex(opts: {
   incremental?: boolean
@@ -137,18 +137,15 @@ export async function cmdIndex(opts: {
       }
     }
 
-    const hasFailures =
-      result.pruneRefused !== undefined ||
-      (result.codexFailures !== undefined && result.codexFailures.some((f) => f.kind !== "skipped")) ||
-      (result.codexUnreadable !== undefined && result.codexUnreadable > 0) ||
-      (result.codexErrors !== undefined && result.codexErrors > 0) ||
-      (result.claudeFailures !== undefined && result.claudeFailures.length > 0)
-
-    if (hasFailures) {
-      process.exitCode = RECALL_INDEX_SKIPS_EXIT
-    } else {
-      process.exitCode = 0
-    }
+    // 25462: a refused incremental share-cap prune stays a non-zero REPORT (never a failure)
+    // so the unattended recall-index service still sees the incomplete provenance.
+    // 27458 (@cto 842ca9df): every other outcome of a COMPLETED index — one that committed,
+    // even with ledgered skips — exits 0. Those skips are already a durable ledger (the
+    // counts and per-file lines printed above, plus the persisted failed-session status),
+    // so the exit code stops carrying the provenance and a timer whose only signal was
+    // "skips fired" can no longer read as a fire with no PASS. The busy lock
+    // (RECALL_INDEX_BUSY_EXIT) below still reports non-zero, because the index did not run.
+    process.exitCode = result.pruneRefused !== undefined ? RECALL_INDEX_PRUNE_REFUSED_EXIT : 0
   } catch (error) {
     if (error instanceof IndexWriterBusyError) {
       console.error(error.message)

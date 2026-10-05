@@ -40,7 +40,7 @@ import {
   resetIgnoreCache,
 } from "../../src/history/indexer.ts"
 import { getPersistedFailedSessions } from "../../src/lib/status.ts"
-import { cmdIndex, RECALL_INDEX_SKIPS_EXIT } from "../../src/lib/sessions.ts"
+import { cmdIndex } from "../../src/lib/sessions.ts"
 
 const runReal = Boolean(
   process.env.TEST_REAL_PRODUCER === "1" ||
@@ -2917,7 +2917,7 @@ if (process.argv.includes("list")) {
       )
     })
 
-    test("cmdIndex sets process.exitCode = 5 when batch commits with ledgered skips", async () => {
+    test("cmdIndex exits 0 when the batch commits with ledgered skips", async () => {
       const origExitCode = process.exitCode
       const origAgBin = process.env.AG_BIN
       try {
@@ -2973,7 +2973,7 @@ if (process.argv.includes("list")) {
 
         const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
         await cmdIndex({ path: skipFile })
-        expect(process.exitCode).toBe(RECALL_INDEX_SKIPS_EXIT)
+        expect(process.exitCode).toBe(0)
         logSpy.mockRestore()
       } finally {
         process.exitCode = origExitCode
@@ -3124,7 +3124,7 @@ if (process.argv.includes("list")) {
       }
     })
 
-    test("incremental index skips known bad Codex files (exit 0) and exits 5 only on new bad files", async () => {
+    test("incremental index exits 0 on every committed batch, first-encounter or new bad files alike", async () => {
       const origExitCode = process.exitCode
       const origAgBin = process.env.AG_BIN
       try {
@@ -3230,20 +3230,20 @@ if (args.includes("list")) {
 
         const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
 
-        // Run 1: bad1 encountered for the first time -> exits 5
+        // Run 1: bad1 encountered for the first time -> committed, so exits 0
         await cmdIndex({ incremental: true })
-        expect(process.exitCode).toBe(5)
+        expect(process.exitCode).toBe(0)
 
         // Run 2: incremental pass with no file changes -> bad1 skipped -> exits 0
         process.exitCode = undefined
         await cmdIndex({ incremental: true })
         expect(process.exitCode).toBe(0)
 
-        // Run 3: new bad file introduced -> bad2 encountered -> exits 5
+        // Run 3: new bad file introduced -> bad2 encountered -> committed, so exits 0
         writeFileSync(bad2File, "")
         process.exitCode = undefined
         await cmdIndex({ incremental: true })
-        expect(process.exitCode).toBe(5)
+        expect(process.exitCode).toBe(0)
 
         logSpy.mockRestore()
       } finally {

@@ -555,7 +555,7 @@ if (args[0] === "transcript" && args[1] === "list") {
   // --------------------------------------------------------------------------
   // A5: Incremental negative-caching of failed sessions
   // --------------------------------------------------------------------------
-  test("A5: new Claude failure exits 5, unchanged failed file is cached and exits 0", async () => {
+  test("A5: a new Claude failure is a ledgered skip, so the committed index exits 0; unchanged failed file is cached and also exits 0", async () => {
     process.env.RECALL_SKIP_PROVIDER_TRANSCRIPTS = "1"
     const proj = join(projectsDir, "proj-fail")
     mkdirSync(proj, { recursive: true })
@@ -564,10 +564,10 @@ if (args[0] === "transcript" && args[1] === "list") {
 
     vi.spyOn(console, "log").mockImplementation(() => {})
 
-    // Run 1: badFile fails -> exits 5 and records stale-unreadable
+    // Run 1: badFile fails -> the index still committed, so exits 0 and records stale-unreadable
     process.exitCode = undefined
     await cmdIndex({ incremental: true })
-    expect(process.exitCode).toBe(5)
+    expect(process.exitCode).toBe(0)
 
     const failedSession = getSession(db, "bad-session")
     expect(failedSession).toBeDefined()
