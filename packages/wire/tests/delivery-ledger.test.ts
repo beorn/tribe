@@ -39,7 +39,7 @@ function tempPath(): string {
 function costBlock(over: Partial<NonNullable<DeliveryLedgerState["counters"]["cost"]>> = {}) {
   return {
     deliveredBytes: 0,
-    byClass: {},
+    handoffs: 0,
     readRepeatBodies: 0,
     readRepeatBytes: 0,
     readPulls: 0,
@@ -327,11 +327,11 @@ describe("delivery ledger cost (#27488 phase 0)", () => {
         deliveries: 2,
         cost: costBlock({
           deliveredBytes: 500,
+          handoffs: 2,
           readPulls: 1,
           readPullBytes: 200,
           readRepeatBodies: 1,
           readRepeatBytes: 50,
-          byClass: { "watch/notify": { deliveries: 2, bytes: 500, noActionDeliveries: 2, noActionBytes: 500 } },
         }),
       }),
       pendingBallSummary: null,
@@ -342,7 +342,7 @@ describe("delivery ledger cost (#27488 phase 0)", () => {
     const loaded = loadDeliveryLedger(path)
     expect(loaded.coverage.gap).toBe(false)
     expect(loaded.state?.counters.cost?.deliveredBytes).toBe(500)
-    expect(loaded.state?.counters.cost?.byClass["watch/notify"]?.noActionBytes).toBe(500)
+    expect(loaded.state?.counters.cost?.handoffs).toBe(2)
     expect(loaded.state?.counters.cost?.readRepeatBodies).toBe(1)
   })
 

@@ -37,6 +37,7 @@ function spawnFakeDaemon(
       }
     }
     inboxWaitResult?: Record<string, unknown>
+    pendingResult?: Record<string, unknown>
     registerError?: { code: number; message: string; data?: unknown }
     registerErrorAfter?: number
     registerErrorUntil?: number
@@ -127,6 +128,14 @@ function spawnFakeDaemon(
                   text: JSON.stringify({ attention: opts.fetchAttention, events: opts.fetchEvents ?? [] }),
                 },
               ],
+            }),
+          )
+          return
+        }
+        if (msg.method === "tribe.pending") {
+          socket.write(
+            makeResponse(msg.id, {
+              content: [{ type: "text", text: JSON.stringify(opts.pendingResult ?? { balls: [] }) }],
             }),
           )
           return
@@ -2355,11 +2364,12 @@ describe("stdio adapter delivery modes", () => {
     expect(delivered).toBeDefined()
   })
 
-  // #27488 phase 0 (must-hold A) - a MODEL-requested read is measured: the bytes
-  // it returned, and a body returned twice inside the ONE response
-  // (attention.actionable_unread AND events). Phase 0 counts it; phase 1 fixes it.
+  // #27488 phase 0 - every MODEL-requested read is measured as the RESULT bytes
+  // the model received, plus the bodies `fetch` returned twice inside ONE
+  // response (attention.actionable_unread AND events, must-hold A). Phase 0
+  // counts it; phase 1 fixes the read so the count can fall to 0.
   describe("model read cost (#27488 phase 0)", () => {
-    it("counts a model fetch's bytes and the bodies it returned twice in one response", async () => {
+    it("measures each read tool by the result text returned, and fetch's repeated bodies", async () => {
       const socketPath = join(tmpDir, "tribe.sock")
       const recentTs = new Date().toISOString()
       const rowA = { id: "read-dup-a", type: "request", from: "@chief", content: "READ-DUP-A", ts: recentTs }
@@ -2369,7 +2379,11 @@ describe("stdio adapter delivery modes", () => {
         pending_balls: [],
         pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
       }
-      daemon = await spawnFakeDaemon(socketPath, { fetchAttention, fetchEvents: [rowA, rowB] })
+      daemon = await spawnFakeDaemon(socketPath, {
+        fetchAttention,
+        fetchEvents: [rowA, rowB],
+        pendingResult: { balls: [{ id: "ball-1", owner: "@agent/test" }] },
+      })
       child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
         cwd: tmpDir,
         env: {
@@ -2386,7 +2400,33 @@ describe("stdio adapter delivery modes", () => {
       await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
       writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
       await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
-      await writeJsonAndWaitForLine(child, callToolPayload(3, "fetch", { limit: 10 }), (line) => line.id === 3)
+      const fetchReply = await writeJsonAndWaitForLine(
+        child,
+        callToolPayload(3, "fetch", { limit: 10 }),
+        (line) => line.id === 3,
+      )
+      const pendingReply = await writeJsonAndWaitForLine(
+        child,
+        callToolPayload(4, "pending", { owner: "@agent/test" }),
+        (line) => line.id === 4,
+      )
+      const waitReply = await writeJsonAndWaitForLine(
+        child,
+        callToolPayload(5, "inbox.wait", { session: "@agent/test", timeout_ms: 1_000 }),
+        (line) => line.id === 5,
+      )
+
+      // The read's cost is the result text the MODEL received, not the sum of the
+      // rows' content fields (framing is part of what the model pays for). Mirrors
+      // the adapter's own resultText(): every content block, in order.
+      const replyText = (line: Record<string, unknown>): string =>
+        ((line.result as { content?: Array<{ text?: string }> } | undefined)?.content ?? [])
+          .map((block) => block.text ?? "")
+          .join("")
+      const expectedReadBytes =
+        Buffer.byteLength(replyText(fetchReply), "utf8") +
+        Buffer.byteLength(replyText(pendingReply), "utf8") +
+        Buffer.byteLength(replyText(waitReply), "utf8")
 
       const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
       await waitForCondition(() => existsSync(ledgerPath), "cost ledger written")
@@ -2397,12 +2437,12 @@ describe("stdio adapter delivery modes", () => {
           }
         }
       ).counters.cost
-      expect(cost?.readPulls).toBe(1)
+      // fetch, pending and inbox.wait are all reads the model can call.
+      expect(cost?.readPulls).toBe(3)
+      expect(cost?.readPullBytes).toBe(expectedReadBytes)
+      // Only fetch exposes attention AND events, so its duplicated body is the one repeat.
       expect(cost?.readRepeatBodies).toBe(1)
       expect(cost?.readRepeatBytes).toBe(Buffer.byteLength("READ-DUP-A", "utf8"))
-      expect(cost?.readPullBytes).toBe(
-        2 * Buffer.byteLength("READ-DUP-A", "utf8") + Buffer.byteLength("READ-B", "utf8"),
-      )
     })
   })
 })

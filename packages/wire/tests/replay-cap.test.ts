@@ -12,11 +12,8 @@ import {
   createDeliveryCounter,
   createForwardedAttentionTracker,
   decidePendingBallSummary,
-  deliveryClassKey,
-  isNoActionDelivery,
   MAX_REPLAY_AGE_MS,
   MAX_REPLAY_EVENTS,
-  NOTIFICATION_ONLY_MARKER,
   PENDING_BALL_SUMMARY_WINDOW_MS,
   replayEnvelopeMeta,
   selectReplayEvents,
@@ -432,61 +429,45 @@ describe("createDeliveryCounter (#27459 per-pane delivery counter)", () => {
 })
 
 describe("delivery cost counter (#27488 phase 0)", () => {
-  it("classifies by the composition report's sender kind, folding notification-only to status", () => {
-    expect(deliveryClassKey({ from: "telegram", type: "request" })).toBe("operator/request")
-    expect(deliveryClassKey({ from: "@user/0", type: "notify" })).toBe("operator/notify")
-    expect(deliveryClassKey({ from: "@dev/luna6", type: "status" })).toBe("seat/status")
-    expect(deliveryClassKey({ from: "@dev/luna6", type: `${NOTIFICATION_ONLY_MARKER}:status` })).toBe("seat/status")
-    expect(deliveryClassKey({ from: "pending-abc", type: "notify" })).toBe("watch/notify")
-    expect(deliveryClassKey({ from: "dark-work", type: "request" })).toBe("machine:dark-work/request")
-    expect(deliveryClassKey({})).toBe("machine:unknown/unknown")
-  })
-
-  it("follows @chief's (J) no-action rule, including a seat status that names no transition", () => {
-    expect(isNoActionDelivery({ from: "pending-abc", type: "notify" })).toBe(true)
-    expect(isNoActionDelivery({ from: "tribe", type: "attention:pending-balls" })).toBe(true)
-    expect(isNoActionDelivery({ from: "dark-work", type: "request" })).toBe(true)
-    expect(isNoActionDelivery({ from: "page-mailbox-projection", type: "request" })).toBe(true)
-    expect(isNoActionDelivery({ from: "daemon", type: "status" })).toBe(true)
-    expect(isNoActionDelivery({ from: "@dev/luna6", type: "status", content: "still looking at it" })).toBe(true)
-    expect(isNoActionDelivery({ from: "@dev/luna6", type: "status", content: "TAKING #27488 now" })).toBe(false)
-    expect(isNoActionDelivery({ from: "@dev/luna6", type: "response", content: "acked" })).toBe(true)
-    expect(isNoActionDelivery({ from: "@dev/luna6", type: "response", content: "SUBMITTED the fix" })).toBe(false)
-    expect(isNoActionDelivery({ from: "@dev/luna6", type: "request", content: "plain" })).toBe(false)
-    expect(isNoActionDelivery({ from: "telegram", type: "request" })).toBe(false)
-  })
-
-  it("counts delivered bytes, per-class no-action, and model-read repeats", () => {
+  it("counts every handoff's content bytes and the cost-span handoff count", () => {
     const counter = createDeliveryCounter()
-    counter.deliver("a", 40, { from: "pending-1", type: "notify", content: "x".repeat(40) })
-    counter.deliver("b", 10, { from: "@dev/luna6", type: "request", content: "y".repeat(10) })
-    counter.deliver("b", 10, { from: "@dev/luna6", type: "request", content: "y".repeat(10) })
-    counter.recordReadPull({ bytes: 100, repeatBodies: 2, repeatBytes: 30 })
+    counter.deliver("a", 40)
+    counter.deliver("b", 10)
+    counter.deliver("b", 10)
     const snap = counter.snapshot()
     expect(snap.cost?.deliveredBytes).toBe(60)
-    expect(snap.cost?.byClass["watch/notify"]).toEqual({
-      deliveries: 1,
-      bytes: 40,
-      noActionDeliveries: 1,
-      noActionBytes: 40,
-    })
-    expect(snap.cost?.byClass["seat/request"]).toEqual({
-      deliveries: 2,
-      bytes: 20,
-      noActionDeliveries: 0,
-      noActionBytes: 0,
-    })
+    expect(snap.cost?.handoffs).toBe(3)
+    expect(snap.deliveries).toBe(3)
+  })
+
+  it("measures a model read as the returned result bytes and the bodies it repeated", () => {
+    const counter = createDeliveryCounter()
+    counter.recordReadPull({ bytes: 100, repeatBodies: 2, repeatBytes: 30 })
+    const snap = counter.snapshot()
     expect(snap.cost?.readPulls).toBe(1)
     expect(snap.cost?.readPullBytes).toBe(100)
     expect(snap.cost?.readRepeatBodies).toBe(2)
     expect(snap.cost?.readRepeatBytes).toBe(30)
   })
 
-  it("snapshot copies the class map so a reader cannot mutate the counter", () => {
+  it("keeps cost-span handoffs below whole-window deliveries after a v1 resume (#27488 REVISE)", () => {
     const counter = createDeliveryCounter()
-    counter.deliver("a", 4, { from: "pending-1", type: "notify", content: "aaaa" })
+    // A resumed window: whole-window totals restored, cost block begins here.
+    counter.restore([], {
+      presentations: 200,
+      newPresentations: 200,
+      duplicatePresentations: 0,
+      deliveries: 100,
+      newDeliveries: 100,
+      duplicateDeliveries: 0,
+      duplicateBytes: 0,
+      suppressed: 0,
+    })
+    counter.deliver("row-a", 8)
     const snap = counter.snapshot()
-    snap.cost!.byClass["watch/notify"]!.bytes = 999
-    expect(counter.snapshot().cost?.byClass["watch/notify"]?.bytes).toBe(4)
+    // The window saw 100 handoffs, but only 1 has cost bytes behind it.
+    expect(snap.deliveries).toBe(101)
+    expect(snap.cost?.handoffs).toBe(1)
+    expect(snap.cost?.deliveredBytes).toBe(8)
   })
 })

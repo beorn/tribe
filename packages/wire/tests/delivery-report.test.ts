@@ -30,7 +30,7 @@ const NOW = Date.UTC(2026, 4, 30, 12, 0, 0)
 function costBlock(over: Partial<NonNullable<DeliveryLedgerState["counters"]["cost"]>> = {}) {
   return {
     deliveredBytes: 0,
-    byClass: {},
+    handoffs: 0,
     readRepeatBodies: 0,
     readRepeatBytes: 0,
     readPulls: 0,
@@ -284,43 +284,45 @@ describe("delivery report output (#27459)", () => {
 })
 
 describe("delivery cost report (#27488 phase 0)", () => {
-  const classStat = (deliveries: number, bytes: number, noActionDeliveries: number, noActionBytes: number) => ({
-    deliveries,
-    bytes,
-    noActionDeliveries,
-    noActionBytes,
-  })
-
-  it("reports envelope, wrapper, reads and the no-action share over the cost span", () => {
+  it("reports envelope, cost-span wrapper and reads over the cost span", () => {
     const row = buildSeatDeliveryReport(
       ledger({
         counters: counters({
-          deliveries: 4,
+          deliveries: 100,
           newDeliveries: 4,
           cost: costBlock({
             deliveredBytes: 4000,
+            handoffs: 4,
             readPullBytes: 400,
             readPulls: 2,
             readRepeatBodies: 1,
             readRepeatBytes: 40,
-            byClass: {
-              "watch/notify": classStat(3, 3000, 3, 3000),
-              "seat/request": classStat(1, 1000, 0, 0),
-            },
           }),
         }),
       }),
       NOW,
     )
     expect(row.cost?.envelopeTokens).toBe(1000)
-    // deliveries x 460 chars / 4 = deliveries x 115 tokens.
+    // cost-span handoffs (4) x 460 chars / 4, NOT the window's 100 deliveries.
     expect(row.cost?.wrapperTokens).toBe(4 * 115)
     expect(row.cost?.readPullTokens).toBe(100)
     expect(row.cost?.totalTokens).toBe(1000 + 460 + 100)
-    expect(row.cost?.noActionShare).toBeCloseTo(0.75)
     expect(row.cost?.readRepeatBodies).toBe(1)
     expect(row.cost?.readRepeatBytes).toBe(40)
-    expect(row.cost?.byClass[0]?.class).toBe("watch/notify")
+  })
+
+  it("applies the wrapper estimate to the cost span, not the whole window (#27488 REVISE)", () => {
+    const row = buildSeatDeliveryReport(
+      ledger({
+        counters: counters({
+          deliveries: 100,
+          cost: costBlock({ handoffs: 3, deliveredBytes: 1200 }),
+        }),
+      }),
+      NOW,
+    )
+    // 100 window handoffs would read 100 x 115; only the 3 in-cost ones count.
+    expect(row.cost?.wrapperTokens).toBe(3 * 115)
   })
 
   it("reads a ledger with no cost block as unmeasured, never as zero", () => {

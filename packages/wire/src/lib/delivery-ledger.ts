@@ -106,7 +106,7 @@ function zeroCounters(): DeliveryCounters {
   return {
     cost: {
       deliveredBytes: 0,
-      byClass: {},
+      handoffs: 0,
       readRepeatBodies: 0,
       readRepeatBytes: 0,
       readPulls: 0,
@@ -167,14 +167,9 @@ function isCounters(value: unknown): value is DeliveryCounters {
 function isCost(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false
   const candidate = value as Record<string, unknown>
-  const numbers = ["deliveredBytes", "readRepeatBodies", "readRepeatBytes", "readPulls", "readPullBytes"]
-  if (!numbers.every((key) => typeof candidate[key] === "number")) return false
-  if (typeof candidate.byClass !== "object" || candidate.byClass === null) return false
-  return Object.values(candidate.byClass as Record<string, unknown>).every((stat) => {
-    if (typeof stat !== "object" || stat === null) return false
-    const row = stat as Record<string, unknown>
-    return ["deliveries", "bytes", "noActionDeliveries", "noActionBytes"].every((key) => typeof row[key] === "number")
-  })
+  return ["deliveredBytes", "handoffs", "readRepeatBodies", "readRepeatBytes", "readPulls", "readPullBytes"].every(
+    (key) => typeof candidate[key] === "number",
+  )
 }
 
 /**

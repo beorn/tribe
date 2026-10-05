@@ -61,7 +61,6 @@ import {
   createForwardedAttentionTracker,
   decidePendingBallSummary,
   MAX_REPLAY_EVENTS,
-  NOTIFICATION_ONLY_MARKER,
   replayEnvelopeMeta,
   selectReplayEvents,
   type PendingBallSummaryState,
@@ -321,6 +320,8 @@ function sendChannel(content: string, meta: Record<string, string | undefined>):
   const safeContent = defangModelInput(content)
   mcp.notification({ method: "notifications/claude/channel", params: { content: safeContent, meta } }).catch(() => {})
 }
+
+const NOTIFICATION_ONLY_MARKER = "notification-only:do-not-acknowledge-or-respond-to"
 
 function isNotificationOnlyType(type: string): boolean {
   if (type === "session" || type === "status" || type === "delta") return true
@@ -1202,7 +1203,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       // Explicit rename by the agent — don't auto-rename later
       autoRenamed = true
     }
-    if (name === "fetch") recordModelRead(result)
+    if (READ_TOOL_NAMES.has(name)) recordModelRead(result)
     return result as { content: Array<{ type: string; text: string }> }
   } catch (err) {
     return {
@@ -1480,25 +1481,40 @@ function persistDeliveryLedger(now: number): void {
 }
 
 /**
- * #27488 phase 0 (must-hold A) - measure one MODEL-requested read: the content
- * bytes it returned, and the bodies it returned twice inside the ONE response
- * (`attention.actionable_unread` AND `events`). Phase 0 counts it; phase 1 fixes
- * the read so the count can fall to 0. A response that cannot be parsed is a
- * LOUD warn - an unmeasurable read must never read as a clean zero.
+ * #27488 phase 0 - the ONE set of MCP tools whose result is model-requested
+ * CONTEXT. Named once so the read cost and the "count every read tool" rule
+ * cannot drift apart. `inbox.wait` is the dotted MCP tool name.
+ */
+const READ_TOOL_NAMES = new Set(["fetch", "pending", "inbox.wait"])
+
+/** The text the adapter returns to the model (every content block, in order). */
+function resultText(result: unknown): string {
+  const content = (result as { content?: Array<{ text?: string }> } | null)?.content
+  if (!Array.isArray(content)) return ""
+  return content.map((block) => (typeof block?.text === "string" ? block.text : "")).join("")
+}
+
+/**
+ * #27488 phase 0 - measure one MODEL-requested read at what the MODEL received:
+ * the RESULT text's bytes (not the sum of the rows' content fields - framing is
+ * part of what the model pays for), plus the bodies a response returned twice
+ * inside ONE response (`attention.actionable_unread` AND `events`, #27488
+ * must-hold A; only `fetch` exposes both). Phase 0 counts it; phase 1 fixes the
+ * read so the count can fall to 0. A response that cannot be parsed is a LOUD
+ * warn - an unmeasurable read must never read as a clean zero.
  */
 function recordModelRead(result: unknown): void {
   try {
+    const bytes = Buffer.byteLength(resultText(result), "utf8")
     const parsed = parseToolText<TribeFetchResult>(result)
     const rows = [...(parsed?.attention?.actionable_unread ?? []), ...(parsed?.events ?? [])]
-    let bytes = 0
     let repeatBodies = 0
     let repeatBytes = 0
     const seen = new Set<string>()
     for (const row of rows) {
-      const rowBytes = Buffer.byteLength(String(row.content ?? ""), "utf8")
-      bytes += rowBytes
       const id = row.id ? String(row.id) : undefined
       if (id === undefined) continue
+      const rowBytes = Buffer.byteLength(String(row.content ?? ""), "utf8")
       if (seen.has(id)) {
         repeatBodies++
         repeatBytes += rowBytes
@@ -1511,7 +1527,7 @@ function recordModelRead(result: unknown): void {
     persistDeliveryLedger(Date.now())
   } catch (err) {
     log.warn?.(
-      `tribe read-cost: could not measure a fetch response: ${err instanceof Error ? err.message : String(err)}`,
+      `tribe read-cost: could not measure a read response: ${err instanceof Error ? err.message : String(err)}`,
     )
   }
 }
@@ -1578,7 +1594,6 @@ function drainDaemonInbox(): void {
           deliveryCounter.deliver(
             event.id ? String(event.id) : undefined,
             Buffer.byteLength(String(event.content ?? ""), "utf8"),
-            { from: event.from, type: event.type, content: event.content },
           )
         }
         const currentPendingBalls = result?.attention?.pending_balls ?? []
@@ -1609,7 +1624,6 @@ function drainDaemonInbox(): void {
           deliveryCounter.deliver(
             event.id ? String(event.id) : undefined,
             Buffer.byteLength(String(event.content ?? ""), "utf8"),
-            { from: event.from, type: event.type, content: event.content },
           )
         }
         if (skippedOld > 0 || capped > 0) {
@@ -1670,11 +1684,7 @@ function handleDaemonNotification(method: string, params?: Record<string, unknow
       // cannot make the daemon's reconnect re-push read as a fresh delivery.
       ensureDeliveryLedger(Date.now())
       forwardedAttention.remember(pushedId)
-      deliveryCounter.deliver(pushedId, Buffer.byteLength(content, "utf8"), {
-        from: String(params?.from ?? "unknown"),
-        type,
-        content,
-      })
+      deliveryCounter.deliver(pushedId, Buffer.byteLength(content, "utf8"))
       persistDeliveryLedger(Date.now())
     }
   } else if (method === "session.joined" || method === "session.left") {
