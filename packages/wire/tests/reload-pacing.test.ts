@@ -24,7 +24,6 @@ import {
   RELOAD_MAX_ABSENT,
   RELOAD_MAX_DECLARED,
   RELOAD_PROBE_TIMEOUT_MS,
-  RELOAD_READY_TIMEOUT_MS,
   RELOAD_SLOT_MS,
   RELOAD_WINDOW_CAP_MS,
   pacedReexec,
@@ -61,7 +60,9 @@ describe("the reload schedule, through the shipped planner", () => {
   test("the constants carry their derivation: slot = rejoinMax / N, and the deadline adds two bounded reads", () => {
     expect(RELOAD_SLOT_MS).toBe(4_000)
     expect(FLEET * RELOAD_SLOT_MS).toBeLessThanOrEqual(RELOAD_WINDOW_CAP_MS)
-    expect(RELOAD_DEADLINE_MS).toBe(RELOAD_WINDOW_CAP_MS + RELOAD_READY_TIMEOUT_MS + 2 * RELOAD_PROBE_TIMEOUT_MS)
+    // 27539: the deadline is the window cap plus one probe timeout for the rank read and one for the decision read;
+    // the ready-wait 27531 removed no longer contributes a headroom term.
+    expect(RELOAD_DEADLINE_MS).toBe(RELOAD_WINDOW_CAP_MS + 2 * RELOAD_PROBE_TIMEOUT_MS)
     // 25663 r2: the window holds 28 declared seats, one slot each; the live roster declared 23 on 2026-09-24.
     expect(RELOAD_MAX_DECLARED).toBe(28)
     expect(RELOAD_MAX_DECLARED * RELOAD_SLOT_MS).toBe(RELOAD_WINDOW_CAP_MS)
@@ -327,7 +328,7 @@ describe("pacedReexec", () => {
     const run = harness([view(roster(40), "abc")])
     await pacedReexec({ ...run.deps, self: "@dev/35" }, "x")
     expect(run.log[0]).toBe(
-      "warn: reload pacing: the declared roster names 40 seats but the paced reload holds 28 (112000 ms window of 4000 ms slots inside the 146000 ms deadline); declared seats past slot 27 share it",
+      `warn: reload pacing: the declared roster names 40 seats but the paced reload holds 28 (${RELOAD_WINDOW_CAP_MS} ms window of ${RELOAD_SLOT_MS} ms slots inside the ${RELOAD_DEADLINE_MS} ms deadline); declared seats past slot 27 share it`,
     )
     expect(run.log[1]).toMatch(/rank 35 of 40 peers shares the last slot \(27\)/u)
   })

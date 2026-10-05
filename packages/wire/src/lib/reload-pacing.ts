@@ -28,22 +28,18 @@ export const RELOAD_WINDOW_CAP_MS = 112_000
 /** The most declared seats the window gives a slot each: 28. */
 export const RELOAD_MAX_DECLARED = Math.floor(RELOAD_WINDOW_CAP_MS / RELOAD_SLOT_MS)
 /**
- * Headroom kept in RELOAD_DEADLINE_MS for a daemon that is slow to answer. The 27531 gate no longer waits it out: a
- * paced reload makes ONE bounded read after its rank slot and decides from it (see pacedReexec). Kept and exported
- * so RELOAD_DEADLINE_MS, and 25662's bridge-lost grace derived from it, do not move in this change.
- */
-export const RELOAD_READY_TIMEOUT_MS = 30_000
-/**
  * How long one cli_status read may take before it counts as unanswered. The readiness gate checks its timeout only
  * between probes, so a read that never settles (a daemon that accepts no connection) would hold the reload forever.
  */
 export const RELOAD_PROBE_TIMEOUT_MS = 2_000
 /**
- * The longest a paced reload can take: 146 s. That is the window cap, the ready-timeout headroom (no longer waited
- * out; see RELOAD_READY_TIMEOUT_MS), and one probe timeout for the rank read and one for the decision read. 25662's
- * default bridge-lost grace is this plus one tick plus a margin, and an explicit grace is validated against it.
+ * The longest a paced reload can take: 116 s (27539). The rank read, then the rank slot's delay inside the window cap,
+ * then the decision read: the window cap plus one probe timeout each. 27531 removed the ready-wait, so the 30 s the
+ * deadline used to carry as headroom is gone rather than kept (no runnable RELOAD_READY_TIMEOUT_MS remains). 25662's
+ * default bridge-lost grace is this plus one tick plus a margin, and an explicit grace is validated against it, so
+ * narrowing the deadline narrows that grace with it.
  */
-export const RELOAD_DEADLINE_MS = RELOAD_WINDOW_CAP_MS + RELOAD_READY_TIMEOUT_MS + 2 * RELOAD_PROBE_TIMEOUT_MS
+export const RELOAD_DEADLINE_MS = RELOAD_WINDOW_CAP_MS + 2 * RELOAD_PROBE_TIMEOUT_MS
 
 /**
  * Why a declared roster cannot be paced: more declared seats than the window has slots, so the ones past the last slot
