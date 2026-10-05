@@ -57,10 +57,11 @@ export function evaluateCodeRootWait(
     }
   }
   const random = opts.random ?? Math.random
-  const previous = Math.max(CODE_ROOT_WAIT_BASE_MS, Math.min(CODE_ROOT_WAIT_MAX_MS, input.attempt * CODE_ROOT_WAIT_BASE_MS))
-  const retryDelayMs = Math.round(
-    decorrelatedJitter(CODE_ROOT_WAIT_BASE_MS, CODE_ROOT_WAIT_MAX_MS, previous, random),
+  const previous = Math.max(
+    CODE_ROOT_WAIT_BASE_MS,
+    Math.min(CODE_ROOT_WAIT_MAX_MS, input.attempt * CODE_ROOT_WAIT_BASE_MS),
   )
+  const retryDelayMs = Math.round(decorrelatedJitter(CODE_ROOT_WAIT_BASE_MS, CODE_ROOT_WAIT_MAX_MS, previous, random))
   return {
     retry: true,
     giveUp: false,

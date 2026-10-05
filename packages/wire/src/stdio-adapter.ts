@@ -39,11 +39,7 @@ import {
 } from "./lib/socket.ts"
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
-import {
-  parseDaemonCodeView,
-  resolveCheckoutCodeIdentity,
-  sourceRootFromWireModule,
-} from "./lib/code-identity.ts"
+import { parseDaemonCodeView, resolveCheckoutCodeIdentity, sourceRootFromWireModule } from "./lib/code-identity.ts"
 import { pacedReexec, type ReloadDaemonView, type ReloadPeers } from "./lib/reload-pacing.ts"
 import { createHash } from "node:crypto"
 import { constants as osConstants } from "node:os"

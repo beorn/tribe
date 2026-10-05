@@ -38,30 +38,39 @@ describe("SUPERVISOR_CODE_ROOT_WINDOW_MS", () => {
 
 describe("evaluateCodeRootWait", () => {
   it("a cold start inside the window retries with a bounded, non-zero backoff", () => {
-    const decision = evaluateCodeRootWait({ firstSpawn: true, waitedMs: 0, attempt: 1 }, {
-      windowMs: 1_000,
-      random: () => 0.5,
-    })
+    const decision = evaluateCodeRootWait(
+      { firstSpawn: true, waitedMs: 0, attempt: 1 },
+      {
+        windowMs: 1_000,
+        random: () => 0.5,
+      },
+    )
     expect(decision).toMatchObject({ retry: true, giveUp: false })
     expect(decision.retryDelayMs).toBeGreaterThanOrEqual(CODE_ROOT_WAIT_BASE_MS)
     expect(decision.retryDelayMs).toBeLessThanOrEqual(CODE_ROOT_WAIT_MAX_MS)
   })
 
   it("a cold start that exhausts the window gives up, naming the window it waited", () => {
-    const decision = evaluateCodeRootWait({ firstSpawn: true, waitedMs: 1_000, attempt: 9 }, {
-      windowMs: 1_000,
-      random: () => 0.5,
-    })
+    const decision = evaluateCodeRootWait(
+      { firstSpawn: true, waitedMs: 1_000, attempt: 9 },
+      {
+        windowMs: 1_000,
+        random: () => 0.5,
+      },
+    )
     expect(decision.retry).toBe(false)
     expect(decision.giveUp).toBe(true)
     expect(decision.reason).toMatch(/1000 ms/)
   })
 
   it("a respawn never gives up for daemon absence, however long it waits", () => {
-    const decision = evaluateCodeRootWait({ firstSpawn: false, waitedMs: 600_000, attempt: 500 }, {
-      windowMs: 1_000,
-      random: () => 0.5,
-    })
+    const decision = evaluateCodeRootWait(
+      { firstSpawn: false, waitedMs: 600_000, attempt: 500 },
+      {
+        windowMs: 1_000,
+        random: () => 0.5,
+      },
+    )
     expect(decision).toMatchObject({ retry: true, giveUp: false })
   })
 })

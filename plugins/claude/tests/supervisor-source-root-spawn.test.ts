@@ -89,8 +89,11 @@ function spawnRecord(): { entry: string; cwd: string; marker: string | null } | 
   try {
     const line = readFileSync(markerPath, "utf8").trim().split("\n").at(-1)
     return line === undefined || line === "" ? null : JSON.parse(line)
-  } catch {
-    return null
+  } catch (error) {
+    // The marker file does not exist until the stub entry writes its first line; the caller polls for that.
+    // Anything else (a permission error, a torn line) is not "no spawn yet" and must surface.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null
+    throw error
   }
 }
 

@@ -15,11 +15,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeResponse } from "../src/rpc.ts"
-import {
-  DAEMON_CODE_VIEW_CALL_TIMEOUT_MS,
-  parseDaemonCodeView,
-  readDaemonCodeView,
-} from "../src/lib/code-identity.ts"
+import { DAEMON_CODE_VIEW_CALL_TIMEOUT_MS, parseDaemonCodeView, readDaemonCodeView } from "../src/lib/code-identity.ts"
 
 const servers: Server[] = []
 afterEach(() => {

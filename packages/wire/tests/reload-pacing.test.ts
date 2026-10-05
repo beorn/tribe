@@ -272,7 +272,12 @@ describe("pacedReexec", () => {
 
   test("a daemon with no declared roster ranks on the live adapters and says so", async () => {
     const run = harness([
-      { liveNames: ["@dev/3"], peers: { declared: [], liveUndeclared: ["@dev/3"] }, runningCert: "abc", runningRoot: "/landing" },
+      {
+        liveNames: ["@dev/3"],
+        peers: { declared: [], liveUndeclared: ["@dev/3"] },
+        runningCert: "abc",
+        runningRoot: "/landing",
+      },
     ])
     await pacedReexec(run.deps, "x")
     expect(run.log[0]).toMatch(/the daemon has no declared roster; ranking on the live adapters alone/u)
@@ -280,7 +285,12 @@ describe("pacedReexec", () => {
 
   test("an undeclared adapter ranks after the roster and says an unseen one can share its slot", async () => {
     const run = harness([
-      { liveNames: ["@dev/3"], peers: { declared: ["@chief"], liveUndeclared: ["@dev/3"] }, runningCert: "abc", runningRoot: "/landing" },
+      {
+        liveNames: ["@dev/3"],
+        peers: { declared: ["@chief"], liveUndeclared: ["@dev/3"] },
+        runningCert: "abc",
+        runningRoot: "/landing",
+      },
     ])
     await pacedReexec(run.deps, "x")
     expect(run.sleeps[0]).toBe(RELOAD_SLOT_MS)
@@ -314,7 +324,12 @@ describe("pacedReexec", () => {
 
   test("only an undeclared adapter past a full roster shares the last slot, and says so", async () => {
     const run = harness([
-      { liveNames: ["@grok/1"], peers: { declared: roster(28), liveUndeclared: ["@grok/1"] }, runningCert: "abc", runningRoot: "/landing" },
+      {
+        liveNames: ["@grok/1"],
+        peers: { declared: roster(28), liveUndeclared: ["@grok/1"] },
+        runningCert: "abc",
+        runningRoot: "/landing",
+      },
     ])
     await pacedReexec({ ...run.deps, self: "@grok/1" }, "x")
     expect(run.sleeps[0]).toBe(27 * RELOAD_SLOT_MS)
@@ -366,7 +381,9 @@ describe("pacedReexec", () => {
     expect(describeCodeIdentityMismatch(same)).toBeNull()
     expect(describeCodeIdentityMismatch({ ...same, daemonRoot: null })).toMatch(/published no landing root/u)
     expect(describeCodeIdentityMismatch({ ...same, selfRoot: null })).toMatch(/its own landing root/u)
-    expect(describeCodeIdentityMismatch({ ...same, daemonRoot: "/other" })).toMatch(/the daemon runs \/other, this adapter runs \/r/u)
+    expect(describeCodeIdentityMismatch({ ...same, daemonRoot: "/other" })).toMatch(
+      /the daemon runs \/other, this adapter runs \/r/u,
+    )
     expect(describeCodeIdentityMismatch({ ...same, daemonCert: null })).toMatch(/published no cert/u)
     expect(describeCodeIdentityMismatch({ ...same, selfCert: null })).toMatch(/no resolved commit/u)
     expect(describeCodeIdentityMismatch({ ...same, daemonCert: "d" })).toMatch(/commit d at \/r.*is at c/u)

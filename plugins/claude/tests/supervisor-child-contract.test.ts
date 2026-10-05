@@ -52,13 +52,13 @@ beforeEach(() => {
       "const seen = {",
       "  entry: process.argv[1],",
       "  cwd: process.cwd(),",
-      '  child: process.env.TRIBE_PLUGIN_ADAPTER_CHILD ?? null,',
-      '  name: process.env.TRIBE_NAME ?? null,',
-      '  resumeJoined: process.env.TRIBE_PLUGIN_RESUME_JOINED ?? null,',
-      '  providerParentPid: process.env.TRIBE_PLUGIN_PROVIDER_PARENT_PID ?? null,',
-      '  reexecExitCode: process.env.TRIBE_PLUGIN_REEXEC_EXIT_CODE ?? null,',
-      '  refusalExitCode: process.env.TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE ?? null,',
-      '  exitRecord: process.env.TRIBE_PLUGIN_ADAPTER_EXIT_RECORD ?? null,',
+      "  child: process.env.TRIBE_PLUGIN_ADAPTER_CHILD ?? null,",
+      "  name: process.env.TRIBE_NAME ?? null,",
+      "  resumeJoined: process.env.TRIBE_PLUGIN_RESUME_JOINED ?? null,",
+      "  providerParentPid: process.env.TRIBE_PLUGIN_PROVIDER_PARENT_PID ?? null,",
+      "  reexecExitCode: process.env.TRIBE_PLUGIN_REEXEC_EXIT_CODE ?? null,",
+      "  refusalExitCode: process.env.TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE ?? null,",
+      "  exitRecord: process.env.TRIBE_PLUGIN_ADAPTER_EXIT_RECORD ?? null,",
       "}",
       'appendFileSync(process.env.SPAWN_MARKER!, JSON.stringify(seen) + "\\n")',
       'if (seen.resumeJoined === "1") process.exit(0)',
@@ -124,8 +124,11 @@ function records(): SpawnRecord[] {
       .split("\n")
       .filter((line) => line !== "")
       .map((line) => JSON.parse(line) as SpawnRecord)
-  } catch {
-    return []
+  } catch (error) {
+    // The marker file does not exist until the stub entry writes its first line; the caller polls for that.
+    // Anything else (a permission error, a torn line) is not "no records yet" and must surface.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw error
   }
 }
 

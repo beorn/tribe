@@ -266,9 +266,7 @@ export async function pacedReexec(deps: PacedReexecDeps, reason: string): Promis
         const certLag = daemonRoot !== null && daemonRoot === selfRoot && daemonCert !== null && selfCert !== null
         if (!certLag && !identityGapWarned) {
           identityGapWarned = true
-          deps.warn(
-            `reload pacing: ${mismatch}; readiness waits for the daemon to run the same landing and commit`,
-          )
+          deps.warn(`reload pacing: ${mismatch}; readiness waits for the daemon to run the same landing and commit`)
         }
         return false
       }
