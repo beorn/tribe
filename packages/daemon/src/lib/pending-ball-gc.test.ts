@@ -1310,8 +1310,9 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
 
   /**
    * @failure The owner summary's deadline/receipt evidence is read off a
-   * different ball than the one its age reports, or a receipt is not seen.
-   * @level l0 @consumer tribe.health pending_balls owner summary (27440)
+   * different ball than the one its age reports, a receipt is not seen, or
+   * an incident replaces the oldest ordinary request (27735).
+   * @level l0 @consumer tribe.health pending_balls owner summaries (27440/27735)
    */
   it("27440 binds the owner summary deadline and TAKING receipt to the OLDEST owned ball", () => {
     const { db, stmts } = setup()
@@ -1367,6 +1368,48 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         },
       ])
 
+      // 27735: add an older emitter-owned incident through the real send path.
+      // The original 27440 coverage had only ordinary requests, so it could
+      // never catch an all-kind summary being used as request obligation age.
+      const emitter = makeContext(db, stmts, "@agent/monitor")
+      const incident = { emitter: "test-monitor", subject: "@agent/9", condition: "dark-work" }
+      const incidentId = incidentKey(incident)
+      sendMessage(emitter, "@agent/9", "old condition remains", "notify", undefined, undefined, "direct", {}, { incident })
+      db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = ? AND recipient = ?")
+        .run(now - 60 * 60_000, incidentId, "@agent/9")
+
+      type OwnerSummary = {
+        owner: string
+        count: number
+        oldest_age_ms: number
+        oldest_deadline_at_ms: number | null
+        oldest_taking_receipt_at_ms: number | null
+      }
+      type HealthSummary = {
+        pending_balls: {
+          count: number
+          owner_count: number
+          oldest_age_ms: number
+          owners: OwnerSummary[]
+          requests: { count: number; owner_count: number; oldest_age_ms: number; owners: OwnerSummary[] }
+        }
+      }
+      const mixed = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as HealthSummary
+      expect(mixed.pending_balls).toMatchObject({
+        count: 3,
+        owner_count: 1,
+        owners: [{ owner: "@agent/9", count: 3, oldest_deadline_at_ms: null, oldest_taking_receipt_at_ms: null }],
+        requests: {
+          count: 2,
+          owner_count: 1,
+          owners: [{ owner: "@agent/9", count: 2, oldest_deadline_at_ms: olderDeadline,
+            oldest_taking_receipt_at_ms: null }],
+        },
+      })
+      expect(mixed.pending_balls.oldest_age_ms).toBeGreaterThanOrEqual(60 * 60_000)
+      expect(mixed.pending_balls.requests.oldest_age_ms).toBeGreaterThanOrEqual(30 * 60_000)
+      expect(mixed.pending_balls.requests.oldest_age_ms).toBeLessThan(mixed.pending_balls.oldest_age_ms)
+
       // A receipt on the OLDEST ball is the one the summary reports.
       insertTaking(stmts, {
         id: "taking-older",
@@ -1375,15 +1418,28 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         requester: "@chief",
         ts: now - 20_000,
       })
-      const receipted = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as {
-        pending_balls?: {
-          owners: Array<{ oldest_deadline_at_ms: number | null; oldest_taking_receipt_at_ms: number | null }>
-        }
-      }
-      expect(receipted.pending_balls?.owners[0]).toMatchObject({
+      const receipted = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as HealthSummary
+      expect(receipted.pending_balls.requests.owners[0]).toMatchObject({
         oldest_deadline_at_ms: olderDeadline,
         oldest_taking_receipt_at_ms: now - 20_000,
       })
+      expect(receipted.pending_balls.owners[0]).toMatchObject({
+        count: 3, oldest_deadline_at_ms: null, oldest_taking_receipt_at_ms: null,
+      })
+
+      // Settle the two ordinary requests through their real response path.
+      // The incident remains open, visible in all-kind custody, with no owed
+      // request owner. This guards the incident-only producer result.
+      const owner = makeContext(db, stmts, "@agent/9")
+      for (const reply of ["older", "newer"]) {
+        const result = sendMessage(owner, "@chief", "review done", "response", undefined, undefined,
+          "direct", {}, { reply })
+        expect(result.tracker?.closed).toBe(1)
+      }
+      const incidentOnly = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as HealthSummary
+      expect(incidentOnly.pending_balls).toMatchObject({ count: 1, owner_count: 1,
+        owners: [{ owner: "@agent/9", count: 1 }] })
+      expect(incidentOnly.pending_balls.requests).toEqual({ count: 0, owner_count: 0, oldest_age_ms: 0, owners: [] })
     } finally {
       db.close()
     }
