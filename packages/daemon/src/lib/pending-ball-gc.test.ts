@@ -1374,9 +1374,22 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       const emitter = makeContext(db, stmts, "@agent/monitor")
       const incident = { emitter: "test-monitor", subject: "@agent/9", condition: "dark-work" }
       const incidentId = incidentKey(incident)
-      sendMessage(emitter, "@agent/9", "old condition remains", "notify", undefined, undefined, "direct", {}, { incident })
-      db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = ? AND recipient = ?")
-        .run(now - 60 * 60_000, incidentId, "@agent/9")
+      sendMessage(
+        emitter,
+        "@agent/9",
+        "old condition remains",
+        "notify",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { incident },
+      )
+      db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = ? AND recipient = ?").run(
+        now - 60 * 60_000,
+        incidentId,
+        "@agent/9",
+      )
 
       type OwnerSummary = {
         owner: string
@@ -1402,8 +1415,9 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         requests: {
           count: 2,
           owner_count: 1,
-          owners: [{ owner: "@agent/9", count: 2, oldest_deadline_at_ms: olderDeadline,
-            oldest_taking_receipt_at_ms: null }],
+          owners: [
+            { owner: "@agent/9", count: 2, oldest_deadline_at_ms: olderDeadline, oldest_taking_receipt_at_ms: null },
+          ],
         },
       })
       expect(mixed.pending_balls.oldest_age_ms).toBeGreaterThanOrEqual(60 * 60_000)
@@ -1424,7 +1438,9 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         oldest_taking_receipt_at_ms: now - 20_000,
       })
       expect(receipted.pending_balls.owners[0]).toMatchObject({
-        count: 3, oldest_deadline_at_ms: null, oldest_taking_receipt_at_ms: null,
+        count: 3,
+        oldest_deadline_at_ms: null,
+        oldest_taking_receipt_at_ms: null,
       })
 
       // Settle the two ordinary requests through their real response path.
@@ -1432,13 +1448,25 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       // request owner. This guards the incident-only producer result.
       const owner = makeContext(db, stmts, "@agent/9")
       for (const reply of ["older", "newer"]) {
-        const result = sendMessage(owner, "@chief", "review done", "response", undefined, undefined,
-          "direct", {}, { reply })
+        const result = sendMessage(
+          owner,
+          "@chief",
+          "review done",
+          "response",
+          undefined,
+          undefined,
+          "direct",
+          {},
+          { reply },
+        )
         expect(result.tracker?.closed).toBe(1)
       }
       const incidentOnly = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as HealthSummary
-      expect(incidentOnly.pending_balls).toMatchObject({ count: 1, owner_count: 1,
-        owners: [{ owner: "@agent/9", count: 1 }] })
+      expect(incidentOnly.pending_balls).toMatchObject({
+        count: 1,
+        owner_count: 1,
+        owners: [{ owner: "@agent/9", count: 1 }],
+      })
       expect(incidentOnly.pending_balls.requests).toEqual({ count: 0, owner_count: 0, oldest_age_ms: 0, owners: [] })
     } finally {
       db.close()

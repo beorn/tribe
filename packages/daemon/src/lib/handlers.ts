@@ -3597,7 +3597,10 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   // another role is blocked, so health carries the all-owner projection and a
   // bounded aggregate warning for active rows older than two hours.
   const pending = allPendingBalls(ctx, now)
-  const pendingOwners = pendingOwnerSummaries(pending, takingReceiptsForOpenBalls(ctx))
+  const takingReceipts = takingReceiptsForOpenBalls(ctx)
+  const pendingOwners = pendingOwnerSummaries(pending, takingReceipts)
+  const requests = pending.filter((ball) => ball.request_kind === "request")
+  const requestOwners = pendingOwnerSummaries(requests, takingReceipts)
   const stalePending = pending.filter((ball) => ball.age_ms >= 2 * 60 * 60 * 1000)
   const staleOwnerCount = new Set(stalePending.map((ball) => ball.recipient)).size
   const oldestStaleAgeMs = stalePending.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0)
@@ -3643,6 +3646,12 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       owner_count: pendingOwners.length,
       oldest_age_ms: pending.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0),
       owners: pendingOwners,
+      requests: {
+        count: requests.length,
+        owner_count: requestOwners.length,
+        oldest_age_ms: requests.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0),
+        owners: requestOwners,
+      },
       stale: {
         count: stalePending.length,
         owner_count: staleOwnerCount,
