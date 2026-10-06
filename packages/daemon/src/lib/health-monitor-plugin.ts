@@ -25,7 +25,11 @@ import { existsSync, readdirSync, statSync, statfsSync, unlinkSync } from "node:
 import { cpus, totalmem, freemem, loadavg } from "node:os"
 import { createLogger } from "loggily"
 import { isReaperExempt } from "tribe-wire"
-import { RELOAD_DEADLINE_MS } from "tribe-wire/lib/reload-pacing"
+import {
+  RELOAD_DEADLINE_MS,
+  reloadDeadlineMs as deriveReloadDeadlineMs,
+  reloadMaxDeclaredForDeadlineMs,
+} from "tribe-wire/lib/reload-pacing"
 import { createTimers } from "./timers.ts"
 import { startSingleFlightTicker, type SingleFlightRunner, type SingleFlightStats } from "./single-flight-ticker.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
@@ -1168,6 +1172,14 @@ export const BRIDGE_LOST_GRACE_MARGIN_MS = 4_000
 export function bridgeLostDefaultGraceMs(reloadDeadlineMs: number, tickMs: number): number {
   return reloadDeadlineMs + tickMs + BRIDGE_LOST_GRACE_MARGIN_MS
 }
+/**
+ * The largest declared roster a bridge-lost grace supports (27825, @cto e19278ca): the reload deadline that fits
+ * inside it (grace less one tick and the margin), one slot per seat. The config check names it so a roster past the
+ * configured grace refuses loudly at config check (AC2) instead of sharing a reload slot.
+ */
+export function bridgeLostMaxDeclaredRoster(graceMs: number, tickMs: number): number {
+  return reloadMaxDeclaredForDeadlineMs(graceMs - tickMs - BRIDGE_LOST_GRACE_MARGIN_MS)
+}
 
 export interface BridgeLostConfig {
   /** Paged in order; the first that is not itself lost receives the incident. */
@@ -1184,10 +1196,12 @@ export type BridgeLostArming =
  * Arm bridge-lost paging from the daemon's environment, or refuse by name. There is no default owner: a daemon
  * other habitats run must not page a seat name it was never told about. `reloadDeadlineMs` and `tickMs` are the live
  * bounds: the default grace is derived from them, and an explicit grace is validated against them (25663).
+ * `declaredRoster` is the roster size the derived deadline was computed for (27825): the grace must support it, or the
+ * check refuses with the ceiling named (AC2).
  */
 export function parseBridgeLostConfig(
   env: Readonly<Record<string, string | undefined>>,
-  bounds: { readonly reloadDeadlineMs?: number; readonly tickMs?: number } = {},
+  bounds: { readonly reloadDeadlineMs?: number; readonly declaredRoster?: number; readonly tickMs?: number } = {},
 ): BridgeLostArming {
   const raw = env.TRIBE_BRIDGE_LOST_OWNERS
   if (raw === undefined || raw.trim() === "") {
@@ -1203,30 +1217,42 @@ export function parseBridgeLostConfig(
       reason: `TRIBE_BRIDGE_LOST_OWNERS names ${owners.length} owner (${owners.join(", ")}); a lost owner needs a second to page`,
     }
   }
-  const { reloadDeadlineMs, tickMs = 0 } = bounds
+  const { reloadDeadlineMs, declaredRoster, tickMs = 0 } = bounds
   const graceRaw = env.TRIBE_BRIDGE_LOST_GRACE_SEC
+  let graceMs: number
   if (graceRaw === undefined) {
     // The default follows the live tick and deadline this daemon runs with, so it cannot refuse itself.
-    const graceMs = bridgeLostDefaultGraceMs(
+    graceMs = bridgeLostDefaultGraceMs(
       reloadDeadlineMs ?? RELOAD_DEADLINE_MS,
       bounds.tickMs ?? DEFAULT_BRIDGE_LOST_TICK_MS,
     )
-    return { armed: true, config: { owners, graceMs } }
-  }
-  const graceSec = Number(graceRaw)
-  if (!Number.isFinite(graceSec) || graceSec <= 0) {
-    return {
-      armed: false,
-      reason: `TRIBE_BRIDGE_LOST_GRACE_SEC must be a positive number of seconds, got ${JSON.stringify(graceRaw)}`,
+  } else {
+    const graceSec = Number(graceRaw)
+    if (!Number.isFinite(graceSec) || graceSec <= 0) {
+      return {
+        armed: false,
+        reason: `TRIBE_BRIDGE_LOST_GRACE_SEC must be a positive number of seconds, got ${JSON.stringify(graceRaw)}`,
+      }
+    }
+    graceMs = graceSec * 1000
+    if (reloadDeadlineMs !== undefined && graceMs <= reloadDeadlineMs + tickMs) {
+      return {
+        armed: false,
+        reason:
+          `TRIBE_BRIDGE_LOST_GRACE_SEC=${graceSec} is not greater than the reload deadline (${reloadDeadlineMs / 1000} s) ` +
+          `plus one tick (${tickMs / 1000} s); a reload would page`,
+      }
     }
   }
-  const graceMs = graceSec * 1000
-  if (reloadDeadlineMs !== undefined && graceMs <= reloadDeadlineMs + tickMs) {
+  // 27825 AC2: name the ceiling. A roster past what the configured grace supports refuses loudly here, at config
+  // check, rather than sharing a reload slot at daemon start.
+  const maxDeclared = bridgeLostMaxDeclaredRoster(graceMs, tickMs)
+  if (declaredRoster !== undefined && declaredRoster > maxDeclared) {
     return {
       armed: false,
       reason:
-        `TRIBE_BRIDGE_LOST_GRACE_SEC=${graceSec} is not greater than the reload deadline (${reloadDeadlineMs / 1000} s) ` +
-        `plus one tick (${tickMs / 1000} s); a reload would page`,
+        `the declared roster names ${declaredRoster} seats but the bridge-lost grace of ${graceMs / 1000}s supports ` +
+        `${maxDeclared}; raise TRIBE_BRIDGE_LOST_GRACE_SEC or lower the roster`,
     }
   }
   return { armed: true, config: { owners, graceMs } }
@@ -2622,9 +2648,12 @@ export const healthMonitorPlugin: TribePluginApi = {
     if (api.listOpenIncidents === undefined) {
       log.error?.("proc-read-pinned paging disarmed: this daemon's plugin API exposes no open incidents")
     }
-    // 25663: a paced reload takes at most RELOAD_DEADLINE_MS, so the grace must outlast it plus one tick.
+    // 25663/27825: a paced reload takes at most the deadline derived from the expected roster (the window grows with
+    // it), so the grace must outlast that plus one tick; the config check refuses a roster past what the grace holds.
+    const declaredRoster = api.getExpectedMemberCount?.()
     const bridgeLostParsed = parseBridgeLostConfig(process.env, {
-      reloadDeadlineMs: RELOAD_DEADLINE_MS,
+      reloadDeadlineMs: declaredRoster === undefined ? RELOAD_DEADLINE_MS : deriveReloadDeadlineMs(declaredRoster),
+      declaredRoster,
       tickMs: pollIntervalSec * BRIDGE_LOST_TICK_POLLS * 1000,
     })
     currentBridgeLostArming =

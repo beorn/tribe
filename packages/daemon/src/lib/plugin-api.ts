@@ -133,6 +133,13 @@ export interface TribeClientApi {
   getSessionNames(): string[]
 
   /**
+   * Optional (27825): the number of seats hab's declared roster expects, or undefined when the daemon has no roster.
+   * Daemon boot derives the paced reload's deadline from it and passes it to parseBridgeLostConfig, so the bridge-lost
+   * grace is sized for the real fleet instead of a static ceiling.
+   */
+  getExpectedMemberCount?(): number | undefined
+
+  /**
    * Count + oldest-timestamp of actionable messages owned by `sessionName`:
    * direct messages remain until the mailbox cursor acknowledges them, while
    * tracked broadcasts remain until that owner sends TAKING or settles the ball.

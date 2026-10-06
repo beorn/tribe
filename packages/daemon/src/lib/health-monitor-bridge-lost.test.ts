@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
-import { RELOAD_DEADLINE_MS } from "tribe-wire/lib/reload-pacing"
+import { RELOAD_DEADLINE_MS, reloadDeadlineMs as deriveReloadDeadlineMs } from "tribe-wire/lib/reload-pacing"
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { readOpenIncidents, sendMessage } from "./messaging.ts"
@@ -318,6 +318,49 @@ describe("parseBridgeLostConfig", () => {
         "TRIBE_BRIDGE_LOST_GRACE_SEC=60 is not greater than the reload deadline (55 s) plus one tick (10 s); a reload would page",
     })
     expect(parseBridgeLostConfig(env, { reloadDeadlineMs: 45_000, tickMs: 10_000 }).armed).toBe(true)
+  })
+
+  // 27825 (@cto e19278ca): the window grows with the roster, so boot derives the deadline from the expected roster
+  // and the default grace is sized for it.
+  test("a roster-derived deadline reaches the config, and a larger roster lengthens the default grace", () => {
+    const env = { TRIBE_BRIDGE_LOST_OWNERS: "@chief,@cto" }
+    const bounds = {
+      reloadDeadlineMs: deriveReloadDeadlineMs(34),
+      declaredRoster: 34,
+      tickMs: DEFAULT_BRIDGE_LOST_TICK_MS,
+    }
+    expect(deriveReloadDeadlineMs(34)).toBe(34 * 4_000 + 2 * 2_000)
+    expect(parseBridgeLostConfig(env, bounds)).toEqual({
+      armed: true,
+      config: {
+        owners: ["@chief", "@cto"],
+        graceMs: deriveReloadDeadlineMs(34) + DEFAULT_BRIDGE_LOST_TICK_MS + BRIDGE_LOST_GRACE_MARGIN_MS,
+      },
+    })
+  })
+
+  // 27825 AC2: name the ceiling. A roster the configured grace cannot hold refuses at config check, with the largest
+  // supported roster named, instead of sharing a reload slot at daemon start.
+  test("a roster past what the grace supports refuses at config check, naming the ceiling", () => {
+    const env = { TRIBE_BRIDGE_LOST_OWNERS: "@chief,@cto" }
+    const tooMany = parseBridgeLostConfig(env, {
+      reloadDeadlineMs: RELOAD_DEADLINE_MS,
+      declaredRoster: 40,
+      tickMs: DEFAULT_BRIDGE_LOST_TICK_MS,
+    })
+    expect(tooMany.armed).toBe(false)
+    expect(tooMany.armed === false ? tooMany.reason : "").toContain(
+      "the declared roster names 40 seats but the bridge-lost grace of",
+    )
+    expect(tooMany.armed === false ? tooMany.reason : "").toContain("supports 28")
+    // The same roster with the deadline its own size derives fits, and arms.
+    expect(
+      parseBridgeLostConfig(env, {
+        reloadDeadlineMs: deriveReloadDeadlineMs(40),
+        declaredRoster: 40,
+        tickMs: DEFAULT_BRIDGE_LOST_TICK_MS,
+      }).armed,
+    ).toBe(true)
   })
 })
 

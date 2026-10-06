@@ -60,6 +60,8 @@ type RuntimeShape = BaseTribe &
 export interface RuntimeOpts<T extends RuntimeShape> {
   /** Build the TribeClientApi the plugins see. Defaults to the canonical impl. */
   buildPluginApi?: (t: T) => TribeClientApi
+  /** The declared roster size for plugins that size a bound to the fleet (27825). Undefined when the daemon has none. */
+  expectedMemberCount?: () => number | undefined
   /** Plugins to load. Filtered by `available()`. */
   plugins: TribePluginApi[]
   /** Cleanup interval (data retention). Default 6h. */
@@ -88,7 +90,7 @@ export interface WithRuntime {
   run(): Promise<void>
 }
 
-function defaultBuildPluginApi<T extends RuntimeShape>(t: T): TribeClientApi {
+function defaultBuildPluginApi<T extends RuntimeShape>(t: T, opts: RuntimeOpts<T>): TribeClientApi {
   const { stmts, daemonCtx, daemonSessionId, registry } = t
   const { clients } = registry
   return {
@@ -129,6 +131,9 @@ function defaultBuildPluginApi<T extends RuntimeShape>(t: T): TribeClientApi {
         .filter((c) => c.role !== "watch" && c.role !== "pending")
         .map((c) => c.name)
     },
+    getExpectedMemberCount() {
+      return opts.expectedMemberCount?.()
+    },
     getUnreadDms(sessionName) {
       const params = { $name: sessionName }
       const attention = stmts.getUnreadDms.get(params) as { count: number; oldest_ts: number } | undefined
@@ -148,7 +153,7 @@ function defaultBuildPluginApi<T extends RuntimeShape>(t: T): TribeClientApi {
 
 export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T) => T & WithRuntime {
   return (t) => {
-    const buildPluginApi = opts.buildPluginApi ?? defaultBuildPluginApi
+    const buildPluginApi = opts.buildPluginApi ?? ((shape: T) => defaultBuildPluginApi(shape, opts))
     const cleanupIntervalMs = opts.cleanupIntervalMs ?? 6 * 60 * 60 * 1000
 
     // Build the api the plugins see, then load.

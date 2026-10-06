@@ -4,7 +4,8 @@
  * 2026-09-24. Each adapter instead waits for its slot in a rolling restart: its rank among the sorted peer names
  * picks the slot, full jitter spreads it inside the slot, and it goes only once the daemon answers on the code the
  * adapter will re-exec into. Every adapter computes its own rank from the same list (the declared roster, then the live
- * adapters it does not name), so no coordinator is needed (@cto ce976914, bf0417a0).
+ * adapters it does not name), so no coordinator is needed (@cto ce976914, bf0417a0). The window the ranks spread over
+ * GROWS with the declared roster (27825, @cto e19278ca), so no seat shares a slot however large the fleet grows.
  */
 
 import { fullJitter, type RandomUnit } from "@bearly/pacing"
@@ -20,12 +21,14 @@ export const RELOAD_MAX_ABSENT = 5
  */
 export const RELOAD_SLOT_MS = Math.ceil(RELOAD_REJOIN_MAX_MS / RELOAD_MAX_ABSENT / 1_000) * 1_000
 /**
- * The widest stagger the deadline holds (25663 r2, @cto 3b3c3d7a): 28 slots of 4 s. 25662's default bridge-lost grace
- * is derived from RELOAD_DEADLINE_MS (the deadline, one health tick and a margin), so widening this lengthens it.
- * A declared seat never shares a slot while the roster fits; see reloadCapacityRefusal.
+ * The reload window FLOOR (25663 r2, @cto 3b3c3d7a): 28 slots of 4 s. 27825 (@cto e19278ca) makes the window GROW
+ * with the declared roster — reloadWindowCapMs(declaredCount) — so this is the small-roster case, not a hidden
+ * fleet-size ceiling. 25662's default bridge-lost grace is derived from the deadline (the window, one health tick and
+ * a margin), so a larger roster lengthens it; daemon boot derives that deadline from the expected roster, and the
+ * config check names the largest roster the configured grace supports (bridgeLostMaxDeclaredRoster, AC2).
  */
 export const RELOAD_WINDOW_CAP_MS = 112_000
-/** The most declared seats the window gives a slot each: 28. */
+/** The most declared seats the FLOOR window gives a slot each: 28. */
 export const RELOAD_MAX_DECLARED = Math.floor(RELOAD_WINDOW_CAP_MS / RELOAD_SLOT_MS)
 /**
  * How long one cli_status read may take before it counts as unanswered. The readiness gate checks its timeout only
@@ -33,26 +36,34 @@ export const RELOAD_MAX_DECLARED = Math.floor(RELOAD_WINDOW_CAP_MS / RELOAD_SLOT
  */
 export const RELOAD_PROBE_TIMEOUT_MS = 2_000
 /**
- * The longest a paced reload can take: 116 s (27539). The rank read, then the rank slot's delay inside the window cap,
- * then the decision read: the window cap plus one probe timeout each. 27531 removed the ready-wait, so the 30 s the
- * deadline used to carry as headroom is gone rather than kept (no runnable RELOAD_READY_TIMEOUT_MS remains). 25662's
- * default bridge-lost grace is this plus one tick plus a margin, and an explicit grace is validated against it, so
- * narrowing the deadline narrows that grace with it.
+ * The window cap for a roster (27825, @cto e19278ca): the floor, or one RELOAD_SLOT_MS slot per declared seat when
+ * the roster is larger. Every declared seat therefore gets its own slot however large the fleet grows; the static 28
+ * is no ceiling.
  */
-export const RELOAD_DEADLINE_MS = RELOAD_WINDOW_CAP_MS + 2 * RELOAD_PROBE_TIMEOUT_MS
+export function reloadWindowCapMs(declaredCount: number): number {
+  return Math.max(RELOAD_WINDOW_CAP_MS, Math.ceil(declaredCount) * RELOAD_SLOT_MS)
+}
 
 /**
- * Why a declared roster cannot be paced: more declared seats than the window has slots, so the ones past the last slot
- * would share it on every reload. Null when every declared seat gets its own slot. The daemon logs it at startup and
- * each reloading adapter warns with it; neither clips silently.
+ * The longest a paced reload of this roster can take (27825): its window cap plus one probe timeout each for the rank
+ * read and the decision read (27539). Daemon boot derives this from the expected roster and passes it to
+ * parseBridgeLostConfig; 27531 removed the ready-wait, so no RELOAD_READY_TIMEOUT_MS headroom remains.
  */
-export function reloadCapacityRefusal(declaredCount: number): string | null {
-  if (declaredCount <= RELOAD_MAX_DECLARED) return null
-  return (
-    `the declared roster names ${declaredCount} seats but the paced reload holds ${RELOAD_MAX_DECLARED} ` +
-    `(${RELOAD_WINDOW_CAP_MS} ms window of ${RELOAD_SLOT_MS} ms slots inside the ${RELOAD_DEADLINE_MS} ms deadline); ` +
-    `declared seats past slot ${RELOAD_MAX_DECLARED - 1} share it`
-  )
+export function reloadDeadlineMs(declaredCount: number): number {
+  return reloadWindowCapMs(declaredCount) + 2 * RELOAD_PROBE_TIMEOUT_MS
+}
+/**
+ * The deadline for the FLOOR window (a roster of RELOAD_MAX_DECLARED or fewer): 116 s. A larger roster derives its own
+ * through reloadDeadlineMs; this stays the default bound for a daemon with no roster.
+ */
+export const RELOAD_DEADLINE_MS = reloadDeadlineMs(RELOAD_MAX_DECLARED)
+/**
+ * The largest declared roster a deadline supports (27825): the floor always holds RELOAD_MAX_DECLARED, or one seat per
+ * slot the remaining deadline holds. The bridge-lost config check names it, so a roster past a configured grace
+ * refuses loudly at config check rather than sharing a slot (AC2).
+ */
+export function reloadMaxDeclaredForDeadlineMs(deadlineMs: number): number {
+  return Math.max(RELOAD_MAX_DECLARED, Math.floor((deadlineMs - 2 * RELOAD_PROBE_TIMEOUT_MS) / RELOAD_SLOT_MS))
 }
 
 /** The last slot a list of `peerCount` peers can use inside the cap; every rank past it shares it. */
@@ -221,7 +232,7 @@ function boundedRead(deps: PacedReexecDeps): Promise<ReloadDaemonView> {
  * - a failed or unanswered list read spreads over the cap and warns;
  * - a daemon without reload_peers or without a roster ranks on the live list and warns;
  * - a missing self goes last and warns; an undeclared self, or one clipped into a shared last slot, warns;
- * - a declared roster larger than the window warns with the count and the cap (reloadCapacityRefusal);
+ * - the window cap is derived from the declared roster (27825), so a declared seat never shares a slot;
  * - a daemon on a DIFFERENT landing re-execs, so the next child runs the daemon's code;
  * - a daemon on the SAME landing is left alone, so a same-landing restart re-execs nothing;
  * - a daemon we cannot read, one that publishes no landing root, an adapter whose own root is unresolved, or a
@@ -231,6 +242,9 @@ function boundedRead(deps: PacedReexecDeps): Promise<ReloadDaemonView> {
 export async function pacedReexec(deps: PacedReexecDeps, reason: string): Promise<void> {
   let rank: number | null = null
   let peerCount = 0
+  // The window the ranks spread over GROWS with the declared roster (27825); before the read it is the floor, and only
+  // a failed or rosterless read keeps it there.
+  let capMs = RELOAD_WINDOW_CAP_MS
   try {
     const view = await boundedRead(deps)
     let peers = view.peers
@@ -243,14 +257,12 @@ export async function pacedReexec(deps: PacedReexecDeps, reason: string): Promis
       deps.warn(
         "reload pacing: the daemon has no declared roster; ranking on the live adapters alone, where adapters that rejoined at different moments can share a slot",
       )
-    } else {
-      const refusal = reloadCapacityRefusal(new Set(peers.declared).size)
-      if (refusal !== null) deps.warn(`reload pacing: ${refusal}`)
     }
+    capMs = reloadWindowCapMs(new Set(peers.declared).size)
     const ranked = reloadRank(deps.self, peers)
     rank = ranked.rank
     peerCount = ranked.peerCount
-    const lastSlot = reloadLastSlot(peerCount, RELOAD_SLOT_MS, RELOAD_WINDOW_CAP_MS)
+    const lastSlot = reloadLastSlot(peerCount, RELOAD_SLOT_MS, capMs)
     if (!ranked.found) {
       deps.warn(`reload pacing: ${deps.self} is not in cli_status reload_peers; taking the last slot (${rank})`)
     } else if (!ranked.declared && peers.declared.length > 0) {
@@ -260,17 +272,15 @@ export async function pacedReexec(deps: PacedReexecDeps, reason: string): Promis
     }
     if (rank >= lastSlot && peerCount - 1 > lastSlot) {
       deps.warn(
-        `reload pacing: rank ${rank} of ${peerCount} peers shares the last slot (${lastSlot}) inside the ${RELOAD_WINDOW_CAP_MS} ms cap`,
+        `reload pacing: rank ${rank} of ${peerCount} peers shares the last slot (${lastSlot}) inside the ${capMs} ms cap`,
       )
     }
   } catch (error) {
-    deps.warn(
-      `reload pacing: cli_status read failed (${errorText(error)}); spreading over the ${RELOAD_WINDOW_CAP_MS} ms cap`,
-    )
+    deps.warn(`reload pacing: cli_status read failed (${errorText(error)}); spreading over the ${capMs} ms cap`)
   }
-  const delay = planReloadDelay(rank, peerCount, RELOAD_SLOT_MS, RELOAD_WINDOW_CAP_MS, deps.random)
+  const delay = planReloadDelay(rank, peerCount, RELOAD_SLOT_MS, capMs, deps.random)
   if (rank !== null) {
-    const slot = Math.min(rank, reloadLastSlot(peerCount, RELOAD_SLOT_MS, RELOAD_WINDOW_CAP_MS))
+    const slot = Math.min(rank, reloadLastSlot(peerCount, RELOAD_SLOT_MS, capMs))
     deps.info(
       `reload pacing: ${deps.self} rank ${rank} of ${peerCount} peers, slot ${slot}; waiting ${Math.round(delay)} ms`,
     )

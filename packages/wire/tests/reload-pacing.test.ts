@@ -28,8 +28,10 @@ import {
   RELOAD_WINDOW_CAP_MS,
   pacedReexec,
   planReloadDelay,
-  reloadCapacityRefusal,
+  reloadDeadlineMs,
+  reloadMaxDeclaredForDeadlineMs,
   reloadRank,
+  reloadWindowCapMs,
   type ReloadDecision,
   type ReloadDaemonView,
   type ReloadPeers,
@@ -67,6 +69,12 @@ describe("the reload schedule, through the shipped planner", () => {
     // 25663 r2: the window holds 28 declared seats, one slot each; the live roster declared 23 on 2026-09-24.
     expect(RELOAD_MAX_DECLARED).toBe(28)
     expect(RELOAD_MAX_DECLARED * RELOAD_SLOT_MS).toBe(RELOAD_WINDOW_CAP_MS)
+    // 27825: the window is a FLOOR that grows with the roster, one slot per declared seat; the static 28 is gone.
+    expect(reloadWindowCapMs(RELOAD_MAX_DECLARED)).toBe(RELOAD_WINDOW_CAP_MS)
+    expect(reloadWindowCapMs(34)).toBe(34 * RELOAD_SLOT_MS)
+    expect(reloadDeadlineMs(34)).toBe(reloadWindowCapMs(34) + 2 * RELOAD_PROBE_TIMEOUT_MS)
+    expect(reloadMaxDeclaredForDeadlineMs(RELOAD_DEADLINE_MS)).toBe(RELOAD_MAX_DECLARED)
+    expect(reloadMaxDeclaredForDeadlineMs(reloadDeadlineMs(34))).toBe(34)
   })
 
   test.each([2_000, 16_000])(
@@ -329,14 +337,17 @@ describe("pacedReexec", () => {
     expect(slots).toEqual([...declared.keys()])
   })
 
-  test("a roster larger than the window refuses, naming the count and the cap", async () => {
-    expect(reloadCapacityRefusal(RELOAD_MAX_DECLARED)).toBeNull()
-    const run = harness([view(roster(40), "abc")])
-    await pacedReexec({ ...run.deps, self: "@dev/35" }, "x")
-    expect(run.log[0]).toBe(
-      `warn: reload pacing: the declared roster names 40 seats but the paced reload holds 28 (${RELOAD_WINDOW_CAP_MS} ms window of ${RELOAD_SLOT_MS} ms slots inside the ${RELOAD_DEADLINE_MS} ms deadline); declared seats past slot 27 share it`,
-    )
-    expect(run.log[1]).toMatch(/rank 35 of 40 peers shares the last slot \(27\)/u)
+  test("a 34-seat roster gives every declared seat its own slot, with no shared slot and no warning (27825)", async () => {
+    const declared = roster(34)
+    const slots: number[] = []
+    for (const self of declared) {
+      const run = harness([view(declared, "abc")])
+      await pacedReexec({ ...run.deps, self }, "x")
+      expect(run.log, self).toEqual([])
+      slots.push(run.sleeps[0]! / RELOAD_SLOT_MS)
+    }
+    expect(slots).toEqual([...declared.keys()])
+    expect(new Set(slots).size).toBe(34)
   })
 
   test("only an undeclared adapter past a full roster shares the last slot, and says so", async () => {

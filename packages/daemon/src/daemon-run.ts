@@ -41,7 +41,7 @@ import {
   withSocketServer,
 } from "./lib/compose/index.ts"
 import { TOOLS_LIST } from "tribe-wire/lib/tools-list"
-import { reloadCapacityRefusal } from "tribe-wire/lib/reload-pacing"
+import { reloadDeadlineMs as deriveReloadDeadlineMs } from "tribe-wire/lib/reload-pacing"
 import { pruneOldActivityLogs } from "./lib/activity-log.ts"
 import { countDurableSessionRows } from "./lib/session.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
@@ -161,9 +161,12 @@ sanitizeDaemonProcessEnvironment(process.env)
 const log = createLogger("tribe:daemon")
 const deliveryFallbackPolicy = parseDeliveryFallbackPolicy(process.env.TRIBE_DELIVERY_FALLBACKS)
 const getExpectedMembers = createDeclaredRosterReader(process.env)
-// 25663 r2: a roster larger than the reload window would make declared seats share its last slot; say so at boot.
-const bootReloadRefusal = reloadCapacityRefusal(getExpectedMembers()?.byName.size ?? 0)
-if (bootReloadRefusal !== null) log.error?.(`reload pacing refused the declared roster: ${bootReloadRefusal}`)
+// 27825: the paced reload's window grows with the declared roster, so boot names the deadline that roster derives. The
+// health monitor derives the same deadline through getExpectedMemberCount and the config check names the ceiling.
+const bootRosterSize = getExpectedMembers()?.byName.size ?? 0
+log.info?.(
+  `reload pacing: the declared roster names ${bootRosterSize} seats; reload deadline ${deriveReloadDeadlineMs(bootRosterSize)} ms`,
+)
 
 // ---------------------------------------------------------------------------
 // Sync portion of the pipe — config, db, daemonCtx, recall, tools, registry,
@@ -338,6 +341,7 @@ const tribe = withRuntime<typeof withSignalsShape>({
   plugins: process.env.TRIBE_NO_PLUGINS
     ? []
     : [gitPlugin, githubPlugin, healthMonitorPlugin, accountlyPlugin, hookLatencyPlugin],
+  expectedMemberCount: () => getExpectedMembers()?.byName.size,
   publishActivePluginNames: (n) => {
     refs.activePluginNames = n
   },
