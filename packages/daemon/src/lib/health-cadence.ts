@@ -481,7 +481,7 @@ function inboxLagProjection(
       AND m.kind = 'direct'
       AND m.sender != $session
       AND ${ATTENTION_PREDICATE_SQL}
-      AND ${noOpenIncidentAttentionPredicateSql("m", "$session")}
+      AND ${noOpenIncidentAttentionPredicateSql("m")}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
   `),
   )
@@ -497,7 +497,7 @@ function inboxLagProjection(
       AND m.kind = 'direct'
       AND m.sender != $session
       AND ${ATTENTION_PREDICATE_SQL}
-      AND ${noOpenIncidentAttentionPredicateSql("m", "$session")}
+      AND ${noOpenIncidentAttentionPredicateSql("m")}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
   `),
   )
@@ -517,7 +517,7 @@ function inboxLagProjection(
       AND m.kind = 'direct'
       AND m.sender != $session
       AND ${ATTENTION_PREDICATE_SQL}
-      AND ${noOpenIncidentAttentionPredicateSql("m", "$session")}
+      AND ${noOpenIncidentAttentionPredicateSql("m")}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
     ORDER BY m.rowid ASC
     LIMIT 1
@@ -535,7 +535,7 @@ function inboxLagProjection(
       AND m.kind = 'direct'
       AND m.sender != $session
       AND ${ATTENTION_PREDICATE_SQL}
-      AND ${noOpenIncidentAttentionPredicateSql("m", "$session")}
+      AND ${noOpenIncidentAttentionPredicateSql("m")}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
     ORDER BY m.seq ASC
     LIMIT 1
