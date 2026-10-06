@@ -47,7 +47,7 @@ import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
 import { isIdentityTokenMissingRefusal } from "./lib/identity-token-missing-refusal.ts"
-import { TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE_ENV } from "./lib/session-identity-env.ts"
+import { TRIBE_NAME_ENV, TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE_ENV } from "./lib/session-identity-env.ts"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
@@ -1458,7 +1458,7 @@ let deliveryLedgerReady = false
 
 function ensureDeliveryLedger(now: number): void {
   if (deliveryLedgerReady) return
-  const pane = myName !== "" ? myName : process.env.TRIBE_NAME?.trim() || "@unknown"
+  const pane = myName !== "" ? myName : process.env[TRIBE_NAME_ENV]?.trim() || "@unknown"
   const path = deliveryLedgerPath({ pane, env: process.env })
   if (path === null) {
     // No habitat kpi root and no override: count in memory only, and never invent
