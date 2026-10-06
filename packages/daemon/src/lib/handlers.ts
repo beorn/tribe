@@ -831,12 +831,20 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // addressed to the ball's requester). Every other untracked send still refuses expires_in_ms.
   let redue: BallTracker["redue"]
   if (expiresInMs !== undefined && !willTrack) {
-    const ref = typeof a.ref === "string" ? a.ref.trim() : ""
+    // The ref is matched exactly as it is stored, because only an exact ref makes this message a TAKING receipt.
+    const ref = typeof a.ref === "string" ? a.ref : ""
     if (msgType !== "status" || ref === "" || typeof recipients !== "string" || recipients === "*") {
       return jsonResult({
         error:
           "tribe.send: invalid options - expires_in_ms requires a tracked request, or a status + ref TAKING receipt " +
           "on an open ball you own",
+      })
+    }
+    if (replyId !== null) {
+      return jsonResult({
+        error:
+          "tribe.send: invalid options - a re-due keeps the ball open and reply settles it; send the status + ref " +
+          "receipt with expires_in_ms, or the response + reply, not both",
       })
     }
     const resolved = receiptRedue(ctx, { owner: sender, requester: recipients, ref, expiresInMs })

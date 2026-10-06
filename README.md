@@ -313,7 +313,11 @@ The ball stores ownership, age, and fanout. Tracked requests and queries receive
 a 20-minute escalation deadline; assignments have no reply-clock default.
 `expires_in_ms` overrides the class policy for one send. `status + ref` is a
 non-closing TAKING receipt from the owner: it removes the ball from idle/wait
-attention without resetting its deadline or removing it from the pending pile.
+attention without removing it from the pending pile, and keeps its deadline
+unless it carries `expires_in_ms`. With `expires_in_ms`, the owner re-sets an
+open ball's due to the receipt time plus that value, earlier or later, within
+one day of the ball's opening; a passed due, a non-owner, an incident ball or
+the ceiling refuses by name, and the result echoes `applied_due`.
 `response + reply` is final settlement and closes the original ownership row.
 `tribe.fetch()` returns a read-only `attention` projection — actionable unread,
 including explicitly tracked request/query/verdict/assign broadcasts owned by

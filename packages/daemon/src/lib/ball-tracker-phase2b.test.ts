@@ -7,10 +7,11 @@
 
 import { assertSingleStatement } from "@bearly/sqlite"
 import type { Database } from "bun:sqlite"
+import { randomUUID } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
@@ -754,22 +755,127 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
         previous_expires_at: original,
         expires_at: laterDue,
       })
-      // Past the original due, the sweep no longer selects the ball, so no expiry edge is written.
-      const swept = stmts.selectExpiredPendingRequests.all({ $now: original + 1 }) as Array<{ request_id: string }>
-      expect(swept.map((row) => row.request_id)).not.toContain("redue-open")
-      parseToolJson(handleToolCall(agent1, "tribe.pending", {}, opts()))
-      expect(expiredEvents()).toBe(0)
-      // WATCH reads the owner summary's oldest deadline: it now reports the new due, so it stays quiet until then.
+      // WATCH stays quiet only on a TAKING receipt plus a future due on the same oldest row; health carries both.
       const health = parseToolJson(handleToolCall(chief, "tribe.health", {}, opts())) as {
-        pending_balls: { requests: { owners: Array<{ owner: string; oldest_deadline_at_ms: number | null }> } }
+        pending_balls: {
+          requests: {
+            owners: Array<{
+              owner: string
+              oldest_deadline_at_ms: number | null
+              oldest_taking_receipt_at_ms: number | null
+            }>
+          }
+        }
       }
       const owner = health.pending_balls.requests.owners.find((row) => row.owner === "@agent/1")
       expect(owner?.oldest_deadline_at_ms).toBe(laterDue)
+      expect(owner?.oldest_taking_receipt_at_ms).toEqual(expect.any(Number))
+
+      // Every RPC boundary runs the production expiry sweep at Date.now(): past the original due it writes no edge.
+      vi.useFakeTimers({ toFake: ["Date"] })
+      try {
+        vi.setSystemTime(original + 1)
+        parseToolJson(handleToolCall(agent1, "tribe.pending", {}, opts()))
+        expect(expiredEvents()).toBe(0)
+      } finally {
+        vi.useRealTimers()
+      }
 
       const earlier = receipt(agent1, "redue-open", { expires_in_ms: 30_000 })
       expect(earlier.error).toBeUndefined()
-      expect(dueOf("redue-open")!).toBeLessThan(laterDue)
-      expect(earlier.applied_due).toMatchObject({ previous_expires_at: laterDue })
+      const earlierDue = dueOf("redue-open")!
+      expect(earlierDue).toBeLessThan(laterDue)
+      expect(earlier.applied_due).toMatchObject({ previous_expires_at: laterDue, expires_at: earlierDue })
+      // The moved due is the one the sweep keys on: just past it, the ball records its expiry edge.
+      vi.useFakeTimers({ toFake: ["Date"] })
+      try {
+        vi.setSystemTime(earlierDue + 1)
+        parseToolJson(handleToolCall(agent1, "tribe.pending", {}, opts()))
+        expect(expiredEvents()).toBe(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("a ref that is not the exact stored id moves no due, so every re-due is also a TAKING receipt", () => {
+      openBall("redue-exact")
+      const original = dueOf("redue-exact")
+      const count = messageCount()
+
+      const res = receipt(agent1, "redue-exact ", { expires_in_ms: 600_000 })
+      expect(res.error).toMatch(/names no open ball/)
+      expect(dueOf("redue-exact")).toBe(original)
+      expect(messageCount()).toBe(count)
+    })
+
+    it("a re-due that also carries reply is refused, because the reply settles the ball it would re-due", () => {
+      openBall("redue-reply")
+      const original = dueOf("redue-reply")
+      const count = messageCount()
+
+      const res = receipt(agent1, "redue-reply", { expires_in_ms: 600_000, reply: "redue-reply" })
+      expect(res.error).toMatch(/reply settles it/)
+      expect(dueOf("redue-reply")).toBe(original)
+      expect(messageCount()).toBe(count)
+    })
+
+    it("an assignment with no due gains the receipt's due", () => {
+      parseToolJson(
+        handleToolCall(
+          chief,
+          "tribe.send",
+          { to: "@agent/1", message: "standing work", type: "assign", request: "redue-assign" },
+          opts(),
+        ),
+      )
+      expect(dueOf("redue-assign")).toBeNull()
+
+      const res = receipt(agent1, "redue-assign", { expires_in_ms: 600_000 })
+      expect(res.error).toBeUndefined()
+      expect(res.applied_due).toEqual({
+        request_id: "redue-assign",
+        previous_expires_at: null,
+        expires_at: dueOf("redue-assign"),
+      })
+    })
+
+    it("an incident ball is refused, so only its emitter's clear ever settles it", () => {
+      const opened = parseToolJson(
+        handleToolCall(
+          chief,
+          "tribe.send",
+          {
+            to: "@agent/1",
+            type: "notify",
+            message: "@agent/1 transport-wedged",
+            incident: { emitter: "watch", subject: "@agent/1", condition: "transport-wedged" },
+          },
+          opts(),
+        ),
+      ) as { request_id?: string }
+      const incidentId = opened.request_id!
+      expect(dueOf(incidentId)).toBeNull()
+      const count = messageCount()
+
+      const res = receipt(agent1, incidentId, { expires_in_ms: 600_000 })
+      expect(res.error).toMatch(/incident ball/)
+      expect(dueOf(incidentId)).toBeNull()
+      expect(messageCount()).toBe(count)
+    })
+
+    it("a deduplicated retry of a re-due receipt writes nothing and echoes no applied due", () => {
+      openBall("redue-retry")
+      const messageId = randomUUID()
+      const first = receipt(agent1, "redue-retry", { expires_in_ms: 600_000, message_id: messageId })
+      expect(first.error).toBeUndefined()
+      const applied = dueOf("redue-retry")
+      const count = messageCount()
+
+      const retry = receipt(agent1, "redue-retry", { expires_in_ms: 900_000, message_id: messageId })
+      expect(retry.deduplicated).toBe(true)
+      expect(retry).not.toHaveProperty("applied_due")
+      expect(dueOf("redue-retry")).toBe(applied)
+      expect(messageCount()).toBe(count)
     })
 
     it("a re-due after expiry is refused and the expired ball keeps its due", () => {

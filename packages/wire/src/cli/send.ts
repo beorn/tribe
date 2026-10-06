@@ -630,6 +630,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     truncated?: boolean
     original_length?: number
     tracker?: { request_id?: string; closed?: number; cause?: string }
+    applied_due?: { request_id?: string; previous_expires_at?: number | null; expires_at?: number }
     delivery?: {
       state?: string
       original_target?: string
@@ -664,6 +665,17 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     console.log(`Sent message to ${recipient} (redirected from ${originalTarget}: ${reason})`)
   } else {
     console.log(`Sent message to ${input.to}`)
+  }
+  // 27735 B: a status + ref receipt with --expires-in-ms re-set its ball's due; say which ball and the new due.
+  const appliedDue = result.applied_due
+  if (appliedDue?.request_id !== undefined && typeof appliedDue.expires_at === "number") {
+    const previous =
+      typeof appliedDue.previous_expires_at === "number"
+        ? new Date(appliedDue.previous_expires_at).toISOString()
+        : "none"
+    console.log(
+      `Ball ${appliedDue.request_id} is now due ${new Date(appliedDue.expires_at).toISOString()} (was ${previous})`,
+    )
   }
   // The daemon appends this delivery note last in its existing warning field.
   // Other warning classes have their own CLI output below.

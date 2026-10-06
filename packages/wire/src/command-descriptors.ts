@@ -288,6 +288,20 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             required: ["request_id", "closed"],
             description: "Present for replies; reports the committed ball-tracker mutation.",
           },
+          applied_due: {
+            type: "object",
+            properties: {
+              request_id: { type: "string", description: "The ball whose due this TAKING receipt re-set." },
+              previous_expires_at: {
+                type: ["number", "null"],
+                description: "The ball's due before the receipt, in unix ms; null when it had none.",
+              },
+              expires_at: { type: "number", description: "The due the receipt applied, in unix ms." },
+            },
+            required: ["request_id", "previous_expires_at", "expires_at"],
+            description:
+              "Present when a status + ref TAKING receipt carried expires_in_ms: the due applied in the receipt's own transaction.",
+          },
           reply_close_failed: {
             type: "boolean",
             description:
