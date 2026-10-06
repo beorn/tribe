@@ -830,7 +830,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // 27735 B (@cto bd599f15): an owner may re-set its own open ball's due through a TAKING receipt (status + ref,
   // addressed to the ball's requester). Every other untracked send still refuses expires_in_ms.
   let redue: BallTracker["redue"]
-  if (a.expires_in_ms !== undefined && !willTrack) {
+  if (expiresInMs !== undefined && !willTrack) {
     const ref = typeof a.ref === "string" ? a.ref.trim() : ""
     if (msgType !== "status" || ref === "" || typeof recipients !== "string" || recipients === "*") {
       return jsonResult({
@@ -839,7 +839,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
           "on an open ball you own",
       })
     }
-    const resolved = receiptRedue(ctx, { owner: sender, requester: recipients, ref, expiresInMs: expiresInMs ?? 0 })
+    const resolved = receiptRedue(ctx, { owner: sender, requester: recipients, ref, expiresInMs })
     if ("error" in resolved) return jsonResult({ error: `tribe.send: refused re-due - ${resolved.error}` })
     redue = resolved
     expiresInMs = undefined

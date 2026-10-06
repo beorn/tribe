@@ -224,7 +224,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             minimum: 1,
             maximum: 24 * 60 * 60_000,
             description:
-              "Reply deadline for one tracked send, max one day. Requests and queries default to 20 minutes. Expiry never settles ownership — see /tribe.",
+              "Reply deadline for one tracked send, max one day. Requests and queries default to 20 minutes. On a status + ref TAKING receipt for an open ball you own, it re-sets that ball's due from now, within one day of the ball's opening. Expiry never settles ownership — see /tribe.",
           },
           incident: {
             type: "object",
@@ -401,7 +401,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "expires-in-ms",
           flags: "--expires-in-ms <milliseconds>",
-          description: "Override the tracked-ball escalation policy for this send (maximum 1d)",
+          description:
+            "Override the tracked-ball escalation policy for this send (maximum 1d); with --type status --ref on an open ball you own, re-set that ball's due from now",
           mapsTo: "expires_in_ms",
         },
         {
