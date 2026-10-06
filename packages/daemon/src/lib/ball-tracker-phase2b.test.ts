@@ -726,10 +726,9 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       )
     const dueOf = (requestId: string) =>
       (
-        db.prepare("SELECT opened_at, expires_at FROM pending_request WHERE request_id = ? AND recipient = ?").get(
-          requestId,
-          "@agent/1",
-        ) as { opened_at: number; expires_at: number | null }
+        db
+          .prepare("SELECT opened_at, expires_at FROM pending_request WHERE request_id = ? AND recipient = ?")
+          .get(requestId, "@agent/1") as { opened_at: number; expires_at: number | null }
       ).expires_at
     const messageCount = () => (db.prepare("SELECT COUNT(*) AS count FROM messages").get() as { count: number }).count
     const expiredEvents = () =>
@@ -760,6 +759,12 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       expect(swept.map((row) => row.request_id)).not.toContain("redue-open")
       parseToolJson(handleToolCall(agent1, "tribe.pending", {}, opts()))
       expect(expiredEvents()).toBe(0)
+      // WATCH reads the owner summary's oldest deadline: it now reports the new due, so it stays quiet until then.
+      const health = parseToolJson(handleToolCall(chief, "tribe.health", {}, opts())) as {
+        pending_balls: { requests: { owners: Array<{ owner: string; oldest_deadline_at_ms: number | null }> } }
+      }
+      const owner = health.pending_balls.requests.owners.find((row) => row.owner === "@agent/1")
+      expect(owner?.oldest_deadline_at_ms).toBe(laterDue)
 
       const earlier = receipt(agent1, "redue-open", { expires_in_ms: 30_000 })
       expect(earlier.error).toBeUndefined()

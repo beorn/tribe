@@ -159,6 +159,11 @@ export type BallTracker = {
    * class policy; deadline passage never settles ownership. */
   expiresInMs?: number
   /**
+   * 27735 B (@cto bd599f15): this untracked status receipt re-sets its owner's open ball's due. `handleSend` has
+   * checked ownership, the current due and the one-day ceiling; the one UPDATE lands in the receipt's transaction.
+   */
+  redue?: { requestId: string; recipient: string; previousExpiresAt: number | null; expiresAt: number }
+  /**
    * Ambient incident identity — habwire stage 2(d), "one ball per incident".
    *
    * A watcher that fires on every tick would otherwise mint one obligation per
@@ -611,6 +616,18 @@ export function sendMessage(
       }
     }
     const rowid = Number(result.lastInsertRowid)
+    const redue = ballTracker.redue
+    if (redue !== undefined) {
+      const moved = ctx.stmts.updatePendingDue.run({
+        $request_id: redue.requestId,
+        $recipient: redue.recipient,
+        $previous_expires_at: redue.previousExpiresAt,
+        $expires_at: redue.expiresAt,
+      })
+      if (moved.changes !== 1) {
+        throw new Error(`receipt ${id}: ball ${redue.requestId} changed its due before the re-due could apply`)
+      }
+    }
     // sendMessage knows one durable recipient string. Explicit broadcast
     // snapshots remain handleSend's responsibility; direct rows are complete
     // before this transaction returns.

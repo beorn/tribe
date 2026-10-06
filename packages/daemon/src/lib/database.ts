@@ -1950,12 +1950,19 @@ export function createStatements(db: Database) {
      *  recipient's row is still active and whether fanout='first' closes all
      *  or fanout='all' closes only the replying recipient. */
     selectPendingForReplyRecipient: db.prepare(`
-			SELECT request_id, fanout, expires_at, sender, request_kind
+			SELECT request_id, fanout, expires_at, sender, request_kind, opened_at
 			FROM pending_request
 			WHERE recipient = $recipient
 				AND (request_id = $reply_id OR message_id = $reply_id)
 			ORDER BY CASE WHEN request_id = $reply_id THEN 0 ELSE 1 END
 			LIMIT 1
+		`),
+
+    /** 27735 B: an owner's TAKING receipt re-sets its own ball's due; the guard keeps it the due that was checked. */
+    updatePendingDue: db.prepare(`
+			UPDATE pending_request
+			SET expires_at = $expires_at
+			WHERE request_id = $request_id AND recipient = $recipient AND expires_at IS $previous_expires_at
 		`),
 
     /** Exact persisted discriminator for recipient-side close authority. */

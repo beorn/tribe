@@ -34,6 +34,7 @@ import {
   settlePendingRows,
   pendingCloseCause,
   formatPendingCloseCause,
+  type BallTracker,
   type Classification,
   type BallSettlementReason,
   type Delivery,
@@ -826,8 +827,22 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     requestId !== null ||
     (incident !== undefined && incident.active !== false) ||
     (hasImplicitOwner && AUTO_TRACK_TYPES_SET.has(msgType))
+  // 27735 B (@cto bd599f15): an owner may re-set its own open ball's due through a TAKING receipt (status + ref,
+  // addressed to the ball's requester). Every other untracked send still refuses expires_in_ms.
+  let redue: BallTracker["redue"]
   if (a.expires_in_ms !== undefined && !willTrack) {
-    return jsonResult({ error: "tribe.send: invalid options - expires_in_ms requires a tracked request" })
+    const ref = typeof a.ref === "string" ? a.ref.trim() : ""
+    if (msgType !== "status" || ref === "" || typeof recipients !== "string" || recipients === "*") {
+      return jsonResult({
+        error:
+          "tribe.send: invalid options - expires_in_ms requires a tracked request, or a status + ref TAKING receipt " +
+          "on an open ball you own",
+      })
+    }
+    const resolved = receiptRedue(ctx, { owner: sender, requester: recipients, ref, expiresInMs: expiresInMs ?? 0 })
+    if ("error" in resolved) return jsonResult({ error: `tribe.send: refused re-due - ${resolved.error}` })
+    redue = resolved
+    expiresInMs = undefined
   }
   expiresInMs ??= defaultBallTtlMs(msgType, willTrack)
   const summaryArg = typeof a.summary === "string" ? a.summary.trim() : ""
@@ -944,8 +959,16 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       expiresInMs,
       owners: broadcastOwners,
       incident,
+      ...(redue === undefined ? {} : { redue }),
     },
   )
+  if (redue !== undefined && !result.deduplicated) {
+    log.info?.(
+      `re-due ${redue.requestId} (owner ${redue.recipient}) by receipt ${result.id}: ` +
+        `${redue.previousExpiresAt === null ? "no due" : new Date(redue.previousExpiresAt).toISOString()} -> ` +
+        new Date(redue.expiresAt).toISOString(),
+    )
+  }
   // An incident reports its identity as the request id so the caller can see
   // which standing obligation this observation landed on — the same key a
   // later clearing edge must carry.
@@ -980,12 +1003,67 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     delivery: deliveryReport([{ recipient: recipients, resolution }], transport)[0],
     ...(replyReport.tracker ? { tracker: replyReport.tracker } : {}),
     ...(result.deduplicated ? { deduplicated: true } : {}),
+    ...(redue === undefined || result.deduplicated
+      ? {}
+      : {
+          applied_due: {
+            request_id: redue.requestId,
+            previous_expires_at: redue.previousExpiresAt,
+            expires_at: redue.expiresAt,
+          },
+        }),
     ...replyReport.replyCloseFailed,
     summary,
     ...(summaryDerived ? { summary_derived: true } : {}),
     ...truncationReport(truncation),
     ...(warning ? { warning } : {}),
   })
+}
+
+/**
+ * 27735 B (@cto bd599f15): the ball a TAKING receipt may re-due, matched the way the TAKING receipt query matches
+ * (owner = receipt sender, requester = receipt recipient, ref = the ball's request or message id), or why not. The
+ * new due is receipt time plus `expiresInMs`, earlier or later, within the ball's one-day ceiling; never clamped.
+ */
+function receiptRedue(
+  ctx: TribeContext,
+  input: { owner: string; requester: string; ref: string; expiresInMs: number },
+): NonNullable<BallTracker["redue"]> | { error: string } {
+  const ball = ctx.stmts.selectPendingForReplyRecipient.get({ $reply_id: input.ref, $recipient: input.owner }) as {
+    request_id: string
+    expires_at: number | null
+    sender: string
+    request_kind: "request" | "incident"
+    opened_at: number
+  } | null
+  if (ball === null || ball.sender !== input.requester) {
+    return {
+      error:
+        `${input.ref} names no open ball owned by ${input.owner} and requested by ${input.requester}; ` +
+        "a receipt re-sets only the due of a ball its sender owns",
+    }
+  }
+  if (ball.request_kind !== "request") {
+    return { error: `${ball.request_id} is an incident ball; it has no due, and only its emitter clears it` }
+  }
+  const now = Date.now()
+  if (ball.expires_at !== null && ball.expires_at <= now) {
+    return {
+      error:
+        `ball ${ball.request_id} deadline passed at ${new Date(ball.expires_at).toISOString()}; ` +
+        "settle it with response + reply instead",
+    }
+  }
+  const expiresAt = now + input.expiresInMs
+  const ceiling = ball.opened_at + MAX_BALL_TTL_MS
+  if (expiresAt > ceiling) {
+    return {
+      error:
+        `the new due ${new Date(expiresAt).toISOString()} is past ${ball.request_id}'s one-day ceiling ` +
+        `(${new Date(ceiling).toISOString()}); settle it with response + reply and track the work in a todo or an issue`,
+    }
+  }
+  return { requestId: ball.request_id, recipient: input.owner, previousExpiresAt: ball.expires_at, expiresAt }
 }
 
 function handleMultiSend(input: {
