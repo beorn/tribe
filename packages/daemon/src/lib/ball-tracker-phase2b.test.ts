@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { MAX_BALL_TTL_MS } from "./messaging.ts"
 import { registerSession } from "./session.ts"
 
 const PROJECT_ID = "ball-tracker-phase2b"
@@ -698,5 +699,139 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     for (const table of ["messages", "messages_archive"]) {
       expect(plan.some(({ detail }) => detail.startsWith(`SEARCH ${table} `) && /\bref=\?/.test(detail))).toBe(true)
     }
+  })
+
+  // 27735 slice B (@cto bd599f15 §B): the ball's owner re-sets its due through a TAKING receipt.
+  // pending_request.expires_at is the one due every consumer reads (WATCH, the expiry sweep, the pending views),
+  // so these controls assert that row and the expiry statement directly.
+  describe("27735 B — the owner re-sets its ball's due through a TAKING receipt", () => {
+    const opts = () => makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"])
+    const openBall = (requestId: string, expiresInMs = 60_000) =>
+      parseToolJson(
+        handleToolCall(
+          chief,
+          "tribe.send",
+          { to: "@agent/1", message: "owed work", type: "request", request: requestId, expires_in_ms: expiresInMs },
+          opts(),
+        ),
+      )
+    const receipt = (from: TribeContext, requestId: string, extra: Record<string, unknown> = {}) =>
+      parseToolJson(
+        handleToolCall(
+          from,
+          "tribe.send",
+          { to: "@chief", type: "status", ref: requestId, message: `TAKING ${requestId}`, ...extra },
+          opts(),
+        ),
+      )
+    const dueOf = (requestId: string) =>
+      (
+        db.prepare("SELECT opened_at, expires_at FROM pending_request WHERE request_id = ? AND recipient = ?").get(
+          requestId,
+          "@agent/1",
+        ) as { opened_at: number; expires_at: number | null }
+      ).expires_at
+    const messageCount = () => (db.prepare("SELECT COUNT(*) AS count FROM messages").get() as { count: number }).count
+    const expiredEvents = () =>
+      (
+        db
+          .prepare("SELECT COUNT(*) AS count FROM messages WHERE kind = 'event' AND type = 'event.ball.expired'")
+          .get() as { count: number }
+      ).count
+
+    it("a re-due before expiry moves the due later or earlier and writes no expired event", () => {
+      openBall("redue-open")
+      const original = dueOf("redue-open")!
+
+      const before = Date.now()
+      const later = receipt(agent1, "redue-open", { expires_in_ms: 600_000 })
+      const after = Date.now()
+      expect(later.error).toBeUndefined()
+      const laterDue = dueOf("redue-open")!
+      expect(laterDue).toBeGreaterThanOrEqual(before + 600_000)
+      expect(laterDue).toBeLessThanOrEqual(after + 600_000)
+      expect(later.applied_due).toEqual({
+        request_id: "redue-open",
+        previous_expires_at: original,
+        expires_at: laterDue,
+      })
+      // Past the original due, the sweep no longer selects the ball, so no expiry edge is written.
+      const swept = stmts.selectExpiredPendingRequests.all({ $now: original + 1 }) as Array<{ request_id: string }>
+      expect(swept.map((row) => row.request_id)).not.toContain("redue-open")
+      parseToolJson(handleToolCall(agent1, "tribe.pending", {}, opts()))
+      expect(expiredEvents()).toBe(0)
+
+      const earlier = receipt(agent1, "redue-open", { expires_in_ms: 30_000 })
+      expect(earlier.error).toBeUndefined()
+      expect(dueOf("redue-open")!).toBeLessThan(laterDue)
+      expect(earlier.applied_due).toMatchObject({ previous_expires_at: laterDue })
+    })
+
+    it("a re-due after expiry is refused and the expired ball keeps its due", () => {
+      openBall("redue-expired")
+      db.prepare("UPDATE pending_request SET expires_at = 0 WHERE request_id = ?").run("redue-expired")
+      const count = messageCount()
+
+      const res = receipt(agent1, "redue-expired", { expires_in_ms: 600_000 })
+      expect(res.error).toMatch(/deadline passed/)
+      expect(res.error).toMatch(/response \+ reply/)
+      expect(dueOf("redue-expired")).toBe(0)
+      expect(messageCount()).toBe(count + expiredEvents())
+    })
+
+    it("a re-due from a non-owner is refused", () => {
+      openBall("redue-not-owner")
+      const original = dueOf("redue-not-owner")
+      const count = messageCount()
+
+      const res = receipt(agent2, "redue-not-owner", { expires_in_ms: 600_000 })
+      expect(res.error).toMatch(/no open ball owned by @agent\/2/)
+      expect(dueOf("redue-not-owner")).toBe(original)
+      expect(messageCount()).toBe(count)
+    })
+
+    it("a re-due beyond opened_at plus the one-day ceiling is refused, never clamped", () => {
+      openBall("redue-ceiling")
+      const openedAt = Date.now() - (MAX_BALL_TTL_MS - 30 * 60_000)
+      db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = ?").run(openedAt, "redue-ceiling")
+      const original = dueOf("redue-ceiling")
+      const count = messageCount()
+
+      const res = receipt(agent1, "redue-ceiling", { expires_in_ms: 60 * 60_000 })
+      expect(res.error).toMatch(/one-day ceiling/)
+      expect(res.error).toMatch(/settle it with response \+ reply/)
+      expect(dueOf("redue-ceiling")).toBe(original)
+      expect(messageCount()).toBe(count)
+    })
+
+    it("a receipt without expires_in_ms behaves as today", () => {
+      openBall("redue-plain")
+      const original = dueOf("redue-plain")
+
+      const res = receipt(agent1, "redue-plain")
+      expect(res.error).toBeUndefined()
+      expect(res.sent).toBe(true)
+      expect(res).not.toHaveProperty("applied_due")
+      expect(dueOf("redue-plain")).toBe(original)
+    })
+
+    it("an untracked send that is not a TAKING receipt still refuses expires_in_ms", () => {
+      openBall("redue-untracked")
+      const original = dueOf("redue-untracked")
+      const count = messageCount()
+
+      for (const args of [
+        { to: "@chief", type: "notify", ref: "redue-untracked" },
+        { to: "@chief", type: "status" },
+        { to: "@agent/2", type: "status", ref: "redue-untracked" },
+      ]) {
+        const res = parseToolJson(
+          handleToolCall(agent1, "tribe.send", { ...args, message: "not a receipt", expires_in_ms: 600_000 }, opts()),
+        )
+        expect(res.error).toEqual(expect.any(String))
+      }
+      expect(dueOf("redue-untracked")).toBe(original)
+      expect(messageCount()).toBe(count)
+    })
   })
 })
