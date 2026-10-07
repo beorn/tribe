@@ -1428,7 +1428,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       `tribe pending: tribe.pending: refusing --close before mutation: authenticated caller ${JSON.stringify(thirdPersona)} ` +
         `is neither owner ${JSON.stringify(owner)} nor original sender ${JSON.stringify(sender)} for ball ` +
         `${JSON.stringify(thirdPersonaRequestId)}. Allowed closers are the owner (manual-close) or original sender ` +
-        `(sender-withdrawn); ball ${JSON.stringify(thirdPersonaRequestId)} remains open, and no pending row was mutated.\n`,
+        `(sender-withdrawn), or @chief after its structured deadline with an observed offline owner ` +
+        `(offline-owner-close); ball ${JSON.stringify(thirdPersonaRequestId)} remains open, and no pending row was mutated.\n`,
     )
 
     await open(76, missingAuthorityRequestId)
