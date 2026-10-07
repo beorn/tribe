@@ -16,14 +16,14 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js"
+import { resolveProjectName } from "./lib/beads-path.ts"
 import {
   parseTribeArgs,
   parseSessionDomains,
   resolveClaudeSessionId,
   resolveClaudeSessionName,
-  resolveProjectName,
   resolveProjectId,
-} from "./lib/config.ts"
+} from "./lib/config-light.ts"
 import {
   resolveSocketPath,
   connectToDaemon,

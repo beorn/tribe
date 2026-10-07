@@ -15,7 +15,7 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { readDaemonCodeView } from "tribe-wire/lib/code-identity"
-import { parseTribeArgs } from "tribe-wire/lib/config"
+import { parseTribeArgs } from "tribe-wire/lib/config-light"
 import { resolveSocketPath } from "tribe-wire/lib/socket"
 import { isTribeNameShape } from "tribe-wire/lib/persona-name"
 import {
