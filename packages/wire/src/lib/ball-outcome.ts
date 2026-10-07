@@ -10,6 +10,7 @@ export const NON_REPLY_BALL_SETTLEMENT_REASONS = [
   "incident-cleared",
   "gc-expired",
   "sender-withdrawn",
+  "offline-owner-close",
 ] as const
 
 export const BALL_SETTLEMENT_REASONS = ["answered", ...NON_REPLY_BALL_SETTLEMENT_REASONS] as const

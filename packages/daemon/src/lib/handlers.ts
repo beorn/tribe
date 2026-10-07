@@ -6,6 +6,7 @@ import { assertSingleStatement } from "@bearly/sqlite"
 import { createLogger } from "loggily"
 import { randomUUID } from "node:crypto"
 import {
+  ANDON_OWNER,
   ballFactKey,
   describeSettlementConflict,
   foldSettlementFacts,
@@ -2000,6 +2001,7 @@ function closeOneBall(
   owner: string,
   attemptedId: string,
   now: number,
+  transport: OwnerTransportProjector,
 ): { request_id: string; closed: number; reason?: string } {
   const requestId = pendingRequestIdForOwner(ctx, owner, attemptedId)
   const row = ctx.stmts.selectPendingSettlementForRecipient.get({
@@ -2010,8 +2012,25 @@ function closeOneBall(
     const reason = formatPendingCloseCause(pendingCloseCause(ctx, requestId, owner), requestId, owner)
     return { request_id: requestId, closed: 0, reason }
   }
-  const settlement = ctx.getName() === row.sender && ctx.getName() !== owner ? "sender-withdrawn" : "manual-close"
+  const settlement =
+    ctx.getName() !== owner && ctx.getName() !== row.sender && offlineOwnerCloseAllowed(ctx, row, now, transport)
+      ? "offline-owner-close"
+      : ctx.getName() === row.sender && ctx.getName() !== owner
+        ? "sender-withdrawn"
+        : "manual-close"
   return { request_id: requestId, closed: settlePendingRows(ctx, [row], settlement, ctx.getName(), now) }
+}
+
+/** Dispatcher custody uses daemon facts; habitat roster policy stays with the caller. */
+function offlineOwnerCloseAllowed(
+  ctx: TribeContext,
+  row: PendingSettlementRow,
+  now: number,
+  transport: OwnerTransportProjector,
+): boolean {
+  if (ctx.getName() !== ANDON_OWNER || row.expires_at === null || row.expires_at > now) return false
+  const owner = transport.observe(row.recipient)
+  return !owner.owner_transport_live && owner.owner_transport_offline_since !== null
 }
 
 function pendingRequestIdForOwner(ctx: TribeContext, owner: string, attemptedId: string): string {
@@ -2039,6 +2058,8 @@ function pendingCloseAuthorityRefusal(
   ctx: TribeContext,
   owner: string,
   attemptedIds: readonly string[],
+  now: number,
+  transport: OwnerTransportProjector,
 ): PendingCloseAuthorityRefusal | undefined {
   const caller = ctx.getName()
   if (caller === owner) return undefined
@@ -2048,7 +2069,7 @@ function pendingCloseAuthorityRefusal(
       $request_id: requestId,
       $recipient: owner,
     }) as PendingSettlementRow | null
-    if (row !== null && caller !== row.sender) {
+    if (row !== null && caller !== row.sender && !offlineOwnerCloseAllowed(ctx, row, now, transport)) {
       return { caller, owner, attemptedIds, requestId, originalSender: row.sender }
     }
   }
@@ -2060,8 +2081,9 @@ function pendingCloseAuthorityRefusalResult(
   owner: string,
   attemptedIds: readonly string[],
   now: number,
+  transport: OwnerTransportProjector,
 ): ToolResult | undefined {
-  const refusal = pendingCloseAuthorityRefusal(ctx, owner, attemptedIds)
+  const refusal = pendingCloseAuthorityRefusal(ctx, owner, attemptedIds, now, transport)
   if (refusal === undefined) return undefined
   const refusalEventId = logEvent(
     ctx,
@@ -2086,7 +2108,8 @@ function pendingCloseAuthorityRefusalResult(
     `tribe.pending: refusing --close before mutation: authenticated caller ${JSON.stringify(refusal.caller)} ` +
     `is neither owner ${JSON.stringify(refusal.owner)} nor original sender ${JSON.stringify(refusal.originalSender)} ` +
     `for ball ${JSON.stringify(refusal.requestId)}. Allowed closers are the owner (manual-close) or original sender ` +
-    `(sender-withdrawn); ${remainsOpen}, and no pending row was mutated.`
+    `(sender-withdrawn), or ${ANDON_OWNER} after its structured deadline with an observed offline owner ` +
+    `(offline-owner-close); ${remainsOpen}, and no pending row was mutated.`
   return jsonResult({
     error,
     refusal: {
@@ -2371,7 +2394,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
       })
     }
     const ids = closeBatch as string[]
-    const authorityRefusal = pendingCloseAuthorityRefusalResult(ctx, owner, ids, now)
+    const authorityRefusal = pendingCloseAuthorityRefusalResult(ctx, owner, ids, now, transport)
     if (authorityRefusal !== undefined) return authorityRefusal
     const refusal = incidentCloseRefusal(ctx, owner, ids)
     if (refusal !== undefined) return jsonResult({ error: refusal })
@@ -2380,7 +2403,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
     // rollback of its peers. A genuine ERROR mid-batch is different — it
     // aborts the transaction, so nothing settles and the caller never sees a
     // `results` array. That is deliberate: on error, no ball was closed.
-    const results = ctx.db.transaction(() => ids.map((id) => closeOneBall(ctx, owner, id, now)))()
+    const results = ctx.db.transaction(() => ids.map((id) => closeOneBall(ctx, owner, id, now, transport)))()
     const closed = results.reduce((total, row) => total + row.closed, 0)
     // The batch composes its OWN summary and never borrows the single-id miss
     // template. That template's text hardcodes "closed 0 rows" and expects a
@@ -2403,11 +2426,11 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
 
   const closeId = typeof a.close === "string" && a.close.length > 0 ? a.close : null
   if (closeId) {
-    const authorityRefusal = pendingCloseAuthorityRefusalResult(ctx, owner, [closeId], now)
+    const authorityRefusal = pendingCloseAuthorityRefusalResult(ctx, owner, [closeId], now, transport)
     if (authorityRefusal !== undefined) return authorityRefusal
     const refusal = incidentCloseRefusal(ctx, owner, [closeId])
     if (refusal !== undefined) return jsonResult({ error: refusal })
-    const outcome = ctx.db.transaction(() => closeOneBall(ctx, owner, closeId, now))()
+    const outcome = ctx.db.transaction(() => closeOneBall(ctx, owner, closeId, now, transport))()
     const warning = outcome.closed === 0 ? pendingCloseMissWarning(ctx, owner, undefined, closeId) : undefined
     // The one query that ASKS ABOUT a ball: a close aimed at a conflicted id
     // carries every fact in its own result (25654), so the CLI can exit

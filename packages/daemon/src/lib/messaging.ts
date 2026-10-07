@@ -366,6 +366,8 @@ function settlementCauseVerb(cause: { settlement: BallSettlementReason; settled_
       return `answered by ${cause.settled_by}`
     case "manual-close":
       return `${cause.settled_by} closed it manually (manual-close)`
+    case "offline-owner-close":
+      return `${cause.settled_by} closed it because the owner was offline past its deadline (offline-owner-close)`
     case "sender-withdrawn":
       return `the sender withdrew it (sender-withdrawn)`
     case "gc-expired":

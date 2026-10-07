@@ -79,7 +79,13 @@ function insertExpiry(db: Database, requestId: string, ts: number): void {
 function insertSettlement(
   db: Database,
   requestId: string,
-  settlement: "answered" | "manual-close" | "incident-cleared" | "gc-expired" | "sender-withdrawn",
+  settlement:
+    | "answered"
+    | "manual-close"
+    | "incident-cleared"
+    | "gc-expired"
+    | "sender-withdrawn"
+    | "offline-owner-close",
   ts: number,
   recipient = "@chief",
   openedAt = ts - MINUTE,
@@ -201,7 +207,13 @@ describe("21714 wire retro response latency", () => {
   })
 
   it("reports every terminal settlement reason without collapsing them", () => {
-    const reasons = ["manual-close", "incident-cleared", "gc-expired", "sender-withdrawn"] as const
+    const reasons = [
+      "manual-close",
+      "incident-cleared",
+      "gc-expired",
+      "sender-withdrawn",
+      "offline-owner-close",
+    ] as const
     for (const [index, reason] of reasons.entries()) {
       const requestId = `settled-${reason}`
       insertMessage(db, {
@@ -223,9 +235,10 @@ describe("21714 wire retro response latency", () => {
       "incident-cleared": 1,
       "gc-expired": 1,
       "sender-withdrawn": 1,
+      "offline-owner-close": 1,
     })
     expect(formatMarkdown(report)).toContain(
-      "Settlements: answered=0, manual-close=1, incident-cleared=1, gc-expired=1, sender-withdrawn=1",
+      "Settlements: answered=0, manual-close=1, incident-cleared=1, gc-expired=1, sender-withdrawn=1, offline-owner-close=1",
     )
   })
 
@@ -288,6 +301,7 @@ describe("21714 wire retro response latency", () => {
         "incident-cleared": 0,
         "gc-expired": 0,
         "sender-withdrawn": 0,
+        "offline-owner-close": 0,
         open: 1,
         unknown: 1,
       },
@@ -606,6 +620,7 @@ describe("25654 one ball with two settlement facts", () => {
       "incident-cleared": 0,
       "gc-expired": 0,
       "sender-withdrawn": 0,
+      "offline-owner-close": 0,
     })
     expect(report.coordination.settlement_conflicts).toEqual([
       { request_id: "twice-req", settlements: ["manual-close", "answered"] },
