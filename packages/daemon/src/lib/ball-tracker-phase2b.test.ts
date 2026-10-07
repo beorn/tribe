@@ -409,7 +409,6 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       { to: "@agent/1", request: "req-zero-ttl", expires_in_ms: 0 },
       { to: "@agent/1", request: "req-string-ttl", expires_in_ms: "60000" },
       { to: "@agent/1", request: "req-too-long-ttl", expires_in_ms: 24 * 60 * 60 * 1_000 + 1 },
-      { to: "*", expires_in_ms: 60_000 },
       { to: "@chief", expires_in_ms: 60_000 },
     ]) {
       const res = parseToolJson(

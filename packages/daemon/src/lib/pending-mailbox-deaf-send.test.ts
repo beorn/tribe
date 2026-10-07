@@ -106,9 +106,20 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
     const contexts = names.map((name, i) => makeContext(db, stmts, `sess-${i}`, name))
     const call = (i: number, method: string, args: Record<string, unknown>) =>
       parseToolJson(handleToolCall(contexts[i]!, method, args, opts))
-    const sent = call(0, "tribe.send", { to: "*", type, message: "every owner answers", fanout: "all" })
+    const sent = call(0, "tribe.send", {
+      to: "*",
+      type,
+      message: "every owner answers",
+      fanout: "all",
+      expires_in_ms: 60_000,
+    })
     expect(sent.sent).toBe(true)
     expect(sent.request_id).toBe(sent.id)
+    expect(
+      db
+        .query("SELECT expires_at - opened_at AS ttl_ms FROM pending_request WHERE message_id = ?")
+        .all(sent.id as string),
+    ).toEqual([{ ttl_ms: 60_000 }, { ttl_ms: 60_000 }])
     for (const i of [1, 2] as const) {
       expect(stmts.selectPendingForRecipient.all({ $recipient: names[i] })).toHaveLength(1)
       for (let read = 0; read < 2; read++) {
