@@ -34,6 +34,7 @@ const { rebuildIndex, indexSessionFile } = await import("../../src/history/index
 const { cmdIndex, RECALL_INDEX_BUSY_EXIT } = await import("../../src/lib/sessions")
 const { ensureProjectSourcesIndexed, ProjectSourcesBusyError } = await import("../../src/history/project-sources")
 const { closeDb, getDb, initSchema, getIndexMeta, setIndexMeta } = await import("../../src/history/db")
+const { readIndexFreshness } = await import("../../src/lib/search")
 let root: string
 let db: Database
 let dbPath: string
@@ -652,5 +653,43 @@ describe("Recall refresh completion", () => {
     expect(stableRow).toBeDefined()
     expect(firstRow.message_count).toBe(1)
     expect(stableRow.message_count).toBe(1)
+  })
+
+  test("search during an in-progress rebuild reads the last completed stamp (25104)", async () => {
+    const projectDir = join(corpus.projects, "25104-mid")
+    mkdirSync(projectDir, { recursive: true })
+    writeFileSync(
+      join(projectDir, "25104-mid.jsonl"),
+      JSON.stringify({
+        sessionId: "25104-mid",
+        type: "user",
+        message: { content: "midrun needle" },
+        timestamp: new Date().toISOString(),
+      }) + "\n",
+    )
+    const prior = getIndexMeta(db, "last_rebuild")
+    expect(prior).toBeTruthy()
+    expect(prior).not.toBe("")
+    let mid:
+      | {
+          stamp: string | undefined
+          provenance: string
+        }
+      | undefined
+    await rebuildIndex(db, {
+      incremental: true,
+      onProgress: () => {
+        if (mid) return
+        mid = {
+          stamp: getIndexMeta(db, "last_rebuild"),
+          provenance: readIndexFreshness({}).provenance,
+        }
+      },
+    })
+    expect(mid).toBeDefined()
+    expect(mid!.stamp).toBe(prior)
+    expect(mid!.stamp).not.toBe("")
+    expect(mid!.provenance).toBe("complete")
+    expect(getIndexMeta(db, "last_rebuild")).not.toBe(prior)
   })
 })
