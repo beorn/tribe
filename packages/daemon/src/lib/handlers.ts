@@ -119,8 +119,9 @@ export type TribeCoordMethod = (typeof TRIBE_COORD_METHODS)[keyof typeof TRIBE_C
  *      but do not wake `inbox.wait` by default; callers may opt into validated
  *      `status` / `response` replies to their own tracked requests.
  *   3. Every non-self direct assign/query/request automatically opens one
- *      semantic response ball. An explicitly tracked broadcast opens one per
- *      snapshotted owner. Verdict stays actionable and wakeable without
+ *      semantic response ball. Authenticated broadcasts of these types also
+ *      track snapshotted owners; first settles on one answer, all on each owner's.
+ *      Explicit tracking applies to other eligible types. Verdict stays actionable and wakeable without
  *      automatically minting another obligation. Answer
  *      or explicitly defer tracked work with the structured MCP
  *      `reply: "<request-id>"` field (CLI: `--reply <request-id>`), never a
@@ -136,7 +137,9 @@ export const TRIBE_JOIN_PRIMER =
   "`type: assign`/`query`/`request` messages are actionable, wake `inbox.wait`, " +
   "and automatically open a semantic response ball. Direct `type: verdict` is " +
   "also actionable and wakeable, but does not automatically open another ball. " +
-  "An explicitly tracked actionable broadcast is wakeable for each recipient owner until TAKING or settlement. " +
+  "Authenticated assign/query/request broadcasts automatically track each admitted recipient. " +
+  "Broadcast fanout defaults to first: one answer settles for everyone; use all when each recipient owes an answer. " +
+  "A tracked actionable broadcast is wakeable for each recipient owner until TAKING or settlement. " +
   "Direct `notify`/`status`/`response` rows are inbox-visible and not wakeable by default; " +
   "a waiter may explicitly opt into validated `status`/`response` replies to its own tracked requests. " +
   "Answer or explicitly defer each actionable with the structured MCP " +
