@@ -19,6 +19,7 @@ import { RELOAD_REJOIN_MAX_MS, RELOAD_SLOT_MS } from "../src/lib/reload-pacing.t
 import { REEXEC_BACKOFF_BASE_MS, REEXEC_BACKOFF_MAX_MS } from "../../../plugins/claude/supervisor-policy.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 import { launchEnvironment, launchToken, writeClaimsVerifier } from "./launch-token.ts"
+import { assertSingleStatement } from "@bearly/sqlite"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DAEMON = resolve(HERE, "../../daemon/src/daemon.ts")
@@ -216,9 +217,11 @@ async function waitForSameRootReload(
   const db = new Database(dbPath, { readonly: true })
   try {
     const decisions = db.query<{ n: number }, [string]>(
-      "SELECT count(*) AS n FROM messages WHERE type = 'event.adapter_reload_decision' " +
-        "AND json_extract(content, '$.self') = ? AND json_extract(content, '$.decision') = 'no-reexec' " +
-        "AND json_extract(content, '$.daemonRoot') = json_extract(content, '$.selfRoot')",
+      assertSingleStatement(
+        "SELECT count(*) AS n FROM messages WHERE type = 'event.adapter_reload_decision' " +
+          "AND json_extract(content, '$.self') = ? AND json_extract(content, '$.decision') = 'no-reexec' " +
+          "AND json_extract(content, '$.daemonRoot') = json_extract(content, '$.selfRoot')",
+      ),
     )
     await waitFor(
       () => (decisions.get(persona)?.n ?? 0) >= occurrence,
