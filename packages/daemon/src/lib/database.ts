@@ -312,6 +312,23 @@ export function openDatabase(path: string): Database {
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room_id, ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_ts ON messages_archive(ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_seq ON messages_archive(seq)")
+  // 27882: the health projection's 7d growth window filters messages_archive by
+  // `archived_at`; unindexed, both its COUNT and its byte-SUM scanned the whole
+  // archive on every health call. The per-session last-message probe ordered by
+  // `ts` after a `sender` seek, re-sorting each sender's rows into a TEMP B-TREE.
+  db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_archived_at ON messages_archive(archived_at)")
+  db.run("CREATE INDEX IF NOT EXISTS idx_messages_sender_ts ON messages(sender, ts DESC)")
+  // `messages` has idx_messages_recipient_kind, but the archive had no
+  // recipient-led index, so the per-session inbox-lag "oldest actionable"
+  // probe walked the archive from the session's cursor — a full 872k-row scan
+  // for a seat with no archived rows at all. Partial on the attention
+  // predicate so the correlated retirement probes cannot use it (they keep
+  // their own (sender, recipient, reply/ref) indexes) and stay linear.
+  db.run(
+    assertSingleStatement(
+      `CREATE INDEX IF NOT EXISTS idx_messages_archive_attention ON messages_archive(recipient, seq) WHERE kind = 'direct' AND ${ATTENTION_PREDICATE_SQL}`,
+    ),
+  )
   // RPC expiry checks and membership departure checks probe event facts by
   // type/ref. Share the keyed access path across both consumers and tiers.
   db.run(
@@ -1447,6 +1464,42 @@ const MIGRATIONS: readonly Migration[] = [
             `CREATE INDEX IF NOT EXISTS idx_${table}_request ON ${table}(request) WHERE request IS NOT NULL`,
           ),
         )
+      }
+    },
+  },
+  {
+    version: 40,
+    name: "health-growth-and-sender-ts-indexes",
+    /**
+     * 27882: the health projection's database half reads the store on every
+     * tribe.health call. Its 7d growth window filters `messages_archive` by
+     * `archived_at` and its per-session last-message probe ordered by `ts`
+     * after a `sender` seek — neither had a supporting index, so one health call
+     * read ~1.65 GB: two full scans of the 872k-row archive (~530 MiB each) plus
+     * ~31 MiB per live session, and the per-session inbox-lag probe walked the
+     * whole archive again. Idempotent, and a failure throws out of openDatabase
+     * before the version is stamped.
+     */
+    up(db) {
+      // Legacy and partial databases may predate one of the journals; index
+      // only the tables that exist, the way the v39 request-key index does.
+      const wanted: ReadonlyArray<readonly [string, string]> = [
+        [
+          "messages_archive",
+          "CREATE INDEX IF NOT EXISTS idx_messages_archive_archived_at ON messages_archive(archived_at)",
+        ],
+        ["messages", "CREATE INDEX IF NOT EXISTS idx_messages_sender_ts ON messages(sender, ts DESC)"],
+        [
+          "messages_archive",
+          `CREATE INDEX IF NOT EXISTS idx_messages_archive_attention ON messages_archive(recipient, seq) WHERE kind = 'direct' AND ${ATTENTION_PREDICATE_SQL}`,
+        ],
+      ]
+      for (const [table, statement] of wanted) {
+        const exists = db
+          .prepare(assertSingleStatement(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`))
+          .get() as { name: string } | null
+        if (!exists) continue
+        db.run(assertSingleStatement(statement))
       }
     },
   },
