@@ -42,6 +42,9 @@
     "./stdio": "./src/stdio-adapter.ts",
     "./lib/socket": "./src/lib/socket.ts",
     "./lib/config": "./src/lib/config.ts",
+    "./lib/config-light": "./src/lib/config-light.ts",
+    "./lib/beads-path": "./src/lib/beads-path.ts",
+    "./lib/db-path": "./src/lib/db-path.ts",
     "./lib/tools-list": "./src/lib/tools-list.ts",
     "./lib/cwd-guardrail": "./src/lib/cwd-guardrail.ts",
     "./lib/transcript": "./src/lib/transcript.ts",
@@ -106,6 +109,18 @@
       "./lib/config": {
         "types": "./dist/lib/config.d.mts",
         "import": "./dist/lib/config.mjs"
+      },
+      "./lib/config-light": {
+        "types": "./dist/lib/config-light.d.mts",
+        "import": "./dist/lib/config-light.mjs"
+      },
+      "./lib/beads-path": {
+        "types": "./dist/lib/beads-path.d.mts",
+        "import": "./dist/lib/beads-path.mjs"
+      },
+      "./lib/db-path": {
+        "types": "./dist/lib/db-path.d.mts",
+        "import": "./dist/lib/db-path.mjs"
       },
       "./lib/tools-list": {
         "types": "./dist/lib/tools-list.d.mts",
@@ -216,6 +231,9 @@
       "src/stdio-adapter.ts",
       "src/lib/socket.ts",
       "src/lib/config.ts",
+      "src/lib/config-light.ts",
+      "src/lib/beads-path.ts",
+      "src/lib/db-path.ts",
       "src/lib/tools-list.ts",
       "src/lib/cwd-guardrail.ts",
       "src/lib/transcript.ts",
