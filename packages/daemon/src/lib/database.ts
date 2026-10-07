@@ -1759,7 +1759,22 @@ function trackedAttentionPredicateSql(ownerParameter = "$name"): string {
   return `p.recipient = ${ownerParameter}
     AND p.request_kind != 'incident'
     AND COALESCE(m.kind, a.kind) IN ('direct', 'broadcast')
-    AND ${untakenPendingBallPredicateSql("p", TRACKED_ATTENTION_SEQUENCE_SQL)}`
+    AND ${untakenPendingBallPredicateSql("p", TRACKED_ATTENTION_SEQUENCE_SQL)}
+    AND ${trackedResponseCursorGateSql(ownerParameter)}`
+}
+
+/** 27959 — 22203 keeps an untaken ball visible past the mailbox cursor on
+ * purpose, because its recipient can take or settle it. A response's ROW is
+ * different: the response IS the answer, so once a read has returned its body
+ * (the drain, the MCP fetch), presenting the row again tells the seat nothing.
+ * It therefore takes the untracked branch's cursor gate. The obligation is
+ * untouched: a response whose sender tracked it keeps its ball in pending_balls
+ * until the recipient settles it by replying, and requests/queries/assigns keep 22203's
+ * exemption in full. */
+function trackedResponseCursorGateSql(ownerParameter: string): string {
+  return `(COALESCE(m.type, a.type) != 'response'
+    OR ${TRACKED_ATTENTION_SEQUENCE_SQL} > COALESCE(
+      (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ${ownerParameter}), 0))`
 }
 
 const TRACKED_ACTIONABLE_TYPE_SQL = `(COALESCE(m.type, a.type) IN (${ACTIONABLE_TYPES_SQL})

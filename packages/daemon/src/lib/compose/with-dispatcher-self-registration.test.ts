@@ -1687,16 +1687,20 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(status).toMatchObject({ unread_count: 1, latest_type: "response" })
   })
 
-  /** @failure 27959: a settled attention-required response stays actionable after the
-   * seat's own CLI attention read, so the seat's declared idle wait returns at once
-   * instead of sleeping. The settle must attach to the seat's own launch-scoped read
-   * (status and wait agree); a row that needs a reply keeps its ball, unchanged.
+  /** @failure 27959: a settled attention-required response must not survive a read that
+   * returned its content. The drain returns the row's body and acknowledges the mailbox, so
+   * a response that is still actionable afterwards sits in selectAttention's TRACKED branch,
+   * whose exemption (22203) exists only for balls the recipient can take or settle. A response
+   * is the answer itself, so once a read has returned its body the row must stop being
+   * presented; if its sender tracked it, its ball stays in pending_balls until the recipient settles it by replying.
+   * @cto 2026-10-07T11:43Z: (A) refused
+   * (retiring on a count-only read drops an answer nobody read); the RED belongs on the drain.
    * @level l2
-   * @consumer every seat whose /do loop reads `tribe inbox-status --json` then waits */
-  it("settles an attention-required response on the seat's own launch-scoped read, agreeing with inbox-wait (27959)", async () => {
+   * @consumer every seat whose /do loop drains its mailbox and then reads status */
+  it("retires an attention-required response a drain returned, and status and wait agree afterwards (27959)", async () => {
     const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
     cleanup = harness.dispose
-    const launchId = "settle-response-launch"
+    const launchId = "settle-response-drain-launch"
     const token = managedToken("@agent/reader", launchId)
     const { connId } = harness.connectClient()
     await harness.register(connId, {
@@ -1707,50 +1711,99 @@ describe("dispatcher bounded mailbox drain", () => {
       launchParentPid: process.pid,
       idToken: token,
     })
-    const read = async (id: string) =>
-      parseResult<{ session: string; unread_count: number; latest_type: string | null }>(
-        await harness.dispatcher.handleRequest(
-          {
-            jsonrpc: "2.0",
-            id,
-            method: "cli_inbox_status_by_launch_v1",
-            params: { launch_id: launchId, id_token: token },
-          },
-          connId,
-        ),
-      )
-    const wait = async (id: string) =>
-      parseResult<InboxWaitResult>(
-        await harness.dispatcher.handleRequest(
-          {
-            jsonrpc: "2.0",
-            id,
-            method: "cli_inbox_wait_by_launch_v1",
-            params: { launch_id: launchId, id_token: token, timeout_ms: 1 },
-          },
-          connId,
-        ),
-      )
+    const call = async <T>(id: string, method: string, params: Record<string, unknown>) =>
+      parseResult<T>(await harness.dispatcher.handleRequest({ jsonrpc: "2.0", id, method, params }, connId))
+    const launchParams = { launch_id: launchId, id_token: token }
+    const status = () =>
+      call<{ unread_count: number }>("post-drain-status", "cli_inbox_status_by_launch_v1", launchParams)
 
     harness.sendAttentionResponse("@agent/reader", "the requested verdict is ready")
+    expect(
+      (await call<{ unread_count: number }>("pre-drain-status", "cli_inbox_status_by_launch_v1", launchParams))
+        .unread_count,
+    ).toBe(1)
 
-    // Counted unread until the seat's own first attention read, counted read after it.
-    expect(await read("response-before-first-read")).toMatchObject({
-      session: "@agent/reader",
-      unread_count: 1,
-      latest_type: "response",
+    // The drain returns the row's body and acknowledges the mailbox on its behalf.
+    const drained = await call<InboxDrainResult>("the-drain", "cli_inbox_drain", { limit: 10 })
+    expect(drained.events.map((event) => event.content)).toContain("the requested verdict is ready")
+
+    // ...so a response nobody needs to answer is no longer actionable.
+    expect((await status()).unread_count).toBe(0)
+
+    const waited = await call<InboxWaitResult>("post-drain-wait", "cli_inbox_wait_by_launch_v1", {
+      ...launchParams,
+      timeout_ms: 1,
     })
-    expect((await read("response-after-first-read")).unread_count).toBe(0)
+    expect(waited).toMatchObject({ timed_out: true, unread_count: 0 })
+    expect(waited.attention.actionable_unread).toEqual([])
+  })
 
-    // inbox-status and inbox-wait agree: a settled response is not a wake.
-    const settled = await wait("wait-after-settled-response")
-    expect(settled).toMatchObject({ timed_out: true, unread_count: 0 })
-    expect(settled.attention.actionable_unread).toEqual([])
+  /** @failure 27959 (tracked variant): the specimen response was sent WITH request tracking, so
+   * it opens a ball and sits in selectAttention's TRACKED branch, which ignores the mailbox cursor
+   * on purpose (22203). That exemption exists for balls the recipient can take or settle; a
+   * response's ROW is different because the response IS the answer — once a content-delivering
+   * read (the drain) has returned its body, the row must stop being presented, while its ball
+   * (if the sender tracked it) stays in pending_balls until the recipient settles it by replying.
+   * @cto 2026-10-07T11:43Z: (B) is the cure.
+   * @level l2
+   * @consumer a seat whose correspondents track their replies */
+  it("does not let a response sent with request tracking survive the drain that returned it (27959)", async () => {
+    const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
+    cleanup = harness.dispose
+    const launchId = "settle-tracked-response-launch"
+    const token = managedToken("@agent/reader", launchId)
+    const { connId } = harness.connectClient()
+    await harness.register(connId, {
+      name: "@agent/reader",
+      pid: liveHolderPid,
+      project: "/tmp/km",
+      launchId,
+      launchParentPid: process.pid,
+      idToken: token,
+    })
+    harness.addPendingClient("conn-sender")
+    await harness.register("conn-sender", {
+      name: "@agent/sender",
+      pid: liveHolderPid + 7,
+      project: "/tmp/km",
+      identitySid: "sid-sender",
+    })
+    const sent = parseResult<{ structuredContent: SendResult }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "send-tracked-response",
+          method: "tribe.send",
+          params: { to: "@agent/reader", type: "response", message: "tracked answer", request: true },
+        },
+        "conn-sender",
+      ),
+    ).structuredContent
+    expect(sent.sent).toBe(true)
 
-    // A row that needs a reply keeps its ball until it is replied.
-    harness.sendActionable("@agent/reader", "please reply to this")
-    expect((await read("request-stays-actionable-1")).unread_count).toBe(1)
-    expect((await read("request-stays-actionable-2")).unread_count).toBe(1)
+    const call = async <T>(id: string, method: string, params: Record<string, unknown>) =>
+      parseResult<T>(await harness.dispatcher.handleRequest({ jsonrpc: "2.0", id, method, params }, connId))
+    const launchParams = { launch_id: launchId, id_token: token }
+
+    expect(
+      (await call<{ unread_count: number }>("tracked-pre-drain-status", "cli_inbox_status_by_launch_v1", launchParams))
+        .unread_count,
+    ).toBe(1)
+    const drained = await call<InboxDrainResult>("tracked-drain", "cli_inbox_drain", { limit: 10 })
+    expect(drained.events.map((event) => event.content)).toContain("tracked answer")
+
+    expect(
+      (await call<{ unread_count: number }>("tracked-post-drain-status", "cli_inbox_status_by_launch_v1", launchParams))
+        .unread_count,
+    ).toBe(0)
+    const waited = await call<InboxWaitResult>("tracked-post-drain-wait", "cli_inbox_wait_by_launch_v1", {
+      ...launchParams,
+      timeout_ms: 1,
+    })
+    expect(waited).toMatchObject({ timed_out: true, unread_count: 0 })
+    expect(waited.attention.actionable_unread).toEqual([])
+    // The ball itself is NOT retired by the read: it stays open until the recipient settles it by replying.
+    expect(waited.attention.pending_balls.length).toBeGreaterThan(0)
   })
 
   it("reports unauthenticated when an unregistered caller presents the wrong operator capability", async () => {
