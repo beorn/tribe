@@ -759,3 +759,203 @@ describe("Prompt hook latency reader & paging (25304)", () => {
     db.close()
   })
 })
+
+/**
+ * 27712: the hourly reading admits ONE population — a recognized terminal matched to its start — and nothing else.
+ *
+ * @failure A non-terminal warning is counted as a run, an unrecognized producer outcome is silently dropped (so a
+ *   rename turns completions into kills), a terminal just past the hour boundary creates a false kill, an orphan
+ *   timing fabricates a zero, and out-of-window steps (the 29,638 ms September specimen) contaminate the hour.
+ * @level   l2 — the reader's own admission rules over real producer row shapes.
+ * @consumer @ag/tribe/27712-prompt-hook-recall-fallback-over-budget-again
+ */
+describe("27712 terminal cohort, window boundaries and exclusions", () => {
+  let tempDir: string
+  let logPath: string
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "hook-latency-27712-"))
+    logPath = join(tempDir, "injection.jsonl")
+  })
+
+  afterEach(() => {
+    safeRemoveSync(tempDir, { within: tmpdir() })
+    vi.restoreAllMocks()
+  })
+
+  const hookRow = (fields: Record<string, unknown>): string =>
+    JSON.stringify({ namespace: "recall:hook:prompt", level: "info", ...fields })
+
+  const startRow = (pid: number, session: string, at: number): string =>
+    hookRow({ pid, session, msg: "start", start_time: at, ts: new Date(at).toISOString() })
+
+  const terminalRow = (
+    pid: number,
+    session: string,
+    at: number,
+    msg: string,
+    extra: Record<string, unknown> = {},
+  ): string => hookRow({ pid, session, msg, elapsed_ms: at, ts: new Date(at).toISOString(), ...extra })
+
+  const warnSpy = (): string[] => {
+    const lines: string[] = []
+    vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      lines.push(args.map((a) => String(a)).join(" "))
+    })
+    return lines
+  }
+
+  test("a terminal just after the hour boundary closes its start: no kill in H, one completion with its true elapsed in H+1", () => {
+    const boundary = new Date("2026-10-05T10:00:00.000Z").getTime()
+    writeFileSync(
+      logPath,
+      [
+        startRow(401, "sess-boundary", boundary - 500),
+        terminalRow(401, "sess-boundary", boundary + 400, "library ok", { elapsed_ms: 900 }),
+      ].join("\n") + "\n",
+      "utf8",
+    )
+
+    const thisHour = readHookLatencyStats(logPath, {
+      windowStartMs: boundary - 3600_000,
+      windowEndMs: boundary,
+      budgetMs: 1500,
+      timeoutMs: 30_000,
+    })
+    expect(thisHour.killCount, "a late terminal must not read as a boundary kill").toBe(0)
+    expect(thisHour.completedRuns).toBe(0)
+
+    const nextHour = readHookLatencyStats(logPath, {
+      windowStartMs: boundary,
+      windowEndMs: boundary + 3600_000,
+      budgetMs: 1500,
+      timeoutMs: 30_000,
+    })
+    expect(nextHour.completedRuns).toBe(1)
+    expect(nextHour.maxMs, "the completion keeps the run's true elapsed, not the row delta").toBe(900)
+  })
+
+  test("a warning never closes a start, never creates a completion and never feeds the step maxima", () => {
+    const t0 = new Date("2026-10-05T12:00:00.000Z").getTime()
+    writeFileSync(
+      logPath,
+      [
+        startRow(402, "sess-warned", t0),
+        hookRow({ msg: "step skipped rather than waited on", elapsed_ms: 100, steps: { recall: 90 } }),
+        hookRow({ msg: "index writer busy — recall enrichment skipped", elapsed_ms: 120, steps: { index: 110 } }),
+      ].join("\n") + "\n",
+      "utf8",
+    )
+
+    const stats = readHookLatencyStats(logPath, {
+      windowStartMs: t0 - 60_000,
+      windowEndMs: t0 + 60_000,
+      budgetMs: 1500,
+      timeoutMs: 30_000,
+    })
+    expect(stats.completedRuns, "warnings are inert, never a run").toBe(0)
+    expect(stats.killCount, "the start stays open and times out").toBe(1)
+    expect(stats.stepMaxMs, "an incidental row's steps cannot join the hour").toEqual({})
+    expect(stats.slowestStepOverall).toBeNull()
+  })
+
+  test("a terminal-shaped row with an unrecognized outcome is logged by name and never admitted as a completion", () => {
+    const t0 = new Date("2026-10-05T13:00:00.000Z").getTime()
+    const warnings = warnSpy()
+    writeFileSync(
+      logPath,
+      [
+        startRow(403, "sess-unknown", t0),
+        terminalRow(403, "sess-unknown", t0 + 800, "library degraded", { elapsed_ms: 800 }),
+      ].join("\n") + "\n",
+      "utf8",
+    )
+
+    const stats = readHookLatencyStats(logPath, {
+      windowStartMs: t0 - 60_000,
+      windowEndMs: t0 + 60_000,
+      budgetMs: 1500,
+      timeoutMs: 30_000,
+    })
+    expect(stats.completedRuns).toBe(0)
+    expect(warnings.join("\n"), "a new producer terminal must be visible, not a silent kill").toContain(
+      "library degraded",
+    )
+  })
+
+  test("an orphan terminal without elapsed is excluded and named with path, PID and session — never a fabricated zero", () => {
+    const t0 = new Date("2026-10-05T14:00:00.000Z").getTime()
+    const warnings = warnSpy()
+    writeFileSync(
+      logPath,
+      [hookRow({ pid: 404, session: "sess-orphan", msg: "library ok", ts: new Date(t0 + 100).toISOString() })].join(
+        "\n",
+      ) + "\n",
+      "utf8",
+    )
+
+    const stats = readHookLatencyStats(logPath, {
+      windowStartMs: t0 - 60_000,
+      windowEndMs: t0 + 60_000,
+      budgetMs: 1500,
+      timeoutMs: 30_000,
+    })
+    expect(stats.completedRuns, "an excluded row does not silently shrink n by being counted").toBe(0)
+    expect(stats.totalRuns).toBe(0)
+    expect(stats.maxMs).toBeNull()
+    expect(stats.avgMs).toBeNull()
+    const logged = warnings.join("\n")
+    expect(logged).toContain(logPath)
+    expect(logged).toContain("404")
+    expect(logged).toContain("sess-orphan")
+  })
+
+  test("step maxima derive only from the completed cohort: an out-of-window terminal's steps cannot contaminate the hour", () => {
+    const t0 = new Date("2026-10-05T15:00:00.000Z").getTime()
+    writeFileSync(
+      logPath,
+      [
+        // The September 23 shape: a real terminal with a 29,638 ms step, far outside this hour.
+        terminalRow(405, "sess-september", t0 - 24 * 3600_000, "library ok", {
+          elapsed_ms: 29_638,
+          steps: { recall: 29_638 },
+        }),
+        startRow(406, "sess-current", t0),
+        terminalRow(406, "sess-current", t0 + 450, "library ok", { elapsed_ms: 450, steps: { stdin: 5, recall: 445 } }),
+      ].join("\n") + "\n",
+      "utf8",
+    )
+
+    const stats = readHookLatencyStats(logPath, {
+      windowStartMs: t0 - 60_000,
+      windowEndMs: t0 + 60_000,
+      budgetMs: 1500,
+      timeoutMs: 30_000,
+    })
+    expect(stats.completedRuns).toBe(1)
+    expect(stats.stepMaxMs).toEqual({ stdin: 5, recall: 445 })
+    expect(stats.slowestStepOverall).toBe("recall")
+    expect(stats.maxMs).toBe(450)
+  })
+
+  test("a matched terminal without elapsed_ms uses the start-to-terminal timestamp delta", () => {
+    const t0 = new Date("2026-10-05T16:00:00.000Z").getTime()
+    writeFileSync(
+      logPath,
+      [
+        startRow(407, "sess-delta", t0),
+        hookRow({ pid: 407, session: "sess-delta", msg: "library ok", ts: new Date(t0 + 700).toISOString() }),
+      ].join("\n") + "\n",
+      "utf8",
+    )
+
+    const stats = readHookLatencyStats(logPath, {
+      windowStartMs: t0 - 60_000,
+      windowEndMs: t0 + 60_000,
+      budgetMs: 1500,
+      timeoutMs: 30_000,
+    })
+    expect(stats.completedRuns).toBe(1)
+    expect(stats.maxMs).toBe(700)
+  })
+})

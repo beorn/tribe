@@ -104,7 +104,7 @@ The session hooks never write the index: run `recall index --incremental` outsid
 
 Every search result envelope includes top-level `provenance`: `complete`, `stale`, `missing`, or `unknown`. Positive stale hits remain available but the command exits 3. A degraded empty JSON response uses `results: null` and `total: null`; human output labels the count `UNPROVEN`. Only a `complete` empty response uses `results: []`, `total: 0`, and exit 0.
 
-The same threshold gates search classification and SessionStart's background index rebuild.
+The same threshold gates search classification.
 
 ## When to use
 

@@ -5,11 +5,12 @@
  *          step before running in-process recall (@ag/tribe/25298, @cto ruling).
  * @level     l2 — the real `cmdHook`; hookRecall is mocked to isolate hook logging, steps, and outcomes.
  */
-import { mkdtempSync, realpathSync } from "node:fs"
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterAll, afterEach, describe, expect, test, vi } from "vitest"
+import { readHookLatencyStats } from "../../../daemon/src/lib/hook-latency-reader.ts"
 
 type Row = { namespace: string; level: string; msg: unknown; data: unknown }
 const fake = vi.hoisted(() => ({
@@ -21,6 +22,11 @@ const fake = vi.hoisted(() => ({
 fake.home = mkdtempSync(join(realpathSync(tmpdir()), "recall-hook-daemon-"))
 
 vi.mock("os", async (original) => ({ ...(await original<typeof import("os")>()), homedir: () => fake.home }))
+vi.mock("fs", async (original) => ({
+  ...(await original<typeof import("fs")>()),
+  // reportHookFailure writes the FATAL reason to fd 2 by design; keep the suite's output clean.
+  writeSync: () => 0,
+}))
 vi.mock("loggily", async (original) => {
   const actual = await original<typeof import("loggily")>()
   const recorder = (namespace: string): unknown =>
@@ -148,5 +154,81 @@ describe("prompt hook executes in-process recall without daemon dial (25298)", (
     // No daemon-related log rows exist
     const daemonRows = fake.rows.filter((r) => String(r.msg).includes("daemon"))
     expect(daemonRows).toHaveLength(0)
+  })
+
+  // ── 27712 seam: the reader's admission rules over rows the REAL cmdHook produced ────────────────────
+
+  const seamLogPath = join(fake.home, "hook-latency-27712-seam.jsonl")
+
+  /** Serialize a captured producer row into the exact JSONL shape loggily's file sink writes. */
+  const serializeProducerRow = (row: Row): string => {
+    const props = row.data && typeof row.data === "object" ? (row.data as Record<string, unknown>) : {}
+    const msg = typeof row.msg === "string" ? row.msg : typeof row.data === "string" ? row.data : String(row.msg)
+    const tsMs = typeof props.start_time === "number" ? props.start_time : Date.now()
+    return JSON.stringify({
+      ts: new Date(tsMs).toISOString(),
+      producer: "@bearly/injection-envelope",
+      pid: 4242,
+      namespace: row.namespace,
+      level: row.level,
+      msg,
+      ...props,
+    })
+  }
+
+  /** Feed the rows cmdHook just produced to the reader, and return the reader's own log lines. */
+  const feedProducerRowsToReader = () => {
+    const producerRows = fake.rows.filter((row) => row.namespace === "recall:hook:prompt")
+    expect(producerRows.length).toBeGreaterThan(0)
+    writeFileSync(seamLogPath, producerRows.map(serializeProducerRow).join("\n") + "\n", "utf8")
+    fake.rows = []
+    const stats = readHookLatencyStats(seamLogPath, {
+      windowStartMs: Date.now() - 3_600_000,
+      windowEndMs: Date.now() + 1000,
+      budgetMs: 1500,
+    })
+    return { stats, readerRows: [...fake.rows] }
+  }
+
+  test("27712 seam: a real success admits exactly ONE completion and no warning row", async () => {
+    fake.recallResult = {
+      skipped: false,
+      skippedSteps: { project_sources: BUSY },
+      hookOutput: { hookSpecificOutput: { additionalContext: "seam context" } },
+    }
+    vi.spyOn(process.stdin, Symbol.asyncIterator).mockImplementation(async function* () {
+      yield Buffer.from(JSON.stringify({ prompt: "seam prompt", cwd: fake.home }))
+      return undefined
+    })
+    vi.spyOn(process, "exit").mockImplementation((() => undefined) as never)
+    vi.spyOn(console, "log").mockImplementation(() => {})
+
+    await cmdHook()
+
+    const { stats, readerRows } = feedProducerRowsToReader()
+    // The `library ok` terminal closes the start; the warning row carries steps but is inert.
+    expect(stats.completedRuns).toBe(1)
+    expect(stats.totalRuns).toBe(1)
+    expect(stats.killCount).toBe(0)
+    expect(stats.stepMaxMs).toHaveProperty("recall")
+    expect(readerRows, "no orphan/unrecognized noise for a well-formed producer run").toHaveLength(0)
+  })
+
+  test("27712 seam: a real FATAL row is a RECOGNIZED terminal, never an unrecognized outcome", async () => {
+    vi.spyOn(process.stdin, Symbol.asyncIterator).mockImplementation(async function* () {
+      yield Buffer.from("this is not json")
+      return undefined
+    })
+    vi.spyOn(process, "exit").mockImplementation((() => undefined) as never)
+
+    await cmdHook()
+
+    const { stats, readerRows } = feedProducerRowsToReader()
+    // The FATAL row has no start, so it is excluded — never a fabricated completion.
+    expect(stats.completedRuns).toBe(0)
+    expect(stats.totalRuns).toBe(0)
+    const readerText = readerRows.map((row) => String(row.msg)).join("\n")
+    expect(readerText, "FATAL labels are in the closed terminal list").not.toContain("unrecognized terminal outcome")
+    expect(readerText, "the start-less terminal is named, not silently dropped").toContain("no matching start")
   })
 })

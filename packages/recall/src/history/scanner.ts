@@ -221,11 +221,20 @@ export interface ReviewOptions {
    * round-trips. Opt back in with `recall status --bench`.
    */
   skipLlm?: boolean
+  /**
+   * Skip the four FTS search benchmarks (the `"bug fix"`, `"inline edit"`,
+   * `"test" (1d)` and `plans only` searches). Independent of {@link skipLlm}:
+   * a caller that wants index/hook diagnostics but not the search probes sets
+   * this. Skipping yields an EMPTY `searchBenchmarks` plus one explicit
+   * "skipped" recommendation — never a zero result read as an empty index.
+   */
+  skipSearchBenchmarks?: boolean
 }
 
 export async function reviewMemorySystem(projectRoot: string, opts: ReviewOptions = {}): Promise<ReviewResult> {
   const startTime = Date.now()
   const skipLlm = opts.skipLlm ?? false
+  const skipSearchBenchmarks = opts.skipSearchBenchmarks ?? false
   log(`review: starting diagnostics for ${projectRoot}${skipLlm ? " (bounded — LLM stages skipped)" : ""}`)
   const recommendations: string[] = []
 
@@ -322,40 +331,47 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
     },
   ]
 
-  log(`review: running ${benchmarkQueries.length} search benchmarks...`)
   const searchBenchmarks: ReviewResult["searchBenchmarks"] = []
-  for (const bq of benchmarkQueries) {
-    try {
-      const bench = runSearchBenchmark(bq.query, bq.label, bq.since, bq.types)
-      searchBenchmarks.push(bench)
-    } catch {
-      // If a benchmark query fails (e.g. empty FTS), record zeros
-      searchBenchmarks.push({
-        query: bq.label,
-        resultCount: 0,
-        latencyMs: 0,
-        avgSnippetLength: 0,
-        uniqueSessions: 0,
-        hasTitles: false,
-      })
+  let benchmarkFailures = 0
+  if (skipSearchBenchmarks) {
+    // Bounded mode: the four searches are skipped and SAID so — an empty array must never read as "no results".
+    log(`review: skipping ${benchmarkQueries.length} search benchmarks (bounded mode)`)
+    recommendations.push(
+      `Search benchmarks skipped (bounded mode) — all ${benchmarkQueries.length} FTS searches were not run; use \`recall status --bench\` to run them`,
+    )
+  } else {
+    log(`review: running ${benchmarkQueries.length} search benchmarks...`)
+    for (const bq of benchmarkQueries) {
+      try {
+        searchBenchmarks.push(runSearchBenchmark(bq.query, bq.label, bq.since, bq.types))
+      } catch (error) {
+        // NO SILENT ZEROS: a failed query names itself and its error, contributes NO row, and (below) withholds
+        // the search-quality verdict instead of counting as an empty result.
+        benchmarkFailures++
+        const detail = error instanceof Error ? error.message : String(error)
+        log(`review: search benchmark ${bq.label} FAILED: ${detail}`)
+        recommendations.push(`Search benchmark ${bq.label} failed: ${detail} — it is excluded, not counted as 0`)
+      }
     }
   }
 
-  // Search quality recommendations
-  const totalResults = searchBenchmarks.reduce((sum, b) => sum + b.resultCount, 0)
-  if (totalResults === 0) {
-    recommendations.push("All benchmark queries returned 0 results — index may be empty or corrupt")
-  } else {
-    const allFromOneSess = searchBenchmarks.every((b) => b.uniqueSessions <= 1 && b.resultCount > 0)
-    if (allFromOneSess) {
-      recommendations.push("Results only from 1 session per query — index may be incomplete")
-    }
-    const avgLatency = searchBenchmarks.reduce((sum, b) => sum + b.latencyMs, 0) / searchBenchmarks.length
-    const diverseSessions = searchBenchmarks.reduce((sum, b) => sum + b.uniqueSessions, 0)
-    if (avgLatency < 500 && totalResults > 0 && diverseSessions > 2) {
-      recommendations.push(
-        `Search quality is good — ${totalResults} results across ${diverseSessions} sessions in ${Math.round(avgLatency)}ms avg`,
-      )
+  // Search quality recommendations — computed only over a complete, successful cohort.
+  if (!skipSearchBenchmarks && benchmarkFailures === 0 && searchBenchmarks.length > 0) {
+    const totalResults = searchBenchmarks.reduce((sum, b) => sum + b.resultCount, 0)
+    if (totalResults === 0) {
+      recommendations.push("All benchmark queries returned 0 results — index may be empty or corrupt")
+    } else {
+      const allFromOneSess = searchBenchmarks.every((b) => b.uniqueSessions <= 1 && b.resultCount > 0)
+      if (allFromOneSess) {
+        recommendations.push("Results only from 1 session per query — index may be incomplete")
+      }
+      const avgLatency = searchBenchmarks.reduce((sum, b) => sum + b.latencyMs, 0) / searchBenchmarks.length
+      const diverseSessions = searchBenchmarks.reduce((sum, b) => sum + b.uniqueSessions, 0)
+      if (avgLatency < 500 && totalResults > 0 && diverseSessions > 2) {
+        recommendations.push(
+          `Search quality is good — ${totalResults} results across ${diverseSessions} sessions in ${Math.round(avgLatency)}ms avg`,
+        )
+      }
     }
   }
 

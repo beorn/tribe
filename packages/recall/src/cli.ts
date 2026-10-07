@@ -168,7 +168,10 @@ program
   .command("status")
   .description("Dashboard: activity, stats, index health, hook config (bounded — no LLM calls by default)")
   .option("--json", "Output as JSON")
-  .option("--bench", "Also run the LLM synthesis test + multi-model race benchmark (slow)")
+  .option(
+    "--bench",
+    'Also run the four FTS search benchmarks ("bug fix", "inline edit", "test" (1d), plans only) plus the LLM synthesis test and multi-model race (slow)',
+  )
   .action(async (opts: { json?: boolean; bench?: boolean }) => {
     await cmdStatus(opts)
   })

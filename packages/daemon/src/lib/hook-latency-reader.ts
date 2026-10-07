@@ -6,10 +6,40 @@
  * detects killed runs (started and never finished within timeout),
  * and pages the hook owner when p90 exceeds budget or any run was killed.
  *
+ * Admission (27712): a run enters the hour only when a RECOGNIZED terminal is matched to its start and the
+ * terminal's timestamp lands in the half-open [windowStartMs, windowEndMs). Warnings are inert; an unknown
+ * terminal-shaped outcome is logged by name; an orphan or an unusable timing is excluded, never a fabricated zero;
+ * a start whose terminal lands after the window is a completion in the NEXT hour, never a boundary kill.
+ *
  * @consumer @ag/tribe/25304-nothing-reads-the-prompt-hooks-latency-log-so-a-30-s-kill-is-found-by-the-operator
  */
 import { existsSync, readFileSync } from "node:fs"
+import { createLogger } from "loggily"
 import type { TribeClientApi } from "./plugin-api.ts"
+
+const log = createLogger("tribe:hook-latency")
+
+/**
+ * The producer's terminal outcomes, a CLOSED list by ruling (@ag/tribe/27712, operator ruling 2044). A row that
+ * looks like an outcome but is not named here is logged by name and never admitted: a producer rename must not
+ * silently turn completions into kills.
+ */
+const TERMINAL_OUTCOMES = new Set([
+  "library ok",
+  "library skipped",
+  "no prompt in stdin",
+  "FATAL: invalid JSON on stdin",
+  "FATAL: unhandled error",
+  // Historical daemon-path outcomes: old rows still close their start.
+  "daemon ok",
+  "daemon skipped",
+])
+
+/**
+ * The producer's own non-terminal narration (recall/src/lib/hooks.ts `warnSkippedSteps`). Inert by contract: it
+ * never closes a start, never contributes steps, and is not an unrecognized outcome.
+ */
+const NON_TERMINAL_OUTCOMES = new Set(["step skipped rather than waited on"])
 
 export interface KilledRun {
   session: string
@@ -196,68 +226,97 @@ export function readHookLatencyStats(logPath: string, options?: ReadHookLatencyO
   }
 
   const lines = content.split("\n")
+  // Every start is collected, not only the in-window ones: a terminal that lands after windowEnd still closes its
+  // start, so it is never read as a boundary kill and counts as a completion in the hour it lands in (27712).
   const openRuns: OpenRun[] = []
-  const completedRuns: CompletedRun[] = []
-  const stepMaxMs: Record<string, number> = {}
+  const matchedRuns: Array<{ start: OpenRun; terminal: ParsedHookEntry }> = []
+  const unrecognizedOutcomes: ParsedHookEntry[] = []
 
   for (const line of lines) {
     const entry = parseHookLogEntry(line)
     if (!entry) continue
 
     if (entry.msg === "start") {
-      if (entry.tsNum >= windowStartMs && entry.tsNum <= windowEndMs) {
-        openRuns.push({
-          pid: entry.pid,
-          session: entry.session,
-          startTime: entry.tsNum,
-          ts: entry.tsStr,
-        })
-      }
-    } else {
-      let matchedIndex = -1
-      if (entry.pid !== undefined) {
-        matchedIndex = openRuns.findIndex((r) => r.pid === entry.pid)
-      }
-      if (matchedIndex === -1 && entry.session !== "unknown") {
-        matchedIndex = openRuns.findIndex((r) => r.session === entry.session)
-      }
+      openRuns.push({
+        pid: entry.pid,
+        session: entry.session,
+        startTime: entry.tsNum,
+        ts: entry.tsStr,
+      })
+      continue
+    }
 
-      if (matchedIndex !== -1) {
-        const matched = openRuns.splice(matchedIndex, 1)[0]
-        if (matched !== undefined) {
-          const effectiveElapsed = entry.elapsedMs ?? entry.tsNum - matched.startTime
-          completedRuns.push({
-            session: matched.session,
-            ts: matched.ts,
-            startTime: matched.startTime,
-            elapsedMs: effectiveElapsed,
-            steps: entry.steps,
-            pid: matched.pid,
-          })
-        }
-      } else if (entry.tsNum >= windowStartMs && entry.tsNum <= windowEndMs) {
-        const effectiveElapsed = entry.elapsedMs ?? 0
-        completedRuns.push({
-          session: entry.session,
-          ts: entry.tsStr,
-          startTime: entry.tsNum - effectiveElapsed,
-          elapsedMs: effectiveElapsed,
-          steps: entry.steps,
-          pid: entry.pid,
-        })
-      }
+    // Non-terminal narration and empty rows are inert: they never close a start.
+    if (entry.msg === "" || NON_TERMINAL_OUTCOMES.has(entry.msg)) continue
 
-      if (entry.steps) {
-        for (const [stepName, duration] of Object.entries(entry.steps)) {
-          stepMaxMs[stepName] = Math.max(stepMaxMs[stepName] ?? 0, duration)
-        }
+    // A row that looks like an outcome but is not named in the closed list is said out loud, never a silent kill.
+    if (!TERMINAL_OUTCOMES.has(entry.msg)) {
+      unrecognizedOutcomes.push(entry)
+      continue
+    }
+
+    let matchedIndex = -1
+    if (entry.pid !== undefined) {
+      matchedIndex = openRuns.findIndex((r) => r.pid === entry.pid)
+    }
+    if (matchedIndex === -1 && entry.session !== "unknown") {
+      matchedIndex = openRuns.findIndex((r) => r.session === entry.session)
+    }
+    if (matchedIndex === -1) {
+      // An orphan terminal in THIS hour is excluded from latency — never a fabricated zero — and named with where it
+      // came from. One outside the window belongs to no hour here and is out of scope, not silently dropped.
+      if (entry.tsNum >= windowStartMs && entry.tsNum < windowEndMs) {
+        log.warn?.(
+          `prompt hook latency: excluded terminal with no matching start (path=${logPath}, pid=${entry.pid ?? "unknown"}, session=${entry.session}, msg="${entry.msg}")`,
+        )
+      }
+      continue
+    }
+    const matched = openRuns.splice(matchedIndex, 1)[0]
+    if (matched !== undefined) matchedRuns.push({ start: matched, terminal: entry })
+  }
+
+  for (const entry of unrecognizedOutcomes) {
+    // Same scope rule: only an outcome that lands in this hour is this hour's to report; an un-timestamped or
+    // out-of-window row belongs to no hour and is not silently read as an event either way.
+    if (entry.tsNum < windowStartMs || entry.tsNum >= windowEndMs) continue
+    log.warn?.(
+      `prompt hook latency: unrecognized terminal outcome "${entry.msg}" (path=${logPath}, pid=${entry.pid ?? "unknown"}, session=${entry.session})`,
+    )
+  }
+
+  // Completions and step maxima share ONE admission: a recognized terminal, matched to its start, whose terminal
+  // timestamp lands in this half-open hour. An out-of-window terminal's steps cannot contaminate the hour.
+  const completedRuns: CompletedRun[] = []
+  const stepMaxMs: Record<string, number> = {}
+  for (const { start, terminal } of matchedRuns) {
+    if (terminal.tsNum < windowStartMs || terminal.tsNum >= windowEndMs) continue
+    const elapsedMs = terminal.elapsedMs ?? terminal.tsNum - start.startTime
+    if (!Number.isFinite(elapsedMs) || elapsedMs < 0) {
+      log.warn?.(
+        `prompt hook latency: excluded completion with unusable timing (path=${logPath}, pid=${start.pid ?? "unknown"}, session=${start.session}, reason=elapsed ${elapsedMs})`,
+      )
+      continue
+    }
+    completedRuns.push({
+      session: start.session,
+      ts: start.ts,
+      startTime: start.startTime,
+      elapsedMs,
+      steps: terminal.steps,
+      pid: start.pid,
+    })
+    if (terminal.steps) {
+      for (const [stepName, duration] of Object.entries(terminal.steps)) {
+        stepMaxMs[stepName] = Math.max(stepMaxMs[stepName] ?? 0, duration)
       }
     }
   }
 
-  // Any open runs in window that never finished and exceeded timeoutMs are killed
+  // A start in this hour is killed only when its deadline passed before the cutoff and no terminal ever closed it.
   const killedRuns: KilledRun[] = []
   for (const open of openRuns) {
+    if (open.startTime < windowStartMs || open.startTime >= windowEndMs) continue
     if (windowEndMs - open.startTime >= timeoutMs) {
       killedRuns.push({
         session: open.session,

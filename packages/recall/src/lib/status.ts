@@ -58,7 +58,9 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   const projectRoot = resolveHostProjectRoot(process.cwd())
   // Bounded by default: skip the LLM synthesis test + multi-model race so
   // chief recovery gets index/hook diagnostics promptly. `--bench` opts in.
+  // The four FTS search benchmarks are gated by the same flag but skip independently (27712).
   const skipLlm = !opts.bench
+  const skipSearchBenchmarks = !opts.bench
 
   // Active-session discovery diagnostics (@km/bearly/19943): a bounded
   // filesystem scan (mtime-windowed, codex-inspect-capped) — NO LLM. Makes the
@@ -68,7 +70,7 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   const sessionDiscovery = discoverActiveSession({ cwd: process.cwd() }).diagnostics
 
   if (opts.json) {
-    const review = await reviewMemorySystem(projectRoot, { skipLlm })
+    const review = await reviewMemorySystem(projectRoot, { skipLlm, skipSearchBenchmarks })
     console.log(JSON.stringify({ ...review, sessionDiscovery }, null, 2))
     return
   }
@@ -295,7 +297,7 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   }
 
   // ── Hook Configuration ──────────────────────────────────────────────
-  const review = await reviewMemorySystem(projectRoot, { skipLlm })
+  const review = await reviewMemorySystem(projectRoot, { skipLlm, skipSearchBenchmarks })
   const hk = review.hookConfig
 
   console.log(`${BOLD}Hook Configuration${RESET}`)
