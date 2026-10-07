@@ -38,6 +38,8 @@ import { countDurableSessionRows } from "../src/lib/session.ts"
 const ROW_COUNTS = [100, 500, 2_000, 8_000, 20_000]
 const REPS = 100
 const ATTENTION_ROWS = 50
+// The fixture has no connected transports; retained registrations are not sockets.
+const transport = { getActiveSessionInfo: () => [] }
 
 function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b)
@@ -115,8 +117,8 @@ for (const rowCount of ROW_COUNTS) {
   // Instrument check BEFORE timing: a projection returning zero rows
   // short-circuits the trust filter, and an unseeded table makes every query
   // trivial — both read as "flat" while proving nothing.
-  const plainRows = readAttentionProjection(plain.ctx, "@reader").attentionRows.length
-  const trustRows = readAttentionProjection(trust.ctx, "@reader").attentionRows.length
+  const plainRows = readAttentionProjection(plain.ctx, "@reader", Date.now(), 0, transport).attentionRows.length
+  const trustRows = readAttentionProjection(trust.ctx, "@reader", Date.now(), 0, transport).attentionRows.length
   const sessionsSeen = (plain.db.prepare("SELECT count(*) AS c FROM sessions").get() as { c: number }).c
   if (plainRows !== ATTENTION_ROWS || trustRows !== ATTENTION_ROWS || sessionsSeen !== rowCount) {
     throw new Error(
@@ -136,8 +138,8 @@ for (const rowCount of ROW_COUNTS) {
       $verified_prefix_upper: derivedLaunchPrefixUpperBound("launch-42@"),
     })
   })
-  const plainMs = timeIt(REPS, () => readAttentionProjection(plain.ctx, "@reader"))
-  const trustMs = timeIt(REPS, () => readAttentionProjection(trust.ctx, "@reader"))
+  const plainMs = timeIt(REPS, () => readAttentionProjection(plain.ctx, "@reader", Date.now(), 0, transport))
+  const trustMs = timeIt(REPS, () => readAttentionProjection(trust.ctx, "@reader", Date.now(), 0, transport))
   const censusMs = timeIt(REPS, () => countDurableSessionRows(plain.db))
 
   console.log(
