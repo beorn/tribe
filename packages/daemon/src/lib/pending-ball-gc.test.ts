@@ -925,7 +925,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         expired: boolean
         pending: Array<{ request_id: string; settlement: string; settled_at: string }>
       }
-      const attention = readAttentionProjection(ctx, "@chief", now).attention
+      const attention = readAttentionProjection(ctx, "@chief", now, 0, makeOpts()).attention
       const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as {
         pending_balls?: { count: number }
         cadence?: {
@@ -1242,7 +1242,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
-  it("tribe.health reports bounded owner and stale aggregates instead of the full ball pile", () => {
+  it("tribe.health retains compact owner aggregates and a complete per-request custody projection", () => {
     const { db, stmts } = setup()
     try {
       const ctx = createTribeContext({
@@ -1276,6 +1276,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           owner_count: number
           owners: Array<{ owner: string; count: number; oldest_age_ms: number; pending?: unknown }>
           stale: { count: number; owner_count: number; oldest_age_ms: number }
+          requests: { count: number; owners: Array<{ count: number; pending: Array<{ request_id: string }> }> }
         }
       }
 
@@ -1302,7 +1303,13 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       ])
       expect(health.pending_balls?.owners.every((owner) => owner.pending === undefined)).toBe(true)
       expect(health.issues).toEqual([expect.stringMatching(/1 stale pending ball.*1 owner.*remains open and owned/i)])
-      expect(JSON.stringify(health.pending_balls).length).toBeLessThan(2_048)
+      // CTO-approved #22798 contract: the request projection is complete even
+      // when the fleet has more than an attention preview's ten obligations.
+      expect(health.pending_balls?.requests.count).toBe(202)
+      expect(health.pending_balls?.requests.owners.map((owner) => owner.pending.length)).toEqual([201, 1])
+      expect(
+        health.pending_balls?.requests.owners.flatMap((owner) => owner.pending).map((ball) => ball.request_id),
+      ).toContain("bulk-199")
     } finally {
       db.close()
     }

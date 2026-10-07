@@ -28,6 +28,12 @@ export type InboxWaitOptions = InboxWaitControls & {
 }
 
 export type InboxWaitAttention = {
+  readonly sent_offline_balls?: readonly Record<string, unknown>[]
+  readonly sent_offline_balls_summary?: {
+    readonly total: number
+    readonly oldest_age_ms: number
+    readonly truncated: boolean
+  }
   readonly actionable_unread: readonly Record<string, unknown>[]
   readonly pending_balls: readonly Record<string, unknown>[]
   readonly pending_balls_summary: {
@@ -170,6 +176,7 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
     ...(value.reconnect === true ? { reconnect: true } : {}),
     ...(value.woken_by === undefined ? {} : { woken_by: value.woken_by }),
     attention: {
+      ...parseSentOfflineAttention(attention),
       actionable_unread: attention.actionable_unread,
       pending_balls: attention.pending_balls,
       pending_balls_summary: {
@@ -180,6 +187,35 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
           ? {}
           : { withheld: attention.pending_balls_summary.withheld }),
       },
+    },
+  }
+}
+
+function parseSentOfflineAttention(
+  attention: Record<string, unknown>,
+): Pick<InboxWaitAttention, "sent_offline_balls" | "sent_offline_balls_summary"> {
+  const rows = attention.sent_offline_balls
+  const summary = attention.sent_offline_balls_summary
+  if (rows === undefined && summary === undefined) return {}
+  if (
+    !isRecordArray(rows) ||
+    !isRecord(summary) ||
+    !isFiniteNumber(summary.total) ||
+    !Number.isInteger(summary.total) ||
+    summary.total < rows.length ||
+    !isFiniteNumber(summary.oldest_age_ms) ||
+    summary.oldest_age_ms < 0 ||
+    typeof summary.truncated !== "boolean" ||
+    summary.truncated !== summary.total > rows.length
+  ) {
+    throw invalidInboxWaitResult()
+  }
+  return {
+    sent_offline_balls: rows,
+    sent_offline_balls_summary: {
+      total: summary.total,
+      oldest_age_ms: summary.oldest_age_ms,
+      truncated: summary.truncated,
     },
   }
 }

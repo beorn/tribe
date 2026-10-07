@@ -64,7 +64,7 @@ function realAttentionReader(
   stmts: TribeStatements,
 ): (session: string) => AttentionProjection {
   const reader = makeContext(db, stmts, "attention-reader", "@attention-reader")
-  return (session) => readAttentionProjection(reader, session).attention
+  return (session) => readAttentionProjection(reader, session, Date.now(), 0, makeOpts()).attention
 }
 
 function message(overrides: Partial<MessageInsertedInfo>): MessageInsertedInfo {

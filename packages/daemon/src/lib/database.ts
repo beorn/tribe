@@ -2127,6 +2127,17 @@ export function createStatements(db: Database) {
 		ORDER BY p.opened_at ASC
 	`),
 
+    /** Sender-side visibility reads the same custody rows, without changing owner counts. */
+    selectPendingForSender: db.prepare(`
+      SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+        p.request_kind, COALESCE(m.summary, a.summary) AS summary
+      FROM pending_request p
+      LEFT JOIN messages m ON m.id = p.message_id
+      LEFT JOIN messages_archive a ON a.id = p.message_id
+      WHERE p.sender = $sender AND p.request_kind = 'request'
+      ORDER BY p.opened_at ASC
+    `),
+
     /** Open balls that still need an owner receipt. A later status ref marks
      *  the ball taken for attention only; the pending_request row remains the
      *  delivery/deadline authority until a structured reply settles it. */

@@ -89,6 +89,18 @@ const ATTENTION_SCHEMA = {
   description: "Current unread actionable attention and open response balls for the addressed persona.",
   required: ["actionable_unread", "pending_balls", "pending_balls_summary"],
   properties: {
+    sent_offline_balls: {
+      type: "array",
+      description:
+        "Up to 10 open requests this persona sent to recipients without live transport. Original recipient, deadline and keyed offline-since fact are retained; these rows are never added to owed pending_balls counts.",
+      items: { type: "object", additionalProperties: true },
+    },
+    sent_offline_balls_summary: {
+      type: "object",
+      required: ["total", "oldest_age_ms", "truncated"],
+      properties: { total: { type: "number" }, oldest_age_ms: { type: "number" }, truncated: { type: "boolean" } },
+      additionalProperties: false,
+    },
     actionable_unread: {
       type: "array",
       description:

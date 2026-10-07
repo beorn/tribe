@@ -693,6 +693,7 @@ type PendingCliRow = {
   owner_transport_reason?: string
   owner_last_mailbox_read_age_ms?: number | null
   owner_transport_observed_at?: string
+  owner_transport_offline_since?: string | null
 }
 
 /**
@@ -718,7 +719,7 @@ function pendingOwnerTransportWarning(row: PendingCliRow): string {
     case "registered-transport-pids-dead":
     case "registered-owner-pid-dead":
     case "no-session-record":
-      return `  DEGRADED — current owner has no connected, PID-live transport as of ${observedAt}${unresolved}`
+      return `  DEGRADED — current owner has no connected, PID-live transport; offline since ${row.owner_transport_offline_since ?? "unknown (no current departure fact)"}; observed as of ${observedAt}${unresolved}`
     default:
       return (
         `  NOT OBSERVED — current owner is not observed able to answer (${row.owner_transport_reason}) ` +
@@ -1884,6 +1885,13 @@ interface SelfInboxResult {
     actionable_unread?: SelfInboxEvent[]
     pending_balls?: Array<{ request_id?: string; sender?: string; summary?: string }>
     pending_balls_summary?: { total?: number }
+    sent_offline_balls?: Array<{
+      request_id: string
+      recipient: string
+      expires_at: string | null
+      owner_transport_offline_since: string | null
+    }>
+    sent_offline_balls_summary?: { total: number; truncated: boolean }
   }
   events?: SelfInboxEvent[]
   cursor?: number
@@ -1936,6 +1944,17 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean }
     console.log(ball.summary ?? "")
   }
   const pendingTotal = result.attention?.pending_balls_summary?.total ?? pending.length
+  for (const ball of result.attention?.sent_offline_balls ?? []) {
+    console.log(
+      `sent request ${ball.request_id} to ${ball.recipient}: offline since ${ball.owner_transport_offline_since ?? "unknown (no current departure fact)"}; deadline ${ball.expires_at ?? "none"}; original obligation remains open.`,
+    )
+  }
+  const sentSummary = result.attention?.sent_offline_balls_summary
+  if (sentSummary?.truncated) {
+    console.log(
+      `${sentSummary.total} sent offline obligations total; preview truncated. Run tribe pending --all --json and filter sender to inspect the complete custody set.`,
+    )
+  }
 
   if (opts.peek) {
     console.log(

@@ -484,6 +484,18 @@ describe("callTribeTool", () => {
       timed_out: false,
       attention: {
         ...canonicalInboxWaitResult.attention,
+        // @failure The validating adapter drops sender offline custody or confuses it with owed counts (#22798).
+        // @level contract
+        // @consumer MCP inbox.wait callers
+        // @testonly none
+        sent_offline_balls: [
+          {
+            request_id: "sent-request",
+            recipient: "@offline",
+            owner_transport_offline_since: "2026-10-07T15:00:00.000Z",
+          },
+        ],
+        sent_offline_balls_summary: { total: 1, oldest_age_ms: 60_000, truncated: false },
         pending_balls_summary: {
           total: 11,
           oldest_age_ms: 18 * 60_000,
@@ -499,6 +511,8 @@ describe("callTribeTool", () => {
     expect(result).toMatchObject({
       structuredContent: {
         attention: {
+          sent_offline_balls: [{ request_id: "sent-request", recipient: "@offline" }],
+          sent_offline_balls_summary: { total: 1 },
           pending_balls_summary: {
             truncated: true,
             withheld: { total: 1, by_kind: { request: 0, incident: 1 } },
@@ -506,6 +520,21 @@ describe("callTribeTool", () => {
         },
       },
     })
+    for (const summary of [
+      undefined,
+      { total: 0, oldest_age_ms: 60_000, truncated: false },
+      { total: 2, oldest_age_ms: 60_000, truncated: false },
+    ]) {
+      const malformed = {
+        ...truncatedResult,
+        attention: { ...truncatedResult.attention, sent_offline_balls_summary: summary },
+      }
+      await expect(
+        callTribeTool({ call: vi.fn(async () => malformed) } as unknown as DaemonClient, "inbox.wait", {
+          timeout_ms: 1_000,
+        }),
+      ).rejects.toThrow(/invalid canonical InboxWaitResult/)
+    }
   })
 
   it("carries woken_by through the validated inbox-wait result, and refuses a malformed one (25662 row 17)", async () => {

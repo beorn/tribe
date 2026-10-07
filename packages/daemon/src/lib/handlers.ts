@@ -394,7 +394,11 @@ function readLastMailboxReadAt(stmts: TribeContext["stmts"], name: string): numb
   return row?.last_attention_read_at ?? null
 }
 
-function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts, observedAt: number) {
+function ownerTransportObservationProjector(
+  ctx: TribeContext,
+  opts: Pick<HandlerOpts, "getActiveSessionInfo" | "inboxWait">,
+  observedAt: number,
+) {
   const sessionRows = ctx.db.prepare("SELECT id, name, identity_sid, updated_at FROM sessions").all() as Array<{
     id: string
     name: string
@@ -1689,6 +1693,9 @@ export type AttentionProjection = {
   actionable_unread: FetchEvent[]
   pending_balls: PendingBall[]
   pending_balls_summary: PendingBallSummary
+  /** Requests this persona sent whose original recipient has no live transport; never owed by this persona. */
+  sent_offline_balls?: PendingBallWithOwnerTransport[]
+  sent_offline_balls_summary?: PendingBallSummary
 }
 
 function pendingBall(row: PendingBallRow, now: number): PendingBall {
@@ -4190,6 +4197,7 @@ export function readAttentionProjection(
   owner: string,
   now = Date.now(),
   alreadyDeliveredSeq = 0,
+  transportOpts?: Pick<HandlerOpts, "getActiveSessionInfo" | "inboxWait">,
 ): {
   attentionRows: FetchRow[]
   untakenPendingBalls: PendingBall[]
@@ -4218,6 +4226,23 @@ export function readAttentionProjection(
   // and a settled row the cursor never reached, both read as new).
   const shownThrough = Math.max(lastActionableSeq, alreadyDeliveredSeq)
   const pendingBalls = pendingBallsForOwner(ctx, owner, now)
+  const sentRows = ctx.stmts.selectPendingForSender.all({ $sender: owner }) as PendingBallRow[]
+  if (sentRows.length > 0 && transportOpts === undefined) {
+    throw new Error(
+      `Tribe attention for ${owner}: ${sentRows.length} sent requests require the connected transport source`,
+    )
+  }
+  const transport =
+    sentRows.length === 0 || transportOpts === undefined
+      ? null
+      : ownerTransportObservationProjector(ctx, transportOpts, now)
+  const sentOfflineBalls =
+    transport === null
+      ? []
+      : sortPendingBalls(sentRows.map((row) => pendingBall(row, now)))
+          .map((ball) => ({ ...ball, ...transport.observe(ball.recipient) }))
+          .filter((ball) => !ball.owner_transport_live)
+  const sentPreview = sentOfflineBalls.slice(0, ATTENTION_PENDING_BALL_LIMIT)
   const untakenRequestIds = untakenPendingRequestIds(ctx, owner)
   const untakenPendingBalls = pendingBalls.filter((ball) => untakenRequestIds.has(ball.request_id))
   const actionableCount = attentionRows.length
@@ -4257,6 +4282,12 @@ export function readAttentionProjection(
       ...pruned,
       actionable_unread: attentionRows.map((row) => fetchEvent(row, row.rowid <= shownThrough)),
       pending_balls: pendingPreview,
+      sent_offline_balls: sentPreview,
+      sent_offline_balls_summary: {
+        total: sentOfflineBalls.length,
+        oldest_age_ms: sentOfflineBalls.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0),
+        truncated: sentPreview.length < sentOfflineBalls.length,
+      },
       pending_balls_summary: {
         total: pendingBalls.length,
         oldest_age_ms: pendingBalls.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0),
@@ -4479,7 +4510,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
       // rows at or below it were already handed to this seat's transport, so a
       // re-presentation names itself a replay. Read before the advance below,
       // so the first delivery of a row still reads as fresh.
-      const projected = readAttentionProjection(ctx, currentName, Date.now(), cursor?.last_inbox_pull_seq ?? 0)
+      const projected = readAttentionProjection(ctx, currentName, Date.now(), cursor?.last_inbox_pull_seq ?? 0, opts)
       attentionRows = projected.attentionRows
       attention = projected.attention
     }

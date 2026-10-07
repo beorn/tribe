@@ -361,7 +361,13 @@ export function withDispatcher<
       latest_message_id: string | null
       latest_type: string | null
     } {
-      const { attentionRows, untakenPendingBalls, actionableCount } = readAttentionProjection(daemonCtx, sessionName)
+      const { attentionRows, untakenPendingBalls, actionableCount } = readAttentionProjection(
+        daemonCtx,
+        sessionName,
+        Date.now(),
+        0,
+        DAEMON_HANDLER_OPTS,
+      )
       const oldest = attentionRows[0]
       const latest = attentionRows.at(-1)
       const attentionMessageIds = new Set(attentionRows.map((row) => row.id))
@@ -1026,7 +1032,7 @@ export function withDispatcher<
 
     const inboxWait = createInboxWaitManager(
       readInboxStatus,
-      (sessionName) => readAttentionProjection(daemonCtx, sessionName).attention,
+      (sessionName) => readAttentionProjection(daemonCtx, sessionName, Date.now(), 0, DAEMON_HANDLER_OPTS).attention,
       (sessionName, wakeOnCorrelatedReply) => {
         const latest = latestInboxWaitMessage(sessionName, wakeOnCorrelatedReply, false)
         return latest?.rowid ?? 0

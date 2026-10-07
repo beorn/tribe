@@ -835,6 +835,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       owner_transport_reason: reason,
       owner_last_mailbox_read_age_ms: readAgeMs,
       owner_transport_observed_at: observedAt,
+      owner_transport_offline_since: reason === "owner-unknown-no-transport" ? "2026-09-16T19:57:00.000Z" : null,
     })
     const owners = [
       ball("@dev/3", "connected-no-consumer", 240_000),
@@ -892,7 +893,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         `  @relay: 1 (oldest 5m ago)  MAILBOX UNREADABLE — current owner is connected but cannot read its own mailbox as of ${observedAt}; obligation remains open; no automatic close/reroute`,
       )
       expect(ownerLine("@gone")).toBe(
-        `  @gone: 1 (oldest 5m ago)  DEGRADED — current owner has no connected, PID-live transport as of ${observedAt}; obligation remains open; no automatic close/reroute`,
+        `  @gone: 1 (oldest 5m ago)  DEGRADED — current owner has no connected, PID-live transport; offline since 2026-09-16T19:57:00.000Z; observed as of ${observedAt}; obligation remains open; no automatic close/reroute`,
       )
       expect(all.stdout.match(/DEGRADED/g)).toHaveLength(1)
 

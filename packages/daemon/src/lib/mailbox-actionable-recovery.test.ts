@@ -43,6 +43,8 @@ type FetchJson = ToolJson & {
   attention?: {
     actionable_unread?: FetchEvent[]
     pending_balls?: AttentionBall[]
+    sent_offline_balls?: Array<AttentionBall & { recipient: string; owner_transport_offline_since: string | null }>
+    sent_offline_balls_summary?: { total: number; oldest_age_ms: number; truncated: boolean }
     pending_balls_summary?: {
       total: number
       oldest_age_ms: number
@@ -304,6 +306,31 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       id: sent.id,
     })
 
+    // @failure A sender sees no offline custody, or sent requests inflate its owed count (#22798).
+    // @level contract
+    // @consumer Default sender inbox and inbox-wait
+    // @testonly none
+    const departureAt = Date.now()
+    db.prepare(`INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, ref)
+      VALUES ('stopped-left', 'event.session.left', $name, '*', 'event', '{}', $at, 'pull', 'sess-stopped')`).run({
+      $name: NAME,
+      $at: departureAt,
+    })
+    expect(() => readAttentionProjection(chief, "@chief")).toThrow(
+      /sent requests require the connected transport source/,
+    )
+    const senderInbox = fetchJson(chief, opts).json
+    expect(senderInbox.attention?.sent_offline_balls).toEqual([
+      expect.objectContaining({
+        request_id: sent.id,
+        recipient: NAME,
+        owner_transport_offline_since: new Date(departureAt).toISOString(),
+      }),
+    ])
+    expect(senderInbox.attention?.sent_offline_balls_summary).toMatchObject({ total: 1, truncated: false })
+    expect(senderInbox.attention?.pending_balls).toEqual([])
+    expect(senderInbox.attention?.pending_balls_summary?.total).toBe(0)
+
     // The successor inherits the durable addressed work through the mailbox,
     // even though no transport was connected when the request was admitted.
     const successor = connectAs("sess-successor", NAME)
@@ -319,6 +346,8 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(first.attention?.pending_balls).toEqual([
       expect.objectContaining({ request_id: sent.id, message_id: sent.id, sender: "@chief" }),
     ])
+    expect(fetchJson(chief, opts).json.attention?.sent_offline_balls).toEqual([])
+    expect(db.prepare("SELECT COUNT(*) AS n FROM pending_request WHERE request_id = ?").get(sent.id)).toEqual({ n: 1 })
   })
 
   it("recovers a response that closed its tracked ball while the requester was parked", () => {

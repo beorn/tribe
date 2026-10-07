@@ -76,7 +76,7 @@ function rig(type = "health:bridge-lost") {
   })
   const manager = createInboxWaitManager(
     status,
-    (session) => readAttentionProjection(reader, session).attention,
+    (session) => readAttentionProjection(reader, session, Date.now(), 0, opts()).attention,
     (session) => latestWakeSeq(session, false),
     (session) => latestWakeSeq(session, true),
     (session, seq, wakeOnCorrelatedReply) => readInboxWaitWokenBy(stmts, session, seq, wakeOnCorrelatedReply),
