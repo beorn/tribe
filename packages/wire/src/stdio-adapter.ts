@@ -39,7 +39,12 @@ import {
 } from "./lib/socket.ts"
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
-import { parseDaemonCodeView, resolveCheckoutCodeIdentity, sourceRootFromWireModule } from "./lib/code-identity.ts"
+import {
+  parseDaemonCodeView,
+  parseDaemonProtocolVersion,
+  resolveCheckoutCodeIdentity,
+  sourceRootFromWireModule,
+} from "./lib/code-identity.ts"
 import { pacedReexec, type ReloadDaemonView, type ReloadPeers } from "./lib/reload-pacing.ts"
 import { createHash } from "node:crypto"
 import { constants as osConstants } from "node:os"
@@ -633,6 +638,9 @@ async function readReloadDaemonView(): Promise<ReloadDaemonView> {
       peers: parseReloadPeers(status.reload_peers),
       runningCert: code.cert,
       runningRoot: code.root,
+      // 27941 AC2a — the wire protocol version the daemon's code speaks, compared with this adapter's own only when
+      // the daemon publishes one; a daemon that publishes none is compared on its cert alone.
+      runningProtocolVersion: parseDaemonProtocolVersion(status),
     }
   } finally {
     probe.close()
@@ -672,6 +680,7 @@ function requestPacedReexec(reason: string, supervisedExitCode: () => number | n
         return onDisk.ok ? onDisk.value : null
       },
       selfRoot: () => ADAPTER_SOURCE_ROOT,
+      selfProtocolVersion: () => TRIBE_PROTOCOL_VERSION,
       sleep: reloadDelay,
       timeout: reloadDelay,
       warn: (message) => log.warn?.(message),

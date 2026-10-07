@@ -69,6 +69,27 @@ export function parseDaemonCodeView(status: unknown): DaemonCodeView {
   return { root: identityField(record, "root"), cert: identityField(record, "cert") }
 }
 
+/**
+ * cli_status `daemon.protocol_version`: the wire protocol version the daemon's code speaks (27941 AC2a). A daemon
+ * that publishes none predates the field: that is a named null, never a guessed version, so a caller compares it
+ * only when both sides have one. A present-but-malformed field throws, the same way a malformed code_identity does,
+ * so no caller reads a partial identity as agreement.
+ */
+export function parseDaemonProtocolVersion(status: unknown): number | null {
+  if (typeof status !== "object" || status === null) {
+    throw new Error(`cli_status is not an object (${typeof status}); daemon.protocol_version cannot be read`)
+  }
+  const raw = (status as { daemon?: { protocol_version?: unknown } }).daemon?.protocol_version
+  if (raw === undefined || raw === null) return null
+  if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw <= 0) {
+    throw new Error(
+      `cli_status daemon.protocol_version is present but not a positive integer (${typeof raw}); ` +
+        "that is a broken daemon, not a legacy one",
+    )
+  }
+  return raw
+}
+
 /** One bounded read of the daemon's code view, over one connection it closes. */
 export async function readDaemonCodeView(
   socketPath: string,
