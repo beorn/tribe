@@ -1687,6 +1687,72 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(status).toMatchObject({ unread_count: 1, latest_type: "response" })
   })
 
+  /** @failure 27959: a settled attention-required response stays actionable after the
+   * seat's own CLI attention read, so the seat's declared idle wait returns at once
+   * instead of sleeping. The settle must attach to the seat's own launch-scoped read
+   * (status and wait agree); a row that needs a reply keeps its ball, unchanged.
+   * @level l2
+   * @consumer every seat whose /do loop reads `tribe inbox-status --json` then waits */
+  it("settles an attention-required response on the seat's own launch-scoped read, agreeing with inbox-wait (27959)", async () => {
+    const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
+    cleanup = harness.dispose
+    const launchId = "settle-response-launch"
+    const token = managedToken("@agent/reader", launchId)
+    const { connId } = harness.connectClient()
+    await harness.register(connId, {
+      name: "@agent/reader",
+      pid: liveHolderPid,
+      project: "/tmp/km",
+      launchId,
+      launchParentPid: process.pid,
+      idToken: token,
+    })
+    const read = async (id: string) =>
+      parseResult<{ session: string; unread_count: number; latest_type: string | null }>(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id,
+            method: "cli_inbox_status_by_launch_v1",
+            params: { launch_id: launchId, id_token: token },
+          },
+          connId,
+        ),
+      )
+    const wait = async (id: string) =>
+      parseResult<InboxWaitResult>(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id,
+            method: "cli_inbox_wait_by_launch_v1",
+            params: { launch_id: launchId, id_token: token, timeout_ms: 1 },
+          },
+          connId,
+        ),
+      )
+
+    harness.sendAttentionResponse("@agent/reader", "the requested verdict is ready")
+
+    // Counted unread until the seat's own first attention read, counted read after it.
+    expect(await read("response-before-first-read")).toMatchObject({
+      session: "@agent/reader",
+      unread_count: 1,
+      latest_type: "response",
+    })
+    expect((await read("response-after-first-read")).unread_count).toBe(0)
+
+    // inbox-status and inbox-wait agree: a settled response is not a wake.
+    const settled = await wait("wait-after-settled-response")
+    expect(settled).toMatchObject({ timed_out: true, unread_count: 0 })
+    expect(settled.attention.actionable_unread).toEqual([])
+
+    // A row that needs a reply keeps its ball until it is replied.
+    harness.sendActionable("@agent/reader", "please reply to this")
+    expect((await read("request-stays-actionable-1")).unread_count).toBe(1)
+    expect((await read("request-stays-actionable-2")).unread_count).toBe(1)
+  })
+
   it("reports unauthenticated when an unregistered caller presents the wrong operator capability", async () => {
     const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
     cleanup = harness.dispose
