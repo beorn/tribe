@@ -216,12 +216,17 @@ export function checkCanonicalReaper(
   }
   noteSourceHealthy(state, api)
 
+  const liveNames = new Set(sessions.map(({ name }) => name))
   const seen = new Set<string>()
   const rowsByKey = new Map<string, ProcessObservationRow>()
   for (const row of observation.processes) {
     const cpu = row.process.cpuPercent ?? 0
     const command = row.process.command
-    if (cpu <= thresholds.reaperCpuThreshold || !/\b(bun|node)\b/u.test(command)) continue
+    // 27765: a process whose canonical owner is no longer a live recipient is evidence in itself — it outlived
+    // its seat. At rest it never crosses the CPU threshold, so the CPU filter hid it (the specimen sat parked for
+    // three days). CPU stays the admission test for everything else; ownership admits this one.
+    const ownerGone = row.attribution.kind === "owned" && !liveNames.has(row.attribution.ownerId)
+    if (!/\b(bun|node)\b/u.test(command) || (cpu <= thresholds.reaperCpuThreshold && !ownerGone)) continue
     const key = identityKey(row)
     seen.add(key)
     rowsByKey.set(key, row)
@@ -264,24 +269,27 @@ export function checkCanonicalReaper(
     state.suspects.delete(key)
   }
 
-  const liveNames = new Set(sessions.map(({ name }) => name))
   for (const [key, suspect] of state.suspects) {
     const row = rowsByKey.get(key)
     if (row === undefined || row.attribution.kind === "unknown" || row.attribution.kind === "exempt") continue
     const observedSeconds = Math.floor((observation.observedAt - suspect.firstSeen) / 1_000)
     if (row.attribution.kind === "owned") {
-      if (suspect.samples < 3 || suspect.notifiedOwner === row.attribution.ownerId) continue
+      if (suspect.samples < 3) continue
       if (!liveNames.has(row.attribution.ownerId)) {
-        const signature = `owner-not-live\0${row.attribution.ownerId}`
+        // Once per exact incarnation: the seat and the start time are what an operator needs to find this again.
+        const signature = `owner-down\0${row.attribution.ownerId}\0${suspect.pid}\0${suspect.startTime}`
         if (suspect.lastUnknownSignature !== signature) {
           suspect.lastUnknownSignature = signature
-          sendUnknown(
-            api,
-            `health:reaper: PID ${suspect.pid} canonical owner ${row.attribution.ownerId} is not a live recipient; ${diagnosticContext(observation)}`,
+          api.broadcast(
+            `health:reaper: PID ${suspect.pid} (${suspect.command}) START ${JSON.stringify(suspect.startTime)} at ${suspect.cpu}% CPU, observed for ${observedSeconds}s: its canonical owner ${row.attribution.ownerId} (via=${row.attribution.via}) is not a live recipient — the seat is down and this process outlived it. Stop it, or start a probe that must outlive its seat through \`hab run\`; ${diagnosticContext(observation)}`,
+            "health:reaper:owner-down",
+            undefined,
+            { delivery: "push", topic: "health:reaper:owner-down" },
           )
         }
         continue
       }
+      if (suspect.notifiedOwner === row.attribution.ownerId) continue
       api.send(
         row.attribution.ownerId,
         `health:reaper: PID ${suspect.pid} (${suspect.command}) at ${suspect.cpu}% CPU, observed for ${observedSeconds}s; canonical owner ${row.attribution.ownerId} via=${row.attribution.via}.`,

@@ -17,7 +17,14 @@ import { defaultThresholds } from "./health-monitor-plugin.ts"
 
 function observation(
   attribution: ProcessRoutingAttribution,
-  options: { observedAt?: number; pid?: number; sequence?: number; startTime?: string } = {},
+  options: {
+    command?: string
+    cpuPercent?: number
+    observedAt?: number
+    pid?: number
+    sequence?: number
+    startTime?: string
+  } = {},
 ): Extract<CanonicalProcessObservation, { kind: "available" }> {
   const pid = options.pid ?? 10
   return {
@@ -32,8 +39,8 @@ function observation(
       {
         attribution,
         process: {
-          command: "bun worker.ts",
-          cpuPercent: 99,
+          command: options.command ?? "bun worker.ts",
+          cpuPercent: options.cpuPercent ?? 99,
           pgid: pid,
           pid,
           ppid: 1,
@@ -114,6 +121,57 @@ describe("canonical managed reaper", () => {
 
     expect(sink.sends).toEqual([expect.objectContaining({ recipient: "@dev/3", type: "health:reaper:owned" })])
     expect(sink.broadcasts.some(({ type }) => type === "health:reaper:query")).toBe(false)
+  })
+
+  it("names a parked process whose canonical owner is a stopped seat, with the seat and the start time (hh 27765)", () => {
+    const state = createCanonicalReaperState()
+    const sink = api()
+    for (let index = 0; index < 4; index++) {
+      checkCanonicalReaper(
+        observation(
+          { kind: "owned", ownerId: "@dev/luna6", via: "env" },
+          {
+            command: "bun arm-bound-probe.ts",
+            cpuPercent: 0,
+            observedAt: 1_000 + index * 30_000,
+            pid: 2_548_408,
+            sequence: 7 + index,
+            startTime: "linux:boot:2548408",
+          },
+        ),
+        thresholds,
+        state,
+        sink.client,
+        sessions,
+      )
+    }
+
+    const pages = sink.broadcasts.filter(({ type }) => type === "health:reaper:owner-down")
+    expect(pages).toHaveLength(1)
+    expect(pages[0]!.message).toContain("@dev/luna6")
+    expect(pages[0]!.message).toContain("2548408")
+    expect(pages[0]!.message).toContain("linux:boot:2548408")
+    expect(sink.sends.some(({ recipient }) => recipient === "@dev/luna6")).toBe(false)
+  })
+
+  it("stays silent for a parked process whose canonical owner is still live (hh 27765)", () => {
+    const state = createCanonicalReaperState()
+    const sink = api()
+    for (let index = 0; index < 4; index++) {
+      checkCanonicalReaper(
+        observation(
+          { kind: "owned", ownerId: "@dev/3", via: "env" },
+          { cpuPercent: 0, observedAt: 1_000 + index * 30_000, pid: 51, sequence: 7 + index },
+        ),
+        thresholds,
+        state,
+        sink.client,
+        sessions,
+      )
+    }
+
+    expect(sink.broadcasts).toEqual([])
+    expect(sink.sends).toEqual([])
   })
 
   it("says once that a suspect left the watch when its census row turned malformed; an exited one leaves silently (hh 25917)", () => {
