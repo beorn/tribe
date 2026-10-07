@@ -6,6 +6,8 @@
  * vitest's node runtime. search.ts re-exports these for the existing surface.
  */
 
+import type { IndexProvenance } from "../history/recall-shared.ts"
+
 /** Default stale threshold — matches Anthropic's 5m prompt-cache TTL. */
 export const RECALL_STALE_THRESHOLD_DEFAULT = "5m"
 
@@ -39,6 +41,57 @@ export function parseThreshold(s: string): number {
 /** Read the env-or-default stale threshold (ms). */
 export function getStaleThresholdMs(): number {
   return parseThreshold(process.env.RECALL_STALE_THRESHOLD ?? RECALL_STALE_THRESHOLD_DEFAULT)
+}
+
+/** The one field `recall search` and `recall status` both read to judge index freshness. */
+export const INDEX_FRESHNESS_ROOT = "index_meta.last_rebuild"
+
+/**
+ * ONE verdict about the FTS index's freshness.
+ *
+ * `recall search`'s `provenance` and `recall status`'s `isStale` are both derived
+ * from this object, so the two instruments cannot disagree about one index. It
+ * names the root it judged (`root`) and the window it judged over
+ * (`windowMs`/`windowSource`), because a bare "stale" that does not say what it
+ * compared is unreadable beside another instrument's "fresh" (@ag/recall/27930).
+ */
+export interface IndexFreshness {
+  root: typeof INDEX_FRESHNESS_ROOT
+  lastRebuild: string | null
+  ageMs: number | null
+  windowMs: number
+  windowSource: string
+  provenance: IndexProvenance
+}
+
+/** ms → "45s" / "14m" / "3.0h", for a verdict's own label. */
+export function describeMs(ms: number): string {
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`
+  return `${(ms / 3_600_000).toFixed(1)}h`
+}
+
+/** The root and window one verdict judged, as one readable clause. */
+export function describeFreshness(f: IndexFreshness): string {
+  const age = f.ageMs === null ? `no ${f.root} stamp` : `${describeMs(f.ageMs)} old`
+  return `${age} vs ${describeMs(f.windowMs)} window (${f.windowSource}) on ${f.root}`
+}
+
+/**
+ * Judge one rebuild stamp against the one freshness window. Pure: the caller owns
+ * the DB read (`getIndexMeta(db, "last_rebuild")`), so `recall search`'s
+ * provenance and `recall status`'s staleness reach the same verdict from the
+ * same input instead of each carrying its own threshold.
+ */
+export function judgeIndexFreshness(lastRebuild: string | null, now: number = Date.now()): IndexFreshness {
+  const windowMs = getStaleThresholdMs()
+  const windowSource = process.env.RECALL_STALE_THRESHOLD ? "RECALL_STALE_THRESHOLD" : "default"
+  const judged = { root: INDEX_FRESHNESS_ROOT, lastRebuild, windowMs, windowSource } as const
+  if (!lastRebuild) return { ...judged, ageMs: null, provenance: "missing" }
+  const rebuiltAt = new Date(lastRebuild).getTime()
+  if (!Number.isFinite(rebuiltAt)) return { ...judged, ageMs: null, provenance: "unknown" }
+  const ageMs = now - rebuiltAt
+  return { ...judged, ageMs, provenance: ageMs <= windowMs ? "complete" : "stale" }
 }
 
 export type RefreshResult =

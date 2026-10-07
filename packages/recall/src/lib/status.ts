@@ -22,12 +22,12 @@ import {
   WARN,
   CROSS,
   FIVE_MINUTES_MS,
-  ONE_HOUR_MS,
   ONE_DAY_MS,
   formatBytes,
   formatRelativeTime,
   displayProjectPath,
 } from "./format"
+import { describeFreshness, judgeIndexFreshness } from "./staleness.ts"
 
 export interface PersistedFailedSession {
   id: string
@@ -111,7 +111,12 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
     }
 
     const lastRebuild = getIndexMeta(db, "last_rebuild") ?? null
-    const isStale = lastRebuild ? Date.now() - new Date(lastRebuild).getTime() > ONE_HOUR_MS : true
+    // ONE verdict, from the same judgeIndexFreshness `recall search` classifies
+    // with. This used to carry its own hard-coded window (1h) on the same field,
+    // so status read "fresh" while search read "stale" for one stamp
+    // (@ag/recall/27930).
+    const freshness = judgeIndexFreshness(lastRebuild)
+    const isStale = freshness.provenance !== "complete"
 
     // Content table counts by type
     const contentCounts = db.prepare("SELECT content_type, COUNT(*) as n FROM content GROUP BY content_type").all() as {
@@ -225,7 +230,7 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
     }
 
     console.log(
-      `  DB: ${formatBytes(dbSizeBytes)}  Last rebuild: ${lastRebuild ? formatRelativeTime(new Date(lastRebuild).getTime()) : `${RED}never${RESET}`}${isStale ? ` ${YELLOW}(stale)${RESET}` : ""}`,
+      `  DB: ${formatBytes(dbSizeBytes)}  Last rebuild: ${lastRebuild ? formatRelativeTime(new Date(lastRebuild).getTime()) : `${RED}never${RESET}`}${isStale ? ` ${YELLOW}(stale: ${describeFreshness(freshness)})${RESET}` : ""}`,
     )
     console.log()
 

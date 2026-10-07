@@ -105,8 +105,18 @@ export function resolveProjectScope(project: string | undefined, _cwd = process.
 // Pure helpers (parseThreshold/getStaleThresholdMs/RefreshResult/RECALL_STALE_THRESHOLD_DEFAULT)
 // live in staleness.ts so unit tests can import them without dragging the search.ts
 // transitive closure (bun:sqlite, indexer, llm/agent → zod) into vitest's node runtime.
-export { RECALL_STALE_THRESHOLD_DEFAULT, parseThreshold, getStaleThresholdMs, type RefreshResult } from "./staleness"
-import { getStaleThresholdMs, type RefreshResult } from "./staleness"
+export {
+  RECALL_STALE_THRESHOLD_DEFAULT,
+  parseThreshold,
+  getStaleThresholdMs,
+  judgeIndexFreshness,
+  describeMs,
+  describeFreshness,
+  INDEX_FRESHNESS_ROOT,
+  type IndexFreshness,
+  type RefreshResult,
+} from "./staleness"
+import { describeFreshness, judgeIndexFreshness, type IndexFreshness, type RefreshResult } from "./staleness"
 
 /** Read `last_rebuild` index meta — returns null if missing, throws on DB access errors. */
 function readLastRebuild(): string | null {
@@ -135,22 +145,37 @@ export async function refreshIndexIfStale(
   return refreshIndexIfStaleWithDeps(options, merged)
 }
 
-export function readIndexProvenance(options: { refresh?: boolean }): IndexProvenance {
-  if (options.refresh === false) return "unknown"
-
+/**
+ * The ONE freshness verdict for this process, judged by staleness.ts's
+ * `judgeIndexFreshness` — the same call `recall status` makes, so search's
+ * `provenance` and status's `isStale` are one verdict and not two opinions
+ * (@ag/recall/27930). The verdict names the root it read and the window it
+ * judged over; a caller attaches it as `provenanceDetail` so a stale answer
+ * says what it judged.
+ */
+export function readIndexFreshness(options: { refresh?: boolean }): IndexFreshness {
+  if (options.refresh === false) {
+    // --no-refresh: this run deliberately did not classify the index, so there is
+    // no window verdict to name. provenance stays "unknown" (unchanged contract).
+    return { ...judgeIndexFreshness(null), provenance: "unknown" }
+  }
   try {
-    const lastRebuild = readLastRebuild()
-    if (!lastRebuild) return "missing"
-    const rebuiltAt = new Date(lastRebuild).getTime()
-    if (!Number.isFinite(rebuiltAt)) return "unknown"
-    return Date.now() - rebuiltAt <= getStaleThresholdMs() ? "complete" : "stale"
+    return judgeIndexFreshness(readLastRebuild())
   } catch {
-    return "unknown"
+    return { ...judgeIndexFreshness(null), provenance: "unknown" }
   }
 }
 
-function unprovenSuffix(provenance: IndexProvenance): string {
-  return provenance === "complete" ? "" : ` — UNPROVEN (${provenance} index)`
+export function readIndexProvenance(options: { refresh?: boolean }): IndexProvenance {
+  return readIndexFreshness(options).provenance
+}
+
+function unprovenSuffix(provenance: IndexProvenance, freshness?: IndexFreshness): string {
+  if (provenance === "complete") return ""
+  // Only a stale verdict carries the window clause: "missing"/"unknown" did not
+  // judge a stamp against a window, so naming one there would invent a comparison.
+  const judged = provenance === "stale" && freshness !== undefined ? `: ${describeFreshness(freshness)}` : ""
+  return ` — UNPROVEN (${provenance} index${judged})`
 }
 
 function recallJsonEnvelope(result: RecallResult): Omit<RecallResult, "results"> & {
@@ -189,7 +214,8 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
 
   // Search is a read path: classify the index without starting index work.
   // Lifecycle hints and the host scheduler own incremental indexing cadence.
-  const provenance = readIndexProvenance(options)
+  const freshness = readIndexFreshness(options)
+  const provenance = freshness.provenance
   if (!regexMode && provenance !== "complete") process.exitCode = 3
 
   // Power-user flags imply raw mode. --snippets is an explicit alias for
@@ -222,6 +248,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
       ...options,
       project,
       provenance,
+      provenanceDetail: freshness,
       limit: limitStr ? parseInt(limitStr, 10) : 10,
     })
     return
@@ -240,6 +267,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     timeout: timeoutStr ? parseInt(timeoutStr, 10) : DEFAULT_SYNTHESIS_TIMEOUT_MS,
     projectFilter: project,
     provenance,
+    provenanceDetail: freshness,
   }
 
   const agentEnabled = !!options.agent || !!options.debugPlan || process.env.RECALL_AGENT === "1"
@@ -249,6 +277,9 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   }
 
   const result = await recall(query, recallOpts)
+  // The CLI's own verdict names its root and window on the result it prints, so a
+  // stale answer says what it judged without the caller running a second tool.
+  result.provenanceDetail = freshness
   formatRecallOutput(result, { json })
 }
 
@@ -264,6 +295,10 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   }
 
   const result = await recallAgent(query, agentOpts)
+
+  // The CLI's own verdict names its root and window on the result it prints, so a
+  // stale answer says what it judged without the caller running a second tool.
+  if (base.provenanceDetail) result.provenanceDetail = base.provenanceDetail
 
   // Check FIRST, before requireSynthesizedAnswer would throw a generic "no
   // synthesized answer" error that discards the lexical hits recallAgent()
@@ -560,7 +595,7 @@ function formatRecallOutput(result: RecallResult, options: { json?: boolean }): 
     if (result.provenance === "complete") {
       console.log(`No results found for "${result.query}"`)
     } else {
-      console.log(`0 results${unprovenSuffix(result.provenance)} for "${result.query}"`)
+      console.log(`0 results${unprovenSuffix(result.provenance, result.provenanceDetail)} for "${result.query}"`)
     }
     if (result.query.trim().length > 0) {
       const probeToken = literalRawProbeTokens(result.query)[0] ?? result.query.split(/\s+/)[0]
@@ -581,7 +616,7 @@ function formatRecallOutput(result: RecallResult, options: { json?: boolean }): 
     if (result.timing.llmMs !== undefined) timingParts.push(`llm=${result.timing.llmMs}ms`)
   }
   console.log(
-    `${DIM}${result.results.length} results${unprovenSuffix(result.provenance)} from ${uniqueSessions} sessions (${timingParts.join(", ")})${RESET}`,
+    `${DIM}${result.results.length} results${unprovenSuffix(result.provenance, result.provenanceDetail)} from ${uniqueSessions} sessions (${timingParts.join(", ")})${RESET}`,
   )
   if (result.llmCost !== undefined && result.llmCost > 0) {
     console.log(`${DIM}LLM cost: $${result.llmCost.toFixed(4)}${RESET}`)
@@ -627,7 +662,7 @@ function printResultEntries(results: RecallSearchResult[]): void {
 
 function formatRawRecallResults(result: RecallResult): void {
   console.log(
-    `${BOLD}${result.results.length} results${unprovenSuffix(result.provenance)}${RESET} for "${result.query}":\n`,
+    `${BOLD}${result.results.length} results${unprovenSuffix(result.provenance, result.provenanceDetail)}${RESET} for "${result.query}":\n`,
   )
   printResultEntries(result.results)
 
@@ -664,7 +699,7 @@ function renderSynthesisFailure(result: RecallResult, diag: SynthesisDiagnostics
 
   console.log(`${BOLD}${RED}⚠ RECALL SYNTHESIS FAILED — THE TOOL IS BROKEN, NOT EMPTY${RESET}`)
   console.log(
-    `${BOLD}Lexical search found ${result.results.length} result(s)${unprovenSuffix(result.provenance)} for "${result.query}" — the LLM step that summarizes them did not complete.${RESET}`,
+    `${BOLD}Lexical search found ${result.results.length} result(s)${unprovenSuffix(result.provenance, result.provenanceDetail)} for "${result.query}" — the LLM step that summarizes them did not complete.${RESET}`,
   )
   console.log(diag.summary)
   console.log()
@@ -776,10 +811,12 @@ function formatType(type: string): string {
 interface RawSearchOptions extends Omit<SearchOptions, "limit"> {
   limit: number
   provenance: IndexProvenance
+  provenanceDetail?: IndexFreshness
 }
 
 function rawSearch(query: string | undefined, options: RawSearchOptions): void {
-  const { include, question, response, tool, since, project, session, limit, json, provenance } = options
+  const { include, question, response, tool, since, project, session, limit, json, provenance, provenanceDetail } =
+    options
 
   // Parse time filter
   let sinceTime: number | undefined
@@ -1010,6 +1047,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         {
           query,
           provenance,
+          provenanceDetail,
           total: unprovenEmpty ? null : total,
           durationMs: duration,
           results: unprovenEmpty ? null : allResults,
@@ -1031,14 +1069,16 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     if (provenance === "complete") {
       console.log(`No matches found${queryPart} (searched in ${duration}ms)`)
     } else {
-      console.log(`0 matches${unprovenSuffix(provenance)}${queryPart} (searched in ${duration}ms)`)
+      console.log(`0 matches${unprovenSuffix(provenance, provenanceDetail)}${queryPart} (searched in ${duration}ms)`)
     }
     closeDb()
     return
   }
 
   const queryPart = query ? ` for "${query}"` : ""
-  console.log(`Found ${totalWithLive} matches${unprovenSuffix(provenance)}${queryPart} in ${duration}ms:\n`)
+  console.log(
+    `Found ${totalWithLive} matches${unprovenSuffix(provenance, provenanceDetail)}${queryPart} in ${duration}ms:\n`,
+  )
 
   // Display live session results first
   if (liveResults.length > 0) {

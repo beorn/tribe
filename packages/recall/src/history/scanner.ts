@@ -19,7 +19,8 @@ import {
 } from "./db.ts"
 import type { ContentType } from "./types.ts"
 import { loadLlm, selectAvailableCheapModels } from "../lib/llm-backend.ts"
-import { log, ONE_HOUR_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
+import { log, THIRTY_DAYS_MS } from "./recall-shared.ts"
+import { describeFreshness, judgeIndexFreshness, type IndexFreshness } from "../lib/staleness.ts"
 import type { RecallSearchResult } from "./recall-shared.ts"
 import { runInjectDelta, createTmpfileSeenStore, timeStep } from "../lib/inject-core.ts"
 import { recall, parseTimeToMs } from "./search.ts"
@@ -150,6 +151,13 @@ export interface ReviewResult {
     dbSizeBytes: number
     lastRebuild: string | null
     isStale: boolean
+    /**
+     * The root, window and age behind `isStale` — the same judgeIndexFreshness
+     * verdict `recall search` reports as `provenance`, so the two instruments
+     * cannot disagree about one stamp and a stale answer names what it judged
+     * (@ag/recall/27930).
+     */
+    freshness: IndexFreshness
     blockedRebuild?: BlockedRebuildInfo | null
   }
   hookConfig: {
@@ -321,7 +329,12 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
 
     // Last rebuild time
     const lastRebuild = getIndexMeta(db, "last_rebuild") ?? null
-    const isStale = lastRebuild ? Date.now() - new Date(lastRebuild).getTime() > ONE_HOUR_MS : true
+    // ONE verdict, from the same judgeIndexFreshness `recall search` classifies
+    // with. This used to carry its own hard-coded window (1h) on the same field,
+    // so status read "fresh" while search read "stale" for one stamp
+    // (@ag/recall/27930).
+    const freshness = judgeIndexFreshness(lastRebuild)
+    const isStale = freshness.provenance !== "complete"
     const blockedRebuild = isStale ? getBlockedRebuildInfo(projectRoot) : null
 
     indexHealth = {
@@ -339,19 +352,17 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
       dbSizeBytes,
       lastRebuild,
       isStale,
+      freshness,
       ...(blockedRebuild ? { blockedRebuild } : {}),
     }
 
-    // Index health recommendations
+    // Index health recommendations — the parenthetical is the verdict's own root
+    // and window (describeFreshness), so "stale" says what it judged.
     if (isStale) {
-      const ago = lastRebuild ? formatTimeSince(new Date(lastRebuild).getTime()) : "never"
-      if (blockedRebuild) {
-        recommendations.push(
-          `Index is stale (${ago}) — rebuild is blocked by ${blockedRebuild.actor} (${blockedRebuild.reason})`,
-        )
-      } else {
-        recommendations.push(`Index is stale (${ago}) — run \`bun recall index --incremental\``)
-      }
+      const remedy = blockedRebuild
+        ? `rebuild is blocked by ${blockedRebuild.actor} (${blockedRebuild.reason})`
+        : "run `bun recall index --incremental`"
+      recommendations.push(`Index is stale (${describeFreshness(freshness)}) — ${remedy}`)
     }
     if (firstPrompts === 0) {
       recommendations.push("No first_prompt content indexed — run full index rebuild: `bun recall index`")
@@ -875,14 +886,4 @@ function runSearchBenchmark(
   } finally {
     closeDb()
   }
-}
-
-function formatTimeSince(timestamp: number): string {
-  const diff = Date.now() - timestamp
-  const minutes = Math.floor(diff / 60_000)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
 }

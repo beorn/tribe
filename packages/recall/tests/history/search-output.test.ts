@@ -490,8 +490,14 @@ describe("recall search output", () => {
 
       expect(mockRefreshSpawnCalls).toBe(0)
       expect(callsText(errSpy)).not.toContain("auto-refresh")
-      expect(callsText(logSpy)).toContain('0 results — UNPROVEN (stale index) for "nohits-a"')
-      expect(callsText(logSpy)).toContain('0 results — UNPROVEN (stale index) for "nohits-b"')
+      // The stale answer names the root and window it judged (@ag/recall/27930);
+      // this row failed while status carried its own 1h window on the same stamp.
+      expect(callsText(logSpy)).toMatch(
+        /0 results — UNPROVEN \(stale index: 2\.0h old vs \d+m window \(\w+\) on index_meta\.last_rebuild\) for "nohits-a"/,
+      )
+      expect(callsText(logSpy)).toMatch(
+        /0 results — UNPROVEN \(stale index: 2\.0h old vs \d+m window \(\w+\) on index_meta\.last_rebuild\) for "nohits-b"/,
+      )
       expect(process.exitCode).toBe(3)
     } finally {
       process.exitCode = previousExitCode

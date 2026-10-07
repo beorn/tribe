@@ -4,6 +4,7 @@
 
 import { createLogger } from "loggily"
 import type { ContentType } from "./types.ts"
+import type { IndexFreshness } from "../lib/staleness.ts"
 
 // ============================================================================
 // Logging
@@ -47,6 +48,12 @@ export interface RecallOptions {
   /** Index state established by the caller; direct library calls default to unknown. */
   provenance?: IndexProvenance
   /**
+   * The root, window and age behind `provenance`, when the caller classified the
+   * index (the CLI does) — echoed onto RecallResult so a stale answer names what
+   * it judged (@ag/recall/27930).
+   */
+  provenanceDetail?: IndexFreshness
+  /**
    * "exact" (the default, and the CLI's) ranks every match and counts totals. "hook" ranks the time window's matches,
    * at most HOOK_CANDIDATE_LIMIT of them with a loud cap line, inside the prompt hook's budget and counts nothing
    * (@ag/tribe/25071 row 2); see recall-budget.ts.
@@ -80,6 +87,11 @@ export interface HookSearchSummary {
 export interface RecallResult {
   query: string
   provenance: IndexProvenance
+  /**
+   * The root, window and age behind `provenance` — attached on the CLI's own
+   * results so a stale answer names what it judged (@ag/recall/27930).
+   */
+  provenanceDetail?: IndexFreshness
   synthesis: string | null // LLM synthesis (null if raw mode, no results, or synthesis failed)
   results: RecallSearchResult[]
   durationMs: number
