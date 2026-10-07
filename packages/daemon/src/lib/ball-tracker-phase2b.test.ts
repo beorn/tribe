@@ -40,6 +40,7 @@ function makeOpts(activeIds: readonly string[]): HandlerOpts {
     ["sess-agent-1", "@agent/1"],
     ["sess-agent-2", "@agent/2"],
     ["sess-stale", "@agent/stale"],
+    ["sess-service", "@service/page-mailbox-projection"],
   ])
   return {
     cleanup: () => undefined,
@@ -145,6 +146,38 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       request: string | null
     }
     expect(row).toMatchObject({ recipient: "*", kind: "broadcast", request: "req-broadcast" })
+  })
+
+  it("a fanout-all request to '*' opens a ball only for a seat, never a service (28005)", () => {
+    // A service registers role='member' with principal_class='service' and a
+    // live transport; it can never answer. Before 28005 it was admitted as a
+    // ball owner, so every fanout-all broadcast opened a dead ball on it.
+    const service = makeContext(db, stmts, "@service/page-mailbox-projection", "sess-service")
+    registerSession(service, PROJECT_ID, () => true, null, 1005, "push", "/repo", null, "claude", null, null)
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${service.sessionId}`,
+      service.sessionId,
+    )
+    db.prepare("UPDATE sessions SET principal_class = 'service', domains = '[\"service\"]' WHERE id = ?").run(
+      service.sessionId,
+    )
+
+    const res = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: "*", message: "one seat, one service", type: "request", request: "req-28005", fanout: "all" },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-service"]),
+      ),
+    )
+
+    expect(res.sent).toBe(true)
+    expect(pendingRecipients(db, "req-28005")).toEqual(["@agent/1"])
+    // The service still receives the message row (it owns no ball).
+    const allRecipients = (
+      db.prepare("SELECT recipient FROM messages WHERE request = ?").all("req-28005") as Array<{ recipient: string }>
+    ).map((r) => r.recipient)
+    expect(allRecipients).toEqual(["*"])
   })
 
   it("commits broadcast ownership before the persisted message becomes observable", () => {

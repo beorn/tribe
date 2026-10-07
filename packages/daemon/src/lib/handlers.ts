@@ -712,6 +712,13 @@ function activeBroadcastRecipients(ctx: TribeContext, answerableNames: ReadonlyS
   // without removing it would have made every broadcast enumerate ZERO
   // recipients. The membership table was never a room concept here; it was an
   // accidental liveness predicate.
+  // A tracked broadcast opens a ball per recipient, and a recipient must be
+  // able to settle it. Services (principal_class 'service': the page mailbox
+  // projector, coordination-watch, dark-work and the like) register as
+  // role='member' but can never answer, so admitting them opened a dead ball on
+  // every fanout-all broadcast (28005; the 03f3d4bb poll admitted 2 services).
+  // A service still receives the message row when it subscribes; it owns no
+  // ball. Ball owners are seats (principal_class 'agent') only.
   const rows = ctx.db
     .prepare(
       assertSingleStatement(`
@@ -719,6 +726,7 @@ function activeBroadcastRecipients(ctx: TribeContext, answerableNames: ReadonlyS
       FROM sessions s
       WHERE s.name IN (${placeholders})
         AND s.role = 'member'
+        AND s.principal_class <> 'service'
       ORDER BY s.name ASC
     `),
     )
