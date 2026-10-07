@@ -11,7 +11,7 @@ import { assertSingleStatement } from "@bearly/sqlite"
  */
 import { describe, test, expect, beforeEach, afterEach } from "vitest"
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, rmSync, mkdirSync } from "node:fs"
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs"
 import { Database } from "bun:sqlite"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -53,13 +53,65 @@ describe("recall status (bounded by default)", () => {
     expect(review.recommendations.join(" ")).toMatch(/bounded status/i)
   })
 
-  test("--bench opts back into LLM stages (no bounded-skip recommendation)", () => {
+  test("default JSON pins status to no searches (search benchmarks skipped by default)", () => {
+    const { status, stdout } = runStatus(["--json"])
+    expect(status).toBe(0)
+
+    const review = JSON.parse(stdout) as {
+      searchBenchmarks: unknown[]
+      recommendations: string[]
+    }
+    expect(review.searchBenchmarks).toEqual([])
+    expect(review.recommendations.join(" ")).toMatch(/search benchmarks skipped \(bounded mode\)/i)
+  })
+
+  test("status reports blocked rebuild when recall-index schedule is held", () => {
+    const fakeHabDir = join(home, "main.hab", "state", "units", "recall-index")
+    mkdirSync(fakeHabDir, { recursive: true })
+    const overridesPath = join(fakeHabDir, "overrides.json")
+    writeFileSync(
+      overridesPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        unit: "recall-index",
+        deltas: [
+          {
+            field: "runLevel",
+            value: "stopped",
+            actor: "@chief",
+            reason: "@chief: held pending investigation",
+            at: "2026-10-06T14:02:04.045Z",
+          },
+        ],
+      }),
+    )
+
+    const res = spawnSync(process.execPath, [CLI, "status", "--json"], {
+      encoding: "utf8",
+      timeout: 60_000,
+      env: { ...process.env, HOME: home, TRIBE_LLM_DIR: "", HAB_DIR: join(home, "main.hab") },
+    })
+    expect(res.status).toBe(0)
+    const review = JSON.parse(res.stdout) as {
+      indexHealth: { isStale: boolean; blockedRebuild?: { actor: string; reason: string } | null }
+      recommendations: string[]
+    }
+    expect(review.indexHealth.isStale).toBe(true)
+    expect(review.indexHealth.blockedRebuild?.actor).toBe("@chief")
+    expect(review.recommendations.join(" ")).toMatch(/rebuild is blocked by @chief/i)
+  })
+
+  test("--bench opts back into search benchmarks and LLM stages", () => {
     const { status, stdout } = runStatus(["--json", "--bench"])
     expect(status).toBe(0)
-    const review = JSON.parse(stdout) as { recommendations: string[] }
-    // With --bench the bounded-skip notice must NOT be emitted; the recall test
-    // runs (it may report a missing backend, but the skip notice is absent).
+    const review = JSON.parse(stdout) as {
+      searchBenchmarks: Array<{ query: string; resultCount: number }>
+      recommendations: string[]
+    }
+    // With --bench the bounded-skip notices must NOT be emitted and searches must run
+    expect(review.recommendations.join(" ")).not.toMatch(/search benchmarks skipped/i)
     expect(review.recommendations.join(" ")).not.toMatch(/bounded status: llm checks skipped/i)
+    expect(review.searchBenchmarks).toHaveLength(4)
   })
 
   // @km/bearly/19943 — the JSON status must be machine-safe AND carry the

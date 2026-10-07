@@ -128,6 +128,12 @@ export async function hookRecall(
 // Review / Diagnostics
 // ============================================================================
 
+export interface BlockedRebuildInfo {
+  actor: string
+  reason: string
+  at: string
+}
+
 export interface ReviewResult {
   indexHealth: {
     sessions: number
@@ -144,6 +150,7 @@ export interface ReviewResult {
     dbSizeBytes: number
     lastRebuild: string | null
     isStale: boolean
+    blockedRebuild?: BlockedRebuildInfo | null
   }
   hookConfig: {
     userPromptSubmitConfigured: boolean
@@ -231,6 +238,46 @@ export interface ReviewOptions {
   skipSearchBenchmarks?: boolean
 }
 
+/**
+ * Check whether the automated `recall-index` service schedule is held or stopped
+ * by an operator or supervisor override (@ag/recall/27860).
+ */
+export function getBlockedRebuildInfo(projectRoot?: string): BlockedRebuildInfo | null {
+  const candidatePaths = [
+    projectRoot
+      ? path.resolve(projectRoot, "..", "main.hab", "state", "units", "recall-index", "overrides.json")
+      : null,
+    projectRoot ? path.resolve(projectRoot, "main.hab", "state", "units", "recall-index", "overrides.json") : null,
+    process.env.HAB_SESSION_HABITAT_ROOT
+      ? path.resolve(process.env.HAB_SESSION_HABITAT_ROOT, "state", "units", "recall-index", "overrides.json")
+      : null,
+    process.env.HAB_DIR ? path.resolve(process.env.HAB_DIR, "state", "units", "recall-index", "overrides.json") : null,
+    "/hh/main.hab/state/units/recall-index/overrides.json",
+  ].filter((p): p is string => Boolean(p))
+
+  for (const p of candidatePaths) {
+    try {
+      if (!fs.existsSync(p)) continue
+      const raw = fs.readFileSync(p, "utf8")
+      const parsed = JSON.parse(raw) as {
+        deltas?: Array<{ field?: string; value?: string; actor?: string; reason?: string; at?: string }>
+      }
+      const runLevelDeltas = (parsed.deltas ?? []).filter((d) => d.field === "runLevel")
+      const latest = runLevelDeltas.at(-1)
+      if (latest && latest.value === "stopped" && latest.actor) {
+        return {
+          actor: latest.actor,
+          reason: latest.reason ?? "rebuild stopped",
+          at: latest.at ?? "",
+        }
+      }
+    } catch {
+      // silent-fallback-allow: unreadable overrides file or missing habitat state defaults to null
+    }
+  }
+  return null
+}
+
 export async function reviewMemorySystem(projectRoot: string, opts: ReviewOptions = {}): Promise<ReviewResult> {
   const startTime = Date.now()
   const skipLlm = opts.skipLlm ?? false
@@ -275,6 +322,7 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
     // Last rebuild time
     const lastRebuild = getIndexMeta(db, "last_rebuild") ?? null
     const isStale = lastRebuild ? Date.now() - new Date(lastRebuild).getTime() > ONE_HOUR_MS : true
+    const blockedRebuild = isStale ? getBlockedRebuildInfo(projectRoot) : null
 
     indexHealth = {
       sessions,
@@ -291,12 +339,19 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
       dbSizeBytes,
       lastRebuild,
       isStale,
+      ...(blockedRebuild ? { blockedRebuild } : {}),
     }
 
     // Index health recommendations
     if (isStale) {
       const ago = lastRebuild ? formatTimeSince(new Date(lastRebuild).getTime()) : "never"
-      recommendations.push(`Index is stale (${ago}) — run \`bun recall index --incremental\``)
+      if (blockedRebuild) {
+        recommendations.push(
+          `Index is stale (${ago}) — rebuild is blocked by ${blockedRebuild.actor} (${blockedRebuild.reason})`,
+        )
+      } else {
+        recommendations.push(`Index is stale (${ago}) — run \`bun recall index --incremental\``)
+      }
     }
     if (firstPrompts === 0) {
       recommendations.push("No first_prompt content indexed — run full index rebuild: `bun recall index`")
