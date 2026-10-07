@@ -8,7 +8,7 @@
         "@bearly/sqlite": "0.1.0",
         "@types/bun": "1.4.2",
         "oxfmt": "0.38.0",
-        "removely": "^0.3.0",
+        "removely": "^0.4.0",
         "typescript": "^5.9.3",
         "vitest": "^4.1.6",
       },
@@ -23,7 +23,7 @@
         "@bearly/flock": "^0.1.0",
         "@bearly/sqlite": "0.1.0",
         "loggily": "^0.11.0",
-        "removely": "^0.3.0",
+        "removely": "^0.4.0",
         "tribe-injection-envelope": "workspace:*",
         "tribe-recall": "workspace:*",
         "tribe-wire": "workspace:*",
@@ -48,7 +48,7 @@
         "@silvery/commander": "^0.24.0",
         "@tobilu/qmd": "2.8.3",
         "loggily": "^0.11.0",
-        "removely": "^0.3.0",
+        "removely": "^0.4.0",
         "tribe-wire": "workspace:*",
         "zod": "4.6.5",
       },
@@ -65,7 +65,7 @@
         "@modelcontextprotocol/sdk": "^1.31.0",
         "@silvery/commander": "^0.24.0",
         "loggily": "^0.11.0",
-        "removely": "^0.3.0",
+        "removely": "^0.4.0",
       },
       "devDependencies": {
         "tsdown": "0.22.13",
@@ -91,6 +91,8 @@
     "@bearly/flock": ["@bearly/flock@0.1.0", "", {}, "sha512-L9qQPH3Df+xKaFfOoYOamyL00CmRltbvilx0XfXzylFw76MRMN4SrhydxrVc4ROsZ5nkVZE0prl3G3zv3ZOH5w=="],
 
     "@bearly/pacing": ["@bearly/pacing@0.2.0", "", {}, "sha512-3PxvuxHWpm1X5GNXE9OUQvkSk8R7UDSmUP7cavGjnS5qN43J5kh7ot7YPhLFCDtfLFk6isZH4m0YUINJa0RvHA=="],
+
+    "@bearly/process-sources": ["@bearly/process-sources@0.1.0", "", {}, "sha512-FV53KkJdGgfq2/K1iuR7aFK7oqKTdQDzxLDhAHyD3UnWQ6TfDzVdtzmHaNsasgSxgO2HGbv1Ah4i4QEnS4f1Zw=="],
 
     "@bearly/sqlite": ["@bearly/sqlite@0.1.0", "", {}, "sha512-z9jVGioKjj77lHy9+2OkXIpBgnMfIK7Kte/2ypS5bD6z5c/xnlmklFtxO0wlYJ0soX966G9fDJNiV25u5oz66w=="],
 
@@ -684,7 +686,7 @@
 
     "rc": ["rc@1.2.8", "", { "dependencies": { "deep-extend": "^0.6.0", "ini": "~1.3.0", "minimist": "^1.2.0", "strip-json-comments": "~2.0.1" }, "bin": { "rc": "./cli.js" } }, "sha512-y3bGgqKj3QBdxLbLkomlohkvsA8gdAiUQlSBJnBhfn+BPxg4bc62d8TcBW15wavDfgexCgccckhcZvywyQYPOw=="],
 
-    "removely": ["removely@0.3.0", "", { "bin": { "removely": "dist/cli.mjs" } }, "sha512-sjEgr6cgk8LiYcMMXOctcpxHBiW3lKNsTVy6gunWPqryVUI+5OozVnu64ZjRa/2IoSIfYfRovXm8JDdBaZdUcQ=="],
+    "removely": ["removely@0.4.0", "", { "dependencies": { "@bearly/process-sources": "^0.1.0" }, "bin": { "removely": "dist/cli.mjs" } }, "sha512-SI7c/u4zwvgKX1VEFADGnF13eZ2lO2PBzJJoRwQhXvO0e5wLWDIJQXtbtt3bT05d01IcJwn8lOeoqG0Xv2InFw=="],
 
     "require-directory": ["require-directory@2.1.1", "", {}, "sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q=="],
 
