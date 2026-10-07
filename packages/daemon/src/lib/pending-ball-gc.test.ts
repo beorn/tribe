@@ -1450,6 +1450,48 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         oldest_taking_receipt_at_ms: null,
       })
 
+      // @failure One fanout-all recipient's TAKING hides another recipient's offline obligation (#22798).
+      // @level contract
+      // @consumer WATCH per-ball health facts
+      // @testonly none
+      openBall(stmts, { id: "older", recipient: "@agent/10", openedAt: olderOpenedAt, expiresAt: olderDeadline })
+      db.prepare("UPDATE pending_request SET fanout = 'all' WHERE request_id = 'older'").run()
+      const shared = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as {
+        pending_balls: {
+          requests: {
+            owners: Array<{
+              owner: string
+              oldest_taking_receipt_at_ms: number | null
+              pending: Array<{ request_id: string; taking_receipt_at_ms: number | null }>
+            }>
+          }
+        }
+      }
+      expect(
+        shared.pending_balls.requests.owners
+          .find((row) => row.owner === "@agent/9")
+          ?.pending.find((ball) => ball.request_id === "older")?.taking_receipt_at_ms,
+      ).toBe(now - 20_000)
+      expect(shared.pending_balls.requests.owners.find((row) => row.owner === "@agent/10")).toMatchObject({
+        oldest_taking_receipt_at_ms: null,
+        pending: [expect.objectContaining({ request_id: "older", taking_receipt_at_ms: null })],
+      })
+      // Dispose the second recipient through its real reply, retaining agent/9's own custody.
+      const secondOwner = makeContext(db, stmts, "@agent/10")
+      expect(
+        sendMessage(
+          secondOwner,
+          "@chief",
+          "review done",
+          "response",
+          undefined,
+          undefined,
+          "direct",
+          {},
+          { reply: "older" },
+        ).tracker?.closed,
+      ).toBe(1)
+
       // Settle the two ordinary requests through their real response path.
       // The incident remains open, visible in all-kind custody, with no owed
       // request owner. This guards the incident-only producer result.

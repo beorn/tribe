@@ -2234,7 +2234,7 @@ function pendingOwnerGroups<T extends PendingBall>(
         // ball the age above reports; a receipt on a younger ball in the same
         // group must never stand in for it.
         oldest_deadline_at_ms: oldest.expires_at === null ? null : Date.parse(oldest.expires_at),
-        oldest_taking_receipt_at_ms: takingReceipts.get(oldest.request_id) ?? null,
+        oldest_taking_receipt_at_ms: takingReceipts.get(pendingFactKey(oldest)) ?? null,
         pending: oldestFirst,
       }
     })
@@ -2246,7 +2246,7 @@ function pendingOwnerSummaries(pending: readonly PendingBall[], takingReceipts?:
 
 /**
  * 27440 — the durable TAKING receipts owners sent on their open balls, keyed
- * by request_id. The health owner summary binds one to the oldest ball it
+ * by original request, recipient and message generation. The health owner summary binds one to the oldest ball it
  * reports, so a consumer can tell "owner took it and promised an ETA" from
  * "nobody answered". Both retention tiers are read; an archived receipt is
  * still the owner's evidence.
@@ -2254,9 +2254,11 @@ function pendingOwnerSummaries(pending: readonly PendingBall[], takingReceipts?:
 function takingReceiptsForOpenBalls(ctx: TribeContext): ReadonlyMap<string, number> {
   const rows = ctx.stmts.selectTakingReceiptsForOpenBalls.all() as Array<{
     request_id: string
+    recipient: string
+    message_id: string
     taking_receipt_at_ms: number
   }>
-  return new Map(rows.map((row) => [row.request_id, row.taking_receipt_at_ms]))
+  return new Map(rows.map((row) => [pendingFactKey(row), row.taking_receipt_at_ms]))
 }
 
 function pendingExplicitOwner(value: unknown): string | undefined {
@@ -3725,7 +3727,11 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   const requests = pending.filter((ball) => ball.request_kind === "request")
   const transport = ownerTransportObservationProjector(ctx, opts, now)
   const requestOwners = pendingOwnerGroups(
-    requests.map((ball) => ({ ...ball, ...transport.observe(ball.recipient) })),
+    requests.map((ball) => ({
+      ...ball,
+      ...transport.observe(ball.recipient),
+      taking_receipt_at_ms: takingReceipts.get(pendingFactKey(ball)) ?? null,
+    })),
     takingReceipts,
   )
   const projectedRequestCount = requestOwners.reduce((count, owner) => count + owner.pending.length, 0)

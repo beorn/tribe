@@ -2254,21 +2254,21 @@ export function createStatements(db: Database) {
      *  paths use; an archived receipt still counts. */
     selectTakingReceiptsForOpenBalls: db.prepare(
       assertSingleStatement(`
-		SELECT request_id, MAX(taking_receipt_at_ms) AS taking_receipt_at_ms
+		SELECT request_id, recipient, message_id, MAX(taking_receipt_at_ms) AS taking_receipt_at_ms
 		FROM (
-			SELECT p.request_id AS request_id, r.ts AS taking_receipt_at_ms
+			SELECT p.request_id AS request_id, p.recipient, p.message_id, r.ts AS taking_receipt_at_ms
 			FROM pending_request p
 			LEFT JOIN messages pending_message ON pending_message.id = p.message_id
 			LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
 			JOIN messages r ON ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", "COALESCE(pending_message.rowid, pending_archive.seq)")}
 			UNION ALL
-			SELECT p.request_id AS request_id, r.ts AS taking_receipt_at_ms
+			SELECT p.request_id AS request_id, p.recipient, p.message_id, r.ts AS taking_receipt_at_ms
 			FROM pending_request p
 			LEFT JOIN messages pending_message ON pending_message.id = p.message_id
 			LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
 			JOIN messages_archive r ON ${takingStatusForOpenRequestMatchSql("r", "seq", "p", "COALESCE(pending_message.rowid, pending_archive.seq)")}
 		)
-		GROUP BY request_id
+		GROUP BY request_id, recipient, message_id
 	`),
     ),
 
