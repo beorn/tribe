@@ -31,7 +31,13 @@ export default {
       },
       // oxfmt-ignore
       stateRoots: ["${TRIBE_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/tribe/tribe.db}", "${TRIBE_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.local/share/tribe}/tribe.sock}"],
-      health: { command: "tribe health --json" },
+      // 27871 AC2: DECLARE wire's own probe budget so hab's bound outlasts it. The CLI gives its client a 10 s connect
+      // deadline and a 10 s per-call deadline (client.ts, `callTimeoutMs`), so a loaded or half-open socket can take
+      // ~20 s before `tribe health --json` prints its OWN hab-service-health/2 document and exits. At hab's 15 s
+      // default the probe was killed first, so the reader saw hab's kill (or, on the exit path before 27871 AC1,
+      // nothing at all) instead of wire's own answer. 25 s covers the CLI's worst case with headroom; a bound at or
+      // above `intervalMs` is refused, and wire declares no interval.
+      health: { command: "tribe health --json", timeoutMs: 25_000 },
       // It runs from an immutable landing; when a promoted landing carries a new vendor/tribe, the hab
       // controller restarts it onto that landing (26774, @cto 9e7a89d2). A km-only landing leaves it running.
       // With sourceDigest it does so only when the daemon's closure changed: a tribe move touching nothing it
