@@ -19,6 +19,7 @@
 
 import { describe, expect, test } from "vitest"
 import {
+  describeCodeIdentityAgreement,
   describeCodeIdentityMismatch,
   RELOAD_DEADLINE_MS,
   RELOAD_MAX_ABSENT,
@@ -39,6 +40,8 @@ import {
 
 const FLEET = 20
 const SEEDS = 200
+/** The wire protocol version these fixtures' adapter speaks (27941 AC2a); the daemon publishes it too, unless a row varies it. */
+const SELF_PROTOCOL_VERSION = 11
 
 function seeded(seed: number): () => number {
   let state = seed >>> 0
@@ -205,13 +208,20 @@ describe("pacedReexec", () => {
     peers: { declared, liveUndeclared: [] },
     runningCert,
     runningRoot: runningCert === null ? null : "/landing",
+    runningProtocolVersion: runningCert === null ? null : SELF_PROTOCOL_VERSION,
   })
   /** A daemon on an arbitrary landing root, for the 27531 move / no-move decision rows. */
-  const daemonOn = (declared: string[], root: string | null, cert: string | null): ReloadDaemonView => ({
+  const daemonOn = (
+    declared: string[],
+    root: string | null,
+    cert: string | null,
+    protocolVersion: number | null = SELF_PROTOCOL_VERSION,
+  ): ReloadDaemonView => ({
     liveNames: declared,
     peers: { declared, liveUndeclared: [] },
     runningCert: cert,
     runningRoot: root,
+    runningProtocolVersion: protocolVersion,
   })
   function harness(
     views: Array<ReloadDaemonView | Error | "hang">,
@@ -244,6 +254,7 @@ describe("pacedReexec", () => {
         },
         onDiskCert: () => onDisk,
         selfRoot: () => selfRoot,
+        selfProtocolVersion: () => SELF_PROTOCOL_VERSION,
         sleep: async (ms: number) => {
           sleeps.push(ms)
           now += ms
@@ -261,7 +272,7 @@ describe("pacedReexec", () => {
 
   test("waits for its rank's slot, then adopts the daemon's DIFFERENT landing (27531)", async () => {
     const live = ["@chief", "@dev/2", "@dev/3"]
-    const run = harness([daemonOn(live, "/hh/dev-landings/r2", "abc")])
+    const run = harness([daemonOn(live, "/hh/dev-landings/r2", "def")])
     await pacedReexec(run.deps, "source changed")
     expect(run.sleeps[0]).toBe(2 * RELOAD_SLOT_MS)
     expect(run.infos).toEqual([
@@ -288,7 +299,15 @@ describe("pacedReexec", () => {
   })
 
   test("a daemon older than reload_peers ranks on sessions[].name and says so", async () => {
-    const run = harness([{ liveNames: ["@chief", "@dev/3"], peers: null, runningCert: "abc", runningRoot: "/landing" }])
+    const run = harness([
+      {
+        liveNames: ["@chief", "@dev/3"],
+        peers: null,
+        runningCert: "abc",
+        runningRoot: "/landing",
+        runningProtocolVersion: SELF_PROTOCOL_VERSION,
+      },
+    ])
     await pacedReexec(run.deps, "x")
     expect(run.sleeps[0]).toBe(RELOAD_SLOT_MS)
     expect(run.log[0]).toMatch(/cli_status carries no reload_peers .*; ranking on sessions\[\]\.name/u)
@@ -301,6 +320,7 @@ describe("pacedReexec", () => {
         peers: { declared: [], liveUndeclared: ["@dev/3"] },
         runningCert: "abc",
         runningRoot: "/landing",
+        runningProtocolVersion: SELF_PROTOCOL_VERSION,
       },
     ])
     await pacedReexec(run.deps, "x")
@@ -314,6 +334,7 @@ describe("pacedReexec", () => {
         peers: { declared: ["@chief"], liveUndeclared: ["@dev/3"] },
         runningCert: "abc",
         runningRoot: "/landing",
+        runningProtocolVersion: SELF_PROTOCOL_VERSION,
       },
     ])
     await pacedReexec(run.deps, "x")
@@ -357,6 +378,7 @@ describe("pacedReexec", () => {
         peers: { declared: roster(28), liveUndeclared: ["@grok/1"] },
         runningCert: "abc",
         runningRoot: "/landing",
+        runningProtocolVersion: SELF_PROTOCOL_VERSION,
       },
     ])
     await pacedReexec({ ...run.deps, self: "@grok/1" }, "x")
@@ -387,13 +409,71 @@ describe("pacedReexec", () => {
   })
 
   test("a daemon running a DIFFERENT landing re-execs at once, with no ready-timeout warning (27531)", async () => {
-    const run = harness([daemonOn(["@dev/3"], "/hh/dev-landings/other", "abc")])
+    const run = harness([daemonOn(["@dev/3"], "/hh/dev-landings/other", "def")])
     await pacedReexec(run.deps, "x")
     expect(run.log).toEqual(["reexec: x"])
     expect(run.log.join("\n")).not.toMatch(/not ready|re-execing anyway/u)
     expect(run.infos.at(-1)).toBe(
       "reload pacing: the daemon moved to /hh/dev-landings/other; this adapter runs /landing and re-execs onto the daemon's landing",
     )
+  })
+
+  test("a different landing root at the SAME code identity keeps the warm process: no re-exec (27941 AC2a)", async () => {
+    const run = harness([daemonOn(["@dev/3"], "/hh/dev-landings/r3", "abc")])
+    await pacedReexec(run.deps, "generation changed")
+    expect(run.log).toEqual([])
+    expect(run.infos.at(-1)).toBe(
+      "reload pacing: the daemon moved to /hh/dev-landings/r3 and this adapter runs /landing, but both run commit abc and speak wire protocol 11; this adapter keeps its warm process and reconnects in place (no re-exec)",
+    )
+    expect(run.emitted).toHaveLength(1)
+    expect(run.emitted[0]).toMatchObject({
+      decision: "no-reexec",
+      daemonRoot: "/hh/dev-landings/r3",
+      daemonCert: "abc",
+      selfRoot: "/landing",
+      selfCert: "abc",
+    })
+  })
+
+  test("a different landing root at a DIFFERENT commit still re-execs (27941 AC2a)", async () => {
+    const run = harness([daemonOn(["@dev/3"], "/hh/dev-landings/r3", "def")])
+    await pacedReexec(run.deps, "generation changed")
+    expect(run.log).toEqual(["reexec: generation changed"])
+  })
+
+  test("a different landing root at a DIFFERENT wire protocol version still re-execs (27941 AC2a)", async () => {
+    const run = harness([daemonOn(["@dev/3"], "/hh/dev-landings/r3", "abc", SELF_PROTOCOL_VERSION + 1)])
+    await pacedReexec(run.deps, "generation changed")
+    expect(run.log).toEqual(["reexec: generation changed"])
+  })
+
+  test("a daemon that publishes no wire protocol version agrees on its cert alone (27941 AC2a)", async () => {
+    const run = harness([daemonOn(["@dev/3"], "/hh/dev-landings/r3", "abc", null)])
+    await pacedReexec(run.deps, "generation changed")
+    expect(run.log).toEqual([])
+    expect(run.infos.at(-1)).toContain(
+      "both run commit abc (the daemon publishes no wire protocol version, so the cert alone decides)",
+    )
+  })
+
+  test("describeCodeIdentityAgreement names the first difference and agrees on commit + protocol (27941 AC2a)", () => {
+    const same = { daemonCert: "c", daemonProtocolVersion: 11, selfCert: "c", selfProtocolVersion: 11 }
+    expect(describeCodeIdentityAgreement(same)).toEqual({
+      agrees: true,
+      reason: "both run commit c and speak wire protocol 11",
+    })
+    expect(describeCodeIdentityAgreement({ ...same, daemonCert: null }).agrees).toBe(false)
+    expect(describeCodeIdentityAgreement({ ...same, selfCert: null }).agrees).toBe(false)
+    expect(describeCodeIdentityAgreement({ ...same, daemonCert: "d" }).reason).toMatch(
+      /the daemon runs commit d, this adapter runs c/u,
+    )
+    expect(describeCodeIdentityAgreement({ ...same, daemonProtocolVersion: 12 }).reason).toMatch(
+      /speaks wire protocol 12, this adapter speaks 11/u,
+    )
+    expect(describeCodeIdentityAgreement({ ...same, daemonProtocolVersion: null })).toEqual({
+      agrees: true,
+      reason: "both run commit c (the daemon publishes no wire protocol version, so the cert alone decides)",
+    })
   })
 
   test("a same-landing daemon restart is a no-op: no re-exec (27531)", async () => {
@@ -440,7 +520,7 @@ describe("pacedReexec", () => {
   })
 
   test("the reexec decision is emitted once with its structured fields (27548)", async () => {
-    const run = harness([daemonOn(["@chief", "@dev/2", "@dev/3"], "/hh/dev-landings/r2", "abc")])
+    const run = harness([daemonOn(["@chief", "@dev/2", "@dev/3"], "/hh/dev-landings/r2", "def")])
     await pacedReexec(run.deps, "source changed")
     expect(run.emitted).toHaveLength(1)
     expect(run.emitted[0]).toEqual({
@@ -448,7 +528,7 @@ describe("pacedReexec", () => {
       reason: "source changed",
       self: "@dev/3",
       daemonRoot: "/hh/dev-landings/r2",
-      daemonCert: "abc",
+      daemonCert: "def",
       selfRoot: "/landing",
       selfCert: "abc",
       rank: 2,
@@ -504,7 +584,7 @@ describe("pacedReexec", () => {
   })
 
   test("a failed reexec emit warns and does not throw; the re-exec proceeds (27548)", async () => {
-    const run = harness([daemonOn(["@dev/3"], "/hh/dev-landings/r2", "abc")])
+    const run = harness([daemonOn(["@dev/3"], "/hh/dev-landings/r2", "def")])
     await pacedReexec(
       {
         ...run.deps,
@@ -523,7 +603,7 @@ describe("pacedReexec", () => {
   })
 
   test("a reexec emit that never lands is bounded and warns; the re-exec proceeds (27548)", async () => {
-    const run = harness([daemonOn(["@dev/3"], "/hh/dev-landings/r2", "abc")])
+    const run = harness([daemonOn(["@dev/3"], "/hh/dev-landings/r2", "def")])
     await pacedReexec({ ...run.deps, emitDecision: () => new Promise<void>(() => {}) }, "source changed")
     expect(run.log).toContain("reexec: source changed")
     expect(run.log.some((line) => line.includes(`did not land within ${RELOAD_PROBE_TIMEOUT_MS} ms`))).toBe(true)

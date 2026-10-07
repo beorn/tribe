@@ -136,6 +136,9 @@ export interface ReloadDaemonView {
   readonly runningCert: string | null
   /** cli_status `daemon.code_identity.root`: the landing root the daemon runs from, or null when it reports none. */
   readonly runningRoot: string | null
+  /** cli_status `daemon.protocol_version`: the wire protocol version the daemon's code speaks, or null when it
+   *  reports none (27941 AC2a). Agreement compares it only when the daemon publishes one. */
+  readonly runningProtocolVersion: number | null
 }
 
 /**
@@ -170,6 +173,8 @@ export interface PacedReexecDeps {
   readonly onDiskCert: () => string | null
   /** This adapter's OWN landing root (27531), derived from its own file location; never the daemon's. */
   readonly selfRoot: () => string | null
+  /** The wire protocol version THIS adapter's code speaks (27941 AC2a), for the code-identity agreement check. */
+  readonly selfProtocolVersion: () => number | null
   readonly sleep: (ms: number) => Promise<void>
   readonly warn: (message: string) => void
   /** The rank and slot each reload takes, so an operator (and the journey witness) can see who shared a slot. */
@@ -212,6 +217,55 @@ export function describeCodeIdentityMismatch(input: {
     )
   }
   return null
+}
+
+/**
+ * Whether the daemon runs THIS adapter's code even from a different landing root (27941 AC2a). A process's code
+ * identity is the commit it runs plus the wire protocol version it speaks; a landing ROOT is where it was started,
+ * not what it runs. Two processes at the same commit and the same protocol version therefore run identical code,
+ * and a re-exec onto the daemon's landing would tear down a warm process to rebuild it. Agreement needs a cert from
+ * both sides; a daemon that publishes no protocol version is compared on its cert alone ("the same wire protocol
+ * version if one exists", @cto b2d87422), while a published version that differs refuses agreement exactly as a
+ * different cert does. `reason` names the agreement or the first difference, so the decision event says why a warm
+ * process was kept or replaced.
+ */
+export function describeCodeIdentityAgreement(input: {
+  readonly daemonCert: string | null
+  readonly daemonProtocolVersion: number | null
+  readonly selfCert: string | null
+  readonly selfProtocolVersion: number | null
+}): { readonly agrees: boolean; readonly reason: string } {
+  if (input.daemonCert === null) {
+    return { agrees: false, reason: "the daemon published no cert (daemon.code_identity.cert absent)" }
+  }
+  if (input.selfCert === null) {
+    return { agrees: false, reason: "this adapter's tree has no resolved commit" }
+  }
+  if (input.daemonCert !== input.selfCert) {
+    return { agrees: false, reason: `the daemon runs commit ${input.daemonCert}, this adapter runs ${input.selfCert}` }
+  }
+  if (
+    input.daemonProtocolVersion !== null &&
+    input.selfProtocolVersion !== null &&
+    input.daemonProtocolVersion !== input.selfProtocolVersion
+  ) {
+    return {
+      agrees: false,
+      reason:
+        `the daemon runs commit ${input.daemonCert} but speaks wire protocol ${input.daemonProtocolVersion}, ` +
+        `this adapter speaks ${input.selfProtocolVersion}`,
+    }
+  }
+  if (input.daemonProtocolVersion === null) {
+    return {
+      agrees: true,
+      reason: `both run commit ${input.daemonCert} (the daemon publishes no wire protocol version, so the cert alone decides)`,
+    }
+  }
+  return {
+    agrees: true,
+    reason: `both run commit ${input.daemonCert} and speak wire protocol ${input.daemonProtocolVersion}`,
+  }
 }
 
 /** One cli_status read that fails, loudly, once RELOAD_PROBE_TIMEOUT_MS passes without an answer. */
@@ -327,6 +381,29 @@ export async function pacedReexec(deps: PacedReexecDeps, reason: string): Promis
   }
   const daemonRoot = view.runningRoot
   if (daemonRoot !== null && selfRoot !== null && daemonRoot !== selfRoot) {
+    const agreement = describeCodeIdentityAgreement({
+      daemonCert: view.runningCert,
+      daemonProtocolVersion: view.runningProtocolVersion,
+      selfCert,
+      selfProtocolVersion: deps.selfProtocolVersion(),
+    })
+    if (agreement.agrees) {
+      // 27941 AC2a — the daemon started from a different landing root but runs this adapter's own code. A re-exec
+      // would tear down a warm process and rebuild the identical code, so keep the live registration instead.
+      deps.info(
+        `reload pacing: the daemon moved to ${daemonRoot} and this adapter runs ${selfRoot}, but ${agreement.reason}; ` +
+          "this adapter keeps its warm process and reconnects in place (no re-exec)",
+      )
+      emitDetached({
+        ...round,
+        decision: "no-reexec",
+        daemonRoot,
+        daemonCert: view.runningCert,
+        selfRoot,
+        selfCert,
+      })
+      return
+    }
     deps.info(
       `reload pacing: the daemon moved to ${daemonRoot}; this adapter runs ${selfRoot} and re-execs onto the daemon's landing`,
     )

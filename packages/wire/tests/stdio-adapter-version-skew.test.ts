@@ -78,18 +78,31 @@ function spawnGenerationDaemon(
   server: Server
   clients: Socket[]
   registrations: number[]
+  receivedMethods: string[]
   setPid(pid: number): void
   setRoot(root: string): void
+  setCert(cert: string | null): void
+  setProtocolVersion(version: number | null): void
+  holdNextMethod(method: string): void
 }> {
   const clients: Socket[] = []
   const registrations: number[] = []
+  const receivedMethods: string[] = []
+  const heldOnce = new Set<string>()
   let daemonPid = 1001
   let daemonRoot = TRIBE_ROOT
+  // 27941 AC2a — the daemon's published code identity. `test-cert` differs from the adapter's own commit, so the
+  // default fixture re-execs onto a moved landing; a row that sets the cert to the adapter's HEAD exercises the
+  // same-code / different-landing in-place path.
+  let daemonCert: string | null = "test-cert"
+  let daemonProtocolVersion: number | null = TRIBE_PROTOCOL_VERSION
   return new Promise((resolveServer) => {
     const server = createServer((socket) => {
       clients.push(socket)
       const parse = createLineParser((msg) => {
         if (!isRequest(msg)) return
+        receivedMethods.push(msg.method)
+        if (heldOnce.delete(msg.method)) return
         if (msg.method === "register") {
           registrations.push(daemonPid)
           socket.write(
@@ -120,7 +133,27 @@ function spawnGenerationDaemon(
                     },
                   }
                 : {}),
-              daemon: { pid: daemonPid, code_identity: { cert: "test-cert", root: daemonRoot } },
+              daemon: {
+                pid: daemonPid,
+                code_identity: { cert: daemonCert, root: daemonRoot },
+                protocol_version: daemonProtocolVersion,
+              },
+            }),
+          )
+          return
+        }
+        if (msg.method === "tribe.fetch") {
+          socket.write(
+            makeResponse(msg.id, {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    marker: "after-change",
+                    messages: [{ id: "after-change", content: "delivered after the generation change" }],
+                  }),
+                },
+              ],
             }),
           )
           return
@@ -150,11 +183,21 @@ function spawnGenerationDaemon(
         server,
         clients,
         registrations,
+        receivedMethods,
         setPid(pid: number) {
           daemonPid = pid
         },
         setRoot(root: string) {
           daemonRoot = root
+        },
+        setCert(cert: string | null) {
+          daemonCert = cert
+        },
+        setProtocolVersion(version: number | null) {
+          daemonProtocolVersion = version
+        },
+        holdNextMethod(method: string) {
+          heldOnce.add(method)
         },
       }),
     )
@@ -712,5 +755,175 @@ describe("stdio adapter — protocol version skew", () => {
       "the paced gate's stays-put decision",
     )
     expect(generationDaemon.registrations).toEqual([1001, 2002])
+  }, 60_000)
+
+  it("reconnects in place, keeping its identity, when a new daemon runs the SAME code from a different landing (27941 AC2a)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const logPath = join(tmpDir, "generation-in-place.log")
+    // The daemon's published cert is the adapter's OWN commit: same code, a different landing root.
+    const onDiskCert = execFileSync("git", ["-C", TRIBE_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
+    const generationDaemon = await spawnGenerationDaemon(socketPath)
+    generationDaemon.setCert(onDiskCert)
+    daemon = generationDaemon
+    child = captureStderr(
+      spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", "generation-test"], {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          ...STANDALONE_PLUGIN_ENV,
+          TRIBE_DELIVERY: "pull",
+          DEBUG_LOG: logPath,
+          LOG_LEVEL: "debug",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      }) as ChildProcessWithoutNullStreams,
+    )
+    await waitForRegistrations(child, () => generationDaemon.registrations.length, 1, 15_000, "initial registration")
+
+    let output = ""
+    child.stdout.on("data", (data: Buffer | string) => {
+      output += data.toString()
+    })
+    child.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 0,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "in-place", version: "0" },
+        },
+      }) + "\n",
+    )
+
+    // The daemon generation changes onto a DIFFERENT landing root that runs the SAME commit.
+    generationDaemon.setRoot(join(tmpDir, "other-landing"))
+    generationDaemon.setPid(2002)
+    for (const socket of generationDaemon.clients.splice(0)) socket.destroy()
+
+    await waitForRegistrations(
+      child,
+      () => generationDaemon.registrations.length,
+      2,
+      40_000,
+      "re-registration after the generation change",
+      logPath,
+    )
+    expect(generationDaemon.registrations).toEqual([1001, 2002])
+
+    // The paced gate waits its rank slot; with the code identity equal it keeps the warm process rather than re-exec.
+    await waitFor(
+      () => (existsSync(logPath) ? readFileSync(logPath, "utf8") : "").includes("reconnects in place (no re-exec)"),
+      15_000,
+      "the in-place no-re-exec decision",
+    )
+    expect(child.exitCode).toBeNull()
+    // No replacement child: still exactly the two registrations, never a third.
+    expect(generationDaemon.registrations).toEqual([1001, 2002])
+    // The seat kept its identity across the change (registered twice, same name).
+    const log = existsSync(logPath) ? readFileSync(logPath, "utf8") : ""
+    expect(log.match(/Registered as generation-test/gu)?.length ?? 0).toBeGreaterThanOrEqual(2)
+
+    // It still delivers after the change: a fetch over the same bridge returns the new generation's message.
+    child.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "fetch", arguments: {} },
+      }) + "\n",
+    )
+    await waitFor(() => output.includes("after-change"), 10_000, "the post-change fetch result")
+    expect(child.exitCode).toBeNull()
+  }, 60_000)
+
+  it("fails loudly, never silently, when a generation change lands mid-request, then recovers (27941 AC2a)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const logPath = join(tmpDir, "generation-mid-request.log")
+    const generationDaemon = await spawnGenerationDaemon(socketPath)
+    daemon = generationDaemon
+    child = captureStderr(
+      spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", "generation-test"], {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          ...STANDALONE_PLUGIN_ENV,
+          TRIBE_DELIVERY: "pull",
+          DEBUG_LOG: logPath,
+          LOG_LEVEL: "debug",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      }) as ChildProcessWithoutNullStreams,
+    )
+    await waitForRegistrations(child, () => generationDaemon.registrations.length, 1, 15_000, "initial registration")
+
+    let output = ""
+    child.stdout.on("data", (data: Buffer | string) => {
+      output += data.toString()
+    })
+    child.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 0,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "mid-request", version: "0" },
+        },
+      }) + "\n",
+    )
+
+    generationDaemon.holdNextMethod("tribe.fetch")
+    child.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 11,
+        method: "tools/call",
+        params: { name: "fetch", arguments: {} },
+      }) + "\n",
+    )
+    await waitFor(
+      () => generationDaemon.receivedMethods.includes("tribe.fetch"),
+      10_000,
+      "the in-flight fetch reaching the daemon",
+    )
+
+    // The generation changes while that request is still unanswered.
+    generationDaemon.setPid(2002)
+    for (const socket of generationDaemon.clients.splice(0)) socket.destroy()
+
+    const parse = (id: number) =>
+      output
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as { id?: number; result?: { isError?: boolean } })
+        .find((response) => response.id === id)
+    await waitFor(() => parse(11) !== undefined, 15_000, "the failed mid-request response")
+    const failed = parse(11)!
+    expect(failed.result?.isError).toBe(true)
+    expect(JSON.stringify(failed)).toMatch(/closed|reconnect|Connection/u)
+    expect(child.exitCode).toBeNull()
+
+    // And it recovers: the next call on the re-established bridge succeeds.
+    await waitForRegistrations(
+      child,
+      () => generationDaemon.registrations.length,
+      2,
+      40_000,
+      "re-registration after the mid-request change",
+      logPath,
+    )
+    child.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 12,
+        method: "tools/call",
+        params: { name: "fetch", arguments: {} },
+      }) + "\n",
+    )
+    await waitFor(() => output.includes("after-change"), 10_000, "the post-change fetch result")
+    expect(child.exitCode).toBeNull()
   }, 60_000)
 })
