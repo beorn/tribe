@@ -316,7 +316,11 @@ export function openDatabase(path: string): Database {
   // `archived_at`; unindexed, both its COUNT and its byte-SUM scanned the whole
   // archive on every health call. The per-session last-message probe ordered by
   // `ts` after a `sender` seek, re-sorting each sender's rows into a TEMP B-TREE.
-  db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_archived_at ON messages_archive(archived_at)")
+  // A pre-v14 `messages_archive` has no `archived_at`; skip the index rather
+  // than throw on an open (27882).
+  if (tableColumnNames(db, "messages_archive").has("archived_at")) {
+    db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_archived_at ON messages_archive(archived_at)")
+  }
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_sender_ts ON messages(sender, ts DESC)")
   // `messages` has idx_messages_recipient_kind, but the archive had no
   // recipient-led index, so the per-session inbox-lag "oldest actionable"
@@ -401,6 +405,18 @@ export function openDatabase(path: string): Database {
   )
 
   return db
+}
+
+/** Columns present on an existing table, or an empty set when it is absent.
+ * A legacy `messages_archive` can predate a column its CREATE TABLE now names
+ * (v14 uses CREATE TABLE IF NOT EXISTS, so it never back-fills `archived_at`),
+ * so an index over it must check the column, not only the table (27882). */
+function tableColumnNames(db: Database, table: string): ReadonlySet<string> {
+  return new Set(
+    (db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{ name: string }>).map(
+      (row) => row.name,
+    ),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -1481,24 +1497,30 @@ const MIGRATIONS: readonly Migration[] = [
      * before the version is stamped.
      */
     up(db) {
-      // Legacy and partial databases may predate one of the journals; index
-      // only the tables that exist, the way the v39 request-key index does.
-      const wanted: ReadonlyArray<readonly [string, string]> = [
+      // Legacy and partial databases may predate one of the journals OR a
+      // column an index names: a `messages_archive` created before v14 has no
+      // `archived_at` (v14's CREATE TABLE IF NOT EXISTS never back-fills it),
+      // so guard each entry on its own columns, not only the table.
+      const wanted: ReadonlyArray<readonly [string, readonly string[], string]> = [
         [
           "messages_archive",
+          ["archived_at"],
           "CREATE INDEX IF NOT EXISTS idx_messages_archive_archived_at ON messages_archive(archived_at)",
         ],
-        ["messages", "CREATE INDEX IF NOT EXISTS idx_messages_sender_ts ON messages(sender, ts DESC)"],
+        [
+          "messages",
+          ["sender", "ts"],
+          "CREATE INDEX IF NOT EXISTS idx_messages_sender_ts ON messages(sender, ts DESC)",
+        ],
         [
           "messages_archive",
+          ["recipient", "seq", "kind", "type", "attention_required"],
           `CREATE INDEX IF NOT EXISTS idx_messages_archive_attention ON messages_archive(recipient, seq) WHERE kind = 'direct' AND ${ATTENTION_PREDICATE_SQL}`,
         ],
       ]
-      for (const [table, statement] of wanted) {
-        const exists = db
-          .prepare(assertSingleStatement(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`))
-          .get() as { name: string } | null
-        if (!exists) continue
+      for (const [table, columns, statement] of wanted) {
+        const present = tableColumnNames(db, table)
+        if (!columns.every((column) => present.has(column))) continue
         db.run(assertSingleStatement(statement))
       }
     },
