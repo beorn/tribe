@@ -205,7 +205,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               { type: "boolean", const: true },
             ],
             description:
-              'Direct request/query/assign messages automatically open a recipient-owned ball. Pass `true` to explicitly track any eligible message, including a broadcast, or a string other than "true" to set the id. Ownership and closing rules: /tribe.',
+              'Direct request/query/assign messages and authenticated broadcasts of these types automatically open recipient-owned balls. Broadcast fanout defaults to first (one answer settles for everyone); use all when each recipient owes an answer. Pass `true` to explicitly track another eligible message, or a string other than "true" to set the id. Ownership and closing rules: /tribe.',
           },
           reply: {
             type: "string",

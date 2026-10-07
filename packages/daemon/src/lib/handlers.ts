@@ -819,11 +819,22 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     })
   }
   const sender = ctx.getName()
+  // An authenticated broadcast uses the same owner snapshot and transaction as explicit tracking.
+  // Unattributed pending callers remain ambient and must not advertise a nonexistent request id.
+  const senderIdentity = ctx.stmts.selectSessionAuthority.get({ $id: ctx.sessionId }) as {
+    identity_sid: string | null
+  } | null
+  const trackBroadcast =
+    recipients === "*" &&
+    AUTO_TRACK_TYPES_SET.has(msgType) &&
+    senderIdentity !== null &&
+    sessionAuthority(senderIdentity) === "verified"
+  const trackWithMessageId = requestFlag || (requestId === null && trackBroadcast)
   const hasImplicitOwner = Array.isArray(recipients)
     ? recipients.some((recipient) => recipient !== sender)
     : recipients !== "*" && recipients !== sender
   const willTrack =
-    requestFlag ||
+    trackWithMessageId ||
     requestId !== null ||
     (incident !== undefined && incident.active !== false) ||
     (hasImplicitOwner && AUTO_TRACK_TYPES_SET.has(msgType))
@@ -908,7 +919,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   }
 
   const broadcastOwners =
-    recipients === "*" && (requestFlag || requestId !== null)
+    recipients === "*" && (trackWithMessageId || requestId !== null)
       ? activeBroadcastRecipients(
           ctx,
           new Set([...transport.liveTransportNames].filter((name) => !transport.mailboxDeafNames.has(name))),
@@ -960,7 +971,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     "direct",
     classification,
     {
-      request: requestFlag ? true : (requestId ?? undefined),
+      request: trackWithMessageId ? true : (requestId ?? undefined),
       owner: resolution.state === "bounced" ? resolution.to : undefined,
       reply: replyId ?? undefined,
       fanout: fanoutArg,
@@ -983,7 +994,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const effectiveRequestId =
     incident !== undefined
       ? incidentKey(incident)
-      : requestFlag || (requestId === null && AUTO_TRACK_TYPES_SET.has(msgType) && sender !== recipients)
+      : trackWithMessageId || (requestId === null && hasImplicitOwner && AUTO_TRACK_TYPES_SET.has(msgType))
         ? result.id
         : requestId
   if (!result.deduplicated) {

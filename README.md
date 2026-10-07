@@ -308,8 +308,11 @@ recipient's session default. Delivery classification is orthogonal to ball
 tracking — only message type and `request` decide whether a pending ball opens.
 
 **Pending balls & attention.** A direct `request`, `query`, or `assign` message
-opens exactly one recipient-owned "ball"; other messages, including broadcasts,
-open recipient-owned balls only when explicitly tracked.
+opens exactly one recipient-owned "ball". Authenticated broadcasts of these
+types automatically open balls for the admitted recipients. Other message
+types require explicit tracking. Broadcast fanout defaults to `first`: one
+answer settles the request for everyone ("someone take this"). Use `all` when
+each recipient owes an answer (a poll or "every seat do this").
 The ball stores ownership, age, and fanout. Tracked requests and queries receive
 a 20-minute escalation deadline; assignments have no reply-clock default.
 `expires_in_ms` overrides the class policy for one send. `status + ref` is a
@@ -321,7 +324,7 @@ one day of the ball's opening; a passed due, a non-owner, an incident ball or
 the ceiling refuses by name, and the result echoes `applied_due`.
 `response + reply` is final settlement and closes the original ownership row.
 `tribe.fetch()` returns a read-only `attention` projection — actionable unread,
-including explicitly tracked request/query/verdict/assign broadcasts owned by
+including tracked request/query/verdict/assign broadcasts owned by
 the reader, plus the oldest open balls — ahead of the chronological events;
 `tribe.pending()` returns the full pile, including taken balls.
 An owned tracked actionable broadcast remains actionable across delivery reads
