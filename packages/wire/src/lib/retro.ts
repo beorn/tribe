@@ -665,6 +665,7 @@ export function formatMarkdown(report: RetroReport): string {
         `incident=${m.balls.endings["incident-cleared"]}`,
         `gc=${m.balls.endings["gc-expired"]}`,
         `withdrawn=${m.balls.endings["sender-withdrawn"]}`,
+        `offline=${m.balls.endings["offline-owner-close"]}`,
         `unknown=${m.balls.endings.unknown}`,
       ].join(" ")
       lines.push(

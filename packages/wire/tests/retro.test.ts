@@ -240,6 +240,11 @@ describe("21714 wire retro response latency", () => {
     expect(formatMarkdown(report)).toContain(
       "Settlements: answered=0, manual-close=1, incident-cleared=1, gc-expired=1, sender-withdrawn=1, offline-owner-close=1",
     )
+    expect(
+      formatMarkdown(report)
+        .split("\n")
+        .find((line) => line.startsWith("| @chief |")),
+    ).toContain("offline=1")
   })
 
   it("counts only session-backed people and keeps unknown transport activity visible once", () => {
