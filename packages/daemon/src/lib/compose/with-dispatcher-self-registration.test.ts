@@ -1761,12 +1761,17 @@ describe("dispatcher bounded mailbox drain", () => {
       launchParentPid: process.pid,
       idToken: token,
     })
+    // The sender is a managed seat too: under managedVerifier an explicit persona without its token is refused, and
+    // that refusal warns, which a host that fails a test on console output reads as a red.
+    const senderLaunchId = "settle-tracked-response-sender"
     harness.addPendingClient("conn-sender")
     await harness.register("conn-sender", {
       name: "@agent/sender",
-      pid: liveHolderPid + 7,
+      pid: liveHolderPid,
       project: "/tmp/km",
-      identitySid: "sid-sender",
+      launchId: senderLaunchId,
+      launchParentPid: process.pid,
+      idToken: managedToken("@agent/sender", senderLaunchId),
     })
     const sent = parseResult<{ structuredContent: SendResult }>(
       await harness.dispatcher.handleRequest(
