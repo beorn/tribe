@@ -189,6 +189,7 @@ const emptySettlementCounts = (): SettlementCounts => ({
   "incident-cleared": 0,
   "gc-expired": 0,
   "sender-withdrawn": 0,
+  "offline-owner-close": 0,
 })
 
 const emptyBallEndings = (): BallEndings => ({ ...emptySettlementCounts(), open: 0, unknown: 0 })
@@ -664,6 +665,7 @@ export function formatMarkdown(report: RetroReport): string {
         `incident=${m.balls.endings["incident-cleared"]}`,
         `gc=${m.balls.endings["gc-expired"]}`,
         `withdrawn=${m.balls.endings["sender-withdrawn"]}`,
+        `offline=${m.balls.endings["offline-owner-close"]}`,
         `unknown=${m.balls.endings.unknown}`,
       ].join(" ")
       lines.push(
@@ -686,7 +688,7 @@ export function formatMarkdown(report: RetroReport): string {
   lines.push("## Coordination Health")
   lines.push(`- Unanswered queries: ${report.coordination.unanswered_queries}`)
   lines.push(
-    `- Settlements: answered=${report.coordination.settlements.answered}, manual-close=${report.coordination.settlements["manual-close"]}, incident-cleared=${report.coordination.settlements["incident-cleared"]}, gc-expired=${report.coordination.settlements["gc-expired"]}, sender-withdrawn=${report.coordination.settlements["sender-withdrawn"]}`,
+    `- Settlements: answered=${report.coordination.settlements.answered}, manual-close=${report.coordination.settlements["manual-close"]}, incident-cleared=${report.coordination.settlements["incident-cleared"]}, gc-expired=${report.coordination.settlements["gc-expired"]}, sender-withdrawn=${report.coordination.settlements["sender-withdrawn"]}, offline-owner-close=${report.coordination.settlements["offline-owner-close"]}`,
   )
   lines.push(formatSettlementConflicts(report))
   if (report.coordination.response_p50 || report.coordination.response_p90) {

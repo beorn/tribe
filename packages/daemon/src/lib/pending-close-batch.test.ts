@@ -218,6 +218,95 @@ describe("closing a ball backlog in one call", () => {
     expect(payload.results).toBeUndefined()
   })
 
+  // @failure Chief cannot settle expired requests after their owner and sender retire (#22798).
+  // @level l2
+  // @consumer Authenticated pending close and the original ball's settlement history
+  it.each([
+    { name: "expired offline owner", actor: "@chief", live: false, departed: true, deadline: -1000, closed: 1 },
+    { name: "live owner", actor: "@chief", live: true, departed: true, deadline: -1000, closed: 0 },
+    { name: "before deadline", actor: "@chief", live: false, departed: true, deadline: 60_000, closed: 0 },
+    { name: "other caller", actor: "@dev/2", live: false, departed: true, deadline: -1000, closed: 0 },
+    { name: "no departure evidence", actor: "@chief", live: false, departed: false, deadline: -1000, closed: 0 },
+    { name: "no structured deadline", actor: "@chief", live: false, departed: true, deadline: null, closed: 0 },
+  ])("admits dispatcher closure only for $name", ({ actor, live, departed, deadline, closed }) => {
+    const owner = "@retired/reviewer"
+    const now = Date.now()
+    openBall("offline-custody", owner, "@retired/sender")
+    db.prepare("UPDATE pending_request SET expires_at = $deadline WHERE request_id = 'offline-custody'").run({
+      $deadline: deadline === null ? null : now + deadline,
+    })
+    db.prepare(`INSERT INTO sessions (id, name, role, domains, pid, started_at, updated_at)
+      VALUES ('retired-owner', $owner, 'member', '[]', $pid, $at, $at)`).run({
+      $owner: owner,
+      $pid: process.pid,
+      $at: now - 2000,
+    })
+    if (departed) {
+      db.prepare(`INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, ref)
+        VALUES ('owner-left', 'event.session.left', $owner, '*', 'event', '{}', $at, 'pull', 'retired-owner')`).run({
+        $owner: owner,
+        $at: now - 1500,
+      })
+    }
+    const closeOpts: HandlerOpts = {
+      ...opts,
+      getActiveSessionInfo: () =>
+        live
+          ? [
+              {
+                id: "retired-owner",
+                name: owner,
+                role: "member",
+                pid: process.pid,
+                cwd: tmpDir,
+                claudeSessionId: null,
+                registeredAt: now,
+                launchId: null,
+                launchParentPid: null,
+                transportPids: [process.pid],
+                pushTransportPids: [],
+              },
+            ]
+          : [],
+    }
+    const close = () =>
+      JSON.parse(
+        (
+          handleToolCall(
+            caller(actor),
+            "tribe.pending",
+            {
+              owner,
+              close: "offline-custody",
+            },
+            closeOpts,
+          ) as { content: Array<{ text: string }> }
+        ).content[0]!.text,
+      ) as { closed?: number; warning?: string; error?: string }
+    const result = close()
+    expect(result.closed ?? 0).toBe(closed)
+    expect(openCount()).toBe(1 - closed)
+    const facts = db.prepare("SELECT content FROM messages WHERE type = 'event.ball.settled'").all() as Array<{
+      content: string
+    }>
+    expect(facts).toHaveLength(closed)
+    if (!closed) expect(result.error).toContain(actor)
+    if (closed) {
+      expect(JSON.parse(facts[0]!.content)).toMatchObject({
+        request_id: "offline-custody",
+        recipient: owner,
+        settlement: "offline-owner-close",
+        settled_by: "@chief",
+      })
+      const again = close()
+      expect(again.closed).toBe(0)
+      expect(again.warning).toContain("offline")
+      expect(again.warning).toContain("@chief")
+      expect(db.prepare("SELECT count(*) AS c FROM messages WHERE type = 'event.ball.settled'").get()).toEqual({ c: 1 })
+    }
+    expect(db.prepare("SELECT count(*) AS c FROM messages WHERE type = 'response'").get()).toEqual({ c: 0 })
+  })
+
   /**
    * The batch reused the SINGLE-id miss template, whose text hardcodes
    * "closed 0 rows", and passed a count string ("1 of 4") where the template
