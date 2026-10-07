@@ -82,7 +82,21 @@ export async function main(argv: readonly string[]): Promise<number> {
     }
   }
 
-  // Commander-routed subcommands (Phase A.2 verb families).
+  // Commander-routed subcommands (Phase A.2 verb families). `tribe health --json` owes its reader exactly
+  // one hab-service-health/2 document on EVERY exit path, so its one caller wraps the whole family: a throw
+  // out of registration or parse used to leave stdout empty, and a reader of an empty stdout can only say
+  // the probe established nothing (bead 27871).
+  try {
+    return await runCommanderSubcommands(argv)
+  } catch (error) {
+    if (sub !== "health" || !args.includes("--json")) throw error
+    await writeHealthProbeFailure(error)
+    return exitCodeSoFar()
+  }
+}
+
+/** The Commander-routed verb families, run under `main`'s health-probe guarantee. */
+async function runCommanderSubcommands(argv: readonly string[]): Promise<number> {
   const { Command, CommanderError } = await import("@silvery/commander")
   const program = new Command("tribe-wire")
   // Help, a usage error or an unknown command throws its exit code back here instead of exiting the process;
@@ -115,6 +129,38 @@ export async function main(argv: readonly string[]): Promise<number> {
 /** A subcommand that failed says so through process.exitCode; main hands that on as its answer. */
 function exitCodeSoFar(): number {
   return typeof process.exitCode === "number" ? process.exitCode : 0
+}
+
+/**
+ * The last-resort document for a health probe that failed before the verb could classify anything — its
+ * module failed to load, or command registration threw. Deliberately import-free: `read.ts` owns the
+ * classified form, and this one exists for the case where `read.ts` is exactly what did not arrive.
+ * Nothing here may throw; the exit code is the /2 contract's `unknown` code (3).
+ */
+async function writeHealthProbeFailure(error: unknown): Promise<void> {
+  let detail: string
+  try {
+    detail = error instanceof Error ? error.message : String(error)
+  } catch {
+    detail = "unprintable failure"
+  }
+  const document = {
+    schema: "hab-service-health/2",
+    service: "wire",
+    state: "unknown",
+    verdict: {
+      kind: "unknown",
+      reason: "unparsed",
+      observed: `tribe health --json failed before it could measure anything: ${detail}`.slice(0, 2_000),
+    },
+  }
+  try {
+    process.stdout.write(`${JSON.stringify(document, null, 2)}\n`)
+  } catch {
+    // silent-fallback-allow: the probe's stdout pipe is already gone, so there is no surface left to report
+    // to; the nonzero exit code below is the only signal this process can still send.
+  }
+  process.exitCode = 3
 }
 
 // Run only as the entry, never on import: importing ./cli must not act (hh #26691, @cto 2259658a).

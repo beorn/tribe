@@ -70,6 +70,26 @@ class DaemonCallTimeoutError extends Error {
   }
 }
 
+/**
+ * The connect deadline expiring — named, because an unnameable timeout is one nobody can classify.
+ *
+ * A refused connect (`ECONNREFUSED`/`ENOENT`) is a measurement: the daemon is not there. This is the
+ * different case — the socket answered nothing within the bound — and a consumer that reports service
+ * health must be able to tell the two apart (bead 27871). Before this, only `DaemonCallTimeoutError`
+ * carried a code and the connect deadline carried none.
+ */
+class DaemonConnectTimeoutError extends Error {
+  readonly code = "TRIBE_DAEMON_CONNECT_TIMEOUT" as const
+
+  constructor(
+    readonly socketPath: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`connect to ${socketPath} timed out after ${timeoutMs}ms`)
+    this.name = "DaemonConnectTimeoutError"
+  }
+}
+
 /** Default delay before one stall-time /proc sample. @cto 666b47e8 / #27089. */
 export const STALL_SAMPLE_AFTER_MS = 5_000
 
@@ -118,7 +138,7 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
       reject(err)
     }
     const connectTimer = timers.setTimeout(() => {
-      failConnect(new Error(`connect to ${socketPath} timed out after ${callTimeoutMs}ms`))
+      failConnect(new DaemonConnectTimeoutError(socketPath, callTimeoutMs))
     }, callTimeoutMs)
     const onConnectError = (err: Error) => {
       failConnect(err)

@@ -9,7 +9,7 @@
  * Commander definitions only.
  */
 
-import { describe, expect, test } from "vitest"
+import { describe, expect, test, vi } from "vitest"
 import { Command } from "@silvery/commander"
 import {
   evaluateWireHealthDocument,
@@ -18,7 +18,9 @@ import {
   registerReadCommands,
   resolveRepairOptions,
   tribeLogScope,
+  writeHealthDocument,
   waitForInboxWithReconnect,
+  type WireHealthDocument,
 } from "../src/cli/read.ts"
 import {
   deriveInboxWaitCallTimeoutMs,
@@ -163,6 +165,87 @@ describe("registerReadCommands", () => {
         },
       })
     })
+  })
+
+  /**
+   * Bead 27871: the document type always carried an `unknown` arm and the probe produced it nowhere, so an
+   * expired bound came back as a verdict about the service (`unhealthy`, exit 2) that nobody had measured.
+   * The `/2` contract's own exit table is healthy 0, absent 1, unhealthy 2, unknown 3 — the reader refuses
+   * any other pairing, so the code and the state have to move together.
+   */
+  describe("evaluateWireHealthDocument timeouts", () => {
+    test("reports a call timeout as unknown/timeout with exit code 3 and the bound in its observed text", () => {
+      const { exitCode, document } = evaluateWireHealthDocument(
+        null,
+        Object.assign(new Error("Request cli_health timed out after 10000ms"), { code: "TRIBE_DAEMON_CALL_TIMEOUT" }),
+        "/run/tribe.sock",
+      )
+      expect(exitCode).toBe(3)
+      expect(document.state).toBe("unknown")
+      expect(document.error).toBeUndefined()
+      const verdict = document.verdict
+      if (verdict.kind !== "unknown") throw new Error(`expected an unknown verdict, got ${verdict.kind}`)
+      expect(verdict.reason).toBe("timeout")
+      expect(verdict.observed).toContain("timed out after 10000ms")
+      expect(verdict.observed).toContain("/run/tribe.sock")
+    })
+
+    test("reports an expired connect deadline the same way, so a socket that answered nothing is never a verdict", () => {
+      const { exitCode, document } = evaluateWireHealthDocument(
+        null,
+        Object.assign(new Error("connect to /run/tribe.sock timed out after 10000ms"), {
+          code: "TRIBE_DAEMON_CONNECT_TIMEOUT",
+        }),
+      )
+      expect(exitCode).toBe(3)
+      expect(document.state).toBe("unknown")
+      const verdict = document.verdict
+      if (verdict.kind !== "unknown") throw new Error(`expected an unknown verdict, got ${verdict.kind}`)
+      expect(verdict.reason).toBe("timeout")
+      expect(typeof verdict.observed).toBe("string")
+    })
+
+    test("keeps a refused connect a measurement, not an unknown", () => {
+      const { exitCode, document } = evaluateWireHealthDocument(
+        null,
+        Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+      )
+      expect(exitCode).toBe(1)
+      expect(document).toEqual({
+        schema: "hab-service-health/2",
+        service: "wire",
+        state: "absent",
+        verdict: { kind: "stopped" },
+      })
+    })
+  })
+
+  /**
+   * `writeJsonStdout` reports its own failed write by setting `process.exitCode = 1`, and the health path
+   * used to set its code AFTER the await — so an unwritable document came back as a healthy probe exit
+   * (exit 0 with empty stdout, which is the page that says the probe answered and established nothing).
+   * A circular document is the cheapest real failed write: serialization throws before stdout is touched.
+   */
+  test("a health document that cannot be written keeps the failed write's exit code, never the probe's", async () => {
+    const document = {
+      schema: "hab-service-health/2",
+      service: "wire",
+      state: "healthy",
+      verdict: { kind: "running" },
+      facts: {},
+    } as WireHealthDocument
+    const facts = document.facts as Record<string, unknown>
+    facts.self = document
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {})
+    const previous = process.exitCode
+    try {
+      process.exitCode = 0
+      await writeHealthDocument(document, 0)
+      expect(process.exitCode).toBe(1)
+    } finally {
+      spy.mockRestore()
+      process.exitCode = previous
+    }
   })
 
   test("inbox-status verb accepts --session and --json", () => {
@@ -922,9 +1005,7 @@ describe("waitForInboxWithReconnect", () => {
 describe("tribeLogScope", () => {
   test("a saturated bounded window says older messages exist", () => {
     expect(tribeLogScope(20, 20, false)).toBe("last 20 — WINDOW FULL, older messages exist (use --limit N or --all)")
-    expect(tribeLogScope(30, 20, false)).toBe(
-      "last 30 — WINDOW FULL, older messages exist (use --limit N or --all)",
-    )
+    expect(tribeLogScope(30, 20, false)).toBe("last 30 — WINDOW FULL, older messages exist (use --limit N or --all)")
   })
 
   test("an exhaustive read says so — with --all, and when a small window held everything", () => {

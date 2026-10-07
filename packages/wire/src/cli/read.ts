@@ -892,7 +892,7 @@ function pendingSettlementConflictLine(row: PendingCliRow): string {
 export type WireHealthDocument = {
   schema: "hab-service-health/2"
   service: "wire"
-  state: "healthy" | "absent" | "unhealthy"
+  state: "healthy" | "absent" | "unhealthy" | "unknown"
   verdict:
     | { kind: "running" }
     | { kind: "stopped" }
@@ -905,6 +905,40 @@ export type WireHealthDocument = {
   facts?: Record<string, unknown>
 }
 
+/**
+ * Wire's own two timeouts, named so a reader can tell "we did not measure" from "the service is down".
+ *
+ * Until this existed the health document had an `unknown` arm in its type and produced it nowhere: a
+ * bounded wait that expired came back as `unhealthy + verdict running`, a claim about a daemon the probe
+ * never reached (bead 27871). `DaemonCallTimeoutError` always carried its code; the connect deadline did
+ * not, so it could not be classified at all — `client.ts` now names that one too.
+ */
+const WIRE_HEALTH_TIMEOUT_CODES = new Set(["TRIBE_DAEMON_CALL_TIMEOUT", "TRIBE_DAEMON_CONNECT_TIMEOUT"])
+
+/** Bound on the text an unknown document quotes back, matching the reader's own hab-core MAX_OBSERVED_TEXT. */
+const MAX_HEALTH_OBSERVED_TEXT = 2_000
+
+/**
+ * The document for a probe that measured nothing because its own bound expired. The exit code is the /2
+ * contract's `unknown` code (3), never `unhealthy`'s 2: nobody established that the service is unhealthy.
+ */
+function healthTimeoutDocument(error: unknown, socketPath: string): WireHealthDocument {
+  const message = error instanceof Error ? error.message : String(error)
+  return {
+    schema: "hab-service-health/2",
+    service: "wire",
+    state: "unknown",
+    verdict: {
+      kind: "unknown",
+      reason: "timeout",
+      observed: `tribe health --json did not answer within its bound: ${message} (socket ${socketPath})`.slice(
+        0,
+        MAX_HEALTH_OBSERVED_TEXT,
+      ),
+    },
+  }
+}
+
 export function evaluateWireHealthDocument(
   result: {
     daemon?: { pid: number; uptime: number; clients: number }
@@ -912,7 +946,7 @@ export function evaluateWireHealthDocument(
   } | null,
   error?: unknown,
   socketPath = resolveSocketPath(),
-): { exitCode: 0 | 1 | 2; document: WireHealthDocument } {
+): { exitCode: 0 | 1 | 2 | 3; document: WireHealthDocument } {
   if (error !== undefined) {
     const code = (error as { code?: string | number }).code
     if (code === "ECONNREFUSED" || code === "ENOENT") {
@@ -925,6 +959,12 @@ export function evaluateWireHealthDocument(
           verdict: { kind: "stopped" },
         },
       }
+    }
+    // A refused connect IS a measurement — the daemon is not there, and `absent + stopped` says so. An
+    // expired bound is not: it is the one case that must never be dressed up as a verdict about the
+    // service, so it keeps the /2 unknown arm and the reader's own timeout reason.
+    if (typeof code === "string" && WIRE_HEALTH_TIMEOUT_CODES.has(code)) {
+      return { exitCode: 3, document: healthTimeoutDocument(error, socketPath) }
     }
     return {
       exitCode: 2,
@@ -959,6 +999,18 @@ export function evaluateWireHealthDocument(
   }
 }
 
+/**
+ * Write one health document and keep the exit code honest.
+ *
+ * The code is set FIRST: `writeJsonStdout` reports its own failed write by setting `process.exitCode = 1`,
+ * and setting ours after the await overwrote that with 0 — so a document nobody could read came back as a
+ * healthy probe exit, which is the page that says the probe answered and established nothing (bead 27871).
+ */
+export async function writeHealthDocument(document: WireHealthDocument, exitCode: 0 | 1 | 2 | 3): Promise<void> {
+  process.exitCode = exitCode
+  await writeJsonStdout(document, 2)
+}
+
 async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
   if (opts?.json) {
     const socketPath = resolveSocketPath()
@@ -967,8 +1019,7 @@ async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
       client = await connectToDaemon(socketPath)
     } catch (error) {
       const { exitCode, document } = evaluateWireHealthDocument(null, error, socketPath)
-      await writeJsonStdout(document, 2)
-      process.exitCode = exitCode
+      await writeHealthDocument(document, exitCode)
       return
     }
 
@@ -985,14 +1036,12 @@ async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
       }
     } catch (error) {
       const { exitCode, document } = evaluateWireHealthDocument(null, error, socketPath)
-      await writeJsonStdout(document, 2)
-      process.exitCode = exitCode
+      await writeHealthDocument(document, exitCode)
       return
     }
 
     const { exitCode, document } = evaluateWireHealthDocument(result, undefined, socketPath)
-    await writeJsonStdout(document, 2)
-    process.exitCode = exitCode
+    await writeHealthDocument(document, exitCode)
     return
   }
 
