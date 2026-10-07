@@ -10,7 +10,7 @@
  * with `reason: summary_busy`; termination releases it for the next process.
  */
 
-import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { tryAcquireFlock } from "@bearly/flock"
@@ -122,5 +122,14 @@ describe("summary-operation lock", () => {
     process.env.RECALL_DB_PATH = join(aliasDir, "recall.db")
     const result = await summarizeDay(DAY)
     expect(result.reason).not.toBe("summary_busy")
+  })
+
+  test("a non-contention lock fault is loud, not a silent skip", async () => {
+    // A directory where the lock file belongs is an open failure (EISDIR), not EAGAIN/EWOULDBLOCK
+    // contention. @bearly/flock throws for it, so the engine must not swallow it as a skip.
+    mkdirSync(`${realpathSync(realDb)}.summary.lock`, { recursive: true })
+    process.env.RECALL_DB_PATH = realDb
+
+    await expect(summarizeDay(DAY)).rejects.toThrow()
   })
 })
