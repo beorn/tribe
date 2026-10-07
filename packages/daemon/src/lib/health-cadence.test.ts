@@ -509,9 +509,9 @@ describe("20876 Tribe health cadence", () => {
     const ctx = createTribeContext({
       db,
       stmts,
-      sessionId: "sess-chief",
+      sessionId: "sess-agent-5",
       sessionRole: "member",
-      initialName: "@chief",
+      initialName: "@agent/5",
       domains: [],
       claudeSessionId: null,
       claudeSessionName: null,
@@ -525,12 +525,67 @@ describe("20876 Tribe health cadence", () => {
       getActiveSessionInfo: () => [activeSession("sess-agent-5", "@agent/5", "member", tmpDir, now)],
     }
 
+    // @failure Offline requests vanish from health when only connected inbox rows are projected (#22798).
+    // @level contract
+    // @consumer Fleet health readers
+    // @testonly none
+    db.prepare("UPDATE sessions SET updated_at = $at WHERE id = 'sess-chief'").run({ $at: now - MINUTE })
+    db.prepare(`INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, ref)
+      VALUES ('chief-left', 'event.session.left', '@chief', '*', 'event', '{}', $at, 'pull', 'sess-chief')`).run({
+      $at: now - 30_000,
+    })
+    insertMessage(db, {
+      id: "offline-open",
+      type: "request",
+      sender: "@agent/5",
+      recipient: "@chief",
+      ts: now - MINUTE,
+      request: "offline-open",
+    })
+    stmts.openPendingRequest.run({
+      $request_id: "offline-open",
+      $recipient: "@chief",
+      $sender: "@agent/5",
+      $opened_at: now - MINUTE,
+      $expires_at: now + MINUTE,
+      $message_id: "offline-open",
+      $fanout: "first",
+    })
     const health = parseToolResult(handleToolCall(ctx, "tribe.health", {}, opts)) as {
+      pending_balls: {
+        requests: { count: number; owners: Array<{ owner: string; count: number; pending: unknown[] }> }
+      }
       cadence?: { as_of_ms?: number; response_latency?: { count?: number }; inbox_lag?: Array<{ session?: string }> }
       issues?: string[]
     }
 
     expect(health.cadence?.as_of_ms).toBeTypeOf("number")
+    expect(health.pending_balls.requests.count).toBe(2)
+    expect(health.pending_balls.requests.owners.find((row) => row.owner === "@chief")?.pending).toEqual([
+      expect.objectContaining({
+        request_id: "offline-open",
+        recipient: "@chief",
+        sender: "@agent/5",
+        expires_at: new Date(now + MINUTE).toISOString(),
+        owner_transport_offline_since: new Date(now - 30_000).toISOString(),
+        owner_transport_live: false,
+      }),
+    ])
+    expect(health.pending_balls.requests.owners.reduce((count, row) => count + row.pending.length, 0)).toBe(2)
+    expect(health.pending_balls.requests.owners.find((row) => row.owner === "@agent/5")?.pending).toEqual([
+      expect.objectContaining({ owner_transport_live: true, owner_transport_offline_since: null }),
+    ])
+    // A re-registration invalidates an older departure; observing no transport
+    // must not invent a fresh offline edge or revive the old generation's one.
+    db.prepare("UPDATE sessions SET updated_at = $at WHERE id = 'sess-chief'").run({ $at: now })
+    const afterRegistration = parseToolResult(handleToolCall(ctx, "tribe.health", {}, opts)) as typeof health
+    expect(afterRegistration.pending_balls.requests.owners.find((row) => row.owner === "@chief")?.pending).toEqual([
+      expect.objectContaining({
+        request_id: "offline-open",
+        owner_transport_live: false,
+        owner_transport_offline_since: null,
+      }),
+    ])
     expect(health.cadence?.response_latency?.count).toBe(5)
     expect(health.cadence?.inbox_lag).toEqual([expect.objectContaining({ session: "@agent/5" })])
     expect(health.issues).toEqual(

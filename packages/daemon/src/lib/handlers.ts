@@ -382,6 +382,8 @@ type OwnerTransportObservation = {
   owner_transport_reason: OwnerTransportReason
   owner_last_mailbox_read_age_ms: number | null
   owner_transport_observed_at: string
+  owner_transport_live: boolean
+  owner_transport_offline_since: string | null
 }
 
 /** The mailbox's last canonical read, joined by NAME exactly as the cursor is keyed. */
@@ -401,6 +403,11 @@ function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts
   }>
   const knownNames = new Set(sessionRows.map((row) => row.name))
   const lastSeenByName = new Map(sessionRows.map((row) => [row.name, row.updated_at]))
+  const latestSessionByName = new Map<string, (typeof sessionRows)[number]>()
+  for (const row of sessionRows) {
+    const previous = latestSessionByName.get(row.name)
+    if (previous === undefined || row.updated_at > previous.updated_at) latestSessionByName.set(row.name, row)
+  }
   const mailboxDeafNames = new Set<string>()
   const mailboxDeafReasons = new Map<string, MailboxReadCapability["reason"]>()
   for (const row of sessionRows) {
@@ -474,6 +481,13 @@ function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts
         consumers: [],
         ...mailbox,
       })
+    const liveTransport = selected.transport_alive && selected.agent_alive
+    const registration = latestSessionByName.get(name)
+    const departure = !liveTransport && registration !== undefined ? readSessionLeftFact(ctx, registration) : null
+    const offlineSince =
+      departure !== null && registration !== undefined && departure.ts >= registration.updated_at
+        ? new Date(departure.ts).toISOString()
+        : null
     const projected = {
       observation: {
         owner_transport_registered: selected.transport_registered,
@@ -484,8 +498,10 @@ function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts
           active.length === 0 && !knownNames.has(name) ? "no-session-record" : selected.answer_reason,
         owner_last_mailbox_read_age_ms: selected.last_mailbox_read_age_ms,
         owner_transport_observed_at: observedAtIso,
+        owner_transport_live: liveTransport,
+        owner_transport_offline_since: offlineSince,
       } satisfies OwnerTransportObservation,
-      liveTransport: selected.transport_alive && selected.agent_alive,
+      liveTransport,
     }
     cache.set(name, projected)
     return projected
@@ -3700,7 +3716,20 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   const takingReceipts = takingReceiptsForOpenBalls(ctx)
   const pendingOwners = pendingOwnerSummaries(pending, takingReceipts)
   const requests = pending.filter((ball) => ball.request_kind === "request")
-  const requestOwners = pendingOwnerSummaries(requests, takingReceipts)
+  const transport = ownerTransportObservationProjector(ctx, opts, now)
+  const requestOwners = pendingOwnerGroups(
+    requests.map((ball) => ({ ...ball, ...transport.observe(ball.recipient) })),
+    takingReceipts,
+  )
+  const projectedRequestCount = requestOwners.reduce((count, owner) => count + owner.pending.length, 0)
+  if (
+    projectedRequestCount !== requests.length ||
+    requestOwners.some((owner) => owner.count !== owner.pending.length)
+  ) {
+    throw new Error(
+      `tribe.health: incomplete pending request projection; expected ${requests.length}, projected ${projectedRequestCount}`,
+    )
+  }
   const stalePending = pending.filter((ball) => ball.age_ms >= 2 * 60 * 60 * 1000)
   const staleOwnerCount = new Set(stalePending.map((ball) => ball.recipient)).size
   const oldestStaleAgeMs = stalePending.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0)
