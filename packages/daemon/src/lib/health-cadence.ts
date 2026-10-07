@@ -4,6 +4,7 @@ import {
   ATTENTION_PREDICATE_SQL,
   noOpenIncidentAttentionPredicateSql,
   unretiredAttentionPredicateSql,
+  wakePredicateSql,
 } from "./database.ts"
 import { TRIBE_SLA_ROLE_ENV } from "tribe-wire/lib/session-identity-env"
 
@@ -104,6 +105,10 @@ export type HealthCadenceProjection = ProjectionStamp & {
       oldest_age_ms: number
       actionable_rows: number
       actionable_oldest_age_ms: number
+      /** The subset of the actionable rows that wakes the seat's inbox-wait (`wakePredicateSql`); quiet direct
+       * responses and ref-bound statuses count above but not here (27735). */
+      waking_rows: number
+      waking_oldest_age_ms: number
       /** When this connected seat began being observable for read silence. */
       tracking_since_ms: number
       /** Null until the seat receives a canonical fetch/inbox-wait attention projection. */
@@ -469,11 +474,14 @@ function inboxLagProjection(
       AND sender != $session
       AND (recipient = $session OR recipient = '*')
   `)
-  const actionableLagQueryMessages = db.prepare(
-    assertSingleStatement(`
+  // One attention-lag shape, two readings (27735): every unacknowledged direct attention row, and the subset
+  // that wakes the seat's inbox-wait. `wakePredicateSql` is the one home for "waking"; nothing here lists types.
+  const attentionLagSql = (table: "messages" | "messages_archive", extraPredicate: string): string => {
+    const sequence = table === "messages" ? "rowid" : "seq"
+    return `
     SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
-    FROM messages AS m
-    WHERE m.rowid > COALESCE(
+    FROM ${table} AS m
+    WHERE m.${sequence} > COALESCE(
       (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
       0
     )
@@ -482,25 +490,14 @@ function inboxLagProjection(
       AND m.sender != $session
       AND ${ATTENTION_PREDICATE_SQL}
       AND ${noOpenIncidentAttentionPredicateSql("m")}
-      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
-  `),
-  )
-  const actionableLagQueryArchive = db.prepare(
-    assertSingleStatement(`
-    SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
-    FROM messages_archive AS m
-    WHERE m.seq > COALESCE(
-      (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
-      0
-    )
-      AND m.recipient = $session
-      AND m.kind = 'direct'
-      AND m.sender != $session
-      AND ${ATTENTION_PREDICATE_SQL}
-      AND ${noOpenIncidentAttentionPredicateSql("m")}
-      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
-  `),
-  )
+      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence })}${extraPredicate}
+  `
+  }
+  const waking = `\n      AND ${wakePredicateSql("m")}`
+  const actionableLagQueryMessages = db.prepare(assertSingleStatement(attentionLagSql("messages", "")))
+  const actionableLagQueryArchive = db.prepare(assertSingleStatement(attentionLagSql("messages_archive", "")))
+  const wakingLagQueryMessages = db.prepare(assertSingleStatement(attentionLagSql("messages", waking)))
+  const wakingLagQueryArchive = db.prepare(assertSingleStatement(attentionLagSql("messages_archive", waking)))
   // Selects the shared seq/rowid position too (absent from the original
   // SELECT list, which only ever needed it in ORDER BY against the single
   // CTE) so olderCandidate() below can compare the two halves' candidates the
@@ -556,6 +553,10 @@ function inboxLagProjection(
       actionableLagQueryMessages.get({ $session: session }) as LagRow,
       actionableLagQueryArchive.get({ $session: session }) as LagRow,
     )
+    const wakingLag = combineJournalCount(
+      wakingLagQueryMessages.get({ $session: session }) as LagRow,
+      wakingLagQueryArchive.get({ $session: session }) as LagRow,
+    )
     const oldestCandidate = olderCandidate(
       oldestActionableQueryMessages.get({ $session: session }) as OldestActionableCandidate | null,
       oldestActionableQueryArchive.get({ $session: session }) as OldestActionableCandidate | null,
@@ -578,6 +579,8 @@ function inboxLagProjection(
       oldest_age_ms: ageFrom(now, lag.oldest_ts),
       actionable_rows: actionableLag.rows,
       actionable_oldest_age_ms: ageFrom(now, actionableLag.oldest_ts),
+      waking_rows: wakingLag.rows,
+      waking_oldest_age_ms: ageFrom(now, wakingLag.oldest_ts),
       tracking_since_ms: cursor?.started_at ?? now,
       last_attention_read_at_ms: lastAttentionReadAt,
       last_attention_read_age_ms: lastAttentionReadAt === null ? null : Math.max(0, now - lastAttentionReadAt),

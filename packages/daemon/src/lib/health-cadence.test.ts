@@ -235,6 +235,8 @@ describe("20876 Tribe health cadence", () => {
         oldest_age_ms: 8 * DAY,
         actionable_rows: 0,
         actionable_oldest_age_ms: 0,
+        waking_rows: 0,
+        waking_oldest_age_ms: 0,
         tracking_since_ms: now,
         last_attention_read_at_ms: null,
         last_attention_read_age_ms: null,
@@ -380,6 +382,42 @@ describe("20876 Tribe health cadence", () => {
         type: "response",
         sender: "@cto",
       },
+    })
+  })
+
+  it("counts a quiet direct response as actionable but not as waking, so WATCH can judge a waiting seat (27735)", () => {
+    insertSession(db, { id: "sess-dev-5", name: "@dev/5", role: "member", now })
+    insertMessage(db, {
+      id: "dev-5-quiet-response",
+      type: "response",
+      sender: "@cto",
+      recipient: "@dev/5",
+      ts: now - 15 * MINUTE,
+      attentionRequired: 1,
+    })
+
+    const quietOnly = projectHealthCadence(db, { now, connectedSessionNames: ["@dev/5"] }).inbox_lag[0]
+    expect(quietOnly).toMatchObject({
+      session: "@dev/5",
+      actionable_rows: 1,
+      actionable_oldest_age_ms: 15 * MINUTE,
+      waking_rows: 0,
+      waking_oldest_age_ms: 0,
+    })
+
+    insertMessage(db, {
+      id: "dev-5-request",
+      type: "request",
+      sender: "@chief",
+      recipient: "@dev/5",
+      ts: now - 4 * MINUTE,
+    })
+    const withRequest = projectHealthCadence(db, { now, connectedSessionNames: ["@dev/5"] }).inbox_lag[0]
+    expect(withRequest).toMatchObject({
+      actionable_rows: 2,
+      actionable_oldest_age_ms: 15 * MINUTE,
+      waking_rows: 1,
+      waking_oldest_age_ms: 4 * MINUTE,
     })
   })
 
