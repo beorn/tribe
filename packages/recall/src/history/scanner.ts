@@ -17,6 +17,7 @@ import {
   getAllSessionTitles,
   getIndexMeta,
 } from "./db.ts"
+import { HAB_SESSION_HABITAT_ROOT_ENV } from "tribe-wire/lib/hab-session-env"
 import type { ContentType } from "./types.ts"
 import { loadLlm, selectAvailableCheapModels } from "../lib/llm-backend.ts"
 import { log, THIRTY_DAYS_MS } from "./recall-shared.ts"
@@ -256,8 +257,8 @@ export function getBlockedRebuildInfo(projectRoot?: string): BlockedRebuildInfo 
       ? path.resolve(projectRoot, "..", "main.hab", "state", "units", "recall-index", "overrides.json")
       : null,
     projectRoot ? path.resolve(projectRoot, "main.hab", "state", "units", "recall-index", "overrides.json") : null,
-    process.env.HAB_SESSION_HABITAT_ROOT
-      ? path.resolve(process.env.HAB_SESSION_HABITAT_ROOT, "state", "units", "recall-index", "overrides.json")
+    process.env[HAB_SESSION_HABITAT_ROOT_ENV]
+      ? path.resolve(process.env[HAB_SESSION_HABITAT_ROOT_ENV], "state", "units", "recall-index", "overrides.json")
       : null,
     process.env.HAB_DIR ? path.resolve(process.env.HAB_DIR, "state", "units", "recall-index", "overrides.json") : null,
     "/hh/main.hab/state/units/recall-index/overrides.json",
