@@ -808,10 +808,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         delivery: "pull",
       })
 
-      const ambientCases = [
-        { type: "notify", content: "notification-only diet row" },
-        { type: "github:push", content: "github ambient diet row" },
-      ]
+      const ambientCases = [{ type: "notify", content: "notification-only diet row" }]
       for (const ambientCase of ambientCases) {
         const sent = (await sender.call("tribe.send", {
           to: observerName,
@@ -821,6 +818,24 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         })) as { structuredContent?: Record<string, unknown> }
         expect(sent.structuredContent).toMatchObject({ sent: true })
       }
+
+      // 28200: a member can no longer forge a topic-shaped type through
+      // tribe.send. The daemon's open vocabulary belongs to its PRODUCERS —
+      // github-plugin calls api.broadcast → sendMessage(daemonCtx, "*", …) —
+      // not to a member's tool call, which the daemon now refuses.
+      const forged = (await sender.call("tribe.send", {
+        to: observerName,
+        message: "forged github row",
+        type: "github:push",
+        summary: "forged github row",
+      })) as { structuredContent?: Record<string, unknown> }
+      expect(forged.structuredContent?.error).toBe(
+        "tribe.send: invalid type 'github:push' - expected one of: assign, status, query, response, notify, request, verdict",
+      )
+      expect(
+        channelNotifications(observer.stdout).some((line) => JSON.stringify(line).includes("forged github row")),
+        "a refused send must not reach the observer",
+      ).toBe(false)
       const afterAmbient = sessionDeliveryOffsets(dbPath, observerName)
       expect(afterAmbient).toEqual(beforeAmbient)
       for (const ambientCase of ambientCases) {

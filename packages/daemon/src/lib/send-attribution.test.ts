@@ -221,6 +221,28 @@ describe("tribe.send attribution and delivery", () => {
     expect(inbox.map(({ id }) => id)).toEqual([sent[2]?.id, sent[3]?.id, sent[4]?.id])
   })
 
+  it("carries a daemon github:push broadcast as an ambient journal event (the 28200 producer seam)", () => {
+    // 28200: a member's tribe.send of `github:push` is now refused, so the
+    // producer path the daemon ACTUALLY uses is asserted here. github-plugin
+    // calls api.broadcast(content, `github:${type}`, undefined,
+    // { delivery: "pull", topic: `github:${type}` }) (github-plugin.ts:836), and
+    // with-runtime's broadcast() forwards to sendMessage(daemonCtx, "*", …,
+    // "broadcast", …). This keeps the journey's ambient-diet coverage for the
+    // topic type where it belongs: with the producer, journal-only (never
+    // delivered), and visible to fetch.
+    const inserted: MessageInsertedInfo[] = []
+    const daemon = makeContext(db, stmts, "daemon", "sess-daemon", "daemon", (info) => inserted.push(info))
+
+    const produced = sendMessage(daemon, "*", "beorn/ag pushed", "github:push", undefined, undefined, "broadcast", {
+      delivery: "pull",
+      topic: "github:push",
+    })
+
+    const row = db.prepare("SELECT type, kind, topic, delivery FROM messages WHERE id = ?").get(produced.id)
+    expect(row).toEqual({ type: "github:push", kind: "event", topic: "github:push", delivery: "pull" })
+    expect(inserted[0]).toMatchObject({ kind: "event", type: "github:push", topic: "github:push" })
+  })
+
   it.each([
     { route: "single", to: "@ci", recipients: ["@ci"] },
     { route: "multi", to: ["@ci", "@cto"], recipients: ["@ci", "@cto"] },
