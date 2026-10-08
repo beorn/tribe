@@ -1,5 +1,5 @@
 /**
- * @failure Periodic and on-demand health paths diverge, managed mode executes
+ * @failure Periodic health paths diverge, managed mode executes
  *          ps, or exact canonical attribution is discarded before delivery.
  * @level   l2
  * @consumer @hab/21960-hab-sysmon S2 routing cutover
@@ -17,7 +17,6 @@ import {
   defaultThresholds,
   evaluateAlerts,
   formatCanonicalHealthAlertForDelivery,
-  getHealthSnapshot,
   ownerForLockHolder,
 } from "./health-monitor-plugin.ts"
 
@@ -305,7 +304,7 @@ describe("health monitor managed process source", () => {
     spawn.mockRestore()
   })
 
-  it("keeps managed unavailability explicit in periodic and on-demand snapshots without ps fallback", async () => {
+  it("keeps managed unavailability explicit in the periodic snapshot without ps fallback", async () => {
     const unavailable: CanonicalProcessObservation = {
       diagnostic: {
         detail: "journal unreadable",
@@ -321,14 +320,12 @@ describe("health monitor managed process source", () => {
     const spawn = stubPeripheralCommands()
 
     const periodic = await collectFullMetrics(source)
-    const onDemand = await getHealthSnapshot(source)
 
     expect(periodic.metrics.processObservation).toMatchObject({
       diagnostic: unavailable.diagnostic,
       kind: "canonical-unavailable",
       reason: "journal-diagnostic",
     })
-    expect(onDemand.processObservation).toEqual(periodic.metrics.processObservation)
     expect(periodic.metrics.cpu.topProcesses).toEqual([])
     expect(spawn.mock.calls.some(([argv]) => Array.isArray(argv) && argv[0] === "ps")).toBe(false)
     spawn.mockRestore()

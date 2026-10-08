@@ -2581,29 +2581,25 @@ export function withDispatcher<
             const health = await handleToolCall(daemonCtx, TRIBE_COORD_METHODS.health, {}, DAEMON_HANDLER_OPTS)
             const { getBridgeLostArming, getHealthSampleStats, resolveHealthMachine } =
               await import("../health-monitor-plugin.ts")
-            // 28196: serve the monitor's just-completed sample when it is fresh
-            // rather than re-running the census (`hab sysmon snapshot`, measured
-            // 0.62-0.70 s) on the single-threaded request path for every call.
-            // `machine_sample` always carries the age and a stale flag, so a
-            // wedged monitor shows instead of hiding behind an old snapshot.
-            let machine: unknown = null
-            let machineSample: {
+            // 28196: serve the monitor's last completed sample rather than
+            // re-running the census (`hab sysmon snapshot`, measured 0.62-0.70 s,
+            // >5 s under load) on the single-threaded request path. The resolver
+            // is synchronous and never collects, so this reply cannot queue
+            // behind a census walk; `machine_sample` always carries the age and a
+            // stale flag, so a wedged monitor shows instead of hiding behind an
+            // old snapshot.
+            const resolved = resolveHealthMachine()
+            const machine: unknown = resolved.metrics
+            const machineSample: {
               age_ms: number | null
               stale: boolean
-              source: "monitor-sample" | "fresh"
+              source: "monitor-sample" | "none"
               stale_after_ms: number
-            } | null = null
-            try {
-              const resolved = await resolveHealthMachine()
-              machine = resolved.metrics
-              machineSample = {
-                age_ms: resolved.ageMs,
-                stale: resolved.stale,
-                source: resolved.source,
-                stale_after_ms: resolved.staleAfterMs,
-              }
-            } catch {
-              /* health snapshot unavailable */
+            } = {
+              age_ms: resolved.ageMs,
+              stale: resolved.stale,
+              source: resolved.source,
+              stale_after_ms: resolved.staleAfterMs,
             }
             // 15588: fold the live roster into the health response so chief
             // can answer "who is connected / who is idle >15min" with one

@@ -1,7 +1,11 @@
 /**
  * @failure cli_health re-runs the process census on every request while the
- *          background monitor already holds a fresh sample, occupying the
- *          single-threaded daemon so 5s-deadline readers queue behind it.
+ *          background monitor already holds a sample, occupying the
+ *          single-threaded daemon so 5s-deadline readers queue behind it — and
+ *          it does it AGAIN once the sample looks old, so the very request that
+ *          reports health stalls behind a >5 s census run — specimen 4,
+ *          23:22:08Z: WATCH failsafe:seats and tribe-inbox-facts both failed
+ *          with "Request cli_health timed out after 5000ms").
  * @level   l2
  * @consumer @chief 28196 (tribe socket reads time out at 5 s under load)
  * @testonly none
@@ -16,73 +20,45 @@ const tokenOf = (metrics: HealthMetrics) => (metrics as unknown as { token: stri
 const monitorSample = (observedAt: number) => ({ metrics: sampleMetrics("monitor"), observedAt })
 
 describe("resolveHealthMachine — serve the monitor's sample (28196)", () => {
-  it("does NOT collect while the monitor holds a sample younger than its interval", async () => {
+  it("serves the monitor's sample and cannot await a census", () => {
     const observedAt = 1_000_000
-    const sample = monitorSample(observedAt)
-    let collects = 0
-    // Two consecutive reads stand in for two cli_health requests; neither may
-    // spawn the census while the monitor's sample is fresh.
-    const first = await resolveHealthMachine({
+    const result = resolveHealthMachine({
       now: () => observedAt + POLL_MS,
       pollIntervalMs: POLL_MS,
-      sample,
-      collect: async () => {
-        collects += 1
-        return sampleMetrics("fresh")
-      },
+      sample: monitorSample(observedAt),
     })
-    const second = await resolveHealthMachine({
-      now: () => observedAt + POLL_MS,
-      pollIntervalMs: POLL_MS,
-      sample,
-      collect: async () => {
-        collects += 1
-        return sampleMetrics("fresh")
-      },
-    })
-    expect(collects).toBe(0)
-    expect(first.source).toBe("monitor-sample")
-    expect(first.stale).toBe(false)
-    expect(first.ageMs).toBe(POLL_MS)
-    expect(tokenOf(first.metrics)).toBe("monitor")
-    expect(second.source).toBe("monitor-sample")
+    // Synchronous by contract: a census on this path is what took >5 s
+    // (specimen 4), and a synchronous result cannot wait on one.
+    expect(result).not.toBeInstanceOf(Promise)
+    expect(result.source).toBe("monitor-sample")
+    expect(result.stale).toBe(false)
+    expect(result.ageMs).toBe(POLL_MS)
+    expect(tokenOf(result.metrics as HealthMetrics)).toBe("monitor")
   })
 
-  it("collects fresh and reports stale once the sample is past the bound", async () => {
+  it("still serves the monitor's sample once it is past the stale bound — it does not collect fresh", () => {
     const observedAt = 2_000_000
     const age = POLL_MS * HEALTH_SAMPLE_STALE_INTERVALS + 1
-    let collects = 0
-    const resolve = await resolveHealthMachine({
+    const result = resolveHealthMachine({
       now: () => observedAt + age,
       pollIntervalMs: POLL_MS,
       sample: monitorSample(observedAt),
-      collect: async () => {
-        collects += 1
-        return sampleMetrics("fresh")
-      },
     })
-    expect(collects).toBe(1)
-    expect(resolve.source).toBe("fresh")
-    expect(resolve.stale).toBe(true)
-    expect(resolve.ageMs).toBe(age)
-    expect(tokenOf(resolve.metrics)).toBe("fresh")
+    // The stale sample is served WITH its age and the stale flag; replacing it
+    // with a fresh census is exactly the stall being fixed.
+    expect(result.source).toBe("monitor-sample")
+    expect(result.stale).toBe(true)
+    expect(result.ageMs).toBe(age)
+    expect(result.staleAfterMs).toBe(POLL_MS * HEALTH_SAMPLE_STALE_INTERVALS)
+    expect(tokenOf(result.metrics as HealthMetrics)).toBe("monitor")
   })
 
-  it("reports stale (never a silent healthy default) when no sample has landed", async () => {
-    let collects = 0
-    const resolve = await resolveHealthMachine({
-      now: () => 3_000_000,
-      pollIntervalMs: POLL_MS,
-      sample: undefined,
-      collect: async () => {
-        collects += 1
-        return sampleMetrics("fresh")
-      },
-    })
-    expect(collects).toBe(1)
-    expect(resolve.source).toBe("fresh")
-    expect(resolve.stale).toBe(true)
-    expect(resolve.ageMs).toBeNull()
-    expect(resolve.staleAfterMs).toBe(POLL_MS * HEALTH_SAMPLE_STALE_INTERVALS)
+  it("reports no sample (never a silent healthy default) before the monitor's first tick", () => {
+    const result = resolveHealthMachine({ now: () => 3_000_000, pollIntervalMs: POLL_MS, sample: undefined })
+    expect(result.metrics).toBeNull()
+    expect(result.source).toBe("none")
+    expect(result.stale).toBe(true)
+    expect(result.ageMs).toBeNull()
+    expect(result.staleAfterMs).toBe(POLL_MS * HEALTH_SAMPLE_STALE_INTERVALS)
   })
 })
