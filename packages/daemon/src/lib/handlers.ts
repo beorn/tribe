@@ -48,6 +48,7 @@ import {
   IncidentCurrentConflict,
 } from "./messaging.ts"
 import { ACTIONABLE_TYPES_SET, AUTO_TRACK_TYPES_SET } from "./database.ts"
+import { ASK_ALLOWED_TYPES, deserializeAsk, parseAsk, type Ask } from "./ask.ts"
 import {
   classifySessionRegistrationLifetime,
   isPidAlive as pidStillAlive,
@@ -900,6 +901,18 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       error: "tribe.send: invalid options - expires_in_ms cannot be combined with incident",
     })
   }
+  let acceptedAsk: Ask | undefined
+  if (a.ask !== undefined) {
+    if (incident !== undefined) {
+      return jsonResult({ error: "tribe.send: invalid options - pass ask or incident, not both" })
+    }
+    if (!ASK_ALLOWED_TYPES.has(msgType)) {
+      return jsonResult({ error: "tribe.send: invalid ask - only request and query may carry ask" })
+    }
+    const parsed = parseAsk(a.ask)
+    if (!parsed.ok) return jsonResult({ error: parsed.error })
+    acceptedAsk = parsed.ask
+  }
   const sender = ctx.getName()
   // An authenticated broadcast uses the same owner snapshot and transaction as explicit tracking.
   // Unattributed pending callers remain ambient and must not advertise a nonexistent request id.
@@ -968,6 +981,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     summary,
     ...(delivery ? { delivery } : {}),
     ...(typeof messageIdArg === "string" ? { messageId: messageIdArg.trim() } : {}),
+    ...(acceptedAsk ? { ask: acceptedAsk } : {}),
   }
   const observedAt = Date.now()
   const transport = ownerTransportObservationProjector(ctx, opts, observedAt)
@@ -1136,6 +1150,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     ...(summaryDerived ? { summary_derived: true } : {}),
     ...truncationReport(truncation),
     ...(warning ? { warning } : {}),
+    ...(acceptedAsk ? { ask: acceptedAsk } : {}),
   })
 }
 
@@ -1292,6 +1307,7 @@ function handleMultiSend(input: {
     ...(input.summaryDerived ? { summary_derived: true } : {}),
     ...truncationReport(input.truncation),
     ...(warning ? { warning } : {}),
+    ...(input.classification.ask ? { ask: input.classification.ask } : {}),
   })
 }
 
@@ -4254,6 +4270,8 @@ export type FetchRow = {
   sender_authority?: SenderAuthority | null
   /** Daemon session that inserted this message. It is stable even after that session leaves. */
   session_id?: string | null
+  /** 26520 — optional structured ask; JSON TEXT, null on old rows. */
+  ask?: string | null
 }
 
 export type FetchEvent = {
@@ -4286,6 +4304,8 @@ export type FetchEvent = {
   from_authority: SenderAuthority | null
   /** Correlate a reply to the member_id captured from a verified current launch. */
   from_session_id: string | null
+  /** 26520 — present when the send carried a structured ask. */
+  ask?: Ask
   /**
    * 27346 - true when the mailbox cursor is already past this row, so the seat
    * has been shown it before and its re-presentation is a replay, not news.
@@ -4298,6 +4318,7 @@ export type FetchEvent = {
 }
 
 export function fetchEvent(row: FetchRow, replay?: boolean): FetchEvent {
+  const ask = deserializeAsk(row.ask)
   return {
     id: row.id,
     rowid: row.rowid,
@@ -4315,6 +4336,7 @@ export function fetchEvent(row: FetchRow, replay?: boolean): FetchEvent {
     is_incident: row.is_incident === 1,
     from_authority: row.sender_authority ?? null,
     from_session_id: row.sender_authority === null ? null : (row.session_id ?? null),
+    ...(ask === null ? {} : { ask }),
     ...(replay === undefined ? {} : { replay }),
   }
 }
@@ -4498,7 +4520,7 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
     .prepare(
       assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required, wakes_owner, is_incident, sender_authority, session_id
+             attention_required, wakes_owner, is_incident, sender_authority, session_id, ask
       FROM messages
       WHERE ${conditions.join("\n        AND ")}
       ORDER BY rowid ${order}
@@ -4653,7 +4675,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
       .prepare(
         assertSingleStatement(`
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-               attention_required, wakes_owner, is_incident, sender_authority, session_id
+               attention_required, wakes_owner, is_incident, sender_authority, session_id, ask
         FROM messages
         WHERE id IN (${placeholders})
           AND kind != 'event'

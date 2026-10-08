@@ -268,6 +268,27 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               properties: { recipient: { type: "string", minLength: 1 }, message_id: { type: "string", minLength: 1 } },
             },
           },
+          ask: {
+            type: "object",
+            additionalProperties: false,
+            required: ["options"],
+            properties: {
+              options: {
+                type: "array",
+                items: { type: "string", minLength: 1, maxLength: 40 },
+                minItems: 1,
+                maxItems: 8,
+                description: "1–8 unique non-empty labels. A tap sends the label verbatim as text.",
+              },
+              default: {
+                type: "string",
+                description:
+                  "When set, must equal options[0]. The answer that is safe if the operator taps without reading.",
+              },
+            },
+            description:
+              "Optional answer buttons on request and query only. Tribe validates at send and echoes the accepted ask; a missing echo means a pre-upgrade daemon dropped it. Other is renderer-only.",
+          },
         },
         required: ["to", "message"],
       },
@@ -376,6 +397,17 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "string",
             description: "ISO timestamp of the transport snapshot behind a tracked-send delivery refusal.",
           },
+          ask: {
+            type: "object",
+            additionalProperties: false,
+            required: ["options"],
+            properties: {
+              options: { type: "array", items: { type: "string" } },
+              default: { type: "string" },
+            },
+            description:
+              "Echo of the accepted ask. Required when the client passed ask; absence means a pre-upgrade daemon dropped it.",
+          },
           ...ERROR_SHAPE,
         },
         "Send result: { sent, id, summary, truncated, original_length, tracker? } on success (tracker for replies; summary_derived + warning when derived; truncated: true means only a prefix was delivered), { error, delivery_failure_id?, observed_at? } on refusal. A tracked request with no reachable recipient or declared fallback is journaled and refused without a direct message or pending row. Each direct delivery report (delivery, or deliveries for several recipients) carries state online|offline|bounced|parked; an online, offline or parked row adds the recipient's answer reason and last_mailbox_read_age_ms (null when it never read). offline with reason connected-no-consumer is a live seat nothing is consuming right now: the mail is in its mailbox and it reads at its next tick, so judge it by the read age, not the bare state.",
@@ -461,6 +493,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           name: "incident-cleared",
           flags: "--incident-cleared",
           description: "The condition named by --incident no longer holds: close its ball (no operator verb needed)",
+        },
+        {
+          name: "ask",
+          flags: "--ask <json>",
+          description:
+            "Optional answer buttons on request/query: JSON {options, default?}. default if set must equal options[0]. The daemon echoes the accepted ask; a missing echo is a loud failure.",
         },
         {
           name: "verbose",

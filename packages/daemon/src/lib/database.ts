@@ -125,7 +125,8 @@ export function openDatabase(path: string): Database {
 		wakes_owner INTEGER NOT NULL DEFAULT 0,
 		is_incident INTEGER NOT NULL DEFAULT 0,
 		sender_authority TEXT,
-		incident_data TEXT
+		incident_data TEXT,
+		ask TEXT
 	)`)
 
   db.run(`CREATE TABLE IF NOT EXISTS messages_archive (
@@ -152,7 +153,8 @@ export function openDatabase(path: string): Database {
 		wakes_owner INTEGER NOT NULL DEFAULT 0,
 		is_incident INTEGER NOT NULL DEFAULT 0,
 		sender_authority TEXT,
-		incident_data TEXT
+		incident_data TEXT,
+		ask TEXT
 	)`)
 
   // Ball-tracker: per-(request_id, recipient) row for every open request.
@@ -1540,6 +1542,24 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 42,
+    name: "ask-on-messages",
+    /**
+     * 26520 — optional structured ask on request/query. Nullable JSON TEXT so
+     * old rows read back with no ask. Forward-only; a pre-upgrade daemon that
+     * dropped the unknown key would still return sent:true, which is why send
+     * echoes the accepted ask.
+     */
+    up(db) {
+      for (const table of ["messages", "messages_archive"]) {
+        const columns = tableColumnNames(db, table)
+        if (columns.size > 0 && !columns.has("ask")) {
+          db.run(assertSingleStatement(`ALTER TABLE ${table} ADD COLUMN ask TEXT`))
+        }
+      }
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1614,6 +1634,7 @@ export const MESSAGE_ARCHIVE_COLUMNS = [
   "is_incident",
   "sender_authority",
   "incident_data",
+  "ask",
 ].join(", ")
 
 type TakingStatusSubjectSql = {
@@ -1764,7 +1785,8 @@ const TRACKED_ATTENTION_FETCH_COLUMNS_SQL = `COALESCE(m.id, a.id) AS id,
   COALESCE(m.attention_required, a.attention_required) AS attention_required,
   COALESCE(m.is_incident, a.is_incident) AS is_incident,
   COALESCE(m.sender_authority, a.sender_authority) AS sender_authority,
-  COALESCE(m.session_id, a.session_id) AS session_id`
+  COALESCE(m.session_id, a.session_id) AS session_id,
+  COALESCE(m.ask, a.ask) AS ask`
 
 /** Tracked attention belongs to a mailbox through its existing pending owner
  * row, independent of whether the original message was direct or broadcast.
@@ -1870,7 +1892,7 @@ export function createStatements(db: Database) {
     insertMessage: db.prepare(`
 		INSERT OR IGNORE INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
 			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id, sender_authority,
-			wakes_owner, is_incident, incident_data, attention_required)
+			wakes_owner, is_incident, incident_data, ask, attention_required)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
 			$delivery, $topic, $room_id, $request, $reply, $correlated_reply_requester, $summary, $session_id,
 			-- 25074 3d-1a: the sending session's authority at insert (sessionAuthority), NULL for a daemon-originated row.
@@ -1880,6 +1902,7 @@ export function createStatements(db: Database) {
 			COALESCE($wakes_owner, 0),
 			COALESCE($is_incident, 0),
 			$incident_data,
+			$ask,
 			CASE
 				WHEN $attention_required = 1 THEN 1
 				WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1
@@ -2803,7 +2826,7 @@ export function createStatements(db: Database) {
       assertSingleStatement(`
 		SELECT m.id, m.rowid, m.type, m.sender, m.recipient, m.content, m.bead_id, m.ref, m.ts,
 			m.delivery, m.topic, m.room_id, m.summary, m.attention_required, m.wakes_owner, m.is_incident,
-			m.sender_authority, m.session_id
+			m.sender_authority, m.session_id, m.ask
 		FROM messages AS m
 		WHERE m.rowid > $since
 			AND (m.recipient = $name OR m.recipient = '*')
@@ -2932,7 +2955,7 @@ export function createStatements(db: Database) {
     selectUnackedAttention: db.prepare(
       assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required, wakes_owner, is_incident, sender_authority, session_id
+             attention_required, wakes_owner, is_incident, sender_authority, session_id, ask
       FROM messages AS m
       WHERE m.recipient = $name
         AND m.kind = 'direct'
@@ -2960,10 +2983,10 @@ export function createStatements(db: Database) {
     selectAttention: db.prepare(
       assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required, is_incident, sender_authority, session_id
+             attention_required, is_incident, sender_authority, session_id, ask
       FROM (
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-               attention_required, is_incident, sender_authority, session_id
+               attention_required, is_incident, sender_authority, session_id, ask
         FROM messages AS m
         WHERE m.recipient = $name
           AND m.kind = 'direct'

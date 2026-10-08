@@ -57,6 +57,7 @@ import { withCliDaemonClient } from "./daemon-client.ts"
 import { writeJsonStdout } from "./json-output.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
 import { warnIfSelfTransportDown } from "./self-transport-warning.ts"
+import { missingAskEchoError, parseAskEcho, type AskEcho } from "../lib/ask-echo.ts"
 import { oversizedMessageError } from "../lib/send-validation.ts"
 import { TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV } from "../launch-environment.ts"
 
@@ -168,6 +169,8 @@ type SendPayloadInput = {
   expiresInMs?: number
   /** Raw `--incident emitter:subject:condition` value. */
   incident?: string
+  /** Optional structured ask on request/query. */
+  ask?: AskEcho
   /** `--incident-cleared`: the condition no longer holds. */
   incidentCleared?: boolean
   /** Verbose output on refusal or delivery failure. */
@@ -187,6 +190,7 @@ type SendPayload = {
   fanout?: Fanout
   expires_in_ms?: number
   incident?: IncidentIdentity & { active?: boolean }
+  ask?: AskEcho
 }
 
 export function buildSendPayload(input: SendPayloadInput): SendPayload {
@@ -221,6 +225,7 @@ export function buildSendPayload(input: SendPayloadInput): SendPayload {
       "--incident-cleared requires --incident <emitter:subject:condition> naming the condition that cleared",
     )
   }
+  if (input.ask !== undefined) payload.ask = input.ask
   return payload
 }
 
@@ -645,6 +650,14 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     }
     process.exit(1)
   }
+  const echoError = missingAskEchoError(
+    input.ask === undefined ? undefined : (parseAskEcho(input.ask) ?? { options: [] }),
+    result,
+  )
+  if (echoError !== null) {
+    console.error(echoError)
+    process.exit(1)
+  }
   if (input.reply && caller) reportCommittedReplyTracker(caller.name, input.reply, result.tracker)
   if (result.delivery?.state === "bounced") {
     const { original_target: originalTarget, recipient, reason } = result.delivery
@@ -946,6 +959,7 @@ export function registerSendCommands(program: Command): void {
   const sendExpiresInMs = cliOption(SEND_CLI, "expires-in-ms")
   const sendIncident = cliOption(SEND_CLI, "incident")
   const sendIncidentCleared = cliOption(SEND_CLI, "incident-cleared")
+  const sendAsk = cliOption(SEND_CLI, "ask")
   const sendVerbose = cliOption(SEND_CLI, "verbose")
   program
     .command(SEND_CLI.name)
@@ -964,6 +978,7 @@ export function registerSendCommands(program: Command): void {
     .option(sendExpiresInMs.flags, sendExpiresInMs.description)
     .option(sendIncident.flags, sendIncident.description)
     .option(sendIncidentCleared.flags, sendIncidentCleared.description)
+    .option(sendAsk.flags, sendAsk.description)
     .option(sendVerbose.flags, sendVerbose.description)
     .addHelpText(
       "after",
@@ -988,6 +1003,7 @@ export function registerSendCommands(program: Command): void {
           expiresInMs?: string
           incident?: string
           incidentCleared?: boolean
+          ask?: string
           verbose?: boolean
         },
       ) => {
@@ -1057,6 +1073,21 @@ export function registerSendCommands(program: Command): void {
           )
           process.exit(2)
         }
+        let ask: AskEcho | undefined
+        if (opts.ask !== undefined) {
+          try {
+            const parsed = JSON.parse(opts.ask) as unknown
+            const echoed = parseAskEcho(parsed)
+            if (echoed === null) {
+              console.error("tribe.send: invalid ask - --ask must be JSON {options, default?}")
+              process.exit(2)
+            }
+            ask = echoed
+          } catch {
+            console.error("tribe.send: invalid ask - --ask must be JSON {options, default?}")
+            process.exit(2)
+          }
+        }
         void cmdSend({
           to,
           message: message.join(" "),
@@ -1073,6 +1104,7 @@ export function registerSendCommands(program: Command): void {
           incident: opts.incident,
           incidentCleared: opts.incidentCleared,
           verbose: opts.verbose,
+          ask,
         })
       },
     )

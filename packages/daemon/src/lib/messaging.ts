@@ -87,6 +87,8 @@ export type Classification = {
   summary?: string
   /** Client-generated durable identity; retries reuse the same row. */
   messageId?: string
+  /** 26520 — structured ask stored with the message; request/query only. */
+  ask?: import("./ask.ts").Ask
 }
 
 export type SenderAttribution = {
@@ -704,6 +706,7 @@ export function sendMessage(
       $wakes_owner: wakesOwner ? 1 : 0,
       $is_incident: incident === undefined ? 0 : 1,
       $incident_data: incidentData,
+      $ask: classification.ask === undefined ? null : JSON.stringify(classification.ask),
       $between_personas: isExplicitTribePersonaName(sender) && isExplicitTribePersonaName(recipient) ? 1 : 0,
       $sender_authority: senderAuthorityOf(ctx, sender),
     })
@@ -940,6 +943,7 @@ export function logEvent(
     $wakes_owner: 0,
     $between_personas: 0,
     $sender_authority: senderAuthorityOf(ctx, sender),
+    $ask: null,
   })
   return id
 }

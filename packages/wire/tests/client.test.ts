@@ -581,6 +581,26 @@ describe("callTribeTool", () => {
     expect(JSON.stringify(result)).toMatch(/file.*sha256/i)
   })
 
+  it("fails loud when send passed ask and the daemon result has no echo", async () => {
+    const call = vi.fn(async () => ({
+      content: [{ type: "text", text: JSON.stringify({ sent: true, id: "x" }) }],
+    }))
+    const client = { call } as unknown as DaemonClient
+    const result = await callTribeTool(client, "send", {
+      to: "@chief",
+      message: "Deploy?",
+      type: "request",
+      ask: { options: ["Hold", "Deploy"], default: "Hold" },
+    })
+    expect(call).toHaveBeenCalled()
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: expect.stringContaining("ask dropped"),
+      },
+    })
+  })
+
   it("uses a host-safe diagnostic window when MCP omits timeout_ms", async () => {
     const call = vi.fn(async () => canonicalInboxWaitResult)
     const client = { call } as unknown as DaemonClient

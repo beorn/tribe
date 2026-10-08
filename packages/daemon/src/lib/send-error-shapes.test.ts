@@ -208,5 +208,69 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
       )
       expect(sent.error).toBe("tribe.send: invalid incident - must be an object {emitter, subject, condition, active?}")
     })
+
+    it("pins ask on notify", () => {
+      const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
+      const sent = parseToolJson(
+        handleToolCall(sender, "tribe.send", { to: "@chief", message: "hi", ask: { options: ["Hold"] } }, makeOpts()),
+      )
+      expect(sent.error).toBe("tribe.send: invalid ask - only request and query may carry ask")
+    })
+
+    it("pins ask combined with incident", () => {
+      const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
+      const sent = parseToolJson(
+        handleToolCall(
+          sender,
+          "tribe.send",
+          {
+            to: "@chief",
+            message: "hi",
+            type: "request",
+            ask: { options: ["Hold"] },
+            incident: { emitter: "watch", subject: "x", condition: "y" },
+          },
+          makeOpts(),
+        ),
+      )
+      expect(sent.error).toBe("tribe.send: invalid options - pass ask or incident, not both")
+    })
+
+    it("pins default not equal to options[0]", () => {
+      const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
+      const sent = parseToolJson(
+        handleToolCall(
+          sender,
+          "tribe.send",
+          {
+            to: "@chief",
+            message: "Deploy?",
+            type: "request",
+            ask: { options: ["Hold", "Deploy"], default: "Deploy" },
+          },
+          makeOpts(),
+        ),
+      )
+      expect(sent.error).toBe("tribe.send: invalid ask.default - when set, default must equal options[0]")
+    })
+  })
+
+  it("echoes the accepted ask on a request send (26520 old-reader)", () => {
+    const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
+    const ask = { options: ["Hold", "Deploy"], default: "Hold" }
+    const sent = parseToolJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "@dev/7", message: "Deploy now?", type: "request", summary: "deploy?", ask },
+        makeOpts(),
+      ),
+    )
+    expect(sent.error).toBeUndefined()
+    expect(sent.sent).toBe(true)
+    expect(sent.ask).toEqual(ask)
+    if (typeof sent.id !== "string") throw new Error("tribe.send echo missing id")
+    const stored = db.prepare("SELECT ask FROM messages WHERE id = ?").get(sent.id) as { ask: string | null }
+    expect(JSON.parse(stored.ask ?? "null")).toEqual(ask)
   })
 })
