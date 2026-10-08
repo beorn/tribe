@@ -1637,7 +1637,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           throughParent: true,
         })
         expect(retained.exitCode, retained.stderr).toBe(0)
-        expect(JSON.parse(retained.stdout).pending).toEqual(
+        const retainedSnapshot = JSON.parse(retained.stdout) as { pending: Array<{ request_id: string }> }
+        expect(retainedSnapshot.pending).toEqual(
           expect.arrayContaining([expect.objectContaining({ request_id: incidentId })]),
         )
         expect(settlementFacts(dbPath).filter((fact) => fact.request_id === incidentId)).toEqual([])
