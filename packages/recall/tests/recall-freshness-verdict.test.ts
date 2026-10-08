@@ -55,18 +55,18 @@ afterEach(() => {
 describe("the one freshness verdict", () => {
   test("judges the documented window and names itself the default", () => {
     const fresh = judgeIndexFreshness(stampAgedBy(60_000))
-    expect(RECALL_STALE_THRESHOLD_DEFAULT).toBe("5m")
+    expect(RECALL_STALE_THRESHOLD_DEFAULT).toBe("16m")
     expect(fresh.windowMs).toBe(getStaleThresholdMs())
-    expect(fresh.windowMs).toBe(5 * 60 * 1000)
+    expect(fresh.windowMs).toBe(16 * 60 * 1000)
     expect(fresh.windowSource).toBe("default")
     expect(fresh.root).toBe(INDEX_FRESHNESS_ROOT)
     expect(fresh.provenance).toBe("complete")
   })
 
   test("a stamp past the window is stale, and the verdict carries the age it judged", () => {
-    const stale = judgeIndexFreshness(stampAgedBy(6 * 60 * 1000))
+    const stale = judgeIndexFreshness(stampAgedBy(17 * 60 * 1000))
     expect(stale.provenance).toBe("stale")
-    expect(stale.ageMs).toBeGreaterThanOrEqual(6 * 60 * 1000)
+    expect(stale.ageMs).toBeGreaterThanOrEqual(17 * 60 * 1000)
     expect(stale.lastRebuild).toBeTruthy()
   })
 
@@ -85,10 +85,28 @@ describe("the one freshness verdict", () => {
   })
 
   test("a stale answer names the root and the window it judged", () => {
-    const named = describeFreshness(judgeIndexFreshness(stampAgedBy(6 * 60 * 1000)))
+    const named = describeFreshness(judgeIndexFreshness(stampAgedBy(17 * 60 * 1000)))
     expect(named).toContain(INDEX_FRESHNESS_ROOT)
     expect(named).toContain("window")
     expect(named).toContain("old")
+    expect(named).toContain("17m old vs 16m window (default)")
+  })
+
+  /**
+   * @failure Normal 15m timer cycles are rejected by a shorter reader allowance.
+   * @level l1
+   * @consumer recall search/status using the recall-index timer's completed stamp
+   * @testonly none
+   */
+  test.each([
+    [15 * 60_000 + 25_000, "complete"],
+    [16 * 60_000, "complete"],
+    [16 * 60_000 + 1, "stale"],
+  ] as const)("judges scheduled-cycle age %dms as %s", (ageMs, provenance) => {
+    const now = Date.now()
+    const verdict = judgeIndexFreshness(new Date(now - ageMs).toISOString(), now)
+    expect(verdict.provenance).toBe(provenance)
+    expect(verdict.ageMs).toBe(ageMs)
   })
 })
 
@@ -113,7 +131,7 @@ describe("search and status cannot disagree about one stamp", () => {
     expect(review.indexHealth.freshness.provenance).toBe(search)
     expect(review.indexHealth.freshness).toMatchObject({
       root: INDEX_FRESHNESS_ROOT,
-      windowMs: 5 * 60 * 1000,
+      windowMs: 16 * 60 * 1000,
     })
   })
 
@@ -122,6 +140,6 @@ describe("search and status cannot disagree about one stamp", () => {
     const freshness = readIndexFreshness({})
     expect(freshness.provenance).toBe("stale")
     expect(freshness.root).toBe(INDEX_FRESHNESS_ROOT)
-    expect(freshness.windowMs).toBe(5 * 60 * 1000)
+    expect(freshness.windowMs).toBe(16 * 60 * 1000)
   })
 })

@@ -8,8 +8,12 @@
 
 import type { IndexProvenance } from "../history/recall-shared.ts"
 
-/** Default stale threshold — matches Anthropic's 5m prompt-cache TTL. */
-export const RECALL_STALE_THRESHOLD_DEFAULT = "5m"
+/**
+ * Covers the recall-index timer's 15m cadence plus a 1m rebuild allowance.
+ * Timer declaration: tools/hh-cli/hab-projects.ts, rootServiceDefinitions["recall-index"].
+ * Revisit this allowance when that cadence changes; slower runs still report stale.
+ */
+export const RECALL_STALE_THRESHOLD_DEFAULT = "16m"
 
 /** Parse "5m" / "30s" / "1h" / "500ms" / bare number-as-minutes → ms. */
 export function parseThreshold(s: string): number {
