@@ -2078,6 +2078,7 @@ function closeOneBall(
   attemptedId: string,
   now: number,
   transport: OwnerTransportProjector,
+  closeEvidence?: string,
 ): { request_id: string; closed: number; reason?: string } {
   const requestId = pendingRequestIdForOwner(ctx, owner, attemptedId)
   const row = ctx.stmts.selectPendingSettlementForRecipient.get({
@@ -2089,12 +2090,14 @@ function closeOneBall(
     return { request_id: requestId, closed: 0, reason }
   }
   const settlement =
-    ctx.getName() !== owner && ctx.getName() !== row.sender && offlineOwnerCloseAllowed(ctx, row, now, transport)
-      ? "offline-owner-close"
-      : ctx.getName() === row.sender && ctx.getName() !== owner
-        ? "sender-withdrawn"
-        : "manual-close"
-  return { request_id: requestId, closed: settlePendingRows(ctx, [row], settlement, ctx.getName(), now) }
+    closeEvidence !== undefined
+      ? "manual-close"
+      : ctx.getName() !== owner && ctx.getName() !== row.sender && offlineOwnerCloseAllowed(ctx, row, now, transport)
+        ? "offline-owner-close"
+        : ctx.getName() === row.sender && ctx.getName() !== owner
+          ? "sender-withdrawn"
+          : "manual-close"
+  return { request_id: requestId, closed: settlePendingRows(ctx, [row], settlement, ctx.getName(), now, closeEvidence) }
 }
 
 /** Dispatcher custody uses daemon facts; habitat roster policy stays with the caller. */
@@ -2180,12 +2183,21 @@ function pendingCloseAuthorityRefusalResult(
     attemptedIds.length > 1
       ? `the entire ${attemptedIds.length}-id close batch remains open`
       : `ball ${JSON.stringify(refusal.requestId)} remains open`
+  const kind = ctx.stmts.selectPendingKindForRecipient.get({
+    $request_id: refusal.requestId,
+    $recipient: owner,
+  }) as { request_kind: "request" | "incident" } | null
+  const allowedClosers =
+    kind?.request_kind === "incident"
+      ? `For this incident, its owner or ${ANDON_OWNER} may record a manual-close with ` +
+        `\`tribe pending --owner ${JSON.stringify(owner)} --close ${JSON.stringify(refusal.requestId)} --evidence '<attestation>'\`; ` +
+        `the emitter may send its --incident-cleared edge`
+      : `Allowed closers are the owner (manual-close) or original sender (sender-withdrawn), or ${ANDON_OWNER} ` +
+        `after its structured deadline with an observed offline owner (offline-owner-close)`
   const error =
     `tribe.pending: refusing --close before mutation: authenticated caller ${JSON.stringify(refusal.caller)} ` +
     `is neither owner ${JSON.stringify(refusal.owner)} nor original sender ${JSON.stringify(refusal.originalSender)} ` +
-    `for ball ${JSON.stringify(refusal.requestId)}. Allowed closers are the owner (manual-close) or original sender ` +
-    `(sender-withdrawn), or ${ANDON_OWNER} after its structured deadline with an observed offline owner ` +
-    `(offline-owner-close); ${remainsOpen}, and no pending row was mutated.`
+    `for ball ${JSON.stringify(refusal.requestId)}. ${allowedClosers}; ${remainsOpen}, and no pending row was mutated.`
   return jsonResult({
     error,
     refusal: {
@@ -2219,7 +2231,12 @@ function pendingPruneAuthorityRefusalResult(ctx: TribeContext, owner: string, no
   })
 }
 
-function incidentCloseRefusal(ctx: TribeContext, owner: string, attemptedIds: readonly string[]): string | undefined {
+function incidentCloseRefusal(
+  ctx: TribeContext,
+  owner: string,
+  attemptedIds: readonly string[],
+  closeEvidence?: string,
+): string | undefined {
   const incidentId = attemptedIds
     .map((id) => pendingRequestIdForOwner(ctx, owner, id))
     .find((requestId) => {
@@ -2230,9 +2247,24 @@ function incidentCloseRefusal(ctx: TribeContext, owner: string, attemptedIds: re
       return row?.request_kind === "incident"
     })
   if (incidentId === undefined) return undefined
+  if (
+    attemptedIds.length === 1 &&
+    closeEvidence !== undefined &&
+    (ctx.getName() === owner || ctx.getName() === ANDON_OWNER)
+  ) {
+    return undefined
+  }
+  const manualRemedy =
+    attemptedIds.length === 1
+      ? `The authenticated owner ${JSON.stringify(owner)} or ${ANDON_OWNER} may manually clear this incident with nonblank ` +
+        `--evidence: \`tribe pending --owner ${JSON.stringify(owner)} --close ${JSON.stringify(incidentId)} --evidence '<attestation>'\`. `
+      : ""
   return (
     `tribe.pending: refusing --close for incident ${JSON.stringify(incidentId)}; ` +
-    "only the incident emitter can clear it when the condition ends. " +
+    manualRemedy +
+    (attemptedIds.length > 1
+      ? "only the incident emitter can clear it when the condition ends. "
+      : "The incident emitter can also clear it when the condition ends. ") +
     `From the emitter, run \`tribe send ${owner} 'incident cleared' --type notify --summary 'incident cleared' ` +
     `--incident ${JSON.stringify(incidentId)} --incident-cleared\`.`
   )
@@ -2365,6 +2397,24 @@ function pendingExplicitOwner(value: unknown): string | undefined {
 }
 
 function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
+  if (
+    a.close_evidence !== undefined &&
+    (typeof a.close_evidence !== "string" ||
+      a.close_evidence.trim().length === 0 ||
+      typeof a.close !== "string" ||
+      a.close.length === 0 ||
+      a.prune === true ||
+      a.all === true ||
+      a.expired === true ||
+      a.owed === true ||
+      a.stale_ms !== undefined ||
+      a.emitter !== undefined)
+  ) {
+    return jsonResult({
+      error:
+        "tribe.pending: --evidence requires nonblank attestation text for one incident --close; read, prune and batch operations do not accept evidence.",
+    })
+  }
   if (typeof a.emitter === "string") {
     const emitter = a.emitter.trim()
     if (
@@ -2453,6 +2503,20 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
 
   const now = Date.now()
   const transport = ownerTransportObservationProjector(ctx, opts, now)
+  const closeEvidence = typeof a.close_evidence === "string" ? a.close_evidence : undefined
+  const evidenceKind =
+    closeEvidence === undefined
+      ? null
+      : (ctx.stmts.selectPendingKindForRecipient.get({
+          $request_id: pendingRequestIdForOwner(ctx, owner, a.close as string),
+          $recipient: owner,
+        }) as { request_kind: "request" | "incident" } | null)
+  if (closeEvidence !== undefined && evidenceKind !== null && evidenceKind.request_kind !== "incident") {
+    return jsonResult({
+      error:
+        "tribe.pending: --evidence is only accepted for an incident --close; ordinary request closes do not accept evidence.",
+    })
+  }
   const withOwnerTransport = <T extends PendingBall>(rows: readonly T[]): Array<T & OwnerTransportObservation> =>
     rows.map((row) => ({ ...row, ...transport.observe(row.recipient) }))
 
@@ -2563,11 +2627,16 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
 
   const closeId = typeof a.close === "string" && a.close.length > 0 ? a.close : null
   if (closeId) {
-    const authorityRefusal = pendingCloseAuthorityRefusalResult(ctx, owner, [closeId], now, transport)
+    // The evidence-bearing incident exception is independent of offline
+    // deadline custody. All ordinary and batch authority stays on its path.
+    const authorityRefusal =
+      closeEvidence !== undefined && evidenceKind?.request_kind === "incident" && ctx.getName() === ANDON_OWNER
+        ? undefined
+        : pendingCloseAuthorityRefusalResult(ctx, owner, [closeId], now, transport)
     if (authorityRefusal !== undefined) return authorityRefusal
-    const refusal = incidentCloseRefusal(ctx, owner, [closeId])
+    const refusal = incidentCloseRefusal(ctx, owner, [closeId], closeEvidence)
     if (refusal !== undefined) return jsonResult({ error: refusal })
-    const outcome = ctx.db.transaction(() => closeOneBall(ctx, owner, closeId, now, transport))()
+    const outcome = ctx.db.transaction(() => closeOneBall(ctx, owner, closeId, now, transport, closeEvidence))()
     const warning = outcome.closed === 0 ? pendingCloseMissWarning(ctx, owner, undefined, closeId) : undefined
     // The one query that ASKS ABOUT a ball: a close aimed at a conflicted id
     // carries every fact in its own result (25654), so the CLI can exit

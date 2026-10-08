@@ -1498,6 +1498,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       expect(invalidFilter.structuredContent).not.toHaveProperty("count")
 
       for (const [field, value, message] of [
+        ["close_evidence", "qualified clear", "Authenticated pending read does not accept close evidence"],
         ["expired", "yes", "Authenticated pending read filter 'expired' must be boolean"],
         ["owed", 1, "Authenticated pending read filter 'owed' must be boolean"],
         ["stale_ms", -1, "Authenticated pending read filter 'stale_ms' must be a finite non-negative number"],

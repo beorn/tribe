@@ -518,7 +518,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           close: {
             type: "string",
             description:
-              "Close one ordinary pending request without sending a reply, after verified out-of-band completion. Incident-keyed conditions refuse: only their emitter's --incident-cleared edge may settle them.",
+              "Close one ordinary pending request without sending a reply, after verified out-of-band completion. An incident requires close_evidence and its authenticated owner or dispatcher @chief; its emitter may also send --incident-cleared.",
+          },
+          close_evidence: {
+            type: "string",
+            description:
+              "Verbatim nonblank attestation for one incident manual close by its owner or dispatcher @chief. Recorded with the authenticated actor; project facts are not verified. Read, prune, batch and ordinary closes refuse evidence.",
           },
         },
       },
@@ -601,9 +606,15 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "close",
           flags: "--close <request_id>",
-          description:
-            "Close one ordinary request after verified out-of-band completion; incidents require the emitter's --incident-cleared edge",
+          description: "Close one ordinary request; an incident requires --evidence and its owner or dispatcher @chief",
           requires: ["owner"],
+        },
+        {
+          name: "evidence",
+          flags: "--evidence <text>",
+          mapsTo: "close_evidence",
+          description: "Record verbatim attestation for one incident manual clear; requires --close",
+          requires: ["close"],
         },
       ],
     }),

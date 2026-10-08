@@ -746,6 +746,7 @@ async function cmdPending(
   staleMs: number | undefined,
   close: string | undefined,
   emitter?: string,
+  evidence?: string,
 ): Promise<void> {
   if (emitter !== undefined) {
     const outcome = await tribeDaemonCalls(`tribe pending emitter ${JSON.stringify(emitter)}`).pendingForEmitter(
@@ -786,6 +787,7 @@ async function cmdPending(
   if (owner) args.owner = owner
   if (staleMs !== undefined) args.stale_ms = staleMs
   if (close) args.close = close
+  if (evidence !== undefined) args.close_evidence = evidence
   const explicitRecoveryCommand = pendingReadRecoveryCommand(expired, owed, staleMs)
   let method = "tribe.pending"
   let rawResult: unknown
@@ -2460,6 +2462,7 @@ export function registerReadCommands(program: Command): void {
   const pendingOwed = cliOption(PENDING_CLI, "owed")
   const pendingStale = cliOption(PENDING_CLI, "stale")
   const pendingClose = cliOption(PENDING_CLI, "close")
+  const pendingEvidence = cliOption(PENDING_CLI, "evidence")
   program
     .command(PENDING_CLI.name)
     .description(PENDING_CLI.description)
@@ -2480,6 +2483,7 @@ export function registerReadCommands(program: Command): void {
     .option(pendingEmitter.flags, pendingEmitter.description)
     .option(pendingStale.flags, pendingStale.description)
     .option(pendingClose.flags, pendingClose.description)
+    .option(pendingEvidence.flags, pendingEvidence.description)
     .action(
       async (opts: {
         all?: boolean
@@ -2490,7 +2494,23 @@ export function registerReadCommands(program: Command): void {
         emitter?: string
         stale?: string
         close?: string
+        evidence?: string
       }) => {
+        if (
+          opts.evidence !== undefined &&
+          (!opts.close ||
+            opts.emitter !== undefined ||
+            opts.all ||
+            opts.expired ||
+            opts.owed ||
+            opts.stale !== undefined)
+        ) {
+          console.error(
+            "tribe pending: --evidence requires one incident --close; read operations do not accept evidence",
+          )
+          process.exitCode = 2
+          return
+        }
         if (
           opts.emitter !== undefined &&
           (opts.owner !== undefined ||
@@ -2542,6 +2562,7 @@ export function registerReadCommands(program: Command): void {
           stale,
           opts.close,
           opts.emitter,
+          opts.evidence,
         )
       },
     )

@@ -302,6 +302,7 @@ export function settlePendingRows(
   settlement: BallSettlementReason,
   settledBy: string,
   settledAt = Date.now(),
+  closeEvidence?: string,
 ): number {
   for (const row of rows) {
     logEvent(
@@ -321,6 +322,7 @@ export function settlePendingRows(
         settlement,
         settled_at: settledAt,
         settled_by: settledBy,
+        ...(closeEvidence === undefined ? {} : { close_evidence: closeEvidence }),
       },
       { sender: "daemon", ref: row.request_id, ts: settledAt },
     )
