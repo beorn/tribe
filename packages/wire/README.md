@@ -85,8 +85,9 @@ launch controller, not the Tribe daemon.
 `tribe-wire doctor` checks daemon identity, protocol versions, membership and
 the coordination rail. `--json` emits one report document. Exit codes are
 0 for OK, 3 for warnings only, 1 for a critical failure and 2 for UNKNOWN;
-UNKNOWN takes precedence over every other check. An absent daemon is a named
-socket error. `--fix` prints remedies without restarting or repairing anything.
+UNKNOWN takes precedence over every other check. An absent daemon produces an
+UNKNOWN report naming the socket, retaining contributed checks in `--json`.
+`--fix` prints remedies without restarting or repairing anything.
 
 Hosts can contribute read-only facts through the existing CLI entry:
 

@@ -111,7 +111,11 @@ function invalidAuthenticatedPendingSnapshot(
 // Daemon connection
 // ---------------------------------------------------------------------------
 
-async function callDaemon(method: string, params?: Record<string, unknown>): Promise<unknown> {
+async function callDaemon(
+  method: string,
+  params?: Record<string, unknown>,
+  missingDaemon: "exit" | "throw" = "exit",
+): Promise<unknown> {
   return withCliDaemonClient(async (client) => {
     try {
       return await client.call(method, params)
@@ -125,7 +129,7 @@ async function callDaemon(method: string, params?: Record<string, unknown>): Pro
       }
       throw error
     }
-  })
+  }, missingDaemon)
 }
 
 function cliInboxTargetParams(verb: string, session: string | undefined): Record<string, unknown> {
@@ -1682,14 +1686,14 @@ async function cmdDoctor(
     }
   } = {}
   try {
-    status = (await callDaemon("cli_status")) as typeof status
+    status = (await callDaemon("cli_status", undefined, "throw")) as typeof status
   } catch {
     // silent-fallback-allow: older daemons omit cli_status; doctor marks UNKNOWN
   }
   let daemonProtocol = status.daemon?.protocol_version
   if (daemonProtocol === undefined) {
     try {
-      const protocol = (await callDaemon("cli_protocol")) as { protocol_version?: unknown }
+      const protocol = (await callDaemon("cli_protocol", undefined, "throw")) as { protocol_version?: unknown }
       if (typeof protocol.protocol_version === "number") daemonProtocol = protocol.protocol_version
     } catch {
       // silent-fallback-allow: cli_protocol unresolved → doctor UNKNOWN, not a fake version
@@ -1724,7 +1728,7 @@ async function cmdDoctor(
 
   let membership: DoctorDiagnosticCheck
   try {
-    const members = mcpJsonContent(await callDaemon("tribe.members")) as {
+    const members = mcpJsonContent(await callDaemon("tribe.members", undefined, "throw")) as {
       sessions?: DoctorMembershipRow[]
       membership_discrepancy?: DoctorMembershipDiscrepancy
     }
@@ -1741,7 +1745,10 @@ async function cmdDoctor(
   let bridgeLost: DoctorDiagnosticCheck
   let healthSample: DoctorDiagnosticCheck
   try {
-    const health = (await callDaemon("cli_health")) as { bridge_lost?: unknown; health_sample?: unknown }
+    const health = (await callDaemon("cli_health", undefined, "throw")) as {
+      bridge_lost?: unknown
+      health_sample?: unknown
+    }
     bridgeLost = evaluateDoctorBridgeLost(health.bridge_lost)
     healthSample = evaluateDoctorHealthSample(health.health_sample)
   } catch (error) {
