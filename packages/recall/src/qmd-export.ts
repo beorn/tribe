@@ -257,24 +257,34 @@ export function forEachJsonlLine(
         consumeRange(buf, start, nl < 0 ? buf.length : nl)
         if (nl < 0) break
         start = nl + 1
-        // Any partial sequence the decoder still held belongs to the dropped
-        // bytes, so the next record starts from a fresh decoder state.
-        if (overflowed) decoder = new StringDecoder("utf8")
+        if (overflowed) {
+          // Any partial sequence the decoder still held belongs to the dropped
+          // bytes, so the next record starts from a fresh decoder state.
+          decoder = new StringDecoder("utf8")
+        } else {
+          // The newline ended the record, so a truncated sequence the decoder
+          // still holds belongs to THIS record — the whole-chunk reader
+          // resolved it to U+FFFD here, and feeding those bytes to the next
+          // record would tear a valid record that follows (@cto 0cca6f35e
+          // review). `end()` returns the replacement character and resets the
+          // decoder for the next record; its bytes are already counted.
+          const tail = decoder.end()
+          if (tail.length > 0) {
+            if (blank && tail.trim().length > 0) blank = false
+            carry += tail
+          }
+        }
         if (endRecord() === false) return
       }
     }
     if (!overflowed) {
-      // Flush the decoder's held partial sequence (if any) into the final
-      // record; the flushed text's byte length is the held bytes exactly.
+      // The same for a final record with no trailing newline. Its held bytes
+      // were already counted by consumeRange, so appending the flushed text
+      // must not re-count them (a 1–3 byte partial re-encodes as 3).
       const tail = decoder.end()
       if (tail.length > 0) {
         if (blank && tail.trim().length > 0) blank = false
         carry += tail
-        recordBytes += Buffer.byteLength(tail, "utf8")
-        if (recordBytes > limit) {
-          overflowed = true
-          carry = ""
-        }
       }
     }
     // A final record with no trailing newline. `carry` holds it while it fits;

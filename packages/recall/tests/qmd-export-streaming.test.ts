@@ -421,6 +421,47 @@ describe("oversized JSONL records are bounded (27785)", () => {
     expect(yielded.some((l) => l.includes("�"))).toBe(false)
   })
 
+  test("a record ending in a truncated multibyte sequence does not tear the next record", () => {
+    // @cto 0cca6f35e review: the decoder holds a truncated sequence across the
+    // newline, so feeding it to the next record makes a VALID record parse as
+    // U+FFFD-prefixed junk and both consumers drop it silently. The whole-chunk
+    // reader resolved the torn sequence inside record 1; the reader must keep
+    // doing that.
+    const p = join(dir, "torn.jsonl")
+    // "a" + the first two bytes of a 3-byte sequence, then the newline.
+    writeFileSync(p, Buffer.from([0x61, 0xe2, 0x82, 0x0a]), "utf-8")
+    appendFileSync(p, userEntry("survives the torn neighbour") + "\n", "utf-8")
+
+    const yielded: string[] = []
+    forEachJsonlLine(p, (line) => {
+      yielded.push(line)
+    })
+    expect(yielded).toEqual(["a\uFFFD", userEntry("survives the torn neighbour")])
+
+    // The consumer keeps the valid record: it is parsed, exported and named.
+    const meta = readSessionMeta(p)
+    expect(meta?.firstUserText).toBe("survives the torn neighbour")
+    expect(renderSessionMarkdown(meta!)).toContain("survives the torn neighbour")
+  })
+
+  test("a truncated sequence at EOF is not re-counted against the budget", () => {
+    // The same held bytes at EOF are counted once, so an exactly-at-limit record
+    // whose last bytes are a truncated sequence is not wrongly pushed over.
+    const eof = join(dir, "torn-eof.jsonl")
+    writeFileSync(eof, Buffer.concat([Buffer.from("a".repeat(CAP - 2)), Buffer.from([0xe2, 0x82])]), "utf-8")
+    const eofLines: string[] = []
+    const eofReports: unknown[] = []
+    forEachJsonlLine(
+      eof,
+      (line) => {
+        eofLines.push(line)
+      },
+      { maxRecordBytes: CAP, onOversized: (record) => eofReports.push(record) },
+    )
+    expect(eofReports).toEqual([])
+    expect(eofLines).toEqual([`${"a".repeat(CAP - 2)}\uFFFD`])
+  })
+
   test("the export names an oversized record inside and outside the export", () => {
     const p = join(dir, "oversized-export.jsonl")
     const oversizedLine = assistantEntry("y".repeat(REVIEWED_RECORD_LIMIT_BYTES + 4096))
