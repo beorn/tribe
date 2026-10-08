@@ -2635,6 +2635,7 @@ function createDispatcherHarness(
     operatorCapability?: string
     retiredNames?: ReadonlySet<string>
     identityVerifier?: LoadedIdentityVerifier
+    requiredIncidentEmitters?: readonly string[]
   } = {},
 ) {
   const tempDir = mkdtempSync(join(tmpdir(), "tribe-dispatcher-"))
@@ -2680,6 +2681,7 @@ function createDispatcherHarness(
       summarizerMode: "off" as const,
       recallEnabled: false,
       operatorCapability: options.operatorCapability ?? null,
+      requiredIncidentEmitters: options.requiredIncidentEmitters,
     },
     db,
     stmts,
@@ -3088,6 +3090,45 @@ function createFakeServer(): Server {
   }
   return server as unknown as Server
 }
+
+/**
+ * @failure Loss of required incident policy permits managed reads or writes, or stops unrelated traffic.
+ * @level l1
+ * @consumer The three managed incident producers (28044 AC1).
+ * Existing registration tests verify tokens but do not require emitter authority on each operation.
+ */
+describe("managed incident policy availability (28044)", () => {
+  it("refuses managed operations by policy path while unrelated traffic remains available", async () => {
+    const emitter = "longproc-reading"
+    const token = managedToken(emitter, "longproc-sid")
+    const identityVerifier: LoadedIdentityVerifier = {
+      path: "/test/missing-incident-policy.ts",
+      suppliesGen: true,
+      verify: async () => ({ result: "verified", actor: emitter, kind: "service", sid: "longproc-sid", gen: 1 }),
+    }
+    const harness = createDispatcherHarness({ identityVerifier, requiredIncidentEmitters: [emitter] })
+    cleanup = harness.dispose
+    await harness.register("incident-service", { name: emitter, pid: process.pid, project: "/test", idToken: token })
+    const call = async (method: string, params: Record<string, unknown>) =>
+      JSON.parse(
+        await harness.dispatcher.handleRequest({ jsonrpc: "2.0", id: method, method, params }, "incident-service"),
+      ) as { error?: { message: string }; result?: unknown }
+    const identity = { emitter, subject: "host", condition: "memory" }
+    for (const [method, params] of [
+      ["tribe.pending", { emitter }],
+      ["tribe.send", { to: "@chief", message: "high memory", incident: identity, if_current: [] }],
+      ["tribe.send", { to: "@chief", message: "high memory again", incident: identity, if_current: [] }],
+      ["tribe.send", { to: "@chief", message: "recovered", incident: { ...identity, active: false }, if_current: [] }],
+    ] as const) {
+      const result = await call(method, params)
+      expect(result.error?.message).toContain(emitter)
+      expect(result.error?.message).toContain(identityVerifier.path)
+      expect(result.error?.message).toMatch(/incident.*policy/i)
+    }
+    expect((await call("tribe.members", {})).error).toBeUndefined()
+    expect(harness.db.prepare("SELECT COUNT(*) AS n FROM pending_request").get()).toEqual({ n: 0 })
+  })
+})
 
 // 24284 — a CLI one-shot read that never reaches the caller must not retire
 // the caller's mailbox. `cli_self_inbox_v1` advances the mailbox cursor inside

@@ -47,6 +47,8 @@ export interface TribeConfig {
    * The daemon loads and checks it at boot (identity-verifier.ts) and refuses startup naming the path.
    */
   readonly identityVerifierPath?: string | null
+  /** Explicit host scope remains known when its required policy is unavailable. */
+  readonly requiredIncidentEmitters?: readonly string[]
   /** Idle-quit delay in seconds. -1 ("never") disables auto-quit, 0 quits immediately on idle. */
   readonly idleQuitAfterSec: number
   /** Which surface set idleQuitAfterSec — see IdleQuitSource. */
@@ -193,6 +195,7 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
         // bindVaultDb applies it, so this is the option carried through, not a second resolver.
         "vault-db": { type: "string" },
         "identity-verifier": { type: "string" },
+        "require-incident-policy": { type: "string", multiple: true },
         "focus-poll-ms": { type: "string", default: process.env.TRIBE_FOCUS_POLL_MS ?? "60000" },
         "summary-poll-ms": { type: "string", default: process.env.TRIBE_SUMMARY_POLL_MS ?? "120000" },
         "summarizer-model": { type: "string", default: process.env.TRIBE_SUMMARIZER_MODEL ?? "off" },
@@ -221,6 +224,7 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
       recallDbPath: resolveRecallDbPath(daemonArgs["recall-db"] as string | undefined),
       ...vaultDbConfig(classifyVaultDbFlag(daemonArgs["vault-db"])),
       identityVerifierPath: identityVerifierFlag(daemonArgs["identity-verifier"]),
+      requiredIncidentEmitters: daemonArgs["require-incident-policy"] as string[] | undefined,
       idleQuitAfterSec: idleQuit.idleQuitAfterSec,
       idleQuitSource: idleQuit.idleQuitSource,
       inheritFd: daemonArgs.fd ? parseInt(String(daemonArgs.fd), 10) : null,

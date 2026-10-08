@@ -18,6 +18,45 @@ function moduleAt(name: string, source: string): string {
 }
 
 describe("loadIdentityVerifier", () => {
+  /** @failure Broken incident policy stops identity verification or silently grants managed access.
+   * @level l1
+   * @consumer Managed incident operations and unrelated Tribe traffic (28044 AC1).
+   */
+  it.each([
+    ["absent", ""],
+    ["malformed", "export const INCIDENT_POLICY = { emitters: ['longproc-reading'], authorize: true }"],
+  ])(
+    "keeps identity verification available with %s incident policy and names the policy fault",
+    async (name, policy) => {
+      const path = moduleAt(
+        `policy-${name}.ts`,
+        `export const IDENTITY_VERIFIER_INTERFACE = 1
+      export async function verifyIdentity() { return { result: "absent" } }
+      ${policy}`,
+      )
+      const verifier = await loadIdentityVerifier(path)
+      expect(await verifier.verify("ordinary-token")).toEqual({ result: "absent" })
+      expect(() => verifier.readIncidentPolicy!()).toThrow(`incident policy ${path}`)
+    },
+  )
+
+  it("refuses changed policy bytes instead of continuing with the previously loaded grant", async () => {
+    const source = `export const IDENTITY_VERIFIER_INTERFACE = 1
+      export async function verifyIdentity() { return { result: "absent" } }
+      export const INCIDENT_POLICY = { emitters: ['longproc-reading'], authorize: () => true }`
+    const path = moduleAt("policy-changed.ts", source)
+    const verifier = await loadIdentityVerifier(path)
+    expect(
+      verifier.readIncidentPolicy!().authorize(
+        { result: "verified", actor: "longproc-reading", kind: "service", sid: "s" },
+        "longproc-reading",
+        "read",
+      ),
+    ).toBe(true)
+    writeFileSync(path, source + "\n// changed policy bytes")
+    expect(() => verifier.readIncidentPolicy!()).toThrow(`incident policy ${path}`)
+  })
+
   /** @failure Managed emitter authorization loses the verified service kind.
    * @level l1
    * @consumer The daemon's per-operation incident authorization (28044 AC1).

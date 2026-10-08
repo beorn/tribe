@@ -15,7 +15,7 @@
  */
 
 import { isAbsolute } from "node:path"
-import { existsSync } from "node:fs"
+import { accessSync, constants, existsSync, statSync } from "node:fs"
 
 export const IDENTITY_VERIFIER_INTERFACE_VERSION = 1
 
@@ -38,11 +38,23 @@ export type IdentityVerdict =
 
 export type IdentityVerifier = (token: string) => Promise<IdentityVerdict>
 
+export type IncidentOperation = "read" | "raise" | "clear"
+export type IncidentPolicy = {
+  readonly emitters: readonly string[]
+  readonly authorize: (
+    identity: Extract<IdentityVerdict, { result: "verified" }>,
+    emitter: string,
+    operation: IncidentOperation,
+  ) => boolean
+}
+
 export interface LoadedIdentityVerifier {
   readonly path: string
   readonly verify: IdentityVerifier
   /** Whether the module declares that its verified verdicts carry `gen`. */
   readonly suppliesGen: boolean
+  /** Read and validate the host policy per operation; faults never prevent unrelated traffic. */
+  readonly readIncidentPolicy?: () => IncidentPolicy
 }
 
 export type SessionAuthority = "verified" | "claimed"
@@ -89,10 +101,44 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
   if (suppliesGen !== undefined && typeof suppliesGen !== "boolean") {
     refuse(`exports IDENTITY_VERIFIER_SUPPLIES_GEN ${JSON.stringify(suppliesGen)}, not a boolean`)
   }
+  const loadedStat = statSync(path)
+  const readIncidentPolicy = (): IncidentPolicy => {
+    const fail = (reason: string): never => {
+      throw new Error(`incident policy ${path}: ${reason}`)
+    }
+    try {
+      accessSync(path, constants.R_OK)
+      const current = statSync(path)
+      if (
+        current.ino !== loadedStat.ino ||
+        current.mtimeMs !== loadedStat.mtimeMs ||
+        current.size !== loadedStat.size
+      ) {
+        fail("module changed since load; adopt the current module through the daemon's supervisor")
+      }
+    } catch (error) {
+      return fail(error instanceof Error ? error.message : String(error))
+    }
+    const policy = module.INCIDENT_POLICY as Partial<IncidentPolicy> | null | undefined
+    if (
+      !policy ||
+      !Array.isArray(policy.emitters) ||
+      policy.emitters.length === 0 ||
+      policy.emitters.some(
+        (emitter) => typeof emitter !== "string" || emitter.trim() !== emitter || emitter.length === 0,
+      ) ||
+      new Set(policy.emitters).size !== policy.emitters.length ||
+      typeof policy.authorize !== "function"
+    ) {
+      return fail("INCIDENT_POLICY must declare distinct emitter names and an authorize function")
+    }
+    return policy as IncidentPolicy
+  }
   return {
     path,
     verify: async (token) => checkedVerdict(await (verify as (token: string) => unknown)(token), path),
     suppliesGen: suppliesGen === true,
+    readIncidentPolicy,
   }
 }
 

@@ -316,6 +316,9 @@ export type HandlerOpts = {
   identityVerifierPath?: string | null
   /** 25074 3c-2a — whether the loaded verifier declares `gen` on its verified verdicts; null with no verifier. */
   identityVerifierSuppliesGen?: boolean | null
+  /** Per-call receipt created only after current launch and host policy authorization. */
+  incidentAuthorization?: { readonly emitter: string; readonly operation: "read" | "raise" | "clear" }
+  requiredIncidentEmitters?: readonly string[]
   /** An active verifier fault issue, restored from its durable incident after a restart. */
   getIdentityVerifierFault?: () => string | null
   /** Daemon-local refusals at the tokenless by-launch inbox boundary. */
@@ -591,6 +594,23 @@ export function handleToolCall(
   opts: HandlerOpts,
   connId?: string,
 ): ToolResult | Promise<ToolResult> {
+  const incident = a.incident as { emitter?: unknown; active?: unknown } | undefined
+  const emitter =
+    name === TRIBE_COORD_METHODS.pending ? a.emitter : name === TRIBE_COORD_METHODS.send ? incident?.emitter : undefined
+  const emitterRead = name === TRIBE_COORD_METHODS.pending && emitter !== undefined
+  const managedWrite = typeof emitter === "string" && (opts.requiredIncidentEmitters ?? []).includes(emitter)
+  if (emitterRead || managedWrite) {
+    const operation = emitterRead ? "read" : incident?.active === false ? "clear" : "raise"
+    if (
+      typeof emitter !== "string" ||
+      opts.incidentAuthorization?.emitter !== emitter ||
+      opts.incidentAuthorization.operation !== operation
+    ) {
+      return jsonResult({
+        error: `incident ${JSON.stringify(emitter)} requires current verified identity and host incident policy authorization`,
+      })
+    }
+  }
   // Class-default deadlines are daemon-owned escalation; a sender can only
   // override their duration. Every RPC boundary records elapsed deadlines
   // before projecting attention, but ownership remains active until an actual

@@ -72,6 +72,7 @@ import {
   TRIBE_COORD_METHODS,
   readSeatTransportFacts,
   resolveRuntimeJoinIdentity,
+  type HandlerOpts,
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import type { TribePluginHandle } from "../plugin-api.ts"
@@ -1191,7 +1192,28 @@ export function withDispatcher<
       recallVaultRefusal: t.config.vaultDbRefusal ?? null,
       identityVerifierPath: hooks.identityVerifier?.path ?? null,
       identityVerifierSuppliesGen: hooks.identityVerifier ? hooks.identityVerifier.suppliesGen : null,
-      getIdentityVerifierFault: () => identityVerifierFaultIssue,
+      requiredIncidentEmitters: t.config.requiredIncidentEmitters,
+      getIdentityVerifierFault: () => {
+        const required = t.config.requiredIncidentEmitters ?? []
+        if (required.length > 0) {
+          try {
+            const verifier = hooks.identityVerifier
+            if (!verifier?.readIncidentPolicy) {
+              throw new Error(`incident policy ${verifier?.path ?? "(no verifier)"}: required export unavailable`)
+            }
+            const policy = verifier.readIncidentPolicy()
+            const absent = required.filter((emitter) => !policy.emitters.includes(emitter))
+            if (absent.length > 0) {
+              throw new Error(`incident policy ${verifier.path}: missing required emitters ${absent.join(", ")}`)
+            }
+          } catch (error) {
+            return [identityVerifierFaultIssue, error instanceof Error ? error.message : String(error)]
+              .filter(Boolean)
+              .join("; ")
+          }
+        }
+        return identityVerifierFaultIssue
+      },
       getTokenlessByLaunchRefusals: () => tokenlessByLaunchRefusals,
       // tribe.stop actuator — absent (handler refuses loudly) unless the
       // composing daemon supplied its shutdown.
@@ -2424,6 +2446,53 @@ export function withDispatcher<
           case TRIBE_COORD_METHODS.pending: {
             const client = clients.get(connId)
             const ctx = client?.ctx ?? daemonCtx
+            const incident = p.incident as { emitter?: unknown; active?: unknown } | undefined
+            const emitter =
+              method === TRIBE_COORD_METHODS.pending
+                ? p.emitter
+                : method === TRIBE_COORD_METHODS.send
+                  ? incident?.emitter
+                  : undefined
+            const emitterRead = method === TRIBE_COORD_METHODS.pending && emitter !== undefined
+            let incidentAuthorization: HandlerOpts["incidentAuthorization"]
+            const managedWrite =
+              typeof emitter === "string" && (t.config.requiredIncidentEmitters ?? []).includes(emitter)
+            if (emitterRead || managedWrite) {
+              const verifier = hooks.identityVerifier
+              const policyPath = verifier?.path ?? "(no --identity-verifier configured)"
+              const refuseIncident = (reason: string) =>
+                makeError(
+                  id,
+                  -32003,
+                  `managed incident ${JSON.stringify(emitter)} refused by incident policy ${policyPath}: ${reason}`,
+                )
+              if (typeof emitter !== "string" || emitter.length === 0) {
+                return refuseIncident("emitter must be a nonempty string")
+              }
+              if (!verifier?.readIncidentPolicy) return refuseIncident("required INCIDENT_POLICY export is unavailable")
+              let policy: ReturnType<NonNullable<LoadedIdentityVerifier["readIncidentPolicy"]>>
+              try {
+                policy = verifier.readIncidentPolicy()
+              } catch (error) {
+                return refuseIncident(error instanceof Error ? error.message : String(error))
+              }
+              if (!policy.emitters.includes(emitter)) {
+                return refuseIncident("emitter is not managed by this host policy")
+              }
+              const authority = db
+                .prepare("SELECT verified_id_token FROM sessions WHERE id = ?")
+                .get(ctx.sessionId) as { verified_id_token: string | null } | null
+              const current = await verifyOneShotToken(undefined, authority?.verified_id_token)
+              if (!("verdict" in current)) return refuseIncident(current.errorMessage)
+              const operation = emitterRead ? "read" : incident?.active === false ? "clear" : "raise"
+              try {
+                const allowed = policy.authorize(current.verdict, emitter, operation)
+                if (allowed !== true) return refuseIncident("verified identity is not authorized for this emitter")
+                incidentAuthorization = { emitter, operation }
+              } catch (error) {
+                return refuseIncident(error instanceof Error ? error.message : String(error))
+              }
+            }
             if (
               hooks.identityVerifier &&
               client &&
@@ -2450,6 +2519,7 @@ export function withDispatcher<
               client && client.role !== "pending"
                 ? {
                     ...DAEMON_HANDLER_OPTS,
+                    incidentAuthorization,
                     declareTransportDelivery(delivery?: "push" | "pull") {
                       const registered = clients.get(connId)
                       if (!registered || registered.role === "pending" || registered.ctx.sessionId !== ctx.sessionId) {
