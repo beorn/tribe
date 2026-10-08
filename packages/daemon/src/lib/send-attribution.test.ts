@@ -18,6 +18,7 @@ import { createTribeContext, type MessageInsertedInfo, type TribeContext } from 
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { sendMessage } from "./messaging.ts"
+import { registerSession } from "./session.ts"
 
 function makeContext(
   db: Database,
@@ -221,17 +222,34 @@ describe("tribe.send attribution and delivery", () => {
     expect(inbox.map(({ id }) => id)).toEqual([sent[2]?.id, sent[3]?.id, sent[4]?.id])
   })
 
-  it("carries a daemon github:push broadcast as an ambient journal event (the 28200 producer seam)", () => {
+  // @failure @i/21-wire/28200-tribe-mcp-send-accepts-any-message-type-and-opens-no-ball — the real github:push producer's row reaches a member's ambient window, opens an actionable, or credits a delivery cursor.
+  // @level unit
+  // @consumer Tribe daemon message producers (github-plugin / with-runtime broadcast)
+  it("carries a daemon github:push broadcast as a journal-only event the ambient window never returns (the 28200 producer seam)", () => {
     // 28200: a member's tribe.send of `github:push` is now refused, so the
     // producer path the daemon ACTUALLY uses is asserted here. github-plugin
     // calls api.broadcast(content, `github:${type}`, undefined,
     // { delivery: "pull", topic: `github:${type}` }) (github-plugin.ts:836), and
     // with-runtime's broadcast() forwards to sendMessage(daemonCtx, "*", …,
-    // "broadcast", …). This keeps the journey's ambient-diet coverage for the
-    // topic type where it belongs: with the producer, journal-only (never
-    // delivered), and visible to fetch.
+    // "broadcast", …) (with-runtime.ts:114). messaging.ts:556 then demotes a
+    // daemon-sender `*` broadcast of github:push/session to kind='event'.
+    //
+    // Journal-only means excluded from delivery AND from fetch. with-broadcast.ts:237
+    // (`if (info.kind === "event") return`) never fans the row out — the paired
+    // witness that a connected member's channel is untouched and its delivery
+    // cursor is not credited lives in with-broadcast.test.ts ("never fans a
+    // daemon journal event out to a connected member nor credits its delivery
+    // cursor (28200)"). getInboxRows excludes `m.kind != 'event'`
+    // (database.ts:2810), so a member's default fetch returns it in NO window:
+    // `events` is empty and it is never actionable. It stays readable through the
+    // durable log projection (with-dispatcher-self-registration.test.ts "keeps
+    // demoted daemon activity readable through cli_log"). The journey keeps the
+    // member-sent ambient row (notify) and the inverse refusal; this row pins the
+    // producer's own semantics.
     const inserted: MessageInsertedInfo[] = []
     const daemon = makeContext(db, stmts, "daemon", "sess-daemon", "daemon", (info) => inserted.push(info))
+    const observer = makeContext(db, stmts, "@obs", "sess-obs", "member")
+    registerSession(observer, "/repo", undefined, null, process.pid, "push", "/repo")
 
     const produced = sendMessage(daemon, "*", "beorn/ag pushed", "github:push", undefined, undefined, "broadcast", {
       delivery: "pull",
@@ -241,6 +259,18 @@ describe("tribe.send attribution and delivery", () => {
     const row = db.prepare("SELECT type, kind, topic, delivery FROM messages WHERE id = ?").get(produced.id)
     expect(row).toEqual({ type: "github:push", kind: "event", topic: "github:push", delivery: "pull" })
     expect(inserted[0]).toMatchObject({ kind: "event", type: "github:push", topic: "github:push" })
+
+    const deliveredBefore = db.prepare("SELECT last_delivered_seq FROM sessions WHERE id = 'sess-obs'").get()
+    const fetched = parseToolJson(handleToolCall(observer, "tribe.fetch", {}, makeOpts()))
+    expect(fetched.events, "journal-only rows are excluded by getInboxRows — no fetch window returns them").toEqual([])
+    expect(
+      (fetched.attention as { actionable_unread: unknown[] }).actionable_unread,
+      "a journal event is never actionable",
+    ).toEqual([])
+    expect(
+      db.prepare("SELECT last_delivered_seq FROM sessions WHERE id = 'sess-obs'").get(),
+      "no channel delivery credit for a journal-only row",
+    ).toEqual(deliveredBefore)
   })
 
   it.each([

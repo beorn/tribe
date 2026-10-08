@@ -210,8 +210,8 @@ describe("22514 daemon health-log broadcast admission", () => {
   })
 })
 
-describe("G9 self-inbox P0: a focus seat is woken by the reply that settles its own request", () => {
-  function focusSeatFanout(extraPullSockets = false) {
+describe("withBroadcast fanout admission: G9 self-inbox wakeups and 28200 daemon journal events", () => {
+  function focusSeatFanout(extraPullSockets = false, mode: "focus" | "normal" = "focus") {
     const writes: string[] = []
     const pullWrites: string[] = []
     const delivered = vi.fn()
@@ -241,7 +241,7 @@ describe("G9 self-inbox P0: a focus seat is woken by the reply that settles its 
     const subject = withBroadcast()({
       scope,
       stmts: {
-        getSessionFilter: { get: () => ({ filter_mode: "focus", filter_until: null, filter_mute: null }) },
+        getSessionFilter: { get: () => ({ filter_mode: mode, filter_until: null, filter_mute: null }) },
         updateLastDelivered: { run: delivered },
       },
       daemonCtx,
@@ -378,6 +378,38 @@ describe("G9 self-inbox P0: a focus seat is woken by the reply that settles its 
       expect(watchWrites).toHaveLength(3)
       expect(fanout.delivered.mock.calls.map(([args]) => args.$id)).toEqual(["watch", "watch"])
       expect(fanout.pullWrites).toEqual([])
+    } finally {
+      fanout.dispose()
+    }
+  })
+
+  // @failure @i/21-wire/28200-tribe-mcp-send-accepts-any-message-type-and-opens-no-ball — a daemon journal event (kind='event') fans out to a connected push seat or credits its delivery cursor.
+  // @level unit
+  // @consumer withBroadcast's messageTap for daemon-produced github:push / session rows
+  test("never fans a daemon journal event out to a connected member nor credits its delivery cursor (28200)", () => {
+    // A `normal` seat receives ordinary non-actionable broadcasts, so this is
+    // the mode where the kind='event' guard is the operative stop — `focus`
+    // would suppress the row in shouldDeliver before the guard even runs.
+    const fanout = focusSeatFanout(false, "normal")
+    try {
+      // The row messaging.ts:556 produces for a daemon-sender `*` github:push
+      // broadcast: recipient '*', kind 'event', delivery 'pull'. A default
+      // delivery is included too — kind='event' ALONE must stop the fanout.
+      const journalEvent = (delivery: "push" | "pull"): MessageInsertedInfo => ({
+        ...fanout.reply(null),
+        type: "github:push",
+        kind: "event",
+        sender: "daemon",
+        recipient: "*",
+        delivery,
+        topic: "github:push",
+      })
+      fanout.tap(journalEvent("pull"))
+      fanout.tap(journalEvent("push"))
+      // Broadcast fanout is coalesced; flush so a leak would actually reach the socket.
+      fanout.broadcast.flushConnection("conn-seat")
+      expect(fanout.writes, "a journal event must not reach a connected member's channel").toEqual([])
+      expect(fanout.delivered, "a journal event must not credit a delivery cursor").not.toHaveBeenCalled()
     } finally {
       fanout.dispose()
     }
