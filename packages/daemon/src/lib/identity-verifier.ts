@@ -25,7 +25,13 @@ export const IDENTITY_VERIFIER_INTERFACE_VERSION = 1
  * fills it says so by exporting `IDENTITY_VERIFIER_SUPPLIES_GEN = true`, which the daemon reports in health.
  */
 export type IdentityVerdict =
-  | { readonly result: "verified"; readonly actor: string; readonly sid: string; readonly gen?: number }
+  | {
+      readonly result: "verified"
+      readonly actor: string
+      readonly kind?: "service"
+      readonly sid: string
+      readonly gen?: number
+    }
   | { readonly result: "absent" }
   | { readonly result: "unreadable"; readonly reason: string }
   | { readonly result: "contradicted"; readonly reason: string }
@@ -97,9 +103,11 @@ function checkedVerdict(value: unknown, path: string): IdentityVerdict {
   switch (verdict?.result) {
     case "verified":
       if (nonEmpty(verdict.actor) && nonEmpty(verdict.sid)) {
-        if (verdict.gen === undefined) return { result: "verified", actor: verdict.actor, sid: verdict.sid }
+        if (verdict.kind !== undefined && verdict.kind !== "service") break
+        const kind = verdict.kind === "service" ? { kind: "service" as const } : {}
+        if (verdict.gen === undefined) return { result: "verified", actor: verdict.actor, sid: verdict.sid, ...kind }
         if (typeof verdict.gen === "number" && Number.isSafeInteger(verdict.gen) && verdict.gen >= 0) {
-          return { result: "verified", actor: verdict.actor, sid: verdict.sid, gen: verdict.gen }
+          return { result: "verified", actor: verdict.actor, sid: verdict.sid, gen: verdict.gen, ...kind }
         }
       }
       break

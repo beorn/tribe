@@ -18,6 +18,29 @@ function moduleAt(name: string, source: string): string {
 }
 
 describe("loadIdentityVerifier", () => {
+  /** @failure Managed emitter authorization loses the verified service kind.
+   * @level l1
+   * @consumer The daemon's per-operation incident authorization (28044 AC1).
+   * Existing interface-1 coverage exercises only seat verdicts without kind.
+   */
+  it("preserves verified service kind through the existing module boundary", async () => {
+    const path = moduleAt(
+      "service-kind.ts",
+      `export const IDENTITY_VERIFIER_INTERFACE = 1
+       export async function verifyIdentity() {
+         return { result: "verified", actor: "longproc-reading", kind: "service", sid: "svc-1", gen: 2 }
+       }`,
+    )
+    const verifier = await loadIdentityVerifier(path)
+    expect(await verifier.verify("service-token")).toEqual({
+      result: "verified",
+      actor: "longproc-reading",
+      kind: "service",
+      sid: "svc-1",
+      gen: 2,
+    })
+  })
+
   it("loads a module that speaks interface 1 and passes its verdicts through", async () => {
     const path = moduleAt(
       "good.ts",

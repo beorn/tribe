@@ -78,6 +78,33 @@ const opts = (): HandlerOpts => ({
   getActiveSessionInfo: () => [],
 })
 
+/**
+ * @failure A claimed service name obtains an emitter's authoritative incident state.
+ * @level l1
+ * @consumer longproc-reading's restart reconciliation (28044 AC1)
+ * Existing envelope tests label authority but never require it for an emitter read.
+ * Exercise the existing pending boundary and real SQLite session, without a test-only seam.
+ */
+describe("emitter incident read authority (28044)", () => {
+  test("a claimed longproc-reading name cannot read authoritative incident state", () => {
+    const claimed = sender("claimed-longproc", "longproc-reading", "claimed")
+    const result = handleToolCall(claimed, "tribe.pending", { emitter: "longproc-reading" }, opts()) as {
+      content: Array<{ text: string }>
+    }
+    const body = JSON.parse(result.content[0]!.text) as { readonly error?: unknown }
+
+    expect(body.error).toEqual(expect.stringMatching(/verified/i))
+    expect(body.error).toContain("longproc-reading")
+    expect(body).not.toHaveProperty("pending")
+
+    // Explicit recipient diagnostics remain available to the same claimed caller.
+    const diagnostic = handleToolCall(claimed, "tribe.pending", { owner: RECIPIENT }, opts()) as {
+      content: Array<{ text: string }>
+    }
+    expect(JSON.parse(diagnostic.content[0]!.text)).toMatchObject({ owner: RECIPIENT, pending: [] })
+  })
+})
+
 function fetchedAuthorities(): Record<string, unknown> {
   const reader = context("reader", RECIPIENT)
   const result = handleToolCall(reader, "tribe.fetch", { limit: 10 }, opts()) as { content: Array<{ text: string }> }
