@@ -748,7 +748,11 @@ function managedProcessSource(
       const invoked = await invoke(argv)
       // diagnostic.location is the --state-root the census used (stateRoot),
       // not the controller session dir. The formatter reprints it as the
-      // manual command (@i/1-instruments/24962).
+      // manual command (@i/1-instruments/24962). hab sysmon ECHOES the RESOLVED
+      // journal dir (<stateRoot>/habmod) as its own location, so a census that
+      // ran fine against <stateRoot> came back claiming the wrong root and the
+      // reprint was unrunnable (one `habmod` too deep) — pin the location to
+      // the root WE invoked, the only one the reprint can run (@i/4-supervision/28186).
       if (!invoked.ok) return unavailable(stateRoot, invoked.reason, invoked.detail)
       const result = invoked.result
       const lines = result.stdout.trim().split("\n").filter(Boolean)
@@ -757,7 +761,9 @@ function managedProcessSource(
           const line = lines[0]
           if (line === undefined) return unavailable(stateRoot, "source-protocol-invalid")
           const parsed = parseObservation(JSON.parse(line))
-          if (parsed !== undefined && (result.exitCode === 0 || parsed.kind === "unavailable")) return parsed
+          if (parsed !== undefined && (result.exitCode === 0 || parsed.kind === "unavailable")) {
+            return { ...parsed, diagnostic: { ...parsed.diagnostic, location: stateRoot } }
+          }
         } catch {
           // silent-fallback-allow: parse failure falls through to typed unavailable
         }

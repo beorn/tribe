@@ -95,6 +95,47 @@ describe("an unattributable incident carries its own explanation", () => {
     expect(message).not.toContain(`--state-root ${controllerSessionDir}`)
   })
 
+  test("a census that ECHOES .../habmod still prints the real --state-root (28186)", async () => {
+    // Live 2026-10-08 (@chief, @dev/luna2): `hab sysmon snapshot --state-root
+    // <root>` resolves the journal at `<root>/habmod` and echoes THAT resolved
+    // session dir as diagnostic.location. The daemon reprints location verbatim
+    // as `--state-root`, so the cure handed to a reader was off by one `habmod`
+    // and answered fact-unavailable while facts were fresh. This drives the
+    // exact echoed shape — success exit, an unavailable payload — not the
+    // command-error path the test above covers.
+    const runCommand = vi.fn(async () => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: `${JSON.stringify({
+        diagnostic: {
+          excluded: EXCLUDED,
+          location: `${SESSION_DIR}/habmod`,
+          query: "latest exact process census with owner attribution",
+        },
+        kind: "unavailable",
+        reason: "process-fact-unavailable",
+        schema: "process-observation/1",
+      })}\n`,
+    }))
+    const source = createHealthProcessSource({
+      env: {
+        HAB_SCALAR_JOURNAL_DIR: `${SESSION_DIR}/habmod`,
+        HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+        HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+      },
+      runCommand,
+    })
+    if (source.kind !== "managed") throw new Error("expected managed source")
+    const observation = await source.read()
+    expect(observation.kind).toBe("unavailable")
+    if (observation.kind !== "unavailable") throw new Error("unreachable")
+    expect(observation.diagnostic.location).toBe(SESSION_DIR)
+
+    const message = formatCollectedHealthAlert(cpuCritical(), observation, new Map<number, number>(), [], 1).message
+    expect(message).toContain(`hab sysmon snapshot --state-root ${SESSION_DIR}`)
+    expect(message).not.toContain(`--state-root ${SESSION_DIR}/habmod`)
+  })
+
   test("a reason that is NOT the bound must not claim the bound fired", () => {
     // Negative control. Without this, "the 2.5s bound fired" would be printed
     // for every unavailable reason, which is a louder lie than the silence it
