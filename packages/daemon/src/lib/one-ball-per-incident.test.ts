@@ -267,6 +267,115 @@ describe("one ball per incident (habwire stage 2(d))", () => {
 
     const INCIDENT = { emitter: WATCHER, subject: "@dev/5", condition: "transport-wedged" }
 
+    // 28044 AC3: existing upsert/clear tests have no stale snapshot or whole-recipient comparison.
+    it("conflicts without mutation on stale raise/clear and requires every recipient before clearing", () => {
+      const watcher = makeContext(db, stmts, WATCHER)
+      const first = call(watcher, { to: "@chief", message: "first", incident: INCIDENT, if_current: [] })
+      const expected = [{ recipient: "@chief", message_id: first.id }]
+      const count = () => (db.prepare("SELECT COUNT(*) AS n FROM messages").get() as { n: number }).n
+      const before = count()
+      for (const active of [true, false]) {
+        const stale = call(watcher, {
+          to: "@chief",
+          message: "stale",
+          incident: { ...INCIDENT, active },
+          if_current: [],
+        })
+        expect(stale).toMatchObject({
+          sent: false,
+          conflict: { kind: "incident-current-changed", expected: [], current: expected },
+        })
+        expect(count()).toBe(before)
+      }
+      const other = sendMessage(
+        watcher,
+        "@dev/7",
+        "other holding",
+        "notify",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { incident: INCIDENT },
+      )
+      const beforeClear = count()
+      const partial = call(watcher, {
+        to: "@chief",
+        message: "partial clear",
+        incident: { ...INCIDENT, active: false },
+        if_current: expected,
+      })
+      expect(partial).toMatchObject({ sent: false, conflict: { kind: "incident-current-changed" } })
+      expect(count()).toBe(beforeClear)
+      expect(openKeys("@chief")).toHaveLength(1)
+      expect(openKeys("@dev/7")).toHaveLength(1)
+      const cleared = call(watcher, {
+        to: "@chief",
+        message: "complete clear",
+        incident: { ...INCIDENT, active: false },
+        if_current: [{ recipient: "@dev/7", message_id: other.id }, ...expected],
+      })
+      expect(cleared).toMatchObject({ sent: true, tracker: { closed: 2 } })
+      expect(openKeys("@chief")).toEqual([])
+      expect(openKeys("@dev/7")).toEqual([])
+    })
+
+    it("accepts exact retries from hot or archived history without replacing a newer observation", () => {
+      const watcher = makeContext(db, stmts, WATCHER)
+      const original = {
+        to: "@chief",
+        message: "original",
+        incident: INCIDENT,
+        if_current: [],
+        message_id: "28044-original",
+      }
+      const first = call(watcher, original)
+      const newer = call(watcher, {
+        to: "@chief",
+        message: "newer",
+        incident: INCIDENT,
+        if_current: [{ recipient: "@chief", message_id: first.id }],
+      })
+      expect(newer.sent).toBe(true)
+      expect(call(watcher, original)).toMatchObject({ sent: true, id: first.id, deduplicated: true })
+      stmts.archiveExpiredMessages.run({ $cutoff: Date.now() + 1000, $archived_at: Date.now() })
+      stmts.deleteExpiredMessages.run({ $cutoff: Date.now() + 1000 })
+      expect(call(watcher, original)).toMatchObject({ sent: true, id: first.id, deduplicated: true })
+      expect(
+        db.prepare("SELECT message_id FROM pending_request WHERE request_id=?").get(incidentKey(INCIDENT)),
+      ).toEqual({ message_id: newer.id })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE id='28044-original'").get()).toEqual({ n: 0 })
+    })
+
+    it("requires conditional writes when managed policy is enabled and refuses malformed holdings", () => {
+      const watcher = makeContext(db, stmts, WATCHER)
+      const managed = handleToolCall(
+        watcher,
+        "tribe.send",
+        { to: "@chief", message: "missing compare", incident: INCIDENT },
+        {
+          ...makeOpts(),
+          requiredIncidentEmitters: [WATCHER],
+          incidentAuthorization: { emitter: WATCHER, operation: "raise" },
+        },
+      ) as { content: Array<{ text: string }> }
+      expect((JSON.parse(managed.content[0]!.text) as { error?: string }).error).toMatch(/if_current/)
+      for (const value of [
+        null,
+        {},
+        [{ recipient: "@chief" }],
+        [
+          { recipient: "@chief", message_id: "a" },
+          { recipient: "@chief", message_id: "b" },
+        ],
+      ]) {
+        expect(
+          call(watcher, { to: "@chief", message: "invalid", incident: INCIDENT, if_current: value }).error,
+        ).toMatch(/if_current/)
+      }
+      expect(openKeys("@chief")).toEqual([])
+    })
+
     // 28044 AC1/3: prior snapshots only exercised null; wake tests never persisted opaque reconciliation data.
     it("keeps metadata-only reassertions quiet and carries payload through archive and reopen", () => {
       const watcher = makeContext(db, stmts, WATCHER)

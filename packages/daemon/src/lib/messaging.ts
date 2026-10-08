@@ -182,6 +182,43 @@ export type BallTracker = {
   incident?: IncidentIdentity & { active?: boolean }
   /** Opaque JSON observation data, outside the stable incident identity. */
   incidentData?: unknown
+  /** Complete expected holdings for this identity, compared in the mutation transaction. */
+  ifCurrent?: readonly IncidentHolding[]
+}
+
+export type IncidentHolding = { readonly recipient: string; readonly message_id: string }
+
+export function parseIncidentCurrent(value: unknown): IncidentHolding[] {
+  if (!Array.isArray(value)) throw new Error("if_current must be an array of {recipient, message_id} holdings")
+  const recipients = new Set<string>()
+  return value.map((row: unknown) => {
+    if (typeof row !== "object" || row === null) throw new Error("if_current holdings must be objects")
+    const { recipient, message_id } = row as Record<string, unknown>
+    if (
+      typeof recipient !== "string" ||
+      recipient.trim().length === 0 ||
+      typeof message_id !== "string" ||
+      message_id.trim().length === 0
+    ) {
+      throw new Error("if_current holdings require non-empty recipient and message_id strings")
+    }
+    if (recipients.has(recipient)) {
+      throw new Error(`if_current contains duplicate recipient ${JSON.stringify(recipient)}`)
+    }
+    recipients.add(recipient)
+    return { recipient, message_id }
+  })
+}
+
+/** Rolled back inside the writer, projected as a normal conflict outcome at the tool boundary. */
+export class IncidentCurrentConflict extends Error {
+  constructor(
+    readonly requestId: string,
+    readonly expected: readonly IncidentHolding[],
+    readonly current: readonly IncidentHolding[],
+  ) {
+    super(`incident ${requestId} changed since its snapshot`)
+  }
 }
 
 /** One JSON-value boundary for RPC and lower-level writers; no lossy JSON.stringify coercions. */
@@ -550,6 +587,10 @@ export function sendMessage(
     throw new Error("incident_data requires an incident identity")
   }
   const incidentData = serializeIncidentData(ballTracker.incidentData)
+  const expectedHoldings = ballTracker.ifCurrent === undefined ? undefined : parseIncidentCurrent(ballTracker.ifCurrent)
+  if (expectedHoldings !== undefined && incident === undefined) {
+    throw new Error("if_current requires an incident identity")
+  }
   if (incident !== undefined && explicitRequest !== undefined && explicitRequest !== null) {
     throw new Error(
       "a tracked send may carry an incident identity or an explicit request id, not both: the incident identity IS the request id",
@@ -587,6 +628,31 @@ export function sendMessage(
   // after this transaction commits.
   const persist = ctx.db.transaction(() => {
     const openedOwners: string[] = []
+    if (expectedHoldings !== undefined && incidentRequestId !== null) {
+      // Authorization has already run at dispatch. Accepted UUID retries win before comparing an old snapshot,
+      // including when retention has moved their observation into the archive.
+      const accepted = ctx.stmts.selectMessageById.get({ $id: id }) as { rowid: number; ts: number } | null
+      if (accepted !== null) {
+        return {
+          rowid: accepted.rowid,
+          ts: accepted.ts,
+          openedOwners,
+          deduplicated: true as const,
+          tracker: undefined,
+          correlatedReply: null,
+          wakesOwner: false,
+          incident: { transition: "repeated" as const, wakesOwner: false },
+        }
+      }
+      const current = (
+        ctx.stmts.selectPendingSettlementsForRequest.all({ $request_id: incidentRequestId }) as PendingSettlementRow[]
+      ).map((row) => ({ recipient: row.recipient, message_id: row.message_id }))
+      const keys = (holdings: readonly IncidentHolding[]) =>
+        holdings.map((row) => JSON.stringify([row.recipient, row.message_id])).sort()
+      if (JSON.stringify(keys(expectedHoldings)) !== JSON.stringify(keys(current))) {
+        throw new IncidentCurrentConflict(incidentRequestId, expectedHoldings, current)
+      }
+    }
     const pendingReply =
       replyId && resolvedKind === "direct"
         ? (ctx.stmts.selectPendingForReplyRecipient.get({

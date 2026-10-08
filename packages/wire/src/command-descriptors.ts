@@ -258,12 +258,28 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             description:
               "Optional opaque JSON value on an incident observation, outside its stable identity. Requires incident. Stored atomically and preserved by archive; omitted legacy data reads as null. Consumers own the payload schema.",
           },
+          if_current: {
+            type: "array",
+            description:
+              "Complete expected {recipient,message_id} holdings for the incident identity. Compared inside the mutation transaction; [] expects no holdings. A mismatch returns sent:false and conflict without mutation. Required for policy-managed emitters; accepted UUID retries are reauthorized before deduplication.",
+            items: {
+              type: "object",
+              required: ["recipient", "message_id"],
+              properties: { recipient: { type: "string", minLength: 1 }, message_id: { type: "string", minLength: 1 } },
+            },
+          },
         },
         required: ["to", "message"],
       },
       outputSchema: OBJ(
         {
           sent: { type: "boolean", description: "True on successful send." },
+          conflict: {
+            type: "object",
+            additionalProperties: true,
+            description:
+              "Conditional incident mismatch: kind incident-current-changed, request_id, expected and current holdings. No send or settlement occurred; re-read and recompute.",
+          },
           id: { type: "string", description: "Message id assigned by the daemon." },
           ids: {
             type: "array",

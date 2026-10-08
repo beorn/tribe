@@ -44,6 +44,8 @@ import {
   type SenderAuthority,
   isTerminalSessionLeftReason,
   serializeIncidentData,
+  parseIncidentCurrent,
+  IncidentCurrentConflict,
 } from "./messaging.ts"
 import { ACTIONABLE_TYPES_SET, AUTO_TRACK_TYPES_SET } from "./database.ts"
 import {
@@ -596,8 +598,9 @@ export function handleToolCall(
   connId?: string,
 ): ToolResult | Promise<ToolResult> {
   const incident = a.incident as { emitter?: unknown; active?: unknown } | undefined
-  const emitter =
+  const rawEmitter =
     name === TRIBE_COORD_METHODS.pending ? a.emitter : name === TRIBE_COORD_METHODS.send ? incident?.emitter : undefined
+  const emitter = typeof rawEmitter === "string" ? rawEmitter.trim() : rawEmitter
   const emitterRead = name === TRIBE_COORD_METHODS.pending && emitter !== undefined
   const managedWrite = typeof emitter === "string" && (opts.requiredIncidentEmitters ?? []).includes(emitter)
   if (emitterRead || managedWrite) {
@@ -866,6 +869,24 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       ...(fields.active === undefined ? {} : { active: fields.active as boolean }),
     }
   }
+  let ifCurrent: BallTracker["ifCurrent"]
+  if (
+    incident !== undefined &&
+    (opts.requiredIncidentEmitters ?? []).includes(incident.emitter) &&
+    a.if_current === undefined
+  ) {
+    return jsonResult({
+      error: `tribe.send: managed incident ${JSON.stringify(incident.emitter)} requires if_current holdings`,
+    })
+  }
+  if (a.if_current !== undefined) {
+    if (incident === undefined) return jsonResult({ error: "tribe.send: if_current requires an incident identity" })
+    try {
+      ifCurrent = parseIncidentCurrent(a.if_current)
+    } catch (error) {
+      return jsonResult({ error: `tribe.send: ${error instanceof Error ? error.message : String(error)}` })
+    }
+  }
   if (a.incident_data !== undefined) {
     if (incident === undefined) return jsonResult({ error: "tribe.send: incident_data requires an incident identity" })
     try {
@@ -1022,27 +1043,44 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       ...(resolution.detail ? { detail: resolution.detail } : {}),
     })
   }
-  const result = sendMessage(
-    ctx,
-    recipients,
-    sanitized,
-    msgType,
-    a.bead as string | undefined,
-    a.ref as string | undefined,
-    "direct",
-    classification,
-    {
-      request: trackWithMessageId ? true : (requestId ?? undefined),
-      owner: resolution.state === "bounced" ? resolution.to : undefined,
-      reply: replyId ?? undefined,
-      fanout: fanoutArg,
-      expiresInMs,
-      owners: broadcastOwners,
-      incident,
-      incidentData: a.incident_data,
-      ...(redue === undefined ? {} : { redue }),
-    },
-  )
+  let result: ReturnType<typeof sendMessage>
+  try {
+    result = sendMessage(
+      ctx,
+      recipients,
+      sanitized,
+      msgType,
+      a.bead as string | undefined,
+      a.ref as string | undefined,
+      "direct",
+      classification,
+      {
+        request: trackWithMessageId ? true : (requestId ?? undefined),
+        owner: resolution.state === "bounced" ? resolution.to : undefined,
+        reply: replyId ?? undefined,
+        fanout: fanoutArg,
+        expiresInMs,
+        owners: broadcastOwners,
+        incident,
+        incidentData: a.incident_data,
+        ifCurrent,
+        ...(redue === undefined ? {} : { redue }),
+      },
+    )
+  } catch (error) {
+    if (error instanceof IncidentCurrentConflict) {
+      return jsonResult({
+        sent: false,
+        conflict: {
+          kind: "incident-current-changed",
+          request_id: error.requestId,
+          expected: error.expected,
+          current: error.current,
+        },
+      })
+    }
+    throw error
+  }
   if (redue !== undefined && !result.deduplicated) {
     log.info?.(
       `re-due ${redue.requestId} (owner ${redue.recipient}) by receipt ${result.id}: ` +
@@ -2328,7 +2366,7 @@ function pendingExplicitOwner(value: unknown): string | undefined {
 
 function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
   if (typeof a.emitter === "string") {
-    const emitter = a.emitter
+    const emitter = a.emitter.trim()
     if (
       a.owner !== undefined ||
       a.all === true ||

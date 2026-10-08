@@ -2447,12 +2447,13 @@ export function withDispatcher<
             const client = clients.get(connId)
             const ctx = client?.ctx ?? daemonCtx
             const incident = p.incident as { emitter?: unknown; active?: unknown } | undefined
-            const emitter =
+            const rawEmitter =
               method === TRIBE_COORD_METHODS.pending
                 ? p.emitter
                 : method === TRIBE_COORD_METHODS.send
                   ? incident?.emitter
                   : undefined
+            const emitter = typeof rawEmitter === "string" ? rawEmitter.trim() : rawEmitter
             const emitterRead = method === TRIBE_COORD_METHODS.pending && emitter !== undefined
             let incidentAuthorization: HandlerOpts["incidentAuthorization"]
             const managedWrite =

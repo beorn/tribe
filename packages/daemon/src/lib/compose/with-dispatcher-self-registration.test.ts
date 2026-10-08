@@ -3136,6 +3136,19 @@ describe("managed incident policy availability (28044)", () => {
         await harness.dispatcher.handleRequest({ jsonrpc: "2.0", id: method, method, params }, connection.connId),
       ) as { error?: { message: string }; result?: unknown }
     expect((await call("tribe.pending", { emitter })).error).toBeUndefined()
+    const accepted = await call("tribe.send", {
+      to: emitter,
+      message: "accepted before replacement",
+      message_id: "28044-accepted-before-replacement",
+      incident: { emitter, subject: "host", condition: "memory" },
+      if_current: [],
+    })
+    expect(accepted.error).toBeUndefined()
+    const acceptedResult = accepted.result as { content: Array<{ text: string }> }
+    expect(JSON.parse(acceptedResult.content[0]!.text)).toMatchObject({
+      sent: true,
+      id: "28044-accepted-before-replacement",
+    })
     expect(connection.socket.destroyed).toBe(false)
     live = false
     for (const [method, params] of [
@@ -3145,6 +3158,7 @@ describe("managed incident policy availability (28044)", () => {
         {
           to: "@chief",
           message: "stale observation",
+          message_id: "28044-accepted-before-replacement",
           incident: { emitter, subject: "host", condition: "memory" },
           if_current: [],
         },
@@ -3155,7 +3169,7 @@ describe("managed incident policy availability (28044)", () => {
       expect(result.error?.message).toContain(emitter)
     }
     expect(connection.socket.destroyed).toBe(false)
-    expect(harness.db.prepare("SELECT COUNT(*) AS n FROM pending_request").get()).toEqual({ n: 0 })
+    expect(harness.db.prepare("SELECT COUNT(*) AS n FROM pending_request").get()).toEqual({ n: 1 })
   })
 
   it("refuses managed operations by policy path while unrelated traffic remains available", async () => {
@@ -3187,6 +3201,11 @@ describe("managed incident policy availability (28044)", () => {
     for (const [method, params] of [
       ["tribe.pending", { emitter }],
       ["tribe.send", { to: "@chief", message: "high memory", incident: identity, if_current: [] }],
+      // Authority must use the same canonical emitter as incidentKey/handleSend, including whitespace normalization.
+      [
+        "tribe.send",
+        { to: "@chief", message: "padded emitter", incident: { ...identity, emitter: ` ${emitter} ` }, if_current: [] },
+      ],
       ["tribe.send", { to: "@chief", message: "high memory again", incident: identity, if_current: [] }],
       ["tribe.send", { to: "@chief", message: "recovered", incident: { ...identity, active: false }, if_current: [] }],
     ] as const) {

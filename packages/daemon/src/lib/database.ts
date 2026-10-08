@@ -1894,7 +1894,8 @@ export function createStatements(db: Database) {
 			END)
 	`),
 
-    selectMessageById: db.prepare("SELECT rowid, ts FROM messages WHERE id = $id"),
+    selectMessageById: db.prepare(`SELECT rowid, ts FROM messages WHERE id = $id
+      UNION ALL SELECT seq AS rowid, ts FROM messages_archive WHERE id = $id LIMIT 1`),
     /** The sending session's authority facts (25074 3d-1a); no row for a daemon-originated send. */
     selectSessionAuthority: db.prepare("SELECT identity_sid FROM sessions WHERE id = $id"),
 
