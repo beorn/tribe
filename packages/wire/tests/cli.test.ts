@@ -53,7 +53,7 @@ function runCli(args: string[], opts: { timeoutMs?: number } = {}): { stdout: st
 function runCliAsync(
   args: string[],
   env: NodeJS.ProcessEnv,
-  opts: { operatorCapability?: string; timeoutMs?: number } = {},
+  opts: { operatorCapability?: string; timeoutMs?: number; doctorSectionsSource?: string } = {},
 ): Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null }> {
   return new Promise((resolveRun) => {
     const stdio: Array<"ignore" | "pipe" | number> = ["ignore", "pipe", "pipe"]
@@ -68,7 +68,14 @@ function runCliAsync(
       stdio.push(capabilityFd)
       childEnv.TRIBE_OPERATOR_CAPABILITY_FD = String(stdio.length - 1)
     }
-    const child = spawn(BUN_BIN, [CLI, ...args], { env: childEnv, stdio, timeout: opts.timeoutMs })
+    const childArgs =
+      opts.doctorSectionsSource === undefined
+        ? [CLI, ...args]
+        : [
+            "--eval",
+            `const { main } = await import(${JSON.stringify(CLI)}); process.exitCode = await main(${JSON.stringify(["bun", CLI, ...args])}, { doctorSections: ${opts.doctorSectionsSource} });`,
+          ]
+    const child = spawn(BUN_BIN, childArgs, { env: childEnv, stdio, timeout: opts.timeoutMs })
     if (capabilityFd !== undefined) closeSync(capabilityFd)
     let stdout = ""
     let stderr = ""
@@ -299,6 +306,43 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       expect(result.stdout).toContain(
         `OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=${EXPECTED_HOST_PIN}`,
       )
+
+      // The public host boundary must await contributed facts and use the
+      // same verdict table; the standalone canary above has no host section.
+      const extended = await runCliAsync(["doctor", "--json"], env, {
+        timeoutMs: 10_000,
+        doctorSectionsSource: `async () => {
+          await new Promise(resolve => setTimeout(resolve, 20));
+          return [{ name: "fixture-host", checks: { install: { severity: "WARNING", diagnosis: "optional fixture config absent" } } }];
+        }`,
+      })
+      expect(extended.code, extended.stderr).toBe(3)
+      expect(JSON.parse(extended.stdout)).toMatchObject({
+        verdict: "WARNING",
+        identity: { severity: "OK" },
+        rail: { severity: "OK" },
+        sections: [{ name: "fixture-host", checks: { install: { severity: "WARNING" } } }],
+      })
+
+      const failedCollection = await runCliAsync(["doctor", "--json"], env, {
+        timeoutMs: 10_000,
+        doctorSectionsSource: `async () => { throw new Error("unreadable fixture config /fixture/settings.json") }`,
+      })
+      expect(failedCollection.code, failedCollection.stderr).toBe(2)
+      expect(JSON.parse(failedCollection.stdout)).toMatchObject({
+        verdict: "UNKNOWN",
+        sections: [
+          {
+            name: "extensions",
+            checks: {
+              collection: {
+                severity: "UNKNOWN",
+                diagnosis: expect.stringContaining("/fixture/settings.json"),
+              },
+            },
+          },
+        ],
+      })
     } finally {
       daemon.kill("SIGTERM")
       await new Promise<void>((resolveClose) => daemon.once("close", () => resolveClose()))

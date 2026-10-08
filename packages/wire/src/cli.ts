@@ -34,6 +34,12 @@
  */
 
 import { isEntryModule } from "./lib/entry-module.ts"
+import type { DoctorSection } from "./cli/read.ts"
+
+export type { DoctorDiagnosticCheck, DoctorSection } from "./cli/read.ts"
+export type WireCliOptions = Readonly<{
+  doctorSections?: () => Promise<readonly DoctorSection[]>
+}>
 
 const ARGV_FORWARDED_SUBCOMMANDS = new Set(["mcp"])
 const VERSION_FLAGS = new Set(["--version", "-V", "-v", "version"])
@@ -43,7 +49,7 @@ const VERSION_FLAGS = new Set(["--version", "-V", "-v", "version"])
  * code. It never exits the process itself; the entry below, or a host such as hh's `tribe` bin, sets process.exitCode
  * from it. `mcp` still reads process.argv, because the stdio adapter parses its own flags and re-execs from it.
  */
-export async function main(argv: readonly string[]): Promise<number> {
+export async function main(argv: readonly string[], options: WireCliOptions = {}): Promise<number> {
   const args = argv.slice(2)
   const sub = args[0]
 
@@ -52,7 +58,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   // use the typed client helper, not this argv protocol.
   if (sub === "__standalone-supervisor") {
     const { runStandaloneSupervisor } = await import("./standalone-supervisor.ts")
-    return await runStandaloneSupervisor(args.slice(1))
+    return runStandaloneSupervisor(args.slice(1))
   }
 
   // Version identity runs BEFORE Commander, short-circuited like `mcp`, so the
@@ -87,7 +93,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   // out of registration or parse used to leave stdout empty, and a reader of an empty stdout can only say
   // the probe established nothing (bead 27871).
   try {
-    return await runCommanderSubcommands(argv)
+    return await runCommanderSubcommands(argv, options)
   } catch (error) {
     if (sub !== "health" || !args.includes("--json")) throw error
     await writeHealthProbeFailure(error)
@@ -96,7 +102,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 }
 
 /** The Commander-routed verb families, run under `main`'s health-probe guarantee. */
-async function runCommanderSubcommands(argv: readonly string[]): Promise<number> {
+async function runCommanderSubcommands(argv: readonly string[], options: WireCliOptions): Promise<number> {
   const { Command, CommanderError } = await import("@silvery/commander")
   const program = new Command("tribe-wire")
   // Help, a usage error or an unknown command throws its exit code back here instead of exiting the process;
@@ -113,7 +119,7 @@ async function runCommanderSubcommands(argv: readonly string[]): Promise<number>
 
   const { registerReadCommands } = await import("./cli/read.ts")
   const { registerSendCommands } = await import("./cli/send.ts")
-  registerReadCommands(program)
+  registerReadCommands(program, options.doctorSections)
   registerSendCommands(program)
 
   // Commander handles --help and unknown-subcommand errors, and answers them as an exit code.

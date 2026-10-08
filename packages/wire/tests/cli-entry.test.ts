@@ -11,6 +11,8 @@
  */
 
 import { spawnSync } from "node:child_process"
+import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
@@ -67,5 +69,35 @@ describe("the CLI and daemon modules act only when called", () => {
     const result = importIn(DAEMON, 'await m.main(["bun", "daemon.ts", "doctor"])')
     expect(result.status).not.toBe(0)
     expect(result.stderr).toContain("TRIBE_DAEMON_ARGV")
+  })
+
+  it("doctor rejects an unknown flag before collecting host sections", () => {
+    const result = importIn(
+      CLI,
+      'const code = await m.main(["bun", "tribe-wire", "doctor", "--no-such-doctor-option"], { doctorSections: async () => { process.stdout.write("COLLECTED"); return [] } }); process.stdout.write("code=" + code)',
+    )
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe("code=1")
+    expect(result.stderr).toContain("--no-such-doctor-option")
+  })
+
+  it("retired daemon doctor names Wire and exits before creating a daemon socket", () => {
+    const dir = mkdtempSync(resolve(tmpdir(), "tribe-retired-doctor-"))
+    const socketPath = resolve(dir, "tribe.sock")
+    try {
+      const result = spawnSync(BUN_BIN, [DAEMON, "doctor", "--json"], {
+        cwd: dir,
+        env: { ...process.env, HOME: dir, TRIBE_SOCKET: socketPath, TRIBE_NO_AUTOSTART: "1" },
+        encoding: "utf8",
+        input: "",
+        timeout: 5_000,
+      })
+      expect(result.status, result.stderr).toBe(2)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toContain("tribe-wire doctor")
+      expect(existsSync(socketPath)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

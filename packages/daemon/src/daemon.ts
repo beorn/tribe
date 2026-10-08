@@ -12,7 +12,6 @@
  * Setup automation (dispatch-and-exit, never boots the daemon pipe below):
  *   bun tribe-daemon.ts install [--dry-run] [--autostart daemon|library|never]
  *   bun tribe-daemon.ts uninstall [--dry-run]
- *   bun tribe-daemon.ts doctor              # is the Claude Code integration wired up?
  *
  * Importing this module does nothing; main(argv) runs the daemon, and the file runs it only as the entry
  * (hh #26691, @cto 2259658a). The boot itself is daemon-run.ts.
@@ -21,13 +20,17 @@
 import { isEntryModule } from "../../wire/src/lib/entry-module.ts"
 
 /**
- * Run the tribe daemon (or its hook/install/uninstall/doctor verb) and resolve to its exit code once it stops. The boot
+ * Run the tribe daemon (or its hook/install/uninstall verb) and resolve to its exit code once it stops. The boot
  * reads process.argv at module scope, so `argv` must be process.argv itself; any other array is refused by name rather
  * than silently ignored.
  */
 export async function main(argv: readonly string[]): Promise<number> {
   if (argv !== process.argv) {
     throw new Error("TRIBE_DAEMON_ARGV: main(argv) runs the daemon over process.argv; pass process.argv itself")
+  }
+  if (argv[2] === "doctor") {
+    process.stderr.write("tribe-daemon doctor is retired; run tribe-wire doctor (or your host's tribe doctor).\n")
+    return 2
   }
   await import("./daemon-run.ts")
   return typeof process.exitCode === "number" ? process.exitCode : 0
