@@ -1642,6 +1642,16 @@ export type DoctorSection = Readonly<{
   checks: Readonly<Record<string, DoctorDiagnosticCheck>>
 }>
 
+function printDoctorCheck(check: DoctorDiagnosticCheck, okPrefix = "", problemPrefix = ""): void {
+  const prefix = check.severity === "OK" ? okPrefix : problemPrefix
+  const line = `  ${check.severity} — ${prefix}${check.diagnosis}`
+  if (check.severity === "OK") console.log(line)
+  else {
+    console.error(line)
+    if (check.remedy) console.error(`  REMEDY — ${check.remedy}`)
+  }
+}
+
 async function cmdDoctor(
   opts: { fix?: boolean; json?: boolean },
   doctorSections?: () => Promise<readonly DoctorSection[]>,
@@ -1774,36 +1784,11 @@ async function cmdDoctor(
   }
 
   console.log("TRIBE DOCTOR — coordination rail + daemon code identity\n")
-  if (identity.severity === "OK") {
-    console.log(`  OK — code identity ${identity.diagnosis}`)
-  } else {
-    console.error(`  ${identity.severity} — code identity: ${identity.diagnosis}`)
-    if (identity.remedy) console.error(`  REMEDY — ${identity.remedy}`)
-  }
-  if (versions.severity === "OK") {
-    console.log(`  OK — wire versions ${versions.diagnosis}`)
-  } else {
-    console.error(`  ${versions.severity} — wire versions: ${versions.diagnosis}`)
-    if (versions.remedy) console.error(`  REMEDY — ${versions.remedy}`)
-  }
-  if (membership.severity === "OK") {
-    console.log(`  OK — membership ${membership.diagnosis}`)
-  } else {
-    console.error(`  ${membership.severity} — ${membership.diagnosis}`)
-    if (membership.remedy) console.error(`  REMEDY — ${membership.remedy}`)
-  }
-  if (bridgeLost.severity === "OK") {
-    console.log(`  OK — ${bridgeLost.diagnosis}`)
-  } else {
-    console.error(`  ${bridgeLost.severity} — ${bridgeLost.diagnosis}`)
-    if (bridgeLost.remedy) console.error(`  REMEDY — ${bridgeLost.remedy}`)
-  }
-  if (healthSample.severity === "OK") {
-    console.log(`  OK — ${healthSample.diagnosis}`)
-  } else {
-    console.error(`  ${healthSample.severity} — ${healthSample.diagnosis}`)
-    if (healthSample.remedy) console.error(`  REMEDY — ${healthSample.remedy}`)
-  }
+  printDoctorCheck(identity, "code identity ", "code identity: ")
+  printDoctorCheck(versions, "wire versions ", "wire versions: ")
+  printDoctorCheck(membership, "membership ")
+  printDoctorCheck(bridgeLost)
+  printDoctorCheck(healthSample)
 
   if (rail.severity === "OK") {
     console.log(`  OK — rail canary message=${rail.evidence.messageId} waited_ms=${rail.evidence.waitedMs}`)
@@ -1821,12 +1806,7 @@ async function cmdDoctor(
   for (const section of sections ?? []) {
     console.log(`\n  ${section.name}`)
     for (const [name, check] of Object.entries(section.checks)) {
-      const line = `  ${check.severity} — ${name}: ${check.diagnosis}`
-      if (check.severity === "OK") console.log(line)
-      else {
-        console.error(line)
-        if (check.remedy) console.error(`  REMEDY — ${check.remedy}`)
-      }
+      printDoctorCheck(check, `${name}: `, `${name}: `)
     }
   }
 

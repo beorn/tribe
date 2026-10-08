@@ -39,6 +39,13 @@ Lifecycle details: [/hh/docs/reference/tribe/daemon.md](/hh/docs/reference/tribe
 
 ## Boundary
 
+Doctor runs through [the Wire CLI](../wire/README.md#doctor).
+`tribe-daemon doctor` is retired and exits 2 before daemon boot. A host can
+import `doctorReport` and `defaultInstallEnv` from
+`tribe-daemon/install-diagnostics` to contribute installation facts to Wire.
+That entry exports read-only collection and environment types; hook/install
+mutation remains on the existing daemon entry.
+
 This package is reusable infrastructure. It should not encode project-specific
 workflow concepts such as coordinator roles, worker numbering, task queues,
 branch assignments, or merge authority.
