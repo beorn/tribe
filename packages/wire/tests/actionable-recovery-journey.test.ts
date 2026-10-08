@@ -1620,6 +1620,31 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       incident,
     })) as { sent?: boolean }
     expect(raised.sent).toBe(true)
+    const evidenceProbe = await connectToDaemon(socketPath)
+    try {
+      for (const filter of [{ emitter: sender }, { owed: true }]) {
+        await expect(
+          evidenceProbe.call("cli_session_pending_close_v1", {
+            idToken: ownerToken,
+            owner,
+            close: incidentId,
+            close_evidence: evidence,
+            ...filter,
+          }),
+        ).rejects.toThrow(/read filter/i)
+        const retained = await runCli(["pending", "--owner", owner, "--json"], cliEnv, {
+          idToken: ownerToken,
+          throughParent: true,
+        })
+        expect(retained.exitCode, retained.stderr).toBe(0)
+        expect(JSON.parse(retained.stdout).pending).toEqual(
+          expect.arrayContaining([expect.objectContaining({ request_id: incidentId })]),
+        )
+        expect(settlementFacts(dbPath).filter((fact) => fact.request_id === incidentId)).toEqual([])
+      }
+    } finally {
+      evidenceProbe.close()
+    }
     const incidentClose = await runCli(
       ["pending", "--owner", owner, "--close", incidentId, "--evidence", evidence, "--json"],
       cliEnv,

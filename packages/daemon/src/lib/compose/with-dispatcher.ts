@@ -2911,7 +2911,7 @@ export function withDispatcher<
             if (p.close_evidence !== undefined && typeof p.close_evidence !== "string") {
               return makeError(id, -32602, "Authenticated pending close evidence must be a string")
             }
-            if (p.close_evidence !== undefined && p.owed !== undefined) {
+            if (p.close_evidence !== undefined && (p.owed !== undefined || p.emitter !== undefined)) {
               return makeError(id, -32602, "Authenticated pending close evidence cannot accompany a read filter")
             }
             const outcome = await dispatchAuthenticatedSessionCapability(
