@@ -2579,11 +2579,29 @@ export function withDispatcher<
 
           case "cli_health": {
             const health = await handleToolCall(daemonCtx, TRIBE_COORD_METHODS.health, {}, DAEMON_HANDLER_OPTS)
-            const { getBridgeLostArming, getHealthSampleStats, getHealthSnapshot } =
+            const { getBridgeLostArming, getHealthSampleStats, resolveHealthMachine } =
               await import("../health-monitor-plugin.ts")
+            // 28196: serve the monitor's just-completed sample when it is fresh
+            // rather than re-running the census (`hab sysmon snapshot`, measured
+            // 0.62-0.70 s) on the single-threaded request path for every call.
+            // `machine_sample` always carries the age and a stale flag, so a
+            // wedged monitor shows instead of hiding behind an old snapshot.
             let machine: unknown = null
+            let machineSample: {
+              age_ms: number | null
+              stale: boolean
+              source: "monitor-sample" | "fresh"
+              stale_after_ms: number
+            } | null = null
             try {
-              machine = await getHealthSnapshot()
+              const resolved = await resolveHealthMachine()
+              machine = resolved.metrics
+              machineSample = {
+                age_ms: resolved.ageMs,
+                stale: resolved.stale,
+                source: resolved.source,
+                stale_after_ms: resolved.staleAfterMs,
+              }
             } catch {
               /* health snapshot unavailable */
             }
@@ -2607,6 +2625,7 @@ export function withDispatcher<
             return makeResponse(id, {
               ...health,
               machine,
+              machine_sample: machineSample,
               // 25662: doctor prints "bridge-lost paging disarmed: <reason>" from this; never a silent default.
               bridge_lost: getBridgeLostArming(),
               // 24248: skipped health-sample ticks ride the rail; null means the monitor has not started.

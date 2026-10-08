@@ -2618,6 +2618,77 @@ export async function getHealthSnapshot(
 }
 
 // ---------------------------------------------------------------------------
+// Last completed monitor sample (for on-demand readers)
+// ---------------------------------------------------------------------------
+
+/**
+ * A sample older than this many poll intervals is STALE: the monitor is not
+ * completing ticks, and serving its last sample would be a healthy-looking
+ * snapshot of a wedged process. Past the bound the reader collects fresh and
+ * says so; it never silently presents the old sample as current (28196).
+ */
+export const HEALTH_SAMPLE_STALE_INTERVALS = 3
+
+export interface CompletedHealthSample {
+  readonly metrics: HealthMetrics
+  readonly observedAt: number
+}
+
+let lastCompletedHealthSample: CompletedHealthSample | undefined
+
+/** Record the monitor's just-completed sample. Called once per successful tick. */
+function recordCompletedHealthSample(metrics: HealthMetrics, at: number): void {
+  lastCompletedHealthSample = { metrics, observedAt: at }
+}
+
+export interface HealthMachineResolution {
+  readonly metrics: HealthMetrics
+  /** Age (ms) of the monitor sample backing this answer; null when none has landed yet. */
+  readonly ageMs: number | null
+  /** True when the monitor sample is past the stale bound (or absent), so a wedged monitor reads as stale. */
+  readonly stale: boolean
+  /** Where the served metrics came from — the monitor's cached sample, or a fresh collection. */
+  readonly source: "monitor-sample" | "fresh"
+  /** The bound `ageMs` is compared against, carried so a reader can see what "stale" meant. */
+  readonly staleAfterMs: number
+}
+
+/**
+ * Serve the monitor's last completed sample when it is younger than the stale
+ * bound, otherwise collect fresh. Either way the caller is told the sample's age
+ * and whether it is stale — 28196: the loop was occupied by a per-request
+ * `collectFullMetrics()` (a `hab sysmon snapshot` walk measured at 0.62–0.70 s)
+ * that duplicated the sample the monitor had just taken, and 5 s-deadline
+ * readers queued behind it. No silent fallback: an absent or stale sample
+ * always yields `stale: true`.
+ */
+export async function resolveHealthMachine(
+  opts: {
+    readonly now?: () => number
+    readonly pollIntervalMs?: number
+    readonly collect?: () => Promise<HealthMetrics>
+    /** An explicit sample to consider in place of the module cache. */
+    readonly sample?: CompletedHealthSample | undefined
+  } = {},
+): Promise<HealthMachineResolution> {
+  const now = opts.now ?? Date.now
+  const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_HEALTH_POLL_INTERVAL_SEC * 1000
+  const staleAfterMs = pollIntervalMs * HEALTH_SAMPLE_STALE_INTERVALS
+  const cached = opts.sample === undefined ? lastCompletedHealthSample : opts.sample
+  const at = now()
+  if (cached === undefined) {
+    const metrics = await (opts.collect ?? (() => getHealthSnapshot()))()
+    return { metrics, ageMs: null, stale: true, source: "fresh", staleAfterMs }
+  }
+  const ageMs = at - cached.observedAt
+  if (ageMs <= staleAfterMs) {
+    return { metrics: cached.metrics, ageMs, stale: false, source: "monitor-sample", staleAfterMs }
+  }
+  const metrics = await (opts.collect ?? (() => getHealthSnapshot()))()
+  return { metrics, ageMs, stale: true, source: "fresh", staleAfterMs }
+}
+
+// ---------------------------------------------------------------------------
 // Plugin factory
 // ---------------------------------------------------------------------------
 
@@ -2676,6 +2747,9 @@ export const healthMonitorPlugin: TribePluginApi = {
     async function sample(): Promise<void> {
       try {
         const { metrics, pidToParent, processObservation } = await collectFullMetrics(processSource)
+        // Publish this tick for on-demand readers (cli_health) so they serve it
+        // instead of re-running the census per request (28196).
+        recordCompletedHealthSample(metrics, Date.now())
         const sessions = api.getActiveSessions()
         // Pass active-agent count so process-count threshold scales with the
         // number of connected sessions; alarms tuned for solo dev shouldn't
