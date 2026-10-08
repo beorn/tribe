@@ -267,6 +267,83 @@ describe("one ball per incident (habwire stage 2(d))", () => {
 
     const INCIDENT = { emitter: WATCHER, subject: "@dev/5", condition: "transport-wedged" }
 
+    // 28044 AC1/3: prior snapshots only exercised null; wake tests never persisted opaque reconciliation data.
+    it("keeps metadata-only reassertions quiet and carries payload through archive and reopen", () => {
+      const watcher = makeContext(db, stmts, WATCHER)
+      const read = () => {
+        const result = handleToolCall(
+          makeContext(db, stmts, WATCHER),
+          "tribe.pending",
+          { emitter: WATCHER },
+          { ...makeOpts(), incidentAuthorization: { emitter: WATCHER, operation: "read" } },
+        ) as { content: Array<{ text: string }> }
+        return JSON.parse(result.content[0]!.text) as {
+          pending: Array<{ incident_data: unknown; opened_at: string; message_id: string }>
+        }
+      }
+      call(watcher, {
+        to: "@chief",
+        message: "body one",
+        summary: "same condition",
+        incident: INCIDENT,
+        incident_data: { version: 1, revision: "first" },
+      })
+      const opened = read().pending[0]!.opened_at
+      const data = {
+        version: 1,
+        revision: "second",
+        members: ["a", "b"],
+        episodeStart: null,
+        nested: { preserve: true },
+      }
+      const repeated = call(watcher, {
+        to: "@chief",
+        message: "a different human body",
+        summary: "same condition",
+        incident: INCIDENT,
+        incident_data: data,
+      })
+      expect(repeated.incident).toEqual({ transition: "repeated", wakesOwner: false })
+      expect(read().pending[0]).toMatchObject({ incident_data: data, opened_at: opened })
+      stmts.archiveExpiredMessages.run({ $cutoff: Date.now() + 1000, $archived_at: Date.now() })
+      stmts.deleteExpiredMessages.run({ $cutoff: Date.now() + 1000 })
+      db.close()
+      db = openDatabase(join(tmpDir, "tribe.db"))
+      stmts = createStatements(db)
+      expect(read().pending[0]).toMatchObject({ incident_data: data, opened_at: opened })
+      const id = read().pending[0]!.message_id
+      expect(db.prepare("SELECT incident_data FROM messages_archive WHERE id=?").get(id)).toEqual({
+        incident_data: JSON.stringify(data),
+      })
+      // An older protocol caller omits the optional field and still reads/writes against the migrated store.
+      const older = call(makeContext(db, stmts, WATCHER), {
+        to: "@chief",
+        message: "older caller observation",
+        summary: "same condition",
+        incident: INCIDENT,
+      })
+      expect(older.sent).toBe(true)
+      expect(read().pending[0]).toMatchObject({ incident_data: null, opened_at: opened })
+    })
+
+    it("refuses non-JSON metadata before mutation and corrupt stored metadata instead of empty success", () => {
+      const watcher = makeContext(db, stmts, WATCHER)
+      const bad = call(watcher, { to: "@chief", message: "bad", incident: INCIDENT, incident_data: { revision: NaN } })
+      expect(String(bad.error)).toMatch(/incident_data.*JSON/)
+      expect(openKeys("@chief")).toEqual([])
+      observe(watcher, INCIDENT)
+      db.run("UPDATE messages SET incident_data='not-json' WHERE is_incident=1")
+      const result = handleToolCall(
+        watcher,
+        "tribe.pending",
+        { emitter: WATCHER },
+        { ...makeOpts(), incidentAuthorization: { emitter: WATCHER, operation: "read" } },
+      ) as { content: Array<{ text: string }> }
+      const body = JSON.parse(result.content[0]!.text) as { error?: string }
+      expect(body.error).toMatch(/health-monitor.*tribe.db.*incident_data/)
+      expect(body).not.toHaveProperty("pending")
+    })
+
     /** @failure An authorized emitter sees a recipient mailbox or incomplete custody instead of its full snapshot.
      * @level l1
      * @consumer longproc/postmerge/WATCH restart reconciliation (28044 AC1).

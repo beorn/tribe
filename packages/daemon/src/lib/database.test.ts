@@ -93,6 +93,51 @@ async function expectLockHolderToExitSuccessfully(
 }
 
 describe("openDatabase", () => {
+  // 28044 AC1/3: existing migration tests prove incident classification, not opaque payload/null compatibility.
+  it("adds nullable incident metadata to both v40 journals while old inserts still work", () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "tribe-v40-metadata-")))
+    const path = join(dir, "tribe.sqlite")
+    let db: ReturnType<typeof openDatabase> | undefined
+    try {
+      db = openDatabase(path)
+      for (const table of ["messages", "messages_archive"]) {
+        const columns = db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{
+          name: string
+        }>
+        if (columns.some((column) => column.name === "incident_data")) {
+          db.run(assertSingleStatement(`ALTER TABLE ${table} DROP COLUMN incident_data`))
+        }
+        const seq = table === "messages_archive" ? "seq, archived_at, " : ""
+        const values = table === "messages_archive" ? "1, 1, " : ""
+        db.run(
+          assertSingleStatement(
+            `INSERT INTO ${table} (${seq}id,type,sender,recipient,content,ts) VALUES (${values}'legacy','notify','svc','@chief','old body',1)`,
+          ),
+        )
+      }
+      db.run("UPDATE _schema_meta SET value='40' WHERE key='version'")
+      db.close()
+      db = openDatabase(path)
+      for (const table of ["messages", "messages_archive"]) {
+        expect(db.prepare(assertSingleStatement(`SELECT incident_data FROM ${table} WHERE id='legacy'`)).get()).toEqual(
+          { incident_data: null },
+        )
+      }
+      const oldInsert = db.prepare(
+        "INSERT INTO messages (id,type,sender,recipient,content,ts) VALUES (?,'notify','old-client','@chief','old write',2)",
+      )
+      oldInsert.run("older-client-write")
+      expect(db.prepare("SELECT content,incident_data FROM messages WHERE id='older-client-write'").get()).toEqual({
+        content: "old write",
+        incident_data: null,
+      })
+      createStatements(db)
+    } finally {
+      db?.close()
+      safeRemoveSync(dir, { within: TEST_ROOT, allowMissing: true })
+    }
+  })
+
   /**
    * @failure Legacy incident edges become ordinary mail after a schema upgrade,
    *          or archive rows lose the same incident classification as live rows.

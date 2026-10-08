@@ -43,6 +43,7 @@ import {
   type PendingSettlementRow,
   type SenderAuthority,
   isTerminalSessionLeftReason,
+  serializeIncidentData,
 } from "./messaging.ts"
 import { ACTIONABLE_TYPES_SET, AUTO_TRACK_TYPES_SET } from "./database.ts"
 import {
@@ -865,6 +866,14 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       ...(fields.active === undefined ? {} : { active: fields.active as boolean }),
     }
   }
+  if (a.incident_data !== undefined) {
+    if (incident === undefined) return jsonResult({ error: "tribe.send: incident_data requires an incident identity" })
+    try {
+      serializeIncidentData(a.incident_data)
+    } catch (error) {
+      return jsonResult({ error: `tribe.send: ${error instanceof Error ? error.message : String(error)}` })
+    }
+  }
   if (incident !== undefined && a.expires_in_ms !== undefined) {
     return jsonResult({
       error: "tribe.send: invalid options - expires_in_ms cannot be combined with incident",
@@ -1030,6 +1039,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       expiresInMs,
       owners: broadcastOwners,
       incident,
+      incidentData: a.incident_data,
       ...(redue === undefined ? {} : { redue }),
     },
   )
@@ -2335,7 +2345,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
     try {
       const pending = ctx.db.transaction(() => {
         const rows = ctx.stmts.selectAllPendingRequestsWithContent.all() as Array<
-          PendingBallRow & { backing_message_id: string | null }
+          PendingBallRow & { backing_message_id: string | null; incident_data: string | null }
         >
         return rows.flatMap((row) => {
           if (row.request_kind !== "incident") return []
@@ -2346,6 +2356,17 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
               `referenced observation ${JSON.stringify(row.message_id)} is missing from messages and messages_archive`,
             )
           }
+          let incidentData: unknown = null
+          if (row.incident_data !== null) {
+            try {
+              incidentData = JSON.parse(row.incident_data)
+              serializeIncidentData(incidentData)
+            } catch (error) {
+              throw new Error(`observation ${JSON.stringify(row.message_id)} has invalid incident_data JSON`, {
+                cause: error,
+              })
+            }
+          }
           return [
             {
               request_id: row.request_id,
@@ -2355,7 +2376,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
               opened_at: new Date(row.opened_at).toISOString(),
               message_id: row.message_id,
               summary: row.summary,
-              incident_data: null,
+              incident_data: incidentData,
             },
           ]
         })

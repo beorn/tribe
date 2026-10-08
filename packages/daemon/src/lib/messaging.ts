@@ -180,6 +180,39 @@ export type BallTracker = {
    * ball begins or ends.
    */
   incident?: IncidentIdentity & { active?: boolean }
+  /** Opaque JSON observation data, outside the stable incident identity. */
+  incidentData?: unknown
+}
+
+/** One JSON-value boundary for RPC and lower-level writers; no lossy JSON.stringify coercions. */
+export function serializeIncidentData(value: unknown): string | null {
+  if (value === undefined) return null
+  const ancestors = new Set<object>()
+  const validate = (item: unknown): void => {
+    if (item === null || typeof item === "string" || typeof item === "boolean") return
+    if (typeof item === "number" && Number.isFinite(item)) return
+    if (typeof item !== "object" || item === null || ancestors.has(item)) {
+      throw new Error("incident_data must be a finite, acyclic JSON value")
+    }
+    if (
+      !Array.isArray(item) &&
+      Object.getPrototypeOf(item) !== Object.prototype &&
+      Object.getPrototypeOf(item) !== null
+    ) {
+      throw new Error("incident_data must contain only JSON objects, arrays and primitives")
+    }
+    ancestors.add(item)
+    if (Array.isArray(item)) for (const entry of item) validate(entry)
+    else {
+      for (const key of Reflect.ownKeys(item)) {
+        if (typeof key !== "string") throw new Error("incident_data must contain only JSON string keys")
+        validate((item as Record<string, unknown>)[key])
+      }
+    }
+    ancestors.delete(item)
+  }
+  validate(value)
+  return JSON.stringify(value)
 }
 
 type IncidentTransition = "opened" | "changed" | "repeated" | "cleared"
@@ -513,6 +546,10 @@ export function sendMessage(
   // ball. Accepting both an identity and an explicit id would leave two
   // answers to "which obligation is this" — refuse rather than pick one.
   const incident = ballTracker.incident
+  if (ballTracker.incidentData !== undefined && incident === undefined) {
+    throw new Error("incident_data requires an incident identity")
+  }
+  const incidentData = serializeIncidentData(ballTracker.incidentData)
   if (incident !== undefined && explicitRequest !== undefined && explicitRequest !== null) {
     throw new Error(
       "a tracked send may carry an incident identity or an explicit request id, not both: the incident identity IS the request id",
@@ -600,6 +637,7 @@ export function sendMessage(
       $attention_required: classification.attentionRequired === true ? 1 : 0,
       $wakes_owner: wakesOwner ? 1 : 0,
       $is_incident: incident === undefined ? 0 : 1,
+      $incident_data: incidentData,
       $between_personas: isExplicitTribePersonaName(sender) && isExplicitTribePersonaName(recipient) ? 1 : 0,
       $sender_authority: senderAuthorityOf(ctx, sender),
     })

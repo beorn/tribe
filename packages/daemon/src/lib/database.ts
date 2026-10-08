@@ -124,7 +124,8 @@ export function openDatabase(path: string): Database {
 		attention_required INTEGER NOT NULL DEFAULT 0,
 		wakes_owner INTEGER NOT NULL DEFAULT 0,
 		is_incident INTEGER NOT NULL DEFAULT 0,
-		sender_authority TEXT
+		sender_authority TEXT,
+		incident_data TEXT
 	)`)
 
   db.run(`CREATE TABLE IF NOT EXISTS messages_archive (
@@ -150,7 +151,8 @@ export function openDatabase(path: string): Database {
 		attention_required INTEGER NOT NULL DEFAULT 0,
 		wakes_owner INTEGER NOT NULL DEFAULT 0,
 		is_incident INTEGER NOT NULL DEFAULT 0,
-		sender_authority TEXT
+		sender_authority TEXT,
+		incident_data TEXT
 	)`)
 
   // Ball-tracker: per-(request_id, recipient) row for every open request.
@@ -1525,6 +1527,19 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 41,
+    name: "opaque-incident-observation-data",
+    up(db) {
+      for (const table of ["messages", "messages_archive"]) {
+        const columns = tableColumnNames(db, table)
+        // Fresh stores declare the column below; historical stores upgrade both journals atomically.
+        if (columns.size > 0 && !columns.has("incident_data")) {
+          db.run(assertSingleStatement(`ALTER TABLE ${table} ADD COLUMN incident_data TEXT`))
+        }
+      }
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1598,6 +1613,7 @@ export const MESSAGE_ARCHIVE_COLUMNS = [
   "wakes_owner",
   "is_incident",
   "sender_authority",
+  "incident_data",
 ].join(", ")
 
 type TakingStatusSubjectSql = {
@@ -1854,7 +1870,7 @@ export function createStatements(db: Database) {
     insertMessage: db.prepare(`
 		INSERT OR IGNORE INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
 			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id, sender_authority,
-			wakes_owner, is_incident, attention_required)
+			wakes_owner, is_incident, incident_data, attention_required)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
 			$delivery, $topic, $room_id, $request, $reply, $correlated_reply_requester, $summary, $session_id,
 			-- 25074 3d-1a: the sending session's authority at insert (sessionAuthority), NULL for a daemon-originated row.
@@ -1863,6 +1879,7 @@ export function createStatements(db: Database) {
 			-- would silently drop the row on the NOT NULL column instead of failing.
 			COALESCE($wakes_owner, 0),
 			COALESCE($is_incident, 0),
+			$incident_data,
 			CASE
 				WHEN $attention_required = 1 THEN 1
 				WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1
@@ -2241,6 +2258,7 @@ export function createStatements(db: Database) {
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
 			p.request_kind,
 			COALESCE(m.id, a.id) AS backing_message_id,
+			CASE WHEN m.id IS NOT NULL THEN m.incident_data ELSE a.incident_data END AS incident_data,
 			COALESCE(m.summary, a.summary) AS summary,
 			COALESCE(m.content, a.content) AS content
 		FROM pending_request p

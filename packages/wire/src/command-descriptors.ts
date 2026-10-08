@@ -254,6 +254,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             description:
               "For cadence watchers: hold ONE ball per live condition instead of one per observation. Repeats on the same emitter/subject/condition upsert; `active: false` clears. The summary is the condition and the body carries the observation: the open, and an upsert whose summary changed, wake the owner's inbox-wait; a repeat with the same summary and the clear never do. Exactly one recipient, mutually exclusive with `request`. See /tribe.",
           },
+          incident_data: {
+            description:
+              "Optional opaque JSON value on an incident observation, outside its stable identity. Requires incident. Stored atomically and preserved by archive; omitted legacy data reads as null. Consumers own the payload schema.",
+          },
         },
         required: ["to", "message"],
       },
