@@ -214,6 +214,27 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
       expect(stored.type).toBe("notify")
     })
 
+    it("still accepts a topic type outside the message-type list (github:push)", () => {
+      // The daemon's vocabulary is OPEN: wire's actionable-recovery-journey
+      // sends github:push through this path and expects it stored as an ambient
+      // row. The 28200 refusal targets a QUOTED value, never the topic
+      // namespace, or it would break that contract (the tribe CI red).
+      addSession(db, stmts, "sess-chief", "@chief", Date.now())
+      const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
+      const res = parseToolJson(
+        handleToolCall(
+          sender,
+          "tribe.send",
+          { to: "@chief", message: "github ambient", type: "github:push" },
+          makeOpts([liveInfo("sess-chief", "@chief")]),
+        ),
+      )
+
+      expect(res.error).toBeUndefined()
+      const stored = db.prepare("SELECT type FROM messages WHERE id = ?").get(res.id as string) as { type: string }
+      expect(stored.type).toBe("github:push")
+    })
+
     it("pins invalid request", () => {
       const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
       const sent = parseToolJson(

@@ -768,20 +768,27 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   if (recipients === null) {
     return jsonResult({ error: "tribe.send: invalid to - must be a non-empty string or array of non-empty strings" })
   }
-  // The MCP surface is where a model writes `type` by hand, so it is the ONE
-  // place an unknown value can arrive; the CLI already refuses it
-  // (wire/src/cli/send.ts). Accepting it here STORED the message and opened no
-  // ball — a quoted `"request"` from an agent's tool call rode through as a
-  // type no consumer recognises, and the sender believed it had asked
-  // (@i/21-wire/28200). Refuse it like the CLI, naming the value and the list.
-  // `!= null` (not `!== undefined`): the old `(a.type as string) ?? "notify"`
-  // treats an explicit null — a harness serializing an unset optional that way
-  // — exactly like omitted, and a census cannot see that population. Only a
-  // non-null unknown value is refused (@cto 74b5accb).
-  if (a.type != null && !(TRIBE_MESSAGE_TYPES as readonly string[]).includes(a.type as string)) {
-    return jsonResult({
-      error: `tribe.send: invalid type '${String(a.type)}' - expected one of: ${TRIBE_MESSAGE_TYPES.join(", ")}`,
-    })
+  // The MCP surface is where a model writes `type` by hand. The daemon's type
+  // vocabulary is deliberately OPEN — a member may send a topic type
+  // (`github:push`, `health:*`, `event.*`, `session`) through this path, and
+  // wire's `actionable-recovery-journey.test.ts` does exactly that — so we
+  // must NOT refuse every value outside TRIBE_MESSAGE_TYPES. What is never
+  // legitimate is a QUOTED value: a client that serialized an enum member with
+  // its display quotes (`"request"`) stored a type no consumer or ball rule
+  // recognises and opened no ball, while the sender believed it had asked
+  // (@i/21-wire/28200). Refuse that, naming the value and the list it likely
+  // meant. `a.type != null` keeps an explicit null — a harness serializing an
+  // unset optional that way — exactly like an omitted one, which the old
+  // `(a.type as string) ?? "notify"` did (@cto 74b5accb).
+  if (a.type != null) {
+    const typeArg = a.type as string
+    const quoted =
+      (typeArg.startsWith('"') && typeArg.endsWith('"')) || (typeArg.startsWith("'") && typeArg.endsWith("'"))
+    if (quoted) {
+      return jsonResult({
+        error: `tribe.send: invalid type '${typeArg}' - expected one of: ${TRIBE_MESSAGE_TYPES.join(", ")}`,
+      })
+    }
   }
   const msgType = (a.type as string) ?? "notify"
   const truncation = sanitizeMessageWithReport(a.message as string)
