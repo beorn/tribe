@@ -1267,6 +1267,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(attributed.sender).toBe("@chief")
   }, 120_000)
 
+  /**
+   * @failure CLI evidence is discarded between parsing and authenticated close RPC (28159).
+   * @level l4
+   * @consumer Managed seats using pending --close --evidence.
+   */
   it("authenticates managed CLI pending reads and closes through the launch's identity token", async () => {
     const socketPath = join(tmpDir, "managed-cli-pending-close.sock")
     const dbPath = join(tmpDir, "managed-cli-pending-close.db")
@@ -1600,6 +1605,30 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     } finally {
       db.close()
     }
+
+    // Same boot, distinct transport contract: exact evidence crosses the CLI
+    // descriptor and token-derived close RPC into the durable settlement.
+    const incident = { emitter: sender, subject: "service-evidence", condition: "red" }
+    const incidentId = sender + ":service-evidence:red"
+    const evidence = "  nightly run-42; descendant head abc123; no matching red bucket\nattested  "
+    const raised = (await callLaunchToolWhenRegistered(senderAdapter, 90, "send", {
+      to: owner,
+      message: "red observed",
+      type: "notify",
+      summary: "red observed",
+      incident,
+    })) as { sent?: boolean }
+    expect(raised.sent).toBe(true)
+    const incidentClose = await runCli(
+      ["pending", "--owner", owner, "--close", incidentId, "--evidence", evidence, "--json"],
+      cliEnv,
+      { idToken: ownerToken, throughParent: true },
+    )
+    expect(incidentClose.exitCode, incidentClose.stderr).toBe(0)
+    expect(JSON.parse(incidentClose.stdout)).toMatchObject({ owner, request_id: incidentId, closed: 1 })
+    expect(settlementFacts(dbPath).filter((fact) => fact.request_id === incidentId)).toEqual([
+      expect.objectContaining({ settlement: "manual-close", settled_by: owner, close_evidence: evidence, sender }),
+    ])
   }, 120_000)
 
   it("routes attributed CLI replies from two personas sharing one provider launch", async () => {
