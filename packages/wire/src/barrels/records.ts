@@ -41,6 +41,9 @@ export {
   isIncidentKey,
   parseIncidentKey,
   incidentConditionSummary,
+  parseEmitterIncidentSnapshot,
+  type EmitterIncidentRow,
+  type EmitterIncidentSnapshot,
   type IncidentIdentity,
 } from "../lib/incident.ts"
 

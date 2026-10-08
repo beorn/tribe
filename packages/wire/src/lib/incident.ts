@@ -21,7 +21,7 @@
  * over-obligated fleet is visible and annoying, an under-obligated one is
  * silent.
  *
- * This module owns identity only. It opens and closes nothing: the ball
+ * This module owns identity and complete incident snapshot facts. It opens and closes nothing: the ball
  * lifecycle stays with `pending_request` and its existing statements, so there
  * is exactly one settlement owner.
  */
@@ -111,4 +111,78 @@ export function parseIncidentKey(key: string): IncidentIdentity | null {
 /** Whether `key` is a well-formed incident identity key. */
 export function isIncidentKey(key: string): boolean {
   return parseIncidentKey(key) !== null
+}
+
+export type EmitterIncidentRow = Readonly<{
+  request_id: string
+  identity: IncidentIdentity
+  recipient: string
+  sender: string
+  opened_at: string
+  message_id: string
+  summary: string | null
+  incident_data: unknown
+}>
+
+export type EmitterIncidentSnapshot = Readonly<{
+  scope: "emitter"
+  emitter: string
+  count: number
+  pending: readonly EmitterIncidentRow[]
+}>
+
+/** One validator for the complete emitter read shared by CLI and service consumers. */
+export function parseEmitterIncidentSnapshot(value: unknown, emitter: string): EmitterIncidentSnapshot {
+  const invalid = (): never => {
+    throw new Error(`invalid emitter snapshot for ${emitter}`)
+  }
+  if (value === null || typeof value !== "object") return invalid()
+  const snapshot = value as Record<string, unknown>
+  if (
+    snapshot.scope !== "emitter" ||
+    snapshot.emitter !== emitter ||
+    !Number.isSafeInteger(snapshot.count) ||
+    !Array.isArray(snapshot.pending) ||
+    snapshot.count !== snapshot.pending.length
+  ) {
+    return invalid()
+  }
+  const seen = new Set<string>()
+  for (const value of snapshot.pending) {
+    if (value === null || typeof value !== "object") return invalid()
+    const row = value as Record<string, unknown>
+    if (typeof row.request_id !== "string") return invalid()
+    const identity = parseIncidentKey(row.request_id)
+    if (
+      identity === null ||
+      identity.emitter !== emitter ||
+      incidentKey(identity) !== row.request_id ||
+      row.identity === null ||
+      typeof row.identity !== "object"
+    ) {
+      return invalid()
+    }
+    const declared = row.identity as Record<string, unknown>
+    if (
+      declared.emitter !== identity.emitter ||
+      declared.subject !== identity.subject ||
+      declared.condition !== identity.condition
+    ) {
+      return invalid()
+    }
+    for (const field of ["recipient", "sender", "message_id", "opened_at"]) {
+      if (typeof row[field] !== "string" || row[field].trim().length === 0) return invalid()
+    }
+    if (
+      !Number.isFinite(Date.parse(row.opened_at as string)) ||
+      (row.summary !== null && typeof row.summary !== "string") ||
+      !Object.hasOwn(row, "incident_data")
+    ) {
+      return invalid()
+    }
+    const holding = JSON.stringify([row.request_id, row.recipient])
+    if (seen.has(holding)) return invalid()
+    seen.add(holding)
+  }
+  return value as EmitterIncidentSnapshot
 }

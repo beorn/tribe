@@ -32,6 +32,7 @@ import { readLaunchIdFromToken } from "../lib/identity-token.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { writeJsonStdout } from "./json-output.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
+import { parseEmitterIncidentSnapshot } from "../lib/incident.ts"
 import { warnIfSelfTransportDown } from "./self-transport-warning.ts"
 import {
   resolveCheckoutCodeIdentity,
@@ -757,29 +758,12 @@ async function cmdPending(
       process.exitCode = 2
       return
     }
-    const payload = mcpJsonContent(outcome.value) as {
-      scope?: unknown
-      emitter?: unknown
-      count?: unknown
-      pending?: Array<{
-        request_id: string
-        recipient: string
-        sender: string
-        message_id: string
-        summary: string | null
-      }>
-    } | null
-    if (
-      payload?.scope !== "emitter" ||
-      payload.emitter !== emitter ||
-      typeof payload.count !== "number" ||
-      !Number.isSafeInteger(payload.count) ||
-      payload.count < 0 ||
-      !Array.isArray(payload.pending) ||
-      payload.count !== payload.pending.length
-    ) {
+    let payload
+    try {
+      payload = parseEmitterIncidentSnapshot(mcpJsonContent(outcome.value), emitter)
+    } catch {
       console.error(
-        `tribe pending emitter ${JSON.stringify(emitter)} at ${resolveSocketPath()}: invalid emitter snapshot; expected matching scope and emitter, pending array, and count matching its length. Run 'tribe doctor' before retrying.`,
+        `tribe pending emitter ${JSON.stringify(emitter)} at ${resolveSocketPath()}: invalid emitter snapshot; expected matching scope and emitter, count matching pending length, and complete canonical incident rows with observation metadata. Run 'tribe doctor' before retrying.`,
       )
       process.exitCode = 2
       return
