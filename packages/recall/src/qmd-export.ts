@@ -127,10 +127,11 @@ interface SessionMeta {
  * multi-megabyte record could exhaust Recall's memory (km bead 27785). This is
  * the reviewed finite raw-record budget — 4 MiB excluding the newline, a named
  * policy constant rather than a measured production maximum, and the same value
- * CTO approved for the shared reader
+ * CTO approved for the shared reader. It is enforced on every call: only
+ * `options.maxRecordBytes`, for a test, may lower it, and never by accident.
  * (hub/tribe/research/27702-bounded-summary-architecture.md:143).
  */
-export const MAX_JSONL_RECORD_BYTES = 4 * 1024 * 1024
+export const RECORD_BYTE_LIMIT = 4 * 1024 * 1024
 
 /** A record that exceeded the raw-record budget; its bytes were not retained. */
 export interface OversizedJsonlRecord {
@@ -142,95 +143,143 @@ export interface OversizedJsonlRecord {
   limit: number
 }
 
-export interface JsonlRecordBound {
-  /** Positive finite byte budget for one record, excluding its newline. Absent = unbounded (19775 default). */
+export interface JsonlRecordOptions {
+  /**
+   * Lower the reviewed per-record budget (tests only). The bound is
+   * unconditional: this can shrink it, never raise it or switch it off
+   * (@cto a5c75ab2 — an opt-in bound is how 28129 happened).
+   */
   maxRecordBytes?: number
   /**
-   * Named report of each over-budget record. The bytes are discarded while the
+   * Named account of each over-budget record. Its bytes are dropped while the
    * scan continues to the next newline, so the record's position and every
-   * later record survive; this is the only account of the discarded bytes.
+   * later record survive; this callback is then the only account of them.
+   * Absent, the reader writes one stderr line instead — never a silent drop.
    */
   onOversized?: (record: OversizedJsonlRecord) => void
+}
+
+/** The reader's default account of an elided record: path, physical line, bytes and limit. */
+export function oversizedRecordDiagnostic(path: string, record: OversizedJsonlRecord): string {
+  return (
+    `recall: ${path} physical line ${record.physicalLine} holds a ${record.bytes}-byte jsonl ` +
+    `record, over the ${record.limit}-byte raw-record limit; its bytes were not retained\n`
+  )
 }
 
 export function forEachJsonlLine(
   path: string,
   onLine: (line: string) => boolean | undefined | void,
-  bound: JsonlRecordBound = {},
+  options: JsonlRecordOptions = {},
 ): void {
-  const limit = bound.maxRecordBytes
+  // The budget is unconditional in the owner: an opt-in bound is how 28129
+  // happened, with most callers simply not opting in (@cto a5c75ab2). Callers
+  // may lower it for a test; nothing can raise or disable it.
+  const limit = Math.min(options.maxRecordBytes ?? RECORD_BYTE_LIMIT, RECORD_BYTE_LIMIT)
+  const report =
+    options.onOversized ??
+    ((record: OversizedJsonlRecord) => process.stderr.write(oversizedRecordDiagnostic(path, record)))
   const fd = openSync(path, "r")
   try {
     // StringDecoder carries partial multi-byte UTF-8 sequences across
     // chunk boundaries — a bare toString() would emit U+FFFD there.
-    const decoder = new StringDecoder("utf8")
+    let decoder = new StringDecoder("utf8")
     const chunk = Buffer.alloc(256 * 1024)
     let carry = ""
-    let carryBytes = 0
+    let recordBytes = 0
+    // Would the current record still trim to empty? Tracked across every byte,
+    // decoded or dropped, so the trimmed-blank skip can never swallow a record
+    // whose non-blank bytes all precede the budget (@cto 57a7222).
+    let blank = true
     let physicalLine = 0
     let overflowed = false
-    // Set when the bound is first exceeded: whether everything seen so far
-    // would still trim to empty, so the trimmed-blank skip is preserved.
-    let blank = true
-
-    const appendText = (text: string): void => {
-      if (text.length === 0) return
-      if (limit === undefined) {
-        carry += text
-        return
-      }
-      carryBytes += Buffer.byteLength(text, "utf8")
-      if (carryBytes > limit) {
-        if (!overflowed) {
-          overflowed = true
-          carry = ""
-        }
-        if (blank && text.trim().length > 0) blank = false
-        return
-      }
-      carry += text
-    }
 
     // Report the record that just ended. Returns false when onLine asked to stop.
     const endRecord = (): boolean | undefined | void => {
       physicalLine++
       const record = carry
-      const bytes = carryBytes
+      const bytes = recordBytes
       const oversized = overflowed
-      const wasBlank = oversized ? blank : record.trim().length === 0
+      const wasBlank = blank
       carry = ""
-      carryBytes = 0
-      overflowed = false
+      recordBytes = 0
       blank = true
-      if (wasBlank) return
-      if (oversized) return bound.onOversized?.({ physicalLine, bytes, limit: limit as number })
+      overflowed = false
+      if (oversized) {
+        // A record that only ever held whitespace keeps the trimmed-blank skip
+        // at any size; a record that lost real content is named, never dropped
+        // silently.
+        if (wasBlank) return
+        return report({ physicalLine, bytes, limit })
+      }
+      if (record.trim().length === 0) return
       return onLine(record)
     }
 
-    const consume = (text: string): boolean | undefined | void => {
-      let rest = text
-      for (;;) {
-        const nl = rest.indexOf("\n")
-        if (nl < 0) {
-          appendText(rest)
-          return
-        }
-        appendText(rest.slice(0, nl))
-        rest = rest.slice(nl + 1)
-        if (endRecord() === false) return false
+    // Take one raw byte range of the current record: [from, to) ends at the
+    // record's newline or at the end of the chunk. Only the bytes the budget
+    // still allows are decoded — past the limit they are counted and dropped
+    // undecoded, so an arbitrarily long record can never be retained. Counting
+    // RAW bytes (not the decoded string) keeps `bytes` exact even when the
+    // decoder holds a partial UTF-8 sequence at a chunk boundary.
+    const consumeRange = (buf: Buffer, from: number, to: number): void => {
+      const room = limit - recordBytes
+      const decodedTo = Math.min(to, from + Math.max(room, 0))
+      if (decodedTo > from) {
+        const text = decoder.write(buf.subarray(from, decodedTo))
+        if (blank && text.trim().length > 0) blank = false
+        carry += text
       }
+      recordBytes += to - from
+      if (to <= decodedTo) return
+      // Bytes past the budget. 0x0A never occurs inside a multibyte UTF-8
+      // sequence, so a dropped range needs no decoder — only its blankness,
+      // read from raw bytes (ASCII whitespace; anything else errs loud).
+      if (blank) {
+        for (let i = decodedTo; i < to; i++) {
+          const b = buf[i] as number
+          if (b === 0x20 || (b >= 0x09 && b <= 0x0d)) continue
+          blank = false
+          break
+        }
+      }
+      overflowed = true
+      carry = ""
     }
 
     for (;;) {
       const n = readSync(fd, chunk, 0, chunk.length, null)
       if (n <= 0) break
-      if (consume(decoder.write(chunk.subarray(0, n))) === false) return
+      const buf = chunk.subarray(0, n)
+      let start = 0
+      for (;;) {
+        const nl = buf.indexOf(0x0a, start)
+        consumeRange(buf, start, nl < 0 ? buf.length : nl)
+        if (nl < 0) break
+        start = nl + 1
+        // Any partial sequence the decoder still held belongs to the dropped
+        // bytes, so the next record starts from a fresh decoder state.
+        if (overflowed) decoder = new StringDecoder("utf8")
+        if (endRecord() === false) return
+      }
     }
-    if (consume(decoder.end()) === false) return
-    // A final record with no trailing newline. `carry` holds it on the
-    // unbounded path; on the bounded path its bytes are counted (and its text
-    // dropped once it passed the budget), so carryBytes is the only signal.
-    if (carry.length > 0 || carryBytes > 0) endRecord()
+    if (!overflowed) {
+      // Flush the decoder's held partial sequence (if any) into the final
+      // record; the flushed text's byte length is the held bytes exactly.
+      const tail = decoder.end()
+      if (tail.length > 0) {
+        if (blank && tail.trim().length > 0) blank = false
+        carry += tail
+        recordBytes += Buffer.byteLength(tail, "utf8")
+        if (recordBytes > limit) {
+          overflowed = true
+          carry = ""
+        }
+      }
+    }
+    // A final record with no trailing newline. `carry` holds it while it fits;
+    // once elided only recordBytes is left to say the record was there at all.
+    if (carry.length > 0 || recordBytes > 0) endRecord()
   } finally {
     closeSync(fd)
   }
@@ -272,7 +321,10 @@ export function readSessionMeta(
         if (sessionId && startTime && project && firstUserText) return false
         return
       },
-      { maxRecordBytes: MAX_JSONL_RECORD_BYTES, onOversized: report },
+      // No bound options: the reader's own budget applies to every call. An
+      // elided record is named by `report` when the caller passed one, and by
+      // the reader's loud default otherwise (@cto a5c75ab2).
+      report ? { onOversized: report } : undefined,
     )
   } catch {
     // silent-fallback-allow: unreadable transcript cannot contribute qmd session metadata.
@@ -316,7 +368,11 @@ function oversizedRecordPlaceholder(record: OversizedJsonlRecord): string {
   )
 }
 
-export function renderSessionMarkdown(meta: SessionMeta, report?: (record: OversizedJsonlRecord) => void): string {
+export function renderSessionMarkdown(
+  meta: SessionMeta,
+  report: (record: OversizedJsonlRecord) => void = (record) =>
+    process.stderr.write(oversizedRecordDiagnostic(meta.jsonlPath, record)),
+): string {
   // One streamed pass: count user/assistant entries (frontmatter `messages:`)
   // and collect the visible body. Counting happens BEFORE the contamination /
   // empty-text / synthetic-turn filters — identical semantics to the legacy
@@ -352,11 +408,12 @@ export function renderSessionMarkdown(meta: SessionMeta, report?: (record: Overs
       body.push("")
     },
     {
-      maxRecordBytes: MAX_JSONL_RECORD_BYTES,
       onOversized: (record) => {
         body.push(oversizedRecordPlaceholder(record))
         body.push("")
-        report?.(record)
+        // The placeholder names it inside the export; `report` names it outside
+        // — the caller's handler, or the loud default above.
+        report(record)
       },
     },
   )
@@ -513,11 +570,12 @@ function exportTranscripts(options: ExportOptions): void {
   let skipped = 0
   let empty = 0
   let rejected = 0
-  // 27785: an over-budget record's bytes are discarded by the shared reader,
-  // so the export stays memory-bounded. Name every elision so it is never
-  // silent content loss. The rendered export always carries the placeholder;
-  // stderr stays as quiet as the exported/rejected lines below, so --catchup
-  // and the SessionEnd hook do not spam every SessionStart.
+  // 27785: the shared reader bounds every record, so the export stays
+  // memory-bounded. Name each elision so it is never silent content loss. This
+  // handler is an explicit call-site decision, not a silent default: --all,
+  // --hook and --catchup return early (SessionStart output), and the rendered
+  // export still carries the placeholder. Both scans — meta and render — pass
+  // it, so the rare record both of them reach is named twice (@cto a5c75ab2).
   const reportOversized =
     (jsonlPath: string) =>
     (record: OversizedJsonlRecord): void => {

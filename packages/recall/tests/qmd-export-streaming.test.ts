@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { MAX_JSONL_RECORD_BYTES, forEachJsonlLine, readSessionMeta, renderSessionMarkdown } from "../src/qmd-export.ts"
+import { RECORD_BYTE_LIMIT, forEachJsonlLine, readSessionMeta, renderSessionMarkdown } from "../src/qmd-export.ts"
 
 // 19775 (@km/silvercode/19775-claude-resume-rss-runaway): `recall export
 // --catchup --hook` runs on every Claude SessionStart and used to
@@ -26,8 +26,8 @@ import { MAX_JSONL_RECORD_BYTES, forEachJsonlLine, readSessionMeta, renderSessio
 // allocation. This is the reviewed finite raw-record budget (4 MiB excluding
 // the newline, the value CTO approved for the shared reader in
 // hub/tribe/research/27702-bounded-summary-architecture.md:143). The source
-// must export it under the same value.
-const RAW_RECORD_LIMIT_BYTES = 4 * 1024 * 1024
+// must export it under the same value, and enforce it on every call.
+const REVIEWED_RECORD_LIMIT_BYTES = 4 * 1024 * 1024
 
 let dir: string
 
@@ -283,15 +283,36 @@ describe("oversized JSONL records are bounded (27785)", () => {
   // 27785: forEachJsonlLine's `carry` grew until a newline, so ONE long record
   // was an unbounded allocation even though each read is a 256 KiB chunk. A
   // single multi-megabyte record anywhere in a transcript could exhaust
-  // Recall's memory. The bounded reader discards bytes past the review budget
-  // while it scans to the next newline, keeps every later record, and names
-  // the record instead of dropping it silently.
+  // Recall's memory. The bound is unconditional in the reader (@cto a5c75ab2):
+  // bytes past the budget are dropped while the scan continues to the next
+  // newline, every later record survives, and the record is named instead of
+  // lost silently. Tests drive the cap DOWN through maxRecordBytes — the
+  // documented, test-only lever. Nothing can raise it.
+  const CAP = 64 * 1024
+
+  test("the budget is the reviewed constant, and a caller can only lower it", () => {
+    // AC1: the reviewed budget is a named policy constant, not a per-call number.
+    expect(RECORD_BYTE_LIMIT).toBe(REVIEWED_RECORD_LIMIT_BYTES)
+    // A call asking for 64 MiB still gets a 4 MiB bound: it cannot be raised.
+    const p = join(dir, "raise-attempt.jsonl")
+    const line = assistantEntry("q".repeat(REVIEWED_RECORD_LIMIT_BYTES + 4096))
+    writeFileSync(p, line + "\n", "utf-8")
+    const yielded: string[] = []
+    const oversized: Array<{ physicalLine: number; bytes: number; limit: number }> = []
+    forEachJsonlLine(
+      p,
+      (l) => {
+        yielded.push(l)
+      },
+      { maxRecordBytes: REVIEWED_RECORD_LIMIT_BYTES * 16, onOversized: (r) => oversized.push(r) },
+    )
+    expect(yielded).toEqual([])
+    expect(oversized).toEqual([{ physicalLine: 1, bytes: line.length, limit: REVIEWED_RECORD_LIMIT_BYTES }])
+  })
 
   test("an oversized record is not retained past the limit, is named, and the scan continues", () => {
-    // AC1: the reviewed budget is a named policy constant, not a per-call number.
-    expect(MAX_JSONL_RECORD_BYTES).toBe(RAW_RECORD_LIMIT_BYTES)
     const p = join(dir, "oversized-record.jsonl")
-    const oversizedLine = assistantEntry("x".repeat(RAW_RECORD_LIMIT_BYTES + 4096))
+    const oversizedLine = assistantEntry("x".repeat(CAP + 4096))
     writeFileSync(p, [userEntry("before"), oversizedLine, assistantEntry("after")].join("\n") + "\n", "utf-8")
 
     const yielded: string[] = []
@@ -302,7 +323,7 @@ describe("oversized JSONL records are bounded (27785)", () => {
         yielded.push(line)
       },
       {
-        maxRecordBytes: RAW_RECORD_LIMIT_BYTES,
+        maxRecordBytes: CAP,
         onOversized: (record) => {
           oversized.push(record)
         },
@@ -310,36 +331,161 @@ describe("oversized JSONL records are bounded (27785)", () => {
     )
 
     // (a) the budget holds: no yielded record exceeds it.
-    for (const line of yielded) expect(line.length).toBeLessThanOrEqual(RAW_RECORD_LIMIT_BYTES)
+    for (const line of yielded) expect(line.length).toBeLessThanOrEqual(CAP)
     // (b) the oversized record is named with physical line, bytes and limit.
-    expect(oversized).toEqual([{ physicalLine: 2, bytes: oversizedLine.length, limit: RAW_RECORD_LIMIT_BYTES }])
+    expect(oversized).toEqual([{ physicalLine: 2, bytes: oversizedLine.length, limit: CAP }])
     // (c) position preserved: the records around it still yield, in order.
     expect(yielded).toEqual([userEntry("before"), assistantEntry("after")])
   })
 
-  test("the export names an oversized record instead of losing it silently", () => {
+  test("a record exactly at the limit is not elided", () => {
+    const p = join(dir, "exactly-at-cap.jsonl")
+    const line = "c".repeat(CAP)
+    writeFileSync(p, `${line}\ndddd\n`, "utf-8")
+    const yielded: string[] = []
+    const reports: unknown[] = []
+    forEachJsonlLine(
+      p,
+      (l) => {
+        yielded.push(l)
+      },
+      { maxRecordBytes: CAP, onOversized: (r) => reports.push(r) },
+    )
+    expect(reports).toEqual([])
+    expect(yielded).toEqual([line, "dddd"])
+  })
+
+  test("real content before the budget with a whitespace tail is still named", () => {
+    // @cto 57a7222: the trimmed-blank skip must read the bytes BEFORE the
+    // budget too, or a record like this is discarded as blank — silently, with
+    // no placeholder and no report.
+    // The reviewed default cap is used on purpose: the record has to outrun the
+    // 256 KiB read chunk so its non-blank prefix lands in earlier chunks and the
+    // overflow happens in a whitespace-only one. (At a 64 KiB cap the whole
+    // record is a single chunk and the older reader happened to report it.)
+    const p = join(dir, "blank-tail.jsonl")
+    const sized = `{"type":"assistant","text":"real"}${" ".repeat(REVIEWED_RECORD_LIMIT_BYTES + 4096)}`
+    writeFileSync(p, [sized, assistantEntry("after the blank tail")].join("\n") + "\n", "utf-8")
+
+    const yielded: string[] = []
+    const oversized: Array<{ physicalLine: number; bytes: number; limit: number }> = []
+    forEachJsonlLine(
+      p,
+      (line) => {
+        yielded.push(line)
+      },
+      { onOversized: (record) => oversized.push(record) },
+    )
+    expect(oversized).toEqual([{ physicalLine: 1, bytes: sized.length, limit: REVIEWED_RECORD_LIMIT_BYTES }])
+    expect(yielded).toEqual([assistantEntry("after the blank tail")])
+
+    // The trimmed-blank rule is the same at any size: an entirely blank record
+    // is skipped, never named — no report, no placeholder.
+    const blankP = join(dir, "blank-whole.jsonl")
+    writeFileSync(
+      blankP,
+      [" ".repeat(REVIEWED_RECORD_LIMIT_BYTES + 4096), assistantEntry("after")].join("\n") + "\n",
+      "utf-8",
+    )
+    const reports: unknown[] = []
+    const yieldedBlank: string[] = []
+    forEachJsonlLine(
+      blankP,
+      (line) => {
+        yieldedBlank.push(line)
+      },
+      { onOversized: (record) => reports.push(record) },
+    )
+    expect(reports).toEqual([])
+    expect(yieldedBlank).toEqual([assistantEntry("after")])
+  })
+
+  test("a multibyte character straddling the cap boundary does not corrupt the next record", () => {
+    const p = join(dir, "straddle.jsonl")
+    // The retained prefix is exactly CAP bytes, so the record's final emoji,
+    // starting two bytes before the cap, is cut in the middle by the budget.
+    const straddling = `${"a".repeat(CAP - 2)}🤖`
+    writeFileSync(p, [straddling, assistantEntry("clean next line")].join("\n") + "\n", "utf-8")
+
+    const yielded: string[] = []
+    const oversized: Array<{ physicalLine: number; bytes: number; limit: number }> = []
+    forEachJsonlLine(
+      p,
+      (line) => {
+        yielded.push(line)
+      },
+      { maxRecordBytes: CAP, onOversized: (record) => oversized.push(record) },
+    )
+    expect(oversized).toEqual([{ physicalLine: 1, bytes: Buffer.byteLength(straddling, "utf8"), limit: CAP }])
+    expect(yielded).toEqual([assistantEntry("clean next line")])
+    expect(yielded.some((l) => l.includes("�"))).toBe(false)
+  })
+
+  test("the export names an oversized record inside and outside the export", () => {
     const p = join(dir, "oversized-export.jsonl")
-    const oversizedLine = assistantEntry("y".repeat(RAW_RECORD_LIMIT_BYTES + 4096))
+    const oversizedLine = assistantEntry("y".repeat(REVIEWED_RECORD_LIMIT_BYTES + 4096))
     writeFileSync(p, [userEntry("real ask"), oversizedLine, assistantEntry("small answer")].join("\n") + "\n", "utf-8")
 
-    const meta = readSessionMeta(p)
-    expect(meta).toBeDefined()
-    const md = renderSessionMarkdown(meta!)
+    const originalWrite = process.stderr.write
+    const captured: string[] = []
+    ;(process.stderr as unknown as { write: (chunk: string) => boolean }).write = (chunk) => {
+      captured.push(String(chunk))
+      return true
+    }
+    let md: string
+    try {
+      const meta = readSessionMeta(p)
+      expect(meta).toBeDefined()
+      md = renderSessionMarkdown(meta!)
+    } finally {
+      process.stderr.write = originalWrite
+    }
 
     expect(md).toContain("## User\n\nreal ask")
     expect(md).toContain("## Assistant\n\nsmall answer")
-    // Named, not silently dropped: physical line, bytes and limit are all present.
-    expect(md).toContain("oversized record elided")
-    expect(md).toContain("physical line 2")
-    expect(md).toContain(`${oversizedLine.length} bytes`)
-    expect(md).toContain(`${RAW_RECORD_LIMIT_BYTES} bytes`)
+    // Named inside the export, at the record's own position…
+    expect(md).toContain("[oversized record elided: physical line 2")
+    expect(md).toContain(`${oversizedLine.length} bytes, limit ${REVIEWED_RECORD_LIMIT_BYTES} bytes]`)
+    // …and named outside it, by the reader's loud default — never a silent drop.
+    expect(captured.join("")).toContain(`physical line 2 holds a ${oversizedLine.length}-byte jsonl record`)
     // No silently truncated copy of the elided content reached the export.
     expect(md).not.toContain("y".repeat(1024))
   })
 
+  test("an ordinary transcript renders byte-identical Markdown", () => {
+    const p = join(dir, "ordinary.jsonl")
+    writeFileSync(p, [userEntry("plain ask"), "", assistantEntry("plain answer")].join("\n") + "\n", "utf-8")
+    const meta = readSessionMeta(p)
+    expect(meta).toBeDefined()
+    expect(renderSessionMarkdown(meta!)).toBe(
+      [
+        "---",
+        "session_id: 11111111-2222-3333-4444-555555555555",
+        "started: 2026-06-01T10:00:00.000Z",
+        "project: /Users/test/project",
+        "messages: 2",
+        `source: ${p}`,
+        "---",
+        "",
+        "# Session 2026-06-01 10:00",
+        "",
+        "> plain ask",
+        "",
+        "## User",
+        "",
+        "plain ask",
+        "",
+        "## Assistant",
+        "",
+        "plain answer",
+        "",
+      ].join("\n"),
+    )
+  })
+
   test("a single huge record does not balloon the reader's memory (27785)", () => {
     // ONE record of >=64MB with no newline until the end. The unbounded reader
-    // materialized all of it in `carry`; the bounded reader discards past the
+    // materialized all of it in `carry`; the bounded reader drops past the
     // budget while scanning to the newline.
     const p = join(dir, "one-huge-record.jsonl")
     const block = `{"type":"assistant","text":"${"z".repeat(8 * 1024 * 1024)}"}`
@@ -357,11 +503,11 @@ describe("oversized JSONL records are bounded (27785)", () => {
       (line) => {
         longestYielded = Math.max(longestYielded, line.length)
       },
-      { maxRecordBytes: RAW_RECORD_LIMIT_BYTES, onOversized: () => {} },
+      { onOversized: () => {} },
     )
     const deltaMb = (process.memoryUsage().rss - before) / (1024 * 1024)
 
-    expect(longestYielded).toBeLessThanOrEqual(RAW_RECORD_LIMIT_BYTES)
+    expect(longestYielded).toBe(0)
     // Unbounded carry: >= 64MB delta. Bounded reader: near the 4MB budget.
     // 48MB is a generous flake-proof ceiling, the same style as the 19775 test.
     expect(deltaMb, `rss delta ${Math.round(deltaMb)}MB`).toBeLessThan(48)
