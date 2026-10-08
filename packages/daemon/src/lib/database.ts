@@ -2240,6 +2240,7 @@ export function createStatements(db: Database) {
     selectAllPendingRequestsWithContent: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
 			p.request_kind,
+			COALESCE(m.id, a.id) AS backing_message_id,
 			COALESCE(m.summary, a.summary) AS summary,
 			COALESCE(m.content, a.content) AS content
 		FROM pending_request p

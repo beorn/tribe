@@ -267,6 +267,85 @@ describe("one ball per incident (habwire stage 2(d))", () => {
 
     const INCIDENT = { emitter: WATCHER, subject: "@dev/5", condition: "transport-wedged" }
 
+    /** @failure An authorized emitter sees a recipient mailbox or incomplete custody instead of its full snapshot.
+     * @level l1
+     * @consumer longproc/postmerge/WATCH restart reconciliation (28044 AC1).
+     * Owner diagnostics and envelope-authority tests do not prove emitter scope or missing-message handling.
+     */
+    it("reads a complete emitter snapshot, with explicit empty and legacy metadata", () => {
+      const reader = makeContext(db, stmts, WATCHER)
+      const read = () => {
+        const result = handleToolCall(
+          reader,
+          "tribe.pending",
+          { emitter: WATCHER },
+          {
+            ...makeOpts(),
+            incidentAuthorization: { emitter: WATCHER, operation: "read" },
+          },
+        ) as { content: Array<{ text: string }> }
+        return JSON.parse(result.content[0]!.text) as Record<string, unknown>
+      }
+      expect(read()).toMatchObject({ scope: "emitter", emitter: WATCHER, count: 0, pending: [] })
+      const original = makeContext(db, stmts, "historical-service-name")
+      const first = observe(original, INCIDENT)
+      const second = sendMessage(
+        original,
+        "@dev/7",
+        "same condition, another recipient",
+        "notify",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { incident: INCIDENT },
+      )
+      observe(original, { emitter: "health-monitor-other", subject: "@dev/5", condition: "transport-wedged" })
+      const snapshot = read() as { pending: Array<Record<string, unknown>> }
+      expect(snapshot).toMatchObject({ scope: "emitter", emitter: WATCHER, count: 2 })
+      expect(snapshot.pending).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            identity: INCIDENT,
+            recipient: "@chief",
+            sender: "historical-service-name",
+            message_id: first.id,
+            incident_data: null,
+          }),
+          expect.objectContaining({
+            identity: INCIDENT,
+            recipient: "@dev/7",
+            sender: "historical-service-name",
+            message_id: second.id,
+            incident_data: null,
+          }),
+        ]),
+      )
+      expect(snapshot.pending.every((row) => typeof row.opened_at === "string")).toBe(true)
+    })
+
+    it("refuses an emitter snapshot whose pending observation is missing from both stores", () => {
+      const watcher = makeContext(db, stmts, WATCHER)
+      observe(watcher, INCIDENT)
+      db.prepare("UPDATE pending_request SET message_id = 'missing-observation' WHERE request_id = ?").run(
+        incidentKey(INCIDENT),
+      )
+      const result = handleToolCall(
+        watcher,
+        "tribe.pending",
+        { emitter: WATCHER },
+        {
+          ...makeOpts(),
+          incidentAuthorization: { emitter: WATCHER, operation: "read" },
+        },
+      ) as { content: Array<{ text: string }> }
+      const body = JSON.parse(result.content[0]!.text) as { error?: string }
+      expect(body.error).toContain(WATCHER)
+      expect(body.error).toContain("missing-observation")
+      expect(body.error).toContain("tribe.db")
+      expect(body).not.toHaveProperty("pending")
+    })
+
     it("repeated sends carrying the same identity hold ONE ball, and report its key", () => {
       const watcher = makeContext(db, stmts, "@fleet")
 

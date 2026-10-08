@@ -3098,6 +3098,66 @@ function createFakeServer(): Server {
  * Existing registration tests verify tokens but do not require emitter authority on each operation.
  */
 describe("managed incident policy availability (28044)", () => {
+  /** @failure A still-connected replaced service retains incident authority from registration.
+   * @level l1
+   * @consumer Each managed emitter's read/write lifecycle (28044 AC1).
+   */
+  it("revalidates a connected service after launch replacement on its next operation", async () => {
+    const emitter = "longproc-reading"
+    const token = managedToken(emitter, "longproc-old-sid")
+    let live = true
+    const identityVerifier: LoadedIdentityVerifier = {
+      path: "/test/service-policy.ts",
+      suppliesGen: true,
+      verify: async () =>
+        live
+          ? { result: "verified", actor: emitter, kind: "service", sid: "longproc-old-sid", gen: 1 }
+          : { result: "contradicted", reason: "instance-is-live: replaced by generation2" },
+      readIncidentPolicy: () => ({
+        emitters: [emitter],
+        authorize: (identity, requested) => identity.kind === "service" && identity.actor === requested,
+      }),
+    }
+    const harness = createDispatcherHarness({ identityVerifier, requiredIncidentEmitters: [emitter] })
+    cleanup = harness.dispose
+    const connection = harness.connectClient()
+    const registered = JSON.parse(
+      await harness.register(connection.connId, {
+        name: emitter,
+        pid: process.pid,
+        project: "/test",
+        launchParentPid: process.ppid,
+        idToken: token,
+      }),
+    ) as { error?: unknown }
+    expect(registered.error).toBeUndefined()
+    const call = async (method: string, params: Record<string, unknown>) =>
+      JSON.parse(
+        await harness.dispatcher.handleRequest({ jsonrpc: "2.0", id: method, method, params }, connection.connId),
+      ) as { error?: { message: string }; result?: unknown }
+    expect((await call("tribe.pending", { emitter })).error).toBeUndefined()
+    expect(connection.socket.destroyed).toBe(false)
+    live = false
+    for (const [method, params] of [
+      ["tribe.pending", { emitter }],
+      [
+        "tribe.send",
+        {
+          to: "@chief",
+          message: "stale observation",
+          incident: { emitter, subject: "host", condition: "memory" },
+          if_current: [],
+        },
+      ],
+    ] as const) {
+      const result = await call(method, params)
+      expect(result.error?.message).toContain("replaced by generation2")
+      expect(result.error?.message).toContain(emitter)
+    }
+    expect(connection.socket.destroyed).toBe(false)
+    expect(harness.db.prepare("SELECT COUNT(*) AS n FROM pending_request").get()).toEqual({ n: 0 })
+  })
+
   it("refuses managed operations by policy path while unrelated traffic remains available", async () => {
     const emitter = "longproc-reading"
     const token = managedToken(emitter, "longproc-sid")
@@ -3108,10 +3168,20 @@ describe("managed incident policy availability (28044)", () => {
     }
     const harness = createDispatcherHarness({ identityVerifier, requiredIncidentEmitters: [emitter] })
     cleanup = harness.dispose
-    await harness.register("incident-service", { name: emitter, pid: process.pid, project: "/test", idToken: token })
+    const connection = harness.connectClient()
+    const registered = JSON.parse(
+      await harness.register(connection.connId, {
+        name: emitter,
+        pid: process.pid,
+        project: "/test",
+        launchParentPid: process.ppid,
+        idToken: token,
+      }),
+    ) as { error?: unknown }
+    expect(registered.error).toBeUndefined()
     const call = async (method: string, params: Record<string, unknown>) =>
       JSON.parse(
-        await harness.dispatcher.handleRequest({ jsonrpc: "2.0", id: method, method, params }, "incident-service"),
+        await harness.dispatcher.handleRequest({ jsonrpc: "2.0", id: method, method, params }, connection.connId),
       ) as { error?: { message: string }; result?: unknown }
     const identity = { emitter, subject: "host", condition: "memory" }
     for (const [method, params] of [

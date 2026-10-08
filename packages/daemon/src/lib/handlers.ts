@@ -52,7 +52,7 @@ import {
   registerSession,
   type StaleTransportReapReport,
 } from "./session.ts"
-import { incidentConditionSummary, incidentKey, type IncidentIdentity } from "tribe-wire"
+import { incidentConditionSummary, incidentKey, parseIncidentKey, type IncidentIdentity } from "tribe-wire"
 import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { registeredTrustTierForTopic, senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
@@ -2317,6 +2317,56 @@ function pendingExplicitOwner(value: unknown): string | undefined {
 }
 
 function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
+  if (typeof a.emitter === "string") {
+    const emitter = a.emitter
+    if (
+      a.owner !== undefined ||
+      a.all === true ||
+      a.expired === true ||
+      a.owed === true ||
+      a.stale_ms !== undefined ||
+      a.close !== undefined ||
+      a.prune === true
+    ) {
+      return jsonResult({
+        error: `tribe.pending: emitter ${JSON.stringify(emitter)} requires a complete read; owner/all/expired/owed/stale/close/prune are mutually exclusive with emitter`,
+      })
+    }
+    try {
+      const pending = ctx.db.transaction(() => {
+        const rows = ctx.stmts.selectAllPendingRequestsWithContent.all() as Array<
+          PendingBallRow & { backing_message_id: string | null }
+        >
+        return rows.flatMap((row) => {
+          if (row.request_kind !== "incident") return []
+          const identity = parseIncidentKey(row.request_id)
+          if (identity?.emitter !== emitter) return []
+          if (row.backing_message_id !== row.message_id) {
+            throw new Error(
+              `referenced observation ${JSON.stringify(row.message_id)} is missing from messages and messages_archive`,
+            )
+          }
+          return [
+            {
+              request_id: row.request_id,
+              identity,
+              recipient: row.recipient,
+              sender: row.sender,
+              opened_at: new Date(row.opened_at).toISOString(),
+              message_id: row.message_id,
+              summary: row.summary,
+              incident_data: null,
+            },
+          ]
+        })
+      })()
+      return jsonResult({ scope: "emitter", emitter, count: pending.length, pending })
+    } catch (error) {
+      return jsonResult({
+        error: `tribe.pending emitter ${JSON.stringify(emitter)} could not read ${ctx.db.filename}: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    }
+  }
   // Ball-tracker pending-query (@km/tribe/message-ball-tracker Phase 2a):
   // return open requests addressed to the given recipient (the "owner" of
   // the open ball). Default recipient is the caller's own session name.
