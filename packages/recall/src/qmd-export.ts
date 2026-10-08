@@ -121,7 +121,44 @@ interface SessionMeta {
  * ~7GB and tripped Silver Code's ACP backend RSS watchdog, killing the
  * session right after `--resume` (km bead 19775).
  */
-export function forEachJsonlLine(path: string, onLine: (line: string) => boolean | undefined | void): void {
+/**
+ * The read chunk bounds the READ, never the RECORD: `carry` grew until a
+ * newline, so one long record was still an unbounded allocation and a single
+ * multi-megabyte record could exhaust Recall's memory (km bead 27785). This is
+ * the reviewed finite raw-record budget — 4 MiB excluding the newline, a named
+ * policy constant rather than a measured production maximum, and the same value
+ * CTO approved for the shared reader
+ * (hub/tribe/research/27702-bounded-summary-architecture.md:143).
+ */
+export const MAX_JSONL_RECORD_BYTES = 4 * 1024 * 1024
+
+/** A record that exceeded the raw-record budget; its bytes were not retained. */
+export interface OversizedJsonlRecord {
+  /** 1-based physical line in the file, counting blank lines. */
+  physicalLine: number
+  /** Byte length of the record, excluding its newline. */
+  bytes: number
+  /** The budget it exceeded. */
+  limit: number
+}
+
+export interface JsonlRecordBound {
+  /** Positive finite byte budget for one record, excluding its newline. Absent = unbounded (19775 default). */
+  maxRecordBytes?: number
+  /**
+   * Named report of each over-budget record. The bytes are discarded while the
+   * scan continues to the next newline, so the record's position and every
+   * later record survive; this is the only account of the discarded bytes.
+   */
+  onOversized?: (record: OversizedJsonlRecord) => void
+}
+
+export function forEachJsonlLine(
+  path: string,
+  onLine: (line: string) => boolean | undefined | void,
+  bound: JsonlRecordBound = {},
+): void {
+  const limit = bound.maxRecordBytes
   const fd = openSync(path, "r")
   try {
     // StringDecoder carries partial multi-byte UTF-8 sequences across
@@ -129,56 +166,114 @@ export function forEachJsonlLine(path: string, onLine: (line: string) => boolean
     const decoder = new StringDecoder("utf8")
     const chunk = Buffer.alloc(256 * 1024)
     let carry = ""
+    let carryBytes = 0
+    let physicalLine = 0
+    let overflowed = false
+    // Set when the bound is first exceeded: whether everything seen so far
+    // would still trim to empty, so the trimmed-blank skip is preserved.
+    let blank = true
+
+    const appendText = (text: string): void => {
+      if (text.length === 0) return
+      if (limit === undefined) {
+        carry += text
+        return
+      }
+      carryBytes += Buffer.byteLength(text, "utf8")
+      if (carryBytes > limit) {
+        if (!overflowed) {
+          overflowed = true
+          carry = ""
+        }
+        if (blank && text.trim().length > 0) blank = false
+        return
+      }
+      carry += text
+    }
+
+    // Report the record that just ended. Returns false when onLine asked to stop.
+    const endRecord = (): boolean | undefined | void => {
+      physicalLine++
+      const record = carry
+      const bytes = carryBytes
+      const oversized = overflowed
+      const wasBlank = oversized ? blank : record.trim().length === 0
+      carry = ""
+      carryBytes = 0
+      overflowed = false
+      blank = true
+      if (wasBlank) return
+      if (oversized) return bound.onOversized?.({ physicalLine, bytes, limit: limit as number })
+      return onLine(record)
+    }
+
+    const consume = (text: string): boolean | undefined | void => {
+      let rest = text
+      for (;;) {
+        const nl = rest.indexOf("\n")
+        if (nl < 0) {
+          appendText(rest)
+          return
+        }
+        appendText(rest.slice(0, nl))
+        rest = rest.slice(nl + 1)
+        if (endRecord() === false) return false
+      }
+    }
+
     for (;;) {
       const n = readSync(fd, chunk, 0, chunk.length, null)
       if (n <= 0) break
-      carry += decoder.write(chunk.subarray(0, n))
-      let nl: number
-      while ((nl = carry.indexOf("\n")) >= 0) {
-        const line = carry.slice(0, nl)
-        carry = carry.slice(nl + 1)
-        if (line.trim().length === 0) continue
-        if (onLine(line) === false) return
-      }
+      if (consume(decoder.write(chunk.subarray(0, n))) === false) return
     }
-    carry += decoder.end()
-    if (carry.trim().length > 0) onLine(carry)
+    if (consume(decoder.end()) === false) return
+    // A final record with no trailing newline. `carry` holds it on the
+    // unbounded path; on the bounded path its bytes are counted (and its text
+    // dropped once it passed the budget), so carryBytes is the only signal.
+    if (carry.length > 0 || carryBytes > 0) endRecord()
   } finally {
     closeSync(fd)
   }
 }
 
-export function readSessionMeta(jsonlPath: string): SessionMeta | undefined {
+export function readSessionMeta(
+  jsonlPath: string,
+  report?: (record: OversizedJsonlRecord) => void,
+): SessionMeta | undefined {
   let sessionId = ""
   let startTime: Date | undefined
   let project = ""
   let firstUserText = ""
 
   try {
-    forEachJsonlLine(jsonlPath, (line) => {
-      let entry: JsonlEntry
-      try {
-        entry = JSON.parse(line) as JsonlEntry
-      } catch {
-        return
-      }
-      if (!sessionId && entry.sessionId) sessionId = entry.sessionId
-      if (!startTime && entry.timestamp) startTime = new Date(entry.timestamp)
-      if (!project && entry.cwd) project = entry.cwd
-      if (!firstUserText && entry.type === "user") {
-        const txt = extractText(entry).trim()
-        // Skip synthetic system-generated user turns (tool results, reminders)
-        if (txt && !txt.startsWith("<") && !txt.startsWith("[")) {
-          firstUserText = txt.slice(0, 200)
+    forEachJsonlLine(
+      jsonlPath,
+      (line) => {
+        let entry: JsonlEntry
+        try {
+          entry = JSON.parse(line) as JsonlEntry
+        } catch {
+          return
         }
-      }
-      // Every field is first-write-wins, so once all are known no later line
-      // can change the result — stop reading. (messageCount, the one field
-      // that needed a full scan, moved into renderSessionMarkdown, which only
-      // runs for sessions that actually get exported.)
-      if (sessionId && startTime && project && firstUserText) return false
-      return
-    })
+        if (!sessionId && entry.sessionId) sessionId = entry.sessionId
+        if (!startTime && entry.timestamp) startTime = new Date(entry.timestamp)
+        if (!project && entry.cwd) project = entry.cwd
+        if (!firstUserText && entry.type === "user") {
+          const txt = extractText(entry).trim()
+          // Skip synthetic system-generated user turns (tool results, reminders)
+          if (txt && !txt.startsWith("<") && !txt.startsWith("[")) {
+            firstUserText = txt.slice(0, 200)
+          }
+        }
+        // Every field is first-write-wins, so once all are known no later line
+        // can change the result — stop reading. (messageCount, the one field
+        // that needed a full scan, moved into renderSessionMarkdown, which only
+        // runs for sessions that actually get exported.)
+        if (sessionId && startTime && project && firstUserText) return false
+        return
+      },
+      { maxRecordBytes: MAX_JSONL_RECORD_BYTES, onOversized: report },
+    )
   } catch {
     // silent-fallback-allow: unreadable transcript cannot contribute qmd session metadata.
     return undefined
@@ -209,39 +304,62 @@ function sessionFilename(meta: SessionMeta): string {
 
 // ── markdown rendering ───────────────────────────────────────────────────
 
-export function renderSessionMarkdown(meta: SessionMeta): string {
+/**
+ * The named account of ONE over-budget record, rendered in the export at the
+ * record's own position. The bytes are deliberately not exported, so this line
+ * is what keeps the elision visible instead of silent (27785 AC2).
+ */
+function oversizedRecordPlaceholder(record: OversizedJsonlRecord): string {
+  return (
+    `[oversized record elided: physical line ${record.physicalLine}, ` +
+    `${record.bytes} bytes, limit ${record.limit} bytes]`
+  )
+}
+
+export function renderSessionMarkdown(meta: SessionMeta, report?: (record: OversizedJsonlRecord) => void): string {
   // One streamed pass: count user/assistant entries (frontmatter `messages:`)
   // and collect the visible body. Counting happens BEFORE the contamination /
   // empty-text / synthetic-turn filters — identical semantics to the legacy
   // whole-file readSessionMeta counter.
   let messageCount = 0
   const body: string[] = []
-  forEachJsonlLine(meta.jsonlPath, (line) => {
-    let entry: JsonlEntry
-    try {
-      entry = JSON.parse(line) as JsonlEntry
-    } catch {
-      return
-    }
-    if (entry.type === "user" || entry.type === "assistant") messageCount++
-    if (entry.type !== "user" && entry.type !== "assistant" && entry.type !== "system") return
-    // Cross-session contamination guard. Claude Code occasionally writes
-    // entries from a different sessionId into a JSONL — when this happens,
-    // the rendered markdown ends up with fragments from unrelated sessions
-    // joined mid-conversation, which then gets indexed and surfaces as
-    // jumbled "memory" hits. Filter to entries that match the file's primary
-    // sessionId (set by the first-seen entry in readSessionMeta).
-    if (entry.sessionId && entry.sessionId !== meta.sessionId) return
-    const text = extractText(entry).trim()
-    if (!text) return
-    // Skip synthetic user turns that are just tool results wrapped as user
-    if (entry.type === "user" && (text.startsWith("<") || text.startsWith("["))) return
-    const heading = entry.type === "user" ? "## User" : entry.type === "assistant" ? "## Assistant" : "## System"
-    body.push(heading)
-    body.push("")
-    body.push(text)
-    body.push("")
-  })
+  forEachJsonlLine(
+    meta.jsonlPath,
+    (line) => {
+      let entry: JsonlEntry
+      try {
+        entry = JSON.parse(line) as JsonlEntry
+      } catch {
+        return
+      }
+      if (entry.type === "user" || entry.type === "assistant") messageCount++
+      if (entry.type !== "user" && entry.type !== "assistant" && entry.type !== "system") return
+      // Cross-session contamination guard. Claude Code occasionally writes
+      // entries from a different sessionId into a JSONL — when this happens,
+      // the rendered markdown ends up with fragments from unrelated sessions
+      // joined mid-conversation, which then gets indexed and surfaces as
+      // jumbled "memory" hits. Filter to entries that match the file's primary
+      // sessionId (set by the first-seen entry in readSessionMeta).
+      if (entry.sessionId && entry.sessionId !== meta.sessionId) return
+      const text = extractText(entry).trim()
+      if (!text) return
+      // Skip synthetic user turns that are just tool results wrapped as user
+      if (entry.type === "user" && (text.startsWith("<") || text.startsWith("["))) return
+      const heading = entry.type === "user" ? "## User" : entry.type === "assistant" ? "## Assistant" : "## System"
+      body.push(heading)
+      body.push("")
+      body.push(text)
+      body.push("")
+    },
+    {
+      maxRecordBytes: MAX_JSONL_RECORD_BYTES,
+      onOversized: (record) => {
+        body.push(oversizedRecordPlaceholder(record))
+        body.push("")
+        report?.(record)
+      },
+    },
+  )
 
   const out: string[] = []
   out.push("---")
@@ -395,8 +513,23 @@ function exportTranscripts(options: ExportOptions): void {
   let skipped = 0
   let empty = 0
   let rejected = 0
+  // 27785: an over-budget record's bytes are discarded by the shared reader,
+  // so the export stays memory-bounded. Name every elision so it is never
+  // silent content loss. The rendered export always carries the placeholder;
+  // stderr stays as quiet as the exported/rejected lines below, so --catchup
+  // and the SessionEnd hook do not spam every SessionStart.
+  const reportOversized =
+    (jsonlPath: string) =>
+    (record: OversizedJsonlRecord): void => {
+      if (all || isHook || isCatchup) return
+      process.stderr.write(
+        `recall export: ${jsonlPath} physical line ${record.physicalLine} is ${record.bytes} bytes, ` +
+          `over the ${record.limit}-byte raw-record limit; those bytes are not in the export\n`,
+      )
+    }
   for (const jsonlPath of jsonlPaths) {
-    const meta = readSessionMeta(jsonlPath)
+    const report = reportOversized(jsonlPath)
+    const meta = readSessionMeta(jsonlPath, report)
     if (!meta) {
       empty++
       continue
@@ -423,7 +556,7 @@ function exportTranscripts(options: ExportOptions): void {
       continue
     }
     try {
-      const md = renderSessionMarkdown(meta)
+      const md = renderSessionMarkdown(meta, report)
       // Quality gate: reject decayed / stuck-loop / corrupted exports BEFORE
       // they hit qmd's index. Bad docs go to chats-rejected/ with a sidecar
       // .reason so an operator can audit + restore. Reversible quarantine,

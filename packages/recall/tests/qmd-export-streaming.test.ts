@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { forEachJsonlLine, readSessionMeta, renderSessionMarkdown } from "../src/qmd-export.ts"
+import { MAX_JSONL_RECORD_BYTES, forEachJsonlLine, readSessionMeta, renderSessionMarkdown } from "../src/qmd-export.ts"
 
 // 19775 (@km/silvercode/19775-claude-resume-rss-runaway): `recall export
 // --catchup --hook` runs on every Claude SessionStart and used to
@@ -20,6 +20,14 @@ import { forEachJsonlLine, readSessionMeta, renderSessionMarkdown } from "../src
 // every meta field is known. These tests pin (a) the streaming reader's
 // contract, (b) meta/render semantic equivalence with the old whole-file
 // reader, and (c) the memory bound itself.
+
+// 27785: the reader's 256 KiB read chunk bounded the READ but not the RECORD —
+// `carry` grew until a newline, so one long record was still an unbounded
+// allocation. This is the reviewed finite raw-record budget (4 MiB excluding
+// the newline, the value CTO approved for the shared reader in
+// hub/tribe/research/27702-bounded-summary-architecture.md:143). The source
+// must export it under the same value.
+const RAW_RECORD_LIMIT_BYTES = 4 * 1024 * 1024
 
 let dir: string
 
@@ -268,5 +276,94 @@ describe("renderSessionMarkdown (streaming)", () => {
     expect(md).toContain("## Assistant\n\nanswer one")
     expect(md).not.toContain("contaminated")
     expect(md).not.toContain("[tool result wrapped]")
+  })
+})
+
+describe("oversized JSONL records are bounded (27785)", () => {
+  // 27785: forEachJsonlLine's `carry` grew until a newline, so ONE long record
+  // was an unbounded allocation even though each read is a 256 KiB chunk. A
+  // single multi-megabyte record anywhere in a transcript could exhaust
+  // Recall's memory. The bounded reader discards bytes past the review budget
+  // while it scans to the next newline, keeps every later record, and names
+  // the record instead of dropping it silently.
+
+  test("an oversized record is not retained past the limit, is named, and the scan continues", () => {
+    // AC1: the reviewed budget is a named policy constant, not a per-call number.
+    expect(MAX_JSONL_RECORD_BYTES).toBe(RAW_RECORD_LIMIT_BYTES)
+    const p = join(dir, "oversized-record.jsonl")
+    const oversizedLine = assistantEntry("x".repeat(RAW_RECORD_LIMIT_BYTES + 4096))
+    writeFileSync(p, [userEntry("before"), oversizedLine, assistantEntry("after")].join("\n") + "\n", "utf-8")
+
+    const yielded: string[] = []
+    const oversized: Array<{ physicalLine: number; bytes: number; limit: number }> = []
+    forEachJsonlLine(
+      p,
+      (line) => {
+        yielded.push(line)
+      },
+      {
+        maxRecordBytes: RAW_RECORD_LIMIT_BYTES,
+        onOversized: (record) => {
+          oversized.push(record)
+        },
+      },
+    )
+
+    // (a) the budget holds: no yielded record exceeds it.
+    for (const line of yielded) expect(line.length).toBeLessThanOrEqual(RAW_RECORD_LIMIT_BYTES)
+    // (b) the oversized record is named with physical line, bytes and limit.
+    expect(oversized).toEqual([{ physicalLine: 2, bytes: oversizedLine.length, limit: RAW_RECORD_LIMIT_BYTES }])
+    // (c) position preserved: the records around it still yield, in order.
+    expect(yielded).toEqual([userEntry("before"), assistantEntry("after")])
+  })
+
+  test("the export names an oversized record instead of losing it silently", () => {
+    const p = join(dir, "oversized-export.jsonl")
+    const oversizedLine = assistantEntry("y".repeat(RAW_RECORD_LIMIT_BYTES + 4096))
+    writeFileSync(p, [userEntry("real ask"), oversizedLine, assistantEntry("small answer")].join("\n") + "\n", "utf-8")
+
+    const meta = readSessionMeta(p)
+    expect(meta).toBeDefined()
+    const md = renderSessionMarkdown(meta!)
+
+    expect(md).toContain("## User\n\nreal ask")
+    expect(md).toContain("## Assistant\n\nsmall answer")
+    // Named, not silently dropped: physical line, bytes and limit are all present.
+    expect(md).toContain("oversized record elided")
+    expect(md).toContain("physical line 2")
+    expect(md).toContain(`${oversizedLine.length} bytes`)
+    expect(md).toContain(`${RAW_RECORD_LIMIT_BYTES} bytes`)
+    // No silently truncated copy of the elided content reached the export.
+    expect(md).not.toContain("y".repeat(1024))
+  })
+
+  test("a single huge record does not balloon the reader's memory (27785)", () => {
+    // ONE record of >=64MB with no newline until the end. The unbounded reader
+    // materialized all of it in `carry`; the bounded reader discards past the
+    // budget while scanning to the newline.
+    const p = join(dir, "one-huge-record.jsonl")
+    const block = `{"type":"assistant","text":"${"z".repeat(8 * 1024 * 1024)}"}`
+    writeFileSync(p, "", "utf-8")
+    for (let written = 0; written < 64 * 1024 * 1024; written += block.length) appendFileSync(p, block, "utf-8")
+    appendFileSync(p, "\n", "utf-8")
+
+    const maybeBun = (globalThis as { Bun?: { gc?: (force: boolean) => void } }).Bun
+    if (typeof maybeBun?.gc === "function") maybeBun.gc(true)
+    ;(globalThis as { gc?: () => void }).gc?.()
+    const before = process.memoryUsage().rss
+    let longestYielded = 0
+    forEachJsonlLine(
+      p,
+      (line) => {
+        longestYielded = Math.max(longestYielded, line.length)
+      },
+      { maxRecordBytes: RAW_RECORD_LIMIT_BYTES, onOversized: () => {} },
+    )
+    const deltaMb = (process.memoryUsage().rss - before) / (1024 * 1024)
+
+    expect(longestYielded).toBeLessThanOrEqual(RAW_RECORD_LIMIT_BYTES)
+    // Unbounded carry: >= 64MB delta. Bounded reader: near the 4MB budget.
+    // 48MB is a generous flake-proof ceiling, the same style as the 19775 test.
+    expect(deltaMb, `rss delta ${Math.round(deltaMb)}MB`).toBeLessThan(48)
   })
 })
