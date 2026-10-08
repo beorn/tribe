@@ -282,7 +282,16 @@ describe("neutral health process source", () => {
     expect(source.kind).toBe("managed")
     if (source.kind !== "managed") throw new Error("expected managed source")
 
-    await expect(source.read()).resolves.toEqual(availablePayload)
+    // The fixture's location is the ECHOED shape: hab sysmon invoked with
+    // `--state-root /hab` resolves the journal at `/hab/habmod` and reports
+    // THAT as diagnostic.location. The source pins it back to the root it
+    // invoked, so the later `--state-root ${location}` reprint is runnable
+    // instead of one `habmod` too deep (@i/4-supervision/28186).
+    const pinnedAvailablePayload = {
+      ...availablePayload,
+      diagnostic: { ...availablePayload.diagnostic, location: "/hab" },
+    }
+    await expect(source.read()).resolves.toEqual(pinnedAvailablePayload)
     await expect(source.readScalars()).resolves.toEqual(scalarPayload)
     expect(runCommand).toHaveBeenCalledWith(
       ["hab", "sysmon", "snapshot", "--state-root", "/hab", "--max-age-ms", "90000", "--json"],
