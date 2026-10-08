@@ -18,6 +18,7 @@ import {
   type BallOutcomeFactRow,
   type BallSettlementFact,
   type InboxWaitResult,
+  TRIBE_MESSAGE_TYPES,
 } from "tribe-wire"
 import type { TribeContext } from "./context.ts"
 import type { TribeRole } from "tribe-wire/lib/config"
@@ -766,6 +767,17 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const recipients = normalizeRecipients(a.to)
   if (recipients === null) {
     return jsonResult({ error: "tribe.send: invalid to - must be a non-empty string or array of non-empty strings" })
+  }
+  // The MCP surface is where a model writes `type` by hand, so it is the ONE
+  // place an unknown value can arrive; the CLI already refuses it
+  // (wire/src/cli/send.ts). Accepting it here STORED the message and opened no
+  // ball — a quoted `"request"` from an agent's tool call rode through as a
+  // type no consumer recognises, and the sender believed it had asked
+  // (@i/21-wire/28200). Refuse it like the CLI, naming the value and the list.
+  if (a.type !== undefined && !(TRIBE_MESSAGE_TYPES as readonly string[]).includes(a.type as string)) {
+    return jsonResult({
+      error: `tribe.send: invalid type '${String(a.type)}' - expected one of: ${TRIBE_MESSAGE_TYPES.join(", ")}`,
+    })
   }
   const msgType = (a.type as string) ?? "notify"
   const truncation = sanitizeMessageWithReport(a.message as string)

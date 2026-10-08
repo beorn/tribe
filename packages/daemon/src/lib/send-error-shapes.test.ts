@@ -175,6 +175,23 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
       expect(sent.error).toBe("tribe.send: invalid delivery - must be 'push' or 'pull'")
     })
 
+    it('refuses an unknown type (a quoted `"request"` from an MCP tool call) and stores nothing', () => {
+      // 28200: the daemon accepted any type string, so an agent's tool call
+      // carrying a quoted `"request"` was STORED as a type no consumer or ball
+      // rule recognises, and the sender believed it had asked. The CLI refuses
+      // this (wire/src/cli/send.ts:995); the daemon must too.
+      const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
+      const sent = parseToolJson(
+        handleToolCall(sender, "tribe.send", { to: "@chief", message: "hi", type: '"request"' }, makeOpts([])),
+      )
+
+      expect(sent.error).toBe(
+        "tribe.send: invalid type '\"request\"' - expected one of: assign, status, query, response, notify, request, verdict",
+      )
+      const stored = db.query("SELECT COUNT(*) AS n FROM messages WHERE type = '\"request\"'").get() as { n: number }
+      expect(stored.n, "a refused type must store nothing").toBe(0)
+    })
+
     it("pins invalid request", () => {
       const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
       const sent = parseToolJson(
