@@ -192,6 +192,28 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
       expect(stored.n, "a refused type must store nothing").toBe(0)
     })
 
+    it("keeps an explicit null type as omitted -> notify (28200 follow-up)", () => {
+      // @cto 74b5accb: the old `(a.type as string) ?? "notify"` turned null into
+      // notify, so a harness that serializes an unset optional as null was
+      // always stored as notify. The refusal must keep that: only a NON-null
+      // unknown value is refused. A census cannot see the null population
+      // because those rows are indistinguishable from omitted ones.
+      addSession(db, stmts, "sess-chief", "@chief", Date.now())
+      const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
+      const res = parseToolJson(
+        handleToolCall(
+          sender,
+          "tribe.send",
+          { to: "@chief", message: "hi", type: null },
+          makeOpts([liveInfo("sess-chief", "@chief")]),
+        ),
+      )
+
+      expect(res.error).toBeUndefined()
+      const stored = db.prepare("SELECT type FROM messages WHERE id = ?").get(res.id as string) as { type: string }
+      expect(stored.type).toBe("notify")
+    })
+
     it("pins invalid request", () => {
       const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
       const sent = parseToolJson(

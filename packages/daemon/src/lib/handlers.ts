@@ -774,7 +774,11 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // ball — a quoted `"request"` from an agent's tool call rode through as a
   // type no consumer recognises, and the sender believed it had asked
   // (@i/21-wire/28200). Refuse it like the CLI, naming the value and the list.
-  if (a.type !== undefined && !(TRIBE_MESSAGE_TYPES as readonly string[]).includes(a.type as string)) {
+  // `!= null` (not `!== undefined`): the old `(a.type as string) ?? "notify"`
+  // treats an explicit null — a harness serializing an unset optional that way
+  // — exactly like omitted, and a census cannot see that population. Only a
+  // non-null unknown value is refused (@cto 74b5accb).
+  if (a.type != null && !(TRIBE_MESSAGE_TYPES as readonly string[]).includes(a.type as string)) {
     return jsonResult({
       error: `tribe.send: invalid type '${String(a.type)}' - expected one of: ${TRIBE_MESSAGE_TYPES.join(", ")}`,
     })
