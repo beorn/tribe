@@ -761,9 +761,9 @@ async function cmdPending(
     let payload
     try {
       payload = parseEmitterIncidentSnapshot(mcpJsonContent(outcome.value), emitter)
-    } catch {
+    } catch (error) {
       console.error(
-        `tribe pending emitter ${JSON.stringify(emitter)} at ${resolveSocketPath()}: invalid emitter snapshot; expected matching scope and emitter, count matching pending length, and complete canonical incident rows with observation metadata. Run 'tribe doctor' before retrying.`,
+        `tribe pending emitter ${JSON.stringify(emitter)} at ${resolveSocketPath()}: invalid emitter snapshot (${error instanceof Error ? error.message : String(error)}); expected matching scope and emitter, count matching pending length, and complete canonical incident rows with observation metadata. Run 'tribe doctor' before retrying.`,
       )
       process.exitCode = 2
       return
