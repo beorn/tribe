@@ -1,7 +1,7 @@
 /**
  * The ONE sender for every producer that is not a seat's own conversation (25074 3d-1c, @cto 082a4259): `hab
  * attention`, `hab page project`, `ag quota wall`, the root incident emitters, telegram, coordination-watch and
- * yrd-notify. A pile read needs no identity. A send registers as what its launch's identity token names, so every
+ * yrd-notify. Recipient diagnostic reads need no identity. Emitter reads and sends register as the launch's identity token names, so every
  * producer has one answer to "who am I on the wire" (25689 moved the client here from hab-cli so both CLIs share it).
  */
 import { connectTribeLaunch } from "./launch-registration.ts"
@@ -20,6 +20,8 @@ export const TRIBE_DAEMON_DEADLINE_MS = 10_000
 export interface TribeDaemonCalls {
   /** `tribe.pending {owner}` — the open balls `owner` must answer; needs no identity. */
   pendingFor(owner: string): Promise<DaemonCallOutcome<unknown>>
+  /** Complete emitter snapshot, authenticated on this launch's token; never a recipient diagnostic read. */
+  pendingForEmitter(emitter: string): Promise<SendOutcome>
   /** `tribe.members {all: true}` — every session row the daemon has, disconnected included; needs no identity. */
   members(): Promise<DaemonCallOutcome<unknown>>
   /** Register as this launch's token names (see {@link launchSender}), then `tribe.send` with these params VERBATIM. */
@@ -27,7 +29,7 @@ export interface TribeDaemonCalls {
 }
 
 /**
- * A send's outcome. `refused` is the daemon answering and declining the send in-band (its result carries `error`),
+ * An authenticated operation's outcome. `refused` is the daemon declining it in-band (its result carries `error`),
  * carried as data so a caller tells it from a transport failure by kind (@cto 26ff1f69 rider 1): nothing was delivered.
  */
 export type SendOutcome = DaemonCallOutcome<unknown> | Readonly<{ kind: "refused"; refusal: string }>
@@ -43,27 +45,27 @@ export function tribeDaemonCalls(
 ): TribeDaemonCalls {
   const socketPath = opts.socketPath ?? resolveSocketPath()
   const deadlineMs = opts.deadlineMs ?? TRIBE_DAEMON_DEADLINE_MS
+  const authenticatedCall = async (method: string, params: Readonly<Record<string, unknown>>): Promise<SendOutcome> => {
+    let sender: LaunchSender
+    try {
+      sender = launchSender(producer, opts.env ?? process.env)
+    } catch (error) {
+      return { kind: "error", message: error instanceof Error ? error.message : String(error) }
+    }
+    const outcome = await withDaemonCall({ socketPath, deadlineMs, callTimeoutMs: deadlineMs }, async (client) => {
+      await registerLaunchSender(client, sender, { producer, socketPath })
+      return client.call(method, params)
+    })
+    if (outcome.kind !== "ok") return outcome
+    const refusal = (mcpJsonContent(outcome.value) as { readonly error?: unknown } | null)?.error
+    return typeof refusal === "string" && refusal.length > 0 ? { kind: "refused", refusal } : outcome
+  }
   return {
     pendingFor: (owner) =>
       withDaemonCall({ socketPath, deadlineMs }, (client) => client.call("tribe.pending", { owner })),
+    pendingForEmitter: (emitter) => authenticatedCall("tribe.pending", { emitter }),
     members: () => withDaemonCall({ socketPath, deadlineMs }, (client) => client.call("tribe.members", { all: true })),
-    sendAs: async (params) => {
-      let sender: LaunchSender
-      try {
-        sender = launchSender(producer, opts.env ?? process.env)
-      } catch (error) {
-        // Refused before the daemon: nothing registers and nothing is sent.
-        return { kind: "error", message: error instanceof Error ? error.message : String(error) }
-      }
-      const outcome = await withDaemonCall({ socketPath, deadlineMs, callTimeoutMs: deadlineMs }, async (client) => {
-        await registerLaunchSender(client, sender, { producer, socketPath })
-        return client.call("tribe.send", params)
-      })
-      if (outcome.kind !== "ok") return outcome
-      // The daemon refuses a send in-band, as a result whose content carries `error`; that is no delivery.
-      const refusal = (mcpJsonContent(outcome.value) as { readonly error?: unknown } | null)?.error
-      return typeof refusal === "string" && refusal.length > 0 ? { kind: "refused", refusal } : outcome
-    },
+    sendAs: (params) => authenticatedCall("tribe.send", params),
   }
 }
 

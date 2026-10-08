@@ -47,6 +47,7 @@ import {
   readIdentityTokenFromEnvironment,
 } from "../lib/identity-token.ts"
 import { HAB_SERVICE_NAME_ENV } from "../lib/hab-session-env.ts"
+import { describeDaemonOutcome, tribeDaemonCalls } from "../service-send.ts"
 import { TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV } from "../launch-environment.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
@@ -743,7 +744,57 @@ async function cmdPending(
   json: boolean,
   staleMs: number | undefined,
   close: string | undefined,
+  emitter?: string,
 ): Promise<void> {
+  if (emitter !== undefined) {
+    const outcome = await tribeDaemonCalls(`tribe pending emitter ${JSON.stringify(emitter)}`).pendingForEmitter(
+      emitter,
+    )
+    if (outcome.kind !== "ok") {
+      console.error(
+        `tribe pending emitter ${JSON.stringify(emitter)} at ${resolveSocketPath()}: ${describeDaemonOutcome(outcome)}`,
+      )
+      process.exitCode = 2
+      return
+    }
+    const payload = mcpJsonContent(outcome.value) as {
+      scope?: unknown
+      emitter?: unknown
+      count?: unknown
+      pending?: Array<{
+        request_id: string
+        recipient: string
+        sender: string
+        message_id: string
+        summary: string | null
+      }>
+    } | null
+    if (
+      payload?.scope !== "emitter" ||
+      payload.emitter !== emitter ||
+      typeof payload.count !== "number" ||
+      !Number.isSafeInteger(payload.count) ||
+      payload.count < 0 ||
+      !Array.isArray(payload.pending) ||
+      payload.count !== payload.pending.length
+    ) {
+      console.error(
+        `tribe pending emitter ${JSON.stringify(emitter)} at ${resolveSocketPath()}: invalid emitter snapshot; expected matching scope and emitter, pending array, and count matching its length. Run 'tribe doctor' before retrying.`,
+      )
+      process.exitCode = 2
+      return
+    }
+    if (json) await writeJsonStdout(payload, 2)
+    else {
+      console.log(`${payload.count} open incident holding(s) for emitter ${emitter}.`)
+      for (const row of payload.pending) {
+        console.log(
+          `  ${row.request_id}  from ${row.sender}  to ${row.recipient}  ${row.summary ?? "(no summary)"}  (msg ${row.message_id})`,
+        )
+      }
+    }
+    return
+  }
   const args: Record<string, unknown> = {}
   if (all) args.all = true
   if (expired) args.expired = true
@@ -2418,6 +2469,7 @@ export function registerReadCommands(program: Command): void {
     )
 
   const pendingOwner = cliOption(PENDING_CLI, "owner")
+  const pendingEmitter = cliOption(PENDING_CLI, "emitter")
   const pendingAll = cliOption(PENDING_CLI, "all")
   const pendingJson = cliOption(PENDING_CLI, "json")
   const pendingExpired = cliOption(PENDING_CLI, "expired")
@@ -2441,6 +2493,7 @@ export function registerReadCommands(program: Command): void {
     .option(pendingExpired.flags, pendingExpired.description)
     .option(pendingOwed.flags, pendingOwed.description)
     .option(pendingOwner.flags, pendingOwner.description)
+    .option(pendingEmitter.flags, pendingEmitter.description)
     .option(pendingStale.flags, pendingStale.description)
     .option(pendingClose.flags, pendingClose.description)
     .action(
@@ -2450,9 +2503,25 @@ export function registerReadCommands(program: Command): void {
         owed?: boolean
         json?: boolean
         owner?: string
+        emitter?: string
         stale?: string
         close?: string
       }) => {
+        if (
+          opts.emitter !== undefined &&
+          (opts.owner !== undefined ||
+            opts.all ||
+            opts.expired ||
+            opts.owed ||
+            opts.stale !== undefined ||
+            opts.close !== undefined)
+        ) {
+          console.error(
+            "tribe pending: --emitter requires a complete read; --owner/--all/--expired/--owed/--stale/--close are incompatible",
+          )
+          process.exitCode = 2
+          return
+        }
         const stale = opts.stale ? parseStaleMs(opts.stale) : undefined
         if (opts.stale && stale === undefined) {
           console.error(`tribe pending: bad --stale '${opts.stale}' (expected NNs|NNm|NNh)`)
@@ -2480,7 +2549,16 @@ export function registerReadCommands(program: Command): void {
         // daemon already owns that rule and refuses loudly, and the refusal now
         // reaches the user (see cmdPending). Duplicating it would be a second
         // authority for one invariant, free to drift from the first.
-        await cmdPending(opts.owner, !!opts.all, !!opts.expired, !!opts.owed, !!opts.json, stale, opts.close)
+        await cmdPending(
+          opts.owner,
+          !!opts.all,
+          !!opts.expired,
+          !!opts.owed,
+          !!opts.json,
+          stale,
+          opts.close,
+          opts.emitter,
+        )
       },
     )
 

@@ -97,22 +97,61 @@ type OneShotRpcOutcome = { result: unknown } | { error: { code: number; message:
 /** The managed launch's identity token a one-shot pending read presents (25074 3d-3: its only self-read credential). */
 const MANAGED_PENDING_TOKEN = launchToken("sid-dev2", "@dev/2")
 
-async function runManagedPendingCliAgainst(outcomeFor: (request: OneShotRpcRequest) => OneShotRpcOutcome): Promise<{
+async function runManagedPendingCliAgainst(
+  outcomeFor: (request: OneShotRpcRequest) => OneShotRpcOutcome,
+  options: { args?: string[]; token?: string } = {},
+): Promise<{
   result: Awaited<ReturnType<typeof runCliAsync>>
   calls: Array<{ method: string; params?: Record<string, unknown> }>
 }> {
   const dir = mkdtempSync(join(tmpdir(), "tribe-wire-pending-response-"))
   const socketPath = join(dir, "tribe.sock")
   const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+  let serviceRegistration: Record<string, unknown> | undefined
   const server = createServer((socket) => {
     let buffer = ""
     socket.on("data", (chunk) => {
       buffer += chunk.toString("utf8")
-      const newline = buffer.indexOf("\n")
-      if (newline < 0) return
-      const request = JSON.parse(buffer.slice(0, newline)) as OneShotRpcRequest
-      calls.push({ method: request.method, params: request.params })
-      socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, ...outcomeFor(request) })}\n`)
+      for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
+        const request = JSON.parse(buffer.slice(0, newline)) as OneShotRpcRequest
+        buffer = buffer.slice(newline + 1)
+        calls.push({ method: request.method, params: request.params })
+        let outcome: OneShotRpcOutcome
+        if (options.token !== undefined && request.method === "register") {
+          serviceRegistration = request.params
+          outcome = {
+            result: {
+              name: request.params?.name,
+              principalClass: "service",
+              launchId: request.params?.launchId,
+              launchParentPid: request.params?.launchParentPid,
+            },
+          }
+        } else if (serviceRegistration !== undefined && request.method === "tribe.members") {
+          outcome = {
+            result: {
+              content: [
+                {
+                  text: JSON.stringify({
+                    sessions: [
+                      {
+                        name: serviceRegistration.name,
+                        launch_id: serviceRegistration.launchId,
+                        launch_parent_pid: serviceRegistration.launchParentPid,
+                        cwd: serviceRegistration.project,
+                        alive: true,
+                        transport_state: "connected",
+                        delivery: "pull",
+                      },
+                    ],
+                  }),
+                },
+              ],
+            },
+          }
+        } else outcome = outcomeFor(request)
+        socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, ...outcome })}\n`)
+      }
     })
   })
 
@@ -124,11 +163,11 @@ async function runManagedPendingCliAgainst(outcomeFor: (request: OneShotRpcReque
         resolveListen()
       })
     })
-    const result = await runCliAsync(["pending", "--json"], {
+    const result = await runCliAsync(options.args ?? ["pending", "--json"], {
       ...process.env,
       TRIBE_SOCKET: socketPath,
       TRIBE_NO_AUTOSTART: "1",
-      HAB_ID_TOKEN: MANAGED_PENDING_TOKEN,
+      HAB_ID_TOKEN: options.token ?? MANAGED_PENDING_TOKEN,
     })
     return { result, calls }
   } finally {
@@ -491,6 +530,41 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(stdout).toMatch(/--expired/)
     expect(stdout).toMatch(/--json/)
     expect(stdout).toMatch(/all owners/i)
+  })
+
+  // 28044 AC1: the CLI must authenticate this selector and refuse stale/contradictory results;
+  // wire-client tests cannot prove command routing, stdout or process exit status.
+  it("pending --emitter authenticates the selector and preserves an explicit empty snapshot", async () => {
+    const snapshot = { scope: "emitter", emitter: "longproc-alerts", count: 0, pending: [] }
+    const { result, calls } = await runManagedPendingCliAgainst(
+      () => ({ result: { content: [{ text: JSON.stringify(snapshot) }] } }),
+      {
+        args: ["pending", "--emitter", "longproc-alerts", "--json"],
+        token: launchToken("longproc-alerts:launch", "longproc-alerts", "service"),
+      },
+    )
+    expect(result).toMatchObject({ code: 0, stdout: `${JSON.stringify(snapshot, null, 2)}\n`, stderr: "" })
+    expect(calls.map((call) => call.method)).toEqual(["register", "tribe.members", "tribe.pending"])
+    expect(calls[2]?.params).toEqual({ emitter: "longproc-alerts" })
+  })
+
+  it("pending --emitter rejects a contradictory snapshot and incompatible recipient selectors", async () => {
+    const { result } = await runManagedPendingCliAgainst(
+      () => ({
+        result: {
+          content: [{ text: JSON.stringify({ scope: "emitter", emitter: "another-emitter", count: 0, pending: [] }) }],
+        },
+      }),
+      {
+        args: ["pending", "--emitter", "longproc-alerts", "--json"],
+        token: launchToken("longproc-alerts:launch", "longproc-alerts", "service"),
+      },
+    )
+    expect(result).toMatchObject({ code: 2, stdout: "" })
+    expect(result.stderr).toMatch(/longproc-alerts.*invalid emitter snapshot/)
+    const conflict = runCli(["pending", "--emitter", "longproc-alerts", "--owner", "@chief", "--json"])
+    expect(conflict.code).toBe(2)
+    expect(conflict.stderr).toMatch(/--emitter.*complete read/)
   })
 
   it("managed pending reads name a stale daemon and exit through the CLI error contract", async () => {

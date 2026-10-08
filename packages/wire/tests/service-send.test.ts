@@ -106,6 +106,18 @@ async function fakeDaemon(): Promise<{
             params["message"] === "refuse me"
               ? { content: [{ text: JSON.stringify({ error: "tribe.send: invalid incident - subject is empty" }) }] }
               : { content: [{ text: JSON.stringify({ sent: true }) }] }
+        } else if (request.method === "tribe.pending") {
+          result = {
+            content: [
+              {
+                text: JSON.stringify(
+                  params["emitter"] === "refused-emitter"
+                    ? { error: "incident policy refuses read for refused-emitter" }
+                    : { scope: "emitter", emitter: params["emitter"], count: 0, pending: [] },
+                ),
+              },
+            ],
+          }
         }
         socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
       }
@@ -123,6 +135,38 @@ async function fakeDaemon(): Promise<{
 }
 
 describe("the one sender registers as what its launch's token names (25074 3d-1c)", () => {
+  // 28044 AC1: handler tests cannot prove that a one-shot caller registers before its emitter read.
+  it("registers the service launch before reading its complete emitter snapshot", async () => {
+    const { socketPath, calls } = await fakeDaemon()
+    const token = launchToken("longproc-alerts:launch", "longproc-alerts", "service")
+    const outcome = await tribeDaemonCalls("longproc-alerts", {
+      socketPath,
+      env: { HAB_ID_TOKEN: token },
+    }).pendingForEmitter("longproc-alerts")
+    expect(outcome.kind).toBe("ok")
+    expect(calls.map((call) => call.method)).toEqual(["register", "tribe.members", "tribe.pending"])
+    expect(calls[0]?.params).toMatchObject({ name: "longproc-alerts", idToken: token })
+    expect(calls[2]?.params).toEqual({ emitter: "longproc-alerts" })
+  })
+
+  it("refuses a tokenless emitter read before making any daemon call", async () => {
+    const { socketPath, calls } = await fakeDaemon()
+    const outcome = await tribeDaemonCalls("longproc-alerts", { socketPath, env: {} }).pendingForEmitter(
+      "longproc-alerts",
+    )
+    expect(outcome.kind === "error" ? outcome.message : "").toMatch(/longproc-alerts: no identity token.*HAB_ID_TOKEN/)
+    expect(calls).toEqual([])
+  })
+
+  it("preserves an in-band emitter read refusal instead of reporting an empty snapshot", async () => {
+    const { socketPath } = await fakeDaemon()
+    const outcome = await tribeDaemonCalls("refused-emitter", {
+      socketPath,
+      env: { HAB_ID_TOKEN: launchToken("refused-emitter:launch", "refused-emitter", "service") },
+    }).pendingForEmitter("refused-emitter")
+    expect(outcome).toEqual({ kind: "refused", refusal: "incident policy refuses read for refused-emitter" })
+  })
+
   // One row per producer (@cto 6fd50bd0): the register name is the launch's own, the token's actor, never the
   // producer's. quota-wall's job and producer share a name; wait-watch and hab-page are sent by other jobs, so a send
   // that still claimed the producer name would be refused as identity-name-mismatch.

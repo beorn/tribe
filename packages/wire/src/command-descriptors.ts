@@ -481,6 +481,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "string",
             description: "Session name that owns the open ball. Defaults to the caller's own session.",
           },
+          emitter: {
+            type: "string",
+            minLength: 1,
+            description:
+              "Complete authenticated open-incident snapshot for this emitter, across every recipient. Requires current emitter authority; incompatible with owner/all/expired/owed/stale_ms/close/prune. Does not acknowledge a mailbox.",
+          },
           stale_ms: {
             type: "number",
             description: "Filter to requests opened more than this many milliseconds ago (stale-detection).",
@@ -499,7 +505,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
       outputSchema: OBJ(
         {
           owner: { type: "string", description: "The session whose open requests are listed." },
-          scope: { type: "string", description: "`all` for a fleet-wide projection." },
+          scope: {
+            type: "string",
+            description: "`all` for a fleet-wide projection; `emitter` for an authenticated complete emitter snapshot.",
+          },
+          emitter: { type: "string", description: "Exact emitter whose complete incident holdings were read." },
           all: { type: "boolean", description: "True for a fleet-wide projection." },
           expired: { type: "boolean", description: "True when the explicit expired diagnostic view was requested." },
           pending: {
@@ -556,6 +566,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           description: "With --expired: only rows still backed by a live pending request (needs a decision)",
         },
         { name: "owner", flags: "-o, --owner <name>", description: "Owner session name (default: caller)" },
+        {
+          name: "emitter",
+          flags: "--emitter <name>",
+          description: "Complete authenticated incident snapshot for this emitter",
+        },
         {
           name: "stale",
           flags: "-s, --stale <duration>",
