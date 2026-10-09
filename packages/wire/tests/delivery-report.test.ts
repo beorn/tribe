@@ -10,7 +10,8 @@
  * @consumer @chief 4h briefing guard; @cto 9a077460 adapter/Tribe delivery counter
  * @testonly none
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync, realpathSync } from "node:fs"
+import { safeRemoveSync } from "removely"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -302,7 +303,7 @@ describe("delivery report coverage (#27459)", () => {
       expect(text).toContain("no readable ledgers")
       expect(text).not.toContain("no ledgers found")
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      safeRemoveSync(dir, { within: realpathSync(tmpdir()), allowMissing: true })
     }
   })
 })

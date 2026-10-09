@@ -11,7 +11,8 @@
  * @testonly none
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest"
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from "node:fs"
+import { safeRemoveSync } from "removely"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -63,7 +64,7 @@ describe("recall regex mode scope", () => {
     if (previousClaudeDir === undefined) delete process.env.CLAUDE_DIR
     else process.env.CLAUDE_DIR = previousClaudeDir
     process.exitCode = previousExitCode
-    rmSync(claudeDir, { recursive: true, force: true })
+    safeRemoveSync(claudeDir, { within: realpathSync(tmpdir()), allowMissing: true })
   })
 
   const stdout = () => logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n")

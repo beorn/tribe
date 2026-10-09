@@ -15,7 +15,8 @@
  * @testonly none
  */
 import { spawn, type ChildProcess } from "node:child_process"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, realpathSync } from "node:fs"
+import { safeRemoveSync } from "removely"
 import { createServer, type Server, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -92,7 +93,7 @@ beforeEach(() => {
 afterEach(() => {
   for (const child of children.splice(0)) child.kill("SIGKILL")
   daemon?.close()
-  rmSync(dir, { recursive: true, force: true })
+  safeRemoveSync(dir, { within: realpathSync(tmpdir()), allowMissing: true })
 })
 
 /** A daemon that records every code-root request instead of answering it. */
