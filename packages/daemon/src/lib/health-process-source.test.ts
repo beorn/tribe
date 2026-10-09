@@ -442,8 +442,6 @@ describe("neutral health process source", () => {
   })
 
   it.each([
-    ["invalid owner liveness", (payload: any) => (payload.processes[0].attribution.ownerLiveness = "guess")],
-    ["null owner liveness", (payload: any) => (payload.processes[0].attribution.ownerLiveness = null)],
     ["empty query", (payload: any) => (payload.diagnostic.query = "")],
     ["empty location", (payload: any) => (payload.diagnostic.location = "")],
     ["wrong excluded fallbacks", (payload: any) => (payload.diagnostic.excluded = [])],

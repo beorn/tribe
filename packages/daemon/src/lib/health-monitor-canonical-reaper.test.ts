@@ -129,7 +129,7 @@ describe("canonical managed reaper", () => {
     for (let index = 0; index < 4; index++) {
       checkCanonicalReaper(
         observation(
-          { kind: "owned", ownerId: "@dev/luna6", via: "env", ownerLiveness: "down" },
+          { kind: "owned", ownerId: "@dev/luna6", via: "env" },
           {
             command: "bun arm-bound-probe.ts",
             cpuPercent: 0,
@@ -174,12 +174,15 @@ describe("canonical managed reaper", () => {
     expect(sink.sends).toEqual([])
   })
 
-  // 28276: custody paths do not prove owner liveness; the canonical producer supplies it independently.
+  // 28276: a declared hab SERVICE is owned by the hab plan, not by a Tribe recipient, so the
+  // recipient set cannot answer whether it is alive. The census can: `via` root/tree is emitted
+  // only for a process under a registration root whose exact incarnation THIS census observed,
+  // so an owner named by such a row is proven live from the hab supervisor records, not Tribe.
   it("never pages a parked process whose service owner is alive in the census (hh 28276)", () => {
     const state = createCanonicalReaperState()
     const sink = api()
     const atRest = observation(
-      { kind: "owned", ownerId: "habmod", via: "root", ownerLiveness: "live" },
+      { kind: "owned", ownerId: "habmod", via: "root" },
       { command: "bun habmod.ts", cpuPercent: 0, pid: 913_768, startTime: "linux:boot:913768" },
     )
     for (let index = 0; index < 4; index++) {
@@ -190,7 +193,7 @@ describe("canonical managed reaper", () => {
           processes: [
             ...atRest.processes,
             {
-              attribution: { kind: "owned", ownerId: "habmod", via: "tree", ownerLiveness: "live" },
+              attribution: { kind: "owned", ownerId: "habmod", via: "tree" },
               process: {
                 ...atRest.processes[0]!.process,
                 command: "bun habmod-worker.ts",
@@ -219,7 +222,7 @@ describe("canonical managed reaper", () => {
     for (let index = 0; index < 4; index++) {
       checkCanonicalReaper(
         observation(
-          { kind: "owned", ownerId: "km-daemon", via: "env", ownerLiveness: "down" },
+          { kind: "owned", ownerId: "km-daemon", via: "env" },
           {
             command: "bun km-daemon.ts",
             cpuPercent: 0,
