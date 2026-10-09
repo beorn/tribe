@@ -103,6 +103,22 @@ export function deliveryLedgerPath(opts: { pane: string; env: NodeJS.ProcessEnv 
   return join(dir, `tribe-delivery-${deliveryLedgerPaneKey(opts.pane)}.json`)
 }
 
+/**
+ * #28376 — the ledger's OWNER is its persisted `pane`, never its file name.
+ *
+ * `deliveryLedgerPaneKey` is a sanitizer, not a bijection: `/` becomes `_`, so
+ * the two VALID personas `@dev/6` and `@dev_6` both resolve to
+ * `tribe-delivery-@dev_6.json` in one habitat. The file name is therefore a
+ * hint; the identity is what the file records about itself. A window whose
+ * recorded owner is not the caller is NOT the caller's window: adopting it seeds
+ * this pane's forwarded-id set, counters and summary-throttle fingerprint from
+ * another persona's handoffs, and the ids it never received then suppress a
+ * broadcast handoff that was never made to it.
+ */
+export function deliveryLedgerOwnerMismatch(state: DeliveryLedgerState | null, pane: string): boolean {
+  return state !== null && state.pane !== pane
+}
+
 function zeroCounters(): DeliveryCounters {
   return {
     cost: {
@@ -267,7 +283,14 @@ export function openDeliveryLedgerWindow(input: {
   pane: string
   now: number
 }): DeliveryLedgerState {
-  const { existing, coverage, pane, now } = input
+  const { existing: loaded, coverage: loadedCoverage, pane, now } = input
+  // #28376 — a file whose recorded owner is another persona is a LOST window,
+  // never an adopted one: it is ignored here, and its gap is NAMED so the report
+  // reads it as incomplete rather than as this pane's clean zero. Nothing is
+  // deleted: the file still belongs to the owner it records.
+  const existing = deliveryLedgerOwnerMismatch(loaded, pane) ? null : loaded
+  const coverage: DeliveryLedgerCoverage =
+    existing === null && loaded !== null ? { restarts: 0, gap: true, gapReason: "schema" } : loadedCoverage
   if (existing && now - existing.windowStartMs < DELIVERY_LEDGER_WINDOW_MS) {
     return {
       ...existing,

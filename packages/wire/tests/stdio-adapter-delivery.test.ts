@@ -2272,6 +2272,118 @@ describe("stdio adapter delivery modes", () => {
     expect(ledger.coverage.gap).toBe(false)
   })
 
+  // #28376 — two distinct VALID personas in one habitat can name one ledger
+  // file: `deliveryLedgerPaneKey` sanitizes `/` to `_`, so `@dev/6` and `@dev_6`
+  // both resolve to `tribe-delivery-@dev_6.json`. Before the fix the second
+  // persona adopted the first's delivered-id set, counters and summary throttle
+  // (with `coverage.gap=false`) and so SUPPRESSED a broadcast handoff it was
+  // never handed. The persisted `pane` is the owner: a foreign file is ignored
+  // with one line and opens as a NAMED gap, never adopted.
+  it("does not adopt a delivery ledger another persona owns (#28376)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const ledgerPath = join(tmpDir, "tribe-delivery-@dev_6.json")
+    const windowStartMs = Date.now() - 60_000
+    // The @dev/6 persona's own ledger, reached under @dev_6's default path
+    // because the two names sanitize to one key. The id was handed to @dev/6.
+    const foreignId = "broadcast-row-first-handed-only-to-dev-6"
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        version: 2,
+        pane: "@dev/6",
+        windowStartMs,
+        updatedAtMs: windowStartMs,
+        ids: [foreignId],
+        counters: {
+          presentations: 1,
+          newPresentations: 1,
+          duplicatePresentations: 0,
+          deliveries: 1,
+          newDeliveries: 1,
+          duplicateDeliveries: 0,
+          duplicateBytes: 0,
+          suppressed: 0,
+          cost: {
+            deliveredBytes: 0,
+            handoffs: 0,
+            readRepeatBodies: 0,
+            readRepeatBytes: 0,
+            readPulls: 0,
+            readPullBytes: 0,
+          },
+        },
+        pendingBallSummary: null,
+        coverage: { restarts: 1, gap: false, gapReason: "none" },
+      }),
+      "utf8",
+    )
+    const fetchAttention = {
+      actionable_unread: [
+        { id: foreignId, type: "verdict", from: "@chief", content: "FOREIGN-LEDGER-ROW", ts: new Date().toISOString() },
+      ],
+      pending_balls: [],
+    }
+    // The fake daemon pins `@agent/test` unless the ack says otherwise, and the
+    // adapter takes its pane (and so its ledger path) from the ack.
+    daemon = await spawnFakeDaemon(socketPath, {
+      fetchAttention,
+      registerAck: { name: "@dev_6" },
+      joinAck: { name: "@dev_6" },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@dev_6"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const channelText = () =>
+      stdout.filter((line) => line.method === "notifications/claude/channel").map((line) => JSON.stringify(line))
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@dev_6" }), (line) => line.id === 2)
+
+    const before = daemon.requests.filter((request) => request.method === "tribe.fetch").length
+    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+    await waitForCondition(
+      () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+      "28376 foreign-owner drain",
+    )
+    // RED before the fix: the foreign id was restored into the forwarded set, so
+    // this row was read as already handed off and never reached this host.
+    await waitForCondition(
+      () => channelText().some((line) => line.includes("FOREIGN-LEDGER-ROW")),
+      "the row owned by the other persona still reached this host (#28376)",
+    )
+
+    // The refusal is loud on the adapter's own log, and the window this pane
+    // persists is its own: named gap, no inherited id set.
+    await waitForCondition(
+      () =>
+        existsSync(join(tmpDir, "adapter.log")) &&
+        readFileSync(join(tmpDir, "adapter.log"), "utf8").includes("ignoring it (28376)"),
+      "the foreign-owner refusal line",
+    )
+    expect(readFileSync(join(tmpDir, "adapter.log"), "utf8")).toContain("records owner @dev/6, not @dev_6")
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
+      pane: string
+      ids: string[]
+      counters: Record<string, number>
+      coverage: { restarts: number; gap: boolean; gapReason: string }
+    }
+    expect(ledger.pane).toBe("@dev_6")
+    expect(ledger.coverage.gap).toBe(true)
+    expect(ledger.coverage.gapReason).toBe("schema")
+    // The PRE-EXISTING foreign counters are not inherited by this pane's window.
+    expect(ledger.counters.presentations).toBe(1)
+  })
+
   // #27459 - the ambient `events` path is the same pane inbox as attention: a
   // notify recovered from the mailbox cursor must obey the one forwarded-id
   // record, and both paths must feed the ledger, or the report misses the

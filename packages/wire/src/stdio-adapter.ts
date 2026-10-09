@@ -72,6 +72,7 @@ import {
 } from "./lib/replay-cap.ts"
 import {
   DELIVERY_LEDGER_WINDOW_MS,
+  deliveryLedgerOwnerMismatch,
   deliveryLedgerPath,
   loadDeliveryLedger,
   openDeliveryLedgerWindow,
@@ -1501,6 +1502,13 @@ function ensureDeliveryLedger(now: number): void {
     return
   }
   const loaded = loadDeliveryLedger(path)
+  // #28376 — the persisted `pane` is the ledger's owner, and the file name is
+  // only a hint: the key sanitizes `/` to `_`, so two distinct valid personas
+  // (`@dev/6`, `@dev_6`) can name one file. One line, then never adopted — the
+  // open below refuses it, so this pane cannot inherit another's forwarded ids.
+  if (deliveryLedgerOwnerMismatch(loaded.state, pane)) {
+    log.warn?.(`Tribe delivery ledger ${path} records owner ${loaded.state?.pane}, not ${pane}; ignoring it (28376).`)
+  }
   const opened = openDeliveryLedgerWindow({ existing: loaded.state, coverage: loaded.coverage, pane, now })
   // #27459 REVISE — seed the cumulative same-window totals too, not just the
   // id set, or the first persist of a resumed window reads as all-zero.
