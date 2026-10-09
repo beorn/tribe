@@ -48,6 +48,8 @@ export type BallSettlementFact = BallFactEvidence & {
   settlement: BallSettlementReason
   settled_at: number
   settled_by: string
+  /** Authenticated closer's verbatim attestation for a manual incident clear. */
+  close_evidence?: string
 }
 
 export type BallOutcomeFactRow = {

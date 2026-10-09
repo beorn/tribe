@@ -436,7 +436,7 @@ export function withDispatcher<
     type AuthenticatedSessionCapability =
       | { kind: "inbox-ack"; limit: unknown; peek: boolean }
       | { kind: "pending-read"; expired: boolean; owed: boolean; staleMs?: number }
-      | { kind: "pending-close"; owner: string; close: string | string[] }
+      | { kind: "pending-close"; owner: string; close: string | string[]; closeEvidence?: string }
       | { kind: "pending-prune"; owner: string; staleMs: number }
       | { kind: "fetch-read"; args: FetchReadArgs }
 
@@ -445,6 +445,9 @@ export function withDispatcher<
       | { errorCode: number; errorMessage: string; errorData: Record<string, unknown> }
 
     function invalidPendingReadFilter(params: Record<string, unknown>): string | undefined {
+      if (params.close_evidence !== undefined) {
+        return "Authenticated pending read does not accept close evidence"
+      }
       if (params.expired !== undefined && typeof params.expired !== "boolean") {
         return "Authenticated pending read filter 'expired' must be boolean"
       }
@@ -777,7 +780,7 @@ export function withDispatcher<
             result: await handleToolCall(
               resolution.context,
               TRIBE_COORD_METHODS.pending,
-              { owner: capability.owner, close: capability.close },
+              { owner: capability.owner, close: capability.close, close_evidence: capability.closeEvidence },
               DAEMON_HANDLER_OPTS,
               connId,
             ),
@@ -2920,9 +2923,20 @@ export function withDispatcher<
             if (owner === null || close === null) {
               return makeError(id, -32602, "Authenticated pending close requires owner and close")
             }
+            if (p.close_evidence !== undefined && typeof p.close_evidence !== "string") {
+              return makeError(id, -32602, "Authenticated pending close evidence must be a string")
+            }
+            if (p.close_evidence !== undefined && (p.owed !== undefined || p.emitter !== undefined)) {
+              return makeError(id, -32602, "Authenticated pending close evidence cannot accompany a read filter")
+            }
             const outcome = await dispatchAuthenticatedSessionCapability(
               { authority: p.authority, idToken: p.idToken },
-              { kind: "pending-close", owner, close },
+              {
+                kind: "pending-close",
+                owner,
+                close,
+                ...(typeof p.close_evidence === "string" ? { closeEvidence: p.close_evidence } : {}),
+              },
               connId,
             )
             if (!("result" in outcome)) {

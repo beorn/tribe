@@ -332,9 +332,120 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       expect(settlementFacts(db)).toEqual([])
 
       const single = parseToolJson(handleToolCall(owner, "tribe.pending", { close: incidentId }, makeOpts()))
-      expect(String(single.error)).toContain("only the incident emitter can clear it")
+      expect(String(single.error)).toContain("--evidence")
       expect(String(single.error)).toContain("--incident-cleared")
       expect(openIds(stmts, "@chief")).toEqual([incidentId, "ordinary"])
+      expect(settlementFacts(db)).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
+
+  /**
+   * @failure An attested incident cannot settle, loses its authenticated actor,
+   * or becomes permanently muted after manual settlement (28159).
+   * @level l2
+   * @consumer Incident owner and dispatcher using tribe.pending.
+   */
+  it.each(["@dev/owner", "@chief"])("records attested incident clear by %s and preserves recurrence", (actor) => {
+    const { db, stmts } = setup()
+    try {
+      const ownerName = "@dev/owner"
+      const owner = makeContext(db, stmts, ownerName)
+      const closer = makeContext(db, stmts, actor)
+      const emitter = makeContext(db, stmts, "health-monitor")
+      registerSession(owner, "pending-gc", () => true, null, process.pid, "push", "/repo", null, null, null, null)
+      const opts = makeOpts([
+        {
+          id: owner.sessionId,
+          name: ownerName,
+          pid: process.pid,
+          cwd: "/repo",
+          role: "member",
+          claudeSessionId: null,
+          registeredAt: Date.now(),
+          launchId: null,
+          launchParentPid: null,
+          transportPids: [process.pid],
+          pushTransportPids: [],
+        },
+      ])
+      const incident = { emitter: "health-monitor", subject: "service-a", condition: "red" }
+      const id = incidentKey(incident)
+      const evidence = "  nightly run-42 at descendant head abc123; no matching red bucket\nrecorded by closer  "
+      const raise = (messageId: string) =>
+        sendMessage(
+          emitter,
+          ownerName,
+          "red observed",
+          "notify",
+          undefined,
+          undefined,
+          "direct",
+          { messageId },
+          { incident },
+        )
+      const first = raise("28159-first")
+      openBall(stmts, { id: "keep-ordinary", recipient: ownerName, openedAt: Date.now() })
+      for (const close_evidence of [undefined, " \n\t "]) {
+        const refused = parseToolJson(
+          handleToolCall(closer, "tribe.pending", { owner: ownerName, close: id, close_evidence }, opts),
+        )
+        expect(typeof refused.error).toBe("string")
+        expect(openIds(stmts, ownerName)).toEqual([id, "keep-ordinary"])
+        expect(settlementFacts(db)).toEqual([])
+      }
+      const unauthorized = parseToolJson(
+        handleToolCall(emitter, "tribe.pending", { owner: ownerName, close: id, close_evidence: evidence }, opts),
+      )
+      expect(typeof unauthorized.error).toBe("string")
+      expect(openIds(stmts, ownerName)).toEqual([id, "keep-ordinary"])
+      const result = parseToolJson(
+        handleToolCall(closer, "tribe.pending", { owner: ownerName, close: id, close_evidence: evidence }, opts),
+      )
+      expect(result).toMatchObject({ owner: ownerName, request_id: id, closed: 1 })
+      expect(openIds(stmts, ownerName)).toEqual(["keep-ordinary"])
+      expect(settlementFacts(db)).toEqual([
+        expect.objectContaining({
+          schema_version: 1,
+          request_id: id,
+          recipient: ownerName,
+          sender: "health-monitor",
+          message_id: first.id,
+          settlement: "manual-close",
+          settled_by: actor,
+          close_evidence: evidence,
+        }),
+      ])
+      expect(raise("28159-first").id).toBe(first.id)
+      expect(openIds(stmts, ownerName)).toEqual(["keep-ordinary"])
+      const fresh = raise("28159-fresh")
+      expect(openIds(stmts, ownerName)).toEqual(["keep-ordinary", id])
+      expect(stmts.selectPendingSettlementForRecipient.get({ $request_id: id, $recipient: ownerName })).toMatchObject({
+        message_id: fresh.id,
+      })
+      expect(settlementFacts(db)).toHaveLength(1)
+    } finally {
+      db.close()
+    }
+  })
+
+  /** @failure A journal error releases incident custody without evidence. @level l2 @consumer tribe.pending. */
+  it("rolls back attested incident clear when the settlement journal fails", () => {
+    const { db, stmts } = setup()
+    try {
+      const owner = makeContext(db, stmts)
+      const emitter = makeContext(db, stmts, "health-monitor")
+      const incident = { emitter: "health-monitor", subject: "service-b", condition: "red" }
+      const id = incidentKey(incident)
+      sendMessage(emitter, "@chief", "red observed", "notify", undefined, undefined, "direct", {}, { incident })
+      db.exec(
+        "CREATE TRIGGER fail_settlement BEFORE INSERT ON messages WHEN NEW.type = 'event.ball.settled' BEGIN SELECT RAISE(ABORT, 'journal unavailable'); END",
+      )
+      expect(() =>
+        handleToolCall(owner, "tribe.pending", { close: id, close_evidence: "qualified clear" }, makeOpts()),
+      ).toThrow("journal unavailable")
+      expect(openIds(stmts, "@chief")).toEqual([id])
       expect(settlementFacts(db)).toEqual([])
     } finally {
       db.close()
