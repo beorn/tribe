@@ -2600,6 +2600,78 @@ describe("stdio adapter delivery modes", () => {
     expect(ledger.counters.duplicatePresentations).toBe(2)
   })
 
+  // #28282 - @cto 11:19 PDT: the counter is not broken, the two units are
+  // deliberate. `duplicateDeliveries` is the RESIDUAL - a handoff that reached
+  // the pane twice after the once-per-row record - and `duplicatePresentations`
+  // is the daemon's re-offer the record absorbed. This drives a real residual
+  // path through the real adapter: two rows carrying the SAME id in ONE drained
+  // batch. The admission filter (:1670-1672) is evaluated for the whole batch
+  // before the first handoff resolves, so both are admitted, both forward, and
+  // `deliver()` counts the second one. A future path that reaches the pane
+  // while skipping the record is what the >20% / >=100-deliveries alert is for.
+  it("counts a second handoff of one id when both rows arrive in the same batch (#28282)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const recentTs = new Date().toISOString()
+    const fetchEvents: Array<Record<string, unknown>> = [
+      { id: "dup-notify-a", type: "notify", from: "@chief", content: "DUP-COUNTED", ts: recentTs },
+      { id: "dup-notify-a", type: "notify", from: "@chief", content: "DUP-COUNTED", ts: recentTs },
+    ]
+    daemon = await spawnFakeDaemon(socketPath, {
+      fetchAttention: { actionable_unread: [], pending_balls: [] },
+      fetchEvents,
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const channelText = () =>
+      stdout
+        .filter((line) => line.method === "notifications/claude/channel")
+        .map((line) => JSON.stringify(line) as string)
+    const drain = async (label: string) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients[0]?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 250))
+    }
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    await drain("the batch is drained")
+
+    // The pane really received it twice: this is the residual, not a re-offer.
+    expect(channelText().filter((line) => line.includes("DUP-COUNTED"))).toHaveLength(2)
+
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
+    // Poll rather than read once: the drain persists asynchronously.
+    await waitForCondition(() => {
+      if (!existsSync(ledgerPath)) return false
+      const counters = (
+        JSON.parse(readFileSync(ledgerPath, "utf8")) as { counters?: Record<string, number> }
+      ).counters
+      return (counters?.deliveries ?? 0) >= 2
+    }, "both handoffs persisted")
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
+      ids: string[]
+      counters: Record<string, number>
+    }
+    expect(ledger.counters.deliveries).toBe(2)
+    expect(ledger.counters.duplicateDeliveries).toBe(1)
+  })
+
   // #27459 - restart behavior is explicit against the durable ledger: the
   // forwarded-id record is seeded from the per-pane ledger, so an already-handed
   // ambient row stays suppressed in a fresh adapter process.
