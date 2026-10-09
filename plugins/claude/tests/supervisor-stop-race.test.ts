@@ -8,7 +8,9 @@
  *           nothing will signal (28380).
  * @level    l2 - a real supervisor process, a fake daemon that holds the
  *           code-root reply, and a scratch observer that records the native
- *           SIGTERM listener actually executing before that reply is released
+ *           SIGTERM listener ENTRY before that reply is released
+ *           (listener entry, not completion: the production listener sets `stopping`
+ *           synchronously, before any daemon reply callback can run)
  * @consumer @i/4-supervision/27459-coordination-overhead-has-no-budget/27531-adapters-run-from-the-daemon-landing-root-learned-from-the-daemon-never-shared-main/28380-supervisor-spawns-after-stop
  * @testonly none
  */
@@ -63,8 +65,10 @@ beforeEach(() => {
   )
   // A scratch observer wraps ONLY the registration of the two stop signals and
   // calls the production listener unchanged. It is the barrier that proves the
-  // native stop handler has already run when the held reply is released, so the
-  // case is a race on the supervisor's own boundary rather than a sleep.
+  // native stop handler has already been ENTERED when the held reply is released
+  // -- entry, not completion: the production listener sets `stopping` before it
+  // returns, and it returns before any daemon reply callback can run. So the case
+  // is a race on the supervisor's own boundary rather than a sleep.
   observerPath = join(dir, "stop-observer.ts")
   writeFileSync(
     observerPath,
@@ -174,12 +178,12 @@ describe("the supervisor observes a stop while it waits for the daemon's landing
     expect(spawnRecords()[0]?.cwd).toBe(PLUGIN_ROOT)
   }, 30_000)
 
-  it("a stop handler that has already run before the root reply lands starts no child", async () => {
+  it("a stop handler that has already been entered before the root reply lands starts no child", async () => {
     await startFakeDaemon()
     const supervisor = startSupervisor(0)
     await vi.waitFor(() => expect(held.length).toBeGreaterThan(0), { timeout: 10_000 })
     supervisor.kill("SIGTERM")
-    // The barrier: release only after the native listener itself has run.
+    // The barrier: release only after the native listener has been entered.
     await vi.waitFor(() => expect(stopAcks().length).toBeGreaterThan(0), { timeout: 10_000 })
     releaseHeldRoot()
     await vi.waitFor(() => expect(supervisor.exitCode).not.toBeNull(), { timeout: 10_000 })
