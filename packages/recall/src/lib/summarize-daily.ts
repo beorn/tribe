@@ -1,4 +1,5 @@
 import { assertSingleStatement } from "@bearly/sqlite"
+import { atomicWriteFileSync } from "@bearly/durable-file"
 /**
  * Daily and weekly summary rollups from per-session summaries.
  *
@@ -305,7 +306,8 @@ export async function summarizeDay(
   const header = `# ${date}\n\n${meaningfulSessions.length} sessions${msgInfo} | ${projects.map(displayProject).join(", ")}\n\n`
   const sessionsIndex = buildSessionIndex(usableSummaries)
 
-  fs.writeFileSync(memoryFile, header + synthesis + "\n\n" + sessionsIndex)
+  // 27702: atomic temp-file/rename publish — a concurrent weekly reader never sees a partial day.
+  atomicWriteFileSync(memoryFile, header + synthesis + "\n\n" + sessionsIndex)
 
   log(`wrote ${memoryFile}`)
 
@@ -594,7 +596,8 @@ export async function summarizeWeek(weekOf: string, opts: { verbose?: boolean } 
   fs.mkdirSync(memoryDir, { recursive: true })
   const memoryFile = path.join(memoryDir, `week-${weekStart}.md`)
   const header = `# Week of ${weekStart}\n\n${dailySummaries.length} days | ${daysIncluded.join(", ")}\n\n`
-  fs.writeFileSync(memoryFile, header + synthesis + "\n")
+  // 27702: atomic publish for the weekly file, same as the daily path.
+  atomicWriteFileSync(memoryFile, header + synthesis + "\n")
 
   log(`wrote ${memoryFile}`)
 

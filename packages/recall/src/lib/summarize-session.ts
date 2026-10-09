@@ -8,6 +8,7 @@
 import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
+import { atomicWriteFileSync } from "@bearly/durable-file"
 import { extractSessionContent } from "./extract"
 import { loadLlm, resolveAvailableCheapModel } from "./llm-backend.ts"
 
@@ -84,7 +85,8 @@ export function getSessionSummaryCache(sessionId: string): string | null {
 function writeCache(shortId: string, content: string): void {
   const cacheDir = getCacheDir()
   fs.mkdirSync(cacheDir, { recursive: true })
-  fs.writeFileSync(getCachePath(shortId), content)
+  // 27702: publish the summary atomically — a concurrent reader must never see a prefix.
+  atomicWriteFileSync(getCachePath(shortId), content)
 }
 
 // ============================================================================

@@ -30,17 +30,26 @@ vi.mock("os", async (original) => ({ ...(await original<typeof import("os")>()),
 vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>()
   const write = actual.writeFileSync as (...a: unknown[]) => void
+  const observe = (): void => {
+    h.arm = false
+    h.seen.push(h.reader ? h.reader(h.sessionId) : null) // observer while the final path is unpublished
+  }
   const writeFileSync = ((p: unknown, data: unknown, ...rest: unknown[]) => {
     const target = String(p)
     if (h.arm && target === h.cachePath && typeof data === "string") {
-      h.arm = false
-      write(target, data.slice(0, Math.floor(data.length / 2))) // real partial write
-      h.seen.push(h.reader ? h.reader(h.sessionId) : null) // observer while the path is partial
+      write(target, data.slice(0, Math.floor(data.length / 2))) // real partial write (direct-write defect)
+      observe()
       return write(target, data) // complete the real write
     }
     return write(p, data, ...rest)
   }) as typeof actual.writeFileSync
-  return { ...actual, writeFileSync }
+  // The approved fix publishes through a temp sibling + rename; observe at that boundary too, so
+  // the armed observation fires for the atomic path instead of only for the direct write.
+  const renameSync = ((from: unknown, to: unknown) => {
+    if (h.arm && String(to) === h.cachePath) observe()
+    return actual.renameSync(from as string, to as string)
+  }) as typeof actual.renameSync
+  return { ...actual, writeFileSync, renameSync }
 })
 
 vi.mock("../../src/lib/llm-backend.ts", async (importOriginal) => {

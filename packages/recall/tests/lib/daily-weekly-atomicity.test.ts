@@ -45,7 +45,16 @@ vi.mock("fs", async (importOriginal) => {
     }
     return write(p, data, ...rest)
   }) as typeof actual.writeFileSync
-  return { ...actual, writeFileSync }
+  // The approved fix publishes through a temp sibling + rename; start the concurrent weekly reader
+  // at that boundary too, so the armed observation fires for the atomic path, not only the direct write.
+  const renameSync = ((from: unknown, to: unknown) => {
+    if (h.arm && String(to) === h.dailyPath) {
+      h.arm = false
+      h.weekPromise = h.startWeek?.()
+    }
+    return actual.renameSync(from as string, to as string)
+  }) as typeof actual.renameSync
+  return { ...actual, writeFileSync, renameSync }
 })
 
 vi.mock("../../src/lib/llm-backend.ts", async (importOriginal) => {
