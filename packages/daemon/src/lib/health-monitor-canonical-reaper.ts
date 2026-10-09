@@ -217,15 +217,31 @@ export function checkCanonicalReaper(
   noteSourceHealthy(state, api)
 
   const liveNames = new Set(sessions.map(({ name }) => name))
+  /**
+   * 28276: a declared hab service's owner is a hab unit, never a Tribe recipient, so `liveNames`
+   * cannot answer whether it is alive — every live unit read as an orphaned seat and was paged to be
+   * stopped. The census CAN answer: `via` root/tree is emitted only for a process under a
+   * registration root whose exact incarnation THIS census observed (hab-core resolveProcessOwnerRoots),
+   * so an owner named by such a row is proven live from the hab plan/supervisor records, not from Tribe.
+   */
+  const corroboratedOwners = new Set<string>()
+  for (const row of observation.processes) {
+    const attribution = row.attribution
+    if (attribution.kind === "owned" && (attribution.via === "root" || attribution.via === "tree")) {
+      corroboratedOwners.add(attribution.ownerId)
+    }
+  }
+  const ownerIsLive = (ownerId: string): boolean => liveNames.has(ownerId) || corroboratedOwners.has(ownerId)
   const seen = new Set<string>()
   const rowsByKey = new Map<string, ProcessObservationRow>()
   for (const row of observation.processes) {
     const cpu = row.process.cpuPercent ?? 0
     const command = row.process.command
-    // 27765: a process whose canonical owner is no longer a live recipient is evidence in itself — it outlived
-    // its seat. At rest it never crosses the CPU threshold, so the CPU filter hid it (the specimen sat parked for
-    // three days). CPU stays the admission test for everything else; ownership admits this one.
-    const ownerGone = row.attribution.kind === "owned" && !liveNames.has(row.attribution.ownerId)
+    // 27765: a process whose canonical owner is no longer live — neither a live recipient nor an owner process this
+    // census observed (see ownerIsLive) — is evidence in itself: it outlived its seat. At rest it never crosses the
+    // CPU threshold, so the CPU filter hid it (the specimen sat parked for three days). CPU stays the admission test
+    // for everything else; ownership admits this one.
+    const ownerGone = row.attribution.kind === "owned" && !ownerIsLive(row.attribution.ownerId)
     if (!/\b(bun|node)\b/u.test(command) || (cpu <= thresholds.reaperCpuThreshold && !ownerGone)) continue
     const key = identityKey(row)
     seen.add(key)
@@ -275,13 +291,13 @@ export function checkCanonicalReaper(
     const observedSeconds = Math.floor((observation.observedAt - suspect.firstSeen) / 1_000)
     if (row.attribution.kind === "owned") {
       if (suspect.samples < 3) continue
-      if (!liveNames.has(row.attribution.ownerId)) {
+      if (!ownerIsLive(row.attribution.ownerId)) {
         // Once per exact incarnation: the seat and the start time are what an operator needs to find this again.
         const signature = `owner-down\0${row.attribution.ownerId}\0${suspect.pid}\0${suspect.startTime}`
         if (suspect.lastUnknownSignature !== signature) {
           suspect.lastUnknownSignature = signature
           api.broadcast(
-            `health:reaper: PID ${suspect.pid} (${suspect.command}) START ${JSON.stringify(suspect.startTime)} at ${suspect.cpu}% CPU, observed for ${observedSeconds}s: its canonical owner ${row.attribution.ownerId} (via=${row.attribution.via}) is not a live recipient — the seat is down and this process outlived it. Stop it, or start a probe that must outlive its seat through \`hab run\`; ${diagnosticContext(observation)}`,
+            `health:reaper: PID ${suspect.pid} (${suspect.command}) START ${JSON.stringify(suspect.startTime)} at ${suspect.cpu}% CPU, observed for ${observedSeconds}s: its canonical owner ${row.attribution.ownerId} (via=${row.attribution.via}) is not live — no live recipient and no owner process in this census — so this process outlived its owner. Stop it if it is yours, or start a probe that must outlive its owner through \`hab run\`; ${diagnosticContext(observation)}`,
             "health:reaper:owner-down",
             undefined,
             { delivery: "push", topic: "health:reaper:owner-down" },
