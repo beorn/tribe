@@ -174,6 +174,7 @@ async function registerLaunch(
   providerLaunchId: string,
 ): Promise<{ client: TribeLaunchClient; joinRetries: number; launchId: string; processId: number }> {
   let lastError: unknown
+  const attemptedClients = new Set<TribeLaunchClient>()
   for (let attempt = 0; attempt < CONNECT_ATTEMPTS; attempt++) {
     let client: TribeLaunchClient | undefined
     try {
@@ -184,6 +185,10 @@ async function registerLaunch(
       // against what the daemon keyed (@cto b58e4715).
       const byToken = request.idToken !== undefined
       client = await deps.connect(deps.socketPath(), { callTimeoutMs: CONNECT_TIMEOUT_MS })
+      // A one-shot owns one transport. Its injected connector may return the client this bootstrap already closed;
+      // preserve the failure that closed it instead of replacing that refusal with a call on an ended socket.
+      if (attemptedClients.has(client)) throw lastError
+      attemptedClients.add(client)
       const registration = (await client.call("register", {
         name: request.name,
         role: "member",

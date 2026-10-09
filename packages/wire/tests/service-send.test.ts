@@ -16,7 +16,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterEach, describe, expect, it } from "vitest"
-import { launchSender, tribeDaemonCalls } from "../src/service-send.ts"
+import { describeDaemonOutcome, launchSender, tribeDaemonCalls } from "../src/service-send.ts"
 import { launchToken } from "./launch-token.ts"
 
 const SEAT = "@dev/2"
@@ -41,7 +41,7 @@ function actorOf(token: string): string | undefined {
  * A daemon that keys each register on the launch id it was sent and lists that member, and refuses a register whose
  * token names another actor (identity-name-mismatch, as the daemon's with-dispatcher.ts does); it records every call.
  */
-async function fakeDaemon(): Promise<{
+async function fakeDaemon(registrationRefusal?: string): Promise<{
   socketPath: string
   calls: Array<{ method: string; params: Record<string, unknown> }>
 }> {
@@ -62,6 +62,20 @@ async function fakeDaemon(): Promise<{
         calls.push({ method: request.method, params })
         let result: unknown = { error: `unexpected call ${request.method}` }
         const actor = typeof params["idToken"] === "string" ? actorOf(params["idToken"]) : undefined
+        if (request.method === "register" && registrationRefusal !== undefined) {
+          socket.write(
+            `${JSON.stringify({
+              jsonrpc: "2.0",
+              id: request.id,
+              error: {
+                code: -32003,
+                message: registrationRefusal,
+                data: { kind: "identity-contradicted" },
+              },
+            })}\n`,
+          )
+          continue
+        }
         if (request.method === "register" && actor !== undefined && actor !== params["name"]) {
           const error = {
             code: -32602,
@@ -135,6 +149,24 @@ async function fakeDaemon(): Promise<{
 }
 
 describe("the one sender registers as what its launch's token names (25074 3d-1c)", () => {
+  /**
+   * @failure A register refusal is replaced by a timeout when the one-shot bootstrap retries its closed client.
+   * @level l1
+   * @consumer 28263 caller and incident page preserve the daemon's instance-is-live rule
+   * @testonly none
+   */
+  it("preserves a registration refusal through the caller and page outcome formatter", async () => {
+    const refusal = "instance-is-live: longproc-reading launch longproc-reading:probe generation 0 is not live"
+    const { socketPath, calls } = await fakeDaemon(refusal)
+    const outcome = await tribeDaemonCalls("longproc-reading", {
+      socketPath,
+      deadlineMs: 1000,
+      env: { HAB_ID_TOKEN: launchToken("longproc-reading:probe", "longproc-reading", "service") },
+    }).pendingForEmitter("longproc-reading")
+    expect(describeDaemonOutcome(outcome)).toContain(refusal)
+    expect(calls.map((call) => call.method)).toEqual(["register"])
+  })
+
   // 28044 AC1: handler tests cannot prove that a one-shot caller registers before its emitter read.
   it("registers the service launch before reading its complete emitter snapshot", async () => {
     const { socketPath, calls } = await fakeDaemon()
