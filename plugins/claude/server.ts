@@ -87,20 +87,36 @@ function processExists(pid: number): boolean {
 }
 
 /**
+ * Why the wait for the daemon's landing root ended. `stopped` and `unpublished` both carry no root, and the caller
+ * must tell them apart: only `unpublished` is the cold-start refusal. A `resolved` root still needs one stop
+ * re-check before the spawn, because a stop handler can run while the reply is already in flight (28380).
+ */
+type AdapterCodeRoot =
+  | { readonly kind: "resolved"; readonly root: string }
+  | { readonly kind: "stopped" }
+  | { readonly kind: "unpublished" }
+
+/**
  * The landing root the daemon publishes, waited for with one named stderr line per attempt (27531). A COLD START
  * gives up after the measured window, because the host is waiting on this process for its MCP handshake; a RESPAWN
- * never gives up, because the host's MCP endpoint has to survive a daemon that is merely restarting. Returns null
- * only when a cold start exhausted its window.
+ * never gives up, because the host's MCP endpoint has to survive a daemon that is merely restarting. BOTH waits end
+ * on the supervisor's own stop condition (28380): `isStopping` is read before every attempt, so a stop that arrives
+ * while this is parked on the daemon ends the retry instead of leaving the supervisor waiting behind a host that has
+ * already gone.
  */
-async function resolveAdapterCodeRoot(isFirstSpawn: () => boolean): Promise<string | null> {
+async function resolveAdapterCodeRoot(
+  isFirstSpawn: () => boolean,
+  isStopping: () => boolean,
+): Promise<AdapterCodeRoot> {
   const windowMs = codeRootWaitWindowMs(process.env, (line) => process.stderr.write(`${line}\n`))
   const waitStartedAt = Date.now()
   let attempt = 0
   for (;;) {
+    if (isStopping()) return { kind: "stopped" }
     let failure: string
     try {
       const view = await readDaemonCodeView(DAEMON_SOCKET_PATH)
-      if (view.root !== null) return view.root
+      if (view.root !== null) return { kind: "resolved", root: view.root }
       failure = "the daemon answered but published no code root (daemon.code_identity.root absent)"
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error)
@@ -113,7 +129,7 @@ async function resolveAdapterCodeRoot(isFirstSpawn: () => boolean): Promise<stri
       `tribe plugin supervisor: no landing root to spawn the adapter from (${failure}); attempt ${attempt + 1}` +
         (decision.giveUp ? `; ${decision.reason}\n` : `, retrying in ${decision.retryDelayMs} ms\n`),
     )
-    if (decision.giveUp) return null
+    if (decision.giveUp) return { kind: "unpublished" }
     await waitForRetry(decision.retryDelayMs)
     attempt += 1
   }
@@ -184,8 +200,11 @@ async function superviseAdapter(): Promise<void> {
 
   while (!stopping) {
     const startedAt = Date.now()
-    const codeRoot = await resolveAdapterCodeRoot(() => firstSpawn)
-    if (codeRoot === null) {
+    const resolution = await resolveAdapterCodeRoot(
+      () => firstSpawn,
+      () => stopping,
+    )
+    if (resolution.kind === "unpublished") {
       process.stderr.write(
         "tribe plugin supervisor: refused to start the adapter without a daemon-published landing root; " +
           "the host session needs a running tribe daemon (exit 2)\n",
@@ -193,6 +212,16 @@ async function superviseAdapter(): Promise<void> {
       process.exitCode = 2
       return
     }
+    // A stop handler may have run while that reply was in flight, and neither the wait nor this path used to look
+    // (28380): a child born now would outlive the host that just went away, and the forwarded signal has no active
+    // child to reach. The stop is named, because a supervisor that quits without a line is a silent error.
+    if (resolution.kind === "stopped" || stopping) {
+      process.stderr.write(
+        "tribe plugin supervisor: stop observed while waiting for the daemon's landing root; no adapter was started\n",
+      )
+      return
+    }
+    const codeRoot = resolution.root
     const canResumeJoined = resumeJoined && resumeName !== undefined
     const stdio: Array<"inherit" | "ignore" | "ipc" | number> = ["inherit", "inherit", "inherit", "ipc"]
     active = spawn(process.execPath, [adapterEntryForRoot(codeRoot), ...process.argv.slice(2)], {
