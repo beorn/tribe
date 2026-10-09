@@ -1556,7 +1556,18 @@ function persistDeliveryLedger(now: number): void {
     saveDeliveryLedger(deliveryLedgerFilePath, deliveryLedgerState)
   } catch (err) {
     // NO SILENT ERRORS: a ledger we could not persist must not read as a clean 0.
-    log.warn?.(`Failed to persist tribe delivery ledger: ${err instanceof Error ? err.message : String(err)}`)
+    const message = err instanceof Error ? err.message : String(err)
+    // #28283 - the failed write leaves a HOLE in this window's durability: a
+    // restart resumes the last file that landed, so every count between that
+    // write and this one is gone with no signal on disk. Mark THIS window a gap
+    // in memory and carry it, so the next save that lands writes a window the
+    // report reads as unmeasured (complete:false, alertInconclusive) instead of
+    // a silent complete total.
+    deliveryLedgerState = {
+      ...deliveryLedgerState,
+      coverage: { ...deliveryLedgerState.coverage, gap: true, gapReason: "write" },
+    }
+    log.error?.(`Failed to persist tribe delivery ledger ${deliveryLedgerFilePath}: ${message}`)
   }
 }
 

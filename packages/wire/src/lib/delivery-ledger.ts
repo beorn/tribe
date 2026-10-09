@@ -13,6 +13,11 @@
  *
  * NO INVENTED ZERO: a ledger that exists but cannot be read back yields coverage
  * `gap: true` with a reason, and the report must render that, never a clean 0.
+ * A save that FAILED is the same class from the other side (#28283): the counts
+ * are whole in memory, but a restart would resume the last file that did land,
+ * so the window is not provably complete. Its reason is `write`, named apart
+ * from `unreadable` so an operator is not sent looking for a corrupt file when
+ * the disk refused a write.
  * A non-representable `windowStartMs`/window end/`updatedAtMs`/`costSinceMs` is
  * a SCHEMA gap: the report formats those as ISO dates, and one such row must not
  * crash every other row.
@@ -40,7 +45,17 @@ export const TRIBE_DELIVERY_LEDGER_DIR_ENV = "TRIBE_DELIVERY_LEDGER_DIR"
 export const DELIVERY_LEDGER_VERSION = 2
 const DELIVERY_LEDGER_VERSION_LEGACY = 1
 
-export type DeliveryGapReason = "none" | "unreadable" | "schema"
+export type DeliveryGapReason =
+  | "none"
+  | "unreadable"
+  | "schema"
+  /**
+   * #28283 - a save of this window could not be written. The window's counts are
+   * complete in memory, but the durable copy is behind, so the window can never
+   * be read back as a complete total. Set in memory by the adapter at the failed
+   * save and carried by the next save that lands.
+   */
+  | "write"
 
 export type DeliveryLedgerCoverage = {
   /** Adapter processes that resumed this window's ledger (a restart count). */
@@ -299,7 +314,11 @@ export function loadDeliveryLedger(path: string): DeliveryLedgerLoad {
     const restarts = typeof parsed.coverage?.restarts === "number" ? parsed.coverage.restarts : 0
     const gap = parsed.coverage?.gap === true
     const gapReason =
-      parsed.coverage?.gapReason === "unreadable" || parsed.coverage?.gapReason === "schema"
+      parsed.coverage?.gapReason === "unreadable" ||
+      parsed.coverage?.gapReason === "schema" ||
+      // #28283 - a failed save names itself; an older reader that does not know
+      // this reason still reads a gap (it degrades to "schema"), never a total.
+      parsed.coverage?.gapReason === "write"
         ? parsed.coverage.gapReason
         : gap
           ? "schema"

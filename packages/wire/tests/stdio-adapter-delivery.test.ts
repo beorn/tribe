@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -8,6 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeError, makeNotification, makeResponse } from "../src/rpc.ts"
 import { MAX_REPLAY_EVENTS } from "../src/lib/replay-cap.ts"
+import { loadDeliveryLedger } from "../src/lib/delivery-ledger.ts"
+import { buildFleetDeliveryReport } from "../src/lib/delivery-report.ts"
 import { launchEnvironment } from "./launch-token.ts"
 
 const ADAPTER = resolve(dirname(fileURLToPath(import.meta.url)), "../src/stdio-adapter.ts")
@@ -2039,6 +2041,81 @@ describe("stdio adapter delivery modes", () => {
     expect(ledger.counters.duplicatePresentations).toBe(2)
     expect(ledger.counters.suppressed).toBe(2)
     expect([...ledger.ids].sort()).toEqual(["count-row-a", "count-row-b"])
+  })
+
+  // #28283 — a save that FAILS must not leave a window that later reads as a
+  // complete total. Driven through the real adapter: the ledger file's directory
+  // is made read-only to fail the write, then restored, and the write that finally
+  // lands must carry the gap, so the report reads the window unmeasured rather
+  // than as a silent complete total. The failure must also be logged, not
+  // swallowed — the "loud" half of the acceptance.
+  it("marks the window a gap when a ledger save fails, so it never reads as a complete total (#28283)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const recentTs = new Date().toISOString()
+    const fetchAttention = {
+      actionable_unread: [{ id: "gap-row-a", type: "request", from: "@chief", content: "GAP-A", ts: recentTs }],
+      pending_balls: [],
+    }
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
+    const ledgerDir = join(tmpDir, "ledger")
+    mkdirSync(ledgerDir)
+    const ledgerPath = join(ledgerDir, "pane.json")
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_DELIVERY_LEDGER: ledgerPath,
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    collectStdoutJson(child)
+    const drain = async (label: string) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients[0]?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 250))
+    }
+    const loadedState = () => loadDeliveryLedger(ledgerPath).state
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    await drain("first counted drain")
+    await waitForCondition(() => existsSync(ledgerPath), "first delivery ledger written")
+    expect(loadedState()?.coverage.gap).toBe(false)
+
+    try {
+      // Refuse the next write: a directory we cannot create a file in fails the save.
+      chmodSync(ledgerDir, 0o500)
+      await drain("drain with an unwritable ledger directory")
+      await waitForCondition(
+        () => readFileSync(join(tmpDir, "adapter.log"), "utf8").includes("Failed to persist tribe delivery ledger"),
+        "the failed save must be logged, not swallowed",
+      )
+      // The failed write left only the last window that landed — still clean on disk.
+      expect(loadedState()?.coverage.gap).toBe(false)
+    } finally {
+      chmodSync(ledgerDir, 0o700)
+    }
+
+    await drain("drain after the ledger directory is writable again")
+    await waitForCondition(() => loadedState()?.coverage.gap === true, "the gap carried by the next landed save")
+    const landed = loadedState()
+    expect(landed?.coverage.gapReason).toBe("write")
+    // The report reads the window unmeasured, never a clean total, and never fires the alert.
+    const row = buildFleetDeliveryReport({ states: landed ? [landed] : [], now: Date.now() }).seats.find(
+      (seat) => seat.pane === "@agent/test",
+    )
+    expect(row?.complete).toBe(false)
+    expect(row?.alertInconclusive).toBe(true)
+    expect(row?.alert).toBe(false)
   })
 
   // #28378 — a channel notification the host transport REJECTED is not a
