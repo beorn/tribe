@@ -91,6 +91,37 @@ describe("recall regex mode scope", () => {
     expect(envelope.results.map((r) => r.sessionId)).toEqual([SESSION_A])
   })
 
+  test("scopes a subagent to its compound id and reports that id, never its parent's", async () => {
+    const parent = "3b1c2d4e-3333-4a5b-9c6d-777777777777"
+    const subDir = join(claudeDir, "projects", "proj-alpha", parent, "subagents")
+    mkdirSync(subDir, { recursive: true })
+    // The transcript shape the indexer documents: the RECORD carries the
+    // parent's sessionId and the basename carries only the agent name. Neither
+    // is the file's canonical identity, which is `<parent>:<agent>`.
+    writeFileSync(
+      join(subDir, "agent-sub1.jsonl"),
+      JSON.stringify({
+        type: "assistant",
+        sessionId: parent,
+        timestamp: "2026-10-09T19:05:00.000Z",
+        message: { role: "assistant", content: `${TOKEN} subagent body` },
+      }) + "\n",
+      "utf8",
+    )
+
+    await cmdSearch(TOKEN, {
+      grep: true,
+      raw: true,
+      session: `${parent}:agent-sub1`,
+      json: true,
+      limit: "50",
+      refresh: false,
+    })
+
+    const envelope = JSON.parse(stdout()) as { results: { sessionId: string }[] }
+    expect(envelope.results.map((r) => r.sessionId)).toEqual([`${parent}:agent-sub1`])
+  })
+
   test("refuses by name when the scoped session has no Claude transcript, never widening", async () => {
     await cmdSearch(TOKEN, {
       grep: true,

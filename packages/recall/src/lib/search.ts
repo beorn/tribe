@@ -1249,12 +1249,16 @@ async function cmdGrep(
     const relativePath = path.relative(PROJECTS_DIR, sessionFile)
     const projectName = relativePath.split(path.sep)[0] || ""
 
+    // One mapping, the indexer's own, derived once per file: parseSessionPath
+    // is what names a transcript's session at index time, so the regex scan
+    // both SCOPES and REPORTS by that identity. A subagent transcript's record
+    // carries its parent's sessionId and its basename carries only the agent
+    // name, so reading either of those would report the wrong session for the
+    // file the scan actually read.
+    const sessionInfo = parseSessionPath(relativePath, sessionFile)
+
     if (session) {
-      // One mapping, the indexer's own: parseSessionPath is what names a
-      // transcript's session at index time, so the regex scan scopes by the
-      // same identity an indexed query would.
-      const info = parseSessionPath(relativePath, sessionFile)
-      if (info.id !== session) continue
+      if (sessionInfo.id !== session) continue
       sessionFilesSeen++
     }
 
@@ -1287,7 +1291,7 @@ async function cmdGrep(
 
           matches.push({
             sessionFile: relativePath,
-            sessionId: record.sessionId || path.basename(sessionFile, ".jsonl"),
+            sessionId: sessionInfo.id,
             timestamp: record.timestamp || "",
             type: record.type || "unknown",
             lineNumber: j + 1,
