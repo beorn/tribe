@@ -159,14 +159,15 @@ export function deliveryLedgerLegacyPath(opts: { pane: string; env: NodeJS.Proce
 /**
  * #28376 — the ledger's OWNER is its persisted `pane`, never its file name.
  *
- * `deliveryLedgerPaneKey` is a sanitizer, not a bijection: `/` becomes `_`, so
- * the two VALID personas `@dev/6` and `@dev_6` both resolve to
- * `tribe-delivery-@dev_6.json` in one habitat. The file name is therefore a
- * hint; the identity is what the file records about itself. A window whose
- * recorded owner is not the caller is NOT the caller's window: adopting it seeds
- * this pane's forwarded-id set, counters and summary-throttle fingerprint from
- * another persona's handoffs, and the ids it never received then suppress a
- * broadcast handoff that was never made to it.
+ * The key is now injective (`deliveryLedgerPaneKey`) and namespaced, but the
+ * LEGACY key was a sanitizer, not a bijection: `/` became `_`, so the two VALID
+ * personas `@dev/6` and `@dev_6` both resolved to one file, and a legacy file
+ * that `resumeDeliveryLedger` adopts for its owner may still be another
+ * persona's. The file name is therefore a hint; the identity is what the file
+ * records about itself. A window whose recorded owner is not the caller is NOT
+ * the caller's window: adopting it seeds this pane's forwarded-id set, counters
+ * and summary-throttle fingerprint from another persona's handoffs, and the ids
+ * it never received then suppress a broadcast handoff that was never made to it.
  */
 export function deliveryLedgerOwnerMismatch(state: DeliveryLedgerState | null, pane: string): boolean {
   return state !== null && state.pane !== pane

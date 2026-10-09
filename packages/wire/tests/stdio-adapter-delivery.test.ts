@@ -2395,7 +2395,9 @@ describe("stdio adapter delivery modes", () => {
     }
 
     // ---- @dev_6 first: the colliding persona must NOT inherit @dev/6's id. ----
-    const underscoreRow = "row-handed-to-dev-6-underscore"
+    // The row served to @dev_6 is the SAME id the legacy file records for @dev/6,
+    // so pre-fix (when @dev_6 restored that id set) this exact row read as already
+    // handed off and the assertion below fails: genuine RED.
     const underscoreText = await runAdapter({
       socket: join(tmpDir, "tribe-underscore.sock"),
       ackName: "@dev_6",
@@ -2403,7 +2405,7 @@ describe("stdio adapter delivery modes", () => {
       fetchAttention: {
         actionable_unread: [
           {
-            id: underscoreRow,
+            id: dev6Row,
             type: "verdict",
             from: "@chief",
             content: "UNDERSCORE-ROW",
@@ -2413,8 +2415,6 @@ describe("stdio adapter delivery modes", () => {
         pending_balls: [],
       },
     })
-    // RED before the fix: @dev/6's id was restored into the forwarded set, so
-    // @dev_6's own row read as already handed off and never reached this host.
     expect(underscoreText.some((line) => line.includes("UNDERSCORE-ROW"))).toBe(true)
     await waitForCondition(() => existsSync(v2Dev6), "@dev_6 persisted its own v2 ledger")
     const underscoreLedger = ledgerOf(v2Dev6)
