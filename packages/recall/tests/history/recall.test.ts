@@ -1,13 +1,14 @@
-import { describe, test, expect, beforeAll } from "vitest"
+import { describe, test, expect, beforeAll, afterAll } from "vitest"
 import * as fs from "fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { safeRemoveSync } from "removely"
 import { parseTimeToMs, setRecallLogging, boostedRank, expandQueryVariants } from "../../src/history/recall"
 import type { RecallResult } from "../../src/history/recall"
 import { synthesizeResults } from "../../src/history/synthesize"
 import { SynthesisFailure } from "../../src/history/recall-shared"
 import type { LlmBackend, LlmModel } from "../../src/lib/llm-backend"
-import { toFts5Query, DB_PATH, closeDb, getDb } from "../../src/history/db"
+import { toFts5Query, closeDb, getDb } from "../../src/history/db"
 
 // Suppress verbose [recall] logging during tests
 beforeAll(() => {
@@ -295,11 +296,55 @@ describe("expandQueryVariants", () => {
 })
 
 // ============================================================================
-// recall() integration tests (live DB rows skip when it is absent)
+// recall() integration tests, against a seeded fixture DB
 // ============================================================================
 
 describe("recall integration", () => {
-  const dbExists = fs.existsSync(DB_PATH)
+  // Every row reads a fixture DB seeded here (25501). Rows that read the operator's live history skipped in a seat
+  // (no DB under the test HOME) and, where a DB existed, missed fixed budgets under load in guard 2's runs.
+  let fixtureDir = ""
+  let previousDbPath: string | undefined
+  beforeAll(() => {
+    previousDbPath = process.env.RECALL_DB_PATH
+    fixtureDir = fs.mkdtempSync(join(tmpdir(), "recall-integration-"))
+    closeDb()
+    process.env.RECALL_DB_PATH = join(fixtureDir, "fixture.db")
+    const db = getDb()
+    const insertSession = db.prepare(
+      `INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    const insertMessage = db.prepare(
+      "INSERT INTO messages (uuid, session_id, type, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+    )
+    const now = Date.now()
+    const hour = 60 * 60_000
+    const sessions: ReadonlyArray<readonly [string, number, ReadonlyArray<readonly [string, string]>]> = [
+      ["fresh", hour, [["user", "the test runner failed on the first test"]]],
+      [
+        "repeated",
+        3 * hour,
+        [
+          ["user", "the test fixture is seeded twice in one session"],
+          ["user", "the second test message in the same session"],
+          ["assistant", "the function under test now passes"],
+        ],
+      ],
+      ["older", 2 * 24 * hour, [["user", "a test of the function that returns early"]]],
+      ["oldest", 10 * 24 * hour, [["assistant", "the function signature changed in this test"]]],
+    ]
+    for (const [id, ageMs, messages] of sessions) {
+      const timestamp = now - ageMs
+      insertSession.run(id, "/fixture", `/fixture/${id}.jsonl`, timestamp, timestamp, messages.length, id)
+      messages.forEach(([type, content], index) => insertMessage.run(`${id}-${index}`, id, type, content, timestamp))
+    }
+  })
+  afterAll(() => {
+    closeDb()
+    if (previousDbPath === undefined) delete process.env.RECALL_DB_PATH
+    else process.env.RECALL_DB_PATH = previousDbPath
+    safeRemoveSync(fixtureDir, { within: tmpdir(), allowMissing: true })
+  })
 
   // Dynamic import to avoid module-level side effects when DB doesn't exist
   async function getRecall(): Promise<(query: string, options?: Record<string, unknown>) => Promise<RecallResult>> {
@@ -307,33 +352,25 @@ describe("recall integration", () => {
     return mod.recall
   }
 
-  test.skipIf(!dbExists)(
-    "returns RecallResult shape in raw mode",
-    async () => {
-      const recall = await getRecall()
-      const result = await recall("test", { raw: true, limit: 3 })
+  test("returns RecallResult shape in raw mode", async () => {
+    const recall = await getRecall()
+    const result = await recall("test", { raw: true, limit: 3 })
 
-      expect(result).toHaveProperty("query", "test")
-      expect(result).toHaveProperty("synthesis")
-      expect(result).toHaveProperty("results")
-      expect(result).toHaveProperty("durationMs")
-      expect(Array.isArray(result.results)).toBe(true)
+    expect(result).toHaveProperty("query", "test")
+    expect(result).toHaveProperty("synthesis")
+    expect(result).toHaveProperty("results")
+    expect(result).toHaveProperty("durationMs")
+    expect(Array.isArray(result.results)).toBe(true)
 
-      // Raw mode should not have synthesis
-      expect(result.synthesis).toBeNull()
-    },
-    15_000,
-  )
+    // Raw mode should not have synthesis
+    expect(result.synthesis).toBeNull()
+  }, 15_000)
 
-  test.skipIf(!dbExists)(
-    "respects limit option",
-    async () => {
-      const recall = await getRecall()
-      const result = await recall("test", { raw: true, limit: 2 })
-      expect(result.results.length).toBeLessThanOrEqual(2)
-    },
-    15_000,
-  )
+  test("respects limit option", async () => {
+    const recall = await getRecall()
+    const result = await recall("test", { raw: true, limit: 2 })
+    expect(result.results.length).toBe(2)
+  }, 15_000)
 
   test("returns fewer results for narrow time filter", async () => {
     const previousDbPath = process.env.RECALL_DB_PATH
@@ -372,100 +409,79 @@ describe("recall integration", () => {
     }
   }, 15_000)
 
-  test.skipIf(!dbExists)(
-    "returns empty when since is invalid",
-    async () => {
-      const recall = await getRecall()
-      // Invalid since should cause early return with empty results
-      const result = await recall("test", { raw: true, since: "invalid" })
-      expect(result.results).toHaveLength(0)
-      expect(result.synthesis).toBeNull()
-    },
-    15_000,
-  )
+  test("returns empty when since is invalid", async () => {
+    const recall = await getRecall()
+    // Invalid since should cause early return with empty results
+    const result = await recall("test", { raw: true, since: "invalid" })
+    expect(result.results).toHaveLength(0)
+    expect(result.synthesis).toBeNull()
+  }, 15_000)
 
-  test.skipIf(!dbExists)(
-    "result items have correct shape",
-    async () => {
-      const recall = await getRecall()
-      const result = await recall("function", { raw: true, limit: 1 })
-      if (result.results.length > 0) {
-        const item = result.results[0]!
-        expect(item).toHaveProperty("type")
-        expect(item).toHaveProperty("sessionId")
-        expect(item).toHaveProperty("sessionTitle")
-        expect(item).toHaveProperty("timestamp")
-        expect(item).toHaveProperty("snippet")
-        expect(item).toHaveProperty("rank")
-        expect(typeof item.timestamp).toBe("number")
-        expect(typeof item.rank).toBe("number")
-        expect(typeof item.snippet).toBe("string")
-        expect(typeof item.sessionId).toBe("string")
-        // Full ContentType surface (history/types.ts): recall() searches messages,
-        // session-scoped content, and project-scoped content (bead/session_memory/
-        // project_memory/doc/claude_md/llm_research), plus vault FTS when a .km
-        // tree is present — any of these can rank #1 for a broad query like "function".
-        expect([
-          "message",
-          "plan",
-          "summary",
-          "todo",
-          "first_prompt",
-          "bead",
-          "session_memory",
-          "project_memory",
-          "doc",
-          "claude_md",
-          "llm_research",
-          "vault",
-        ]).toContain(item.type)
-      }
-    },
-    15_000,
-  )
+  test("result items have correct shape", async () => {
+    const recall = await getRecall()
+    const result = await recall("function", { raw: true, limit: 1 })
+    expect(result.results).toHaveLength(1)
+    const item = result.results[0]!
+    expect(item).toHaveProperty("type")
+    expect(item).toHaveProperty("sessionId")
+    expect(item).toHaveProperty("sessionTitle")
+    expect(item).toHaveProperty("timestamp")
+    expect(item).toHaveProperty("snippet")
+    expect(item).toHaveProperty("rank")
+    expect(typeof item.timestamp).toBe("number")
+    expect(typeof item.rank).toBe("number")
+    expect(typeof item.snippet).toBe("string")
+    expect(typeof item.sessionId).toBe("string")
+    // Full ContentType surface (history/types.ts): recall() searches messages,
+    // session-scoped content, and project-scoped content (bead/session_memory/
+    // project_memory/doc/claude_md/llm_research), plus vault FTS when a .km
+    // tree is present — any of these can rank #1 for a broad query like "function".
+    expect([
+      "message",
+      "plan",
+      "summary",
+      "todo",
+      "first_prompt",
+      "bead",
+      "session_memory",
+      "project_memory",
+      "doc",
+      "claude_md",
+      "llm_research",
+      "vault",
+    ]).toContain(item.type)
+  }, 15_000)
 
-  test.skipIf(!dbExists)(
-    "deduplicates by session+type",
-    async () => {
-      const recall = await getRecall()
-      const result = await recall("the", { raw: true, limit: 10 })
-      // Each session+type combo should appear at most once
-      const keys = result.results.map((r) => `${r.sessionId}:${r.type}`)
-      const uniqueKeys = new Set(keys)
-      expect(keys.length).toBe(uniqueKeys.size)
-    },
-    30_000,
-  )
+  test("deduplicates by session+type", async () => {
+    const recall = await getRecall()
+    const result = await recall("the", { raw: true, limit: 10 })
+    // Each session+type combo should appear at most once
+    const keys = result.results.map((r) => `${r.sessionId}:${r.type}`)
+    expect(keys.filter((key) => key.startsWith("repeated:"))).not.toHaveLength(0)
+    const uniqueKeys = new Set(keys)
+    expect(keys.length).toBe(uniqueKeys.size)
+  }, 30_000)
 
-  test.skipIf(!dbExists)(
-    "results are sorted by recency-boosted rank",
-    async () => {
-      const recall = await getRecall()
-      const result = await recall("test", { raw: true, limit: 10 })
-      const sortEpsilon = 1e-7
-      if (result.results.length > 1) {
-        for (let i = 1; i < result.results.length; i++) {
-          const prev = result.results[i - 1]!
-          const curr = result.results[i]!
-          const prevScore = boostedRank(prev.rank, prev.timestamp)
-          const currScore = boostedRank(curr.rank, curr.timestamp)
-          expect(currScore).toBeGreaterThanOrEqual(prevScore - sortEpsilon)
-        }
-      }
-    },
-    15_000,
-  )
+  test("results are sorted by recency-boosted rank", async () => {
+    const recall = await getRecall()
+    const result = await recall("test", { raw: true, limit: 10 })
+    const sortEpsilon = 1e-7
+    expect(result.results.length).toBeGreaterThan(1)
+    for (let i = 1; i < result.results.length; i++) {
+      const prev = result.results[i - 1]!
+      const curr = result.results[i]!
+      const prevScore = boostedRank(prev.rank, prev.timestamp)
+      const currScore = boostedRank(curr.rank, curr.timestamp)
+      expect(currScore).toBeGreaterThanOrEqual(prevScore - sortEpsilon)
+    }
+  }, 15_000)
 
-  test.skipIf(!dbExists)(
-    "durationMs is a positive number",
-    async () => {
-      const recall = await getRecall()
-      const result = await recall("test", { raw: true, limit: 1 })
-      expect(result.durationMs).toBeGreaterThanOrEqual(0)
-      expect(typeof result.durationMs).toBe("number")
-    },
-    15_000,
-  )
+  test("durationMs is a positive number", async () => {
+    const recall = await getRecall()
+    const result = await recall("test", { raw: true, limit: 1 })
+    expect(result.durationMs).toBeGreaterThanOrEqual(0)
+    expect(typeof result.durationMs).toBe("number")
+  }, 15_000)
 })
 
 describe("synthesizeResults", () => {
