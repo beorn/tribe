@@ -4,11 +4,19 @@
  * Provides structured extraction of session transcripts for summarization
  * and indexing. Samples from beginning, middle, and end of sessions to
  * capture goals, work, and outcomes.
+ *
+ * 27702: the transcript is never materialised. Both the metadata scan and the
+ * sampled content pass stream the file through the shared bounded reader
+ * (`./qmd-export`), so a multi-GB transcript costs a fixed read buffer plus at
+ * most the sampled records. A record over the reader's raw-record budget keeps
+ * its position and renders as a named placeholder instead of skipping the whole
+ * session.
  */
 
 import * as fs from "fs"
 import * as path from "path"
 import { getDb, closeDb, PROJECTS_DIR } from "../history/db"
+import { forEachJsonlLine, type OversizedJsonlRecord } from "../qmd-export"
 
 // ============================================================================
 // Types
@@ -22,7 +30,48 @@ export interface SessionExtract {
   isSubAgent: boolean
   content: string // extracted text content
   sizeBytes: number // JSONL file size
+  /** Why no usable content was produced (e.g. "changed-input"); absent when `content` is usable. */
+  reason?: string
 }
+
+/** A raw record sampled from a transcript: its decoded line, or the account of an elided one. */
+export interface SampledRecord {
+  /** The record's JSON text, or null when the reader elided it as over-budget. */
+  line: string | null
+  /** Present only for an elided record — a named account, never its bytes. */
+  oversized?: OversizedJsonlRecord
+}
+
+/**
+ * One identity-checked, bounded two-pass scan: metadata plus the sampled raw
+ * records, WITHOUT building the summary content string. The sole production
+ * caller decides whether content is needed after cheap admission.
+ */
+export interface SessionScan {
+  id: string
+  shortId: string
+  title: string | null
+  time: string
+  isSubAgent: boolean
+  sizeBytes: number
+  /** Why no usable transcript remained (e.g. "changed-input"); absent when the scan is usable. */
+  reason?: string
+  /** The sampled records in order; empty when `reason` is set. */
+  records: SampledRecord[]
+}
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/** Legacy sampling window: this many records from each of beginning, middle and end. */
+const SAMPLE_PER_SECTION = 40
+/** Legacy cap on the rendered summary input. */
+const MAX_CONTENT_CHARS = 4000
+/** Legacy threshold below which a text block is treated as noise, not content. */
+const MIN_TEXT_LENGTH = 20
+/** Legacy cap on the quick sub-agent probe's head scan. */
+const QUICK_SCAN_RECORDS = 50
 
 // ============================================================================
 // Public API
@@ -53,154 +102,324 @@ export function findSessionJsonl(sessionId: string): string | null {
 }
 
 /**
+ * Scan a session's transcript without constructing content: identity-checked
+ * metadata (sub-agent classification from the sampled records) plus the sampled
+ * raw records, kept so the caller can render content later without re-reading.
+ *
+ * Two bounded streaming passes: the first counts records to fix the sampling
+ * window, the second keeps only the sampled records. A transcript that changes
+ * mid-read (even with its mtime restored — ctime moves) yields a named
+ * "changed-input" result and no retry.
+ */
+export function scanSessionTranscript(
+  sessionId: string,
+  opts?: { title?: string | null; createdAt?: number },
+): SessionScan | null {
+  const jsonlPath = findSessionJsonl(sessionId)
+  if (!jsonlPath) return null
+
+  const before = readFileIdentity(jsonlPath)
+  if (!before) return null
+
+  const shortId = sessionId.slice(0, 8)
+  const title = opts?.title ?? null
+  const time = formatTime(opts?.createdAt)
+
+  try {
+    const total = countJsonlRecords(jsonlPath)
+    const records = collectSampledRecords(jsonlPath, selectedRecordIndices(total))
+
+    const after = readFileIdentity(jsonlPath)
+    if (!after || !sameFileIdentity(before, after)) {
+      return {
+        id: sessionId,
+        shortId,
+        title,
+        time,
+        isSubAgent: false,
+        sizeBytes: after?.size ?? before.size,
+        reason: "changed-input",
+        records: [],
+      }
+    }
+
+    return {
+      id: sessionId,
+      shortId,
+      title,
+      time,
+      isSubAgent: !recordsCarryUserText(records),
+      sizeBytes: before.size,
+      records,
+    }
+  } catch {
+    // silent-fallback-allow: an unreadable transcript makes this session unavailable for extraction.
+    return null
+  }
+}
+
+/**
+ * Render sampled records into the bounded summary content string.
+ * Preserved from the legacy extractor: 120 sampled records maximum, a ~4 KB
+ * tail, and the same block/tool-use filtering.
+ */
+export function renderSessionContent(records: SampledRecord[]): { content: string; hasUserText: boolean } {
+  const messages: string[] = []
+  let hasUserText = false
+
+  for (const record of records) {
+    if (record.line === null) {
+      messages.push(oversizedPlaceholder(record.oversized))
+      continue
+    }
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const entry = JSON.parse(record.line) as any
+      if (entry.type !== "user" && entry.type !== "assistant") continue
+
+      const parts: string[] = []
+      const content = entry.message?.content
+      if (!Array.isArray(content)) continue
+
+      for (const block of content) {
+        if (typeof block === "string") {
+          if (block.length > MIN_TEXT_LENGTH) parts.push(block)
+          continue
+        }
+        if (!block || typeof block !== "object") continue
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const b = block as any
+        if (b.type === "text" && b.text && b.text.length > MIN_TEXT_LENGTH) {
+          parts.push(truncStr(b.text, 1500))
+          if (entry.type === "user") hasUserText = true
+        } else if (b.type === "tool_use") {
+          const summary = summarizeToolUse(b)
+          if (summary) parts.push(summary)
+        }
+        // Skip tool_result (large file dumps, noise)
+      }
+
+      if (parts.length > 0) {
+        messages.push(`[${entry.type}]: ${parts.join(" | ")}`)
+      }
+    } catch {
+      // Skip unparseable lines
+    }
+  }
+
+  let joined = messages.join("\n")
+  if (joined.length > MAX_CONTENT_CHARS) {
+    joined = joined.slice(-MAX_CONTENT_CHARS)
+  }
+  return { content: joined, hasUserText }
+}
+
+/**
  * Extract structured content from a session's JSONL transcript.
- * Samples from beginning (40 lines), middle (40), and end (40) to
+ * Samples from beginning (40 records), middle (40), and end (40) to
  * capture initial goals, mid-session work, and final outcomes.
  */
 export function extractSessionContent(
   sessionId: string,
   opts?: { title?: string | null; createdAt?: number },
 ): SessionExtract | null {
-  const jsonlPath = findSessionJsonl(sessionId)
-  if (!jsonlPath) return null
+  const scan = scanSessionTranscript(sessionId, opts)
+  if (!scan) return null
 
-  let sizeBytes: number
-  try {
-    sizeBytes = fs.statSync(jsonlPath).size
-  } catch {
-    // silent-fallback-allow: unreadable transcript stat makes this session unavailable for extraction.
-    return null
+  if (scan.reason) {
+    return {
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
+      isSubAgent: scan.isSubAgent,
+      content: "",
+      sizeBytes: scan.sizeBytes,
+      reason: scan.reason,
+    }
   }
 
-  try {
-    const raw = fs.readFileSync(jsonlPath, "utf8")
-    const lines = raw.split("\n").filter(Boolean)
+  const { content } = renderSessionContent(scan.records)
+  if (content.length === 0) return null
 
-    const sampled = sampleLines(lines, 40)
-
-    const messages: string[] = []
-    let hasUserText = false
-
-    for (const line of sampled) {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const entry = JSON.parse(line) as any
-        if (entry.type !== "user" && entry.type !== "assistant") continue
-
-        const parts: string[] = []
-        const content = entry.message?.content
-        if (!Array.isArray(content)) continue
-
-        for (const block of content) {
-          if (typeof block === "string") {
-            if (block.length > 20) parts.push(block)
-            continue
-          }
-          if (!block || typeof block !== "object") continue
-
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const b = block as any
-          if (b.type === "text" && b.text && b.text.length > 20) {
-            parts.push(truncStr(b.text, 1500))
-            if (entry.type === "user") hasUserText = true
-          } else if (b.type === "tool_use") {
-            const summary = summarizeToolUse(b)
-            if (summary) parts.push(summary)
-          }
-          // Skip tool_result (large file dumps, noise)
-        }
-
-        if (parts.length > 0) {
-          messages.push(`[${entry.type}]: ${parts.join(" | ")}`)
-        }
-      } catch {
-        // Skip unparseable lines
-      }
-    }
-
-    if (messages.length === 0) return null
-
-    // Limit total to ~4KB
-    let joined = messages.join("\n")
-    if (joined.length > 4000) {
-      joined = joined.slice(-4000)
-    }
-
-    const shortId = sessionId.slice(0, 8)
-    const time = opts?.createdAt
-      ? new Date(opts.createdAt).toLocaleTimeString("en-US", {
-          hour: "2-digit",
-          minute: "2-digit",
-        })
-      : ""
-
-    return {
-      id: sessionId,
-      shortId,
-      title: opts?.title ?? null,
-      time,
-      isSubAgent: !hasUserText,
-      content: joined,
-      sizeBytes,
-    }
-  } catch {
-    // silent-fallback-allow: malformed transcript lines make this session unavailable for extraction.
-    return null
+  return {
+    id: scan.id,
+    shortId: scan.shortId,
+    title: scan.title,
+    time: scan.time,
+    isSubAgent: scan.isSubAgent,
+    content,
+    sizeBytes: scan.sizeBytes,
   }
 }
 
 /**
  * Quick check if a session is likely a sub-agent (no user text content).
- * Reads only the first 50 lines for speed.
+ * Streams at most the first 50 records and stops early.
  */
 export function isSubAgent(sessionId: string): boolean {
   const jsonlPath = findSessionJsonl(sessionId)
   if (!jsonlPath) return false
 
+  let scanned = 0
+  let sawUserText = false
   try {
-    const raw = fs.readFileSync(jsonlPath, "utf8")
-    const lines = raw.split("\n").filter(Boolean).slice(0, 50)
-
-    for (const line of lines) {
+    forEachJsonlLine(jsonlPath, (line) => {
+      scanned++
       try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const entry = JSON.parse(line) as any
-        if (entry.type !== "user") continue
-
-        const content = entry.message?.content
-        if (!Array.isArray(content)) continue
-
-        for (const block of content) {
-          if (typeof block === "string" && block.length > 0) return false
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          if (block && typeof block === "object" && (block as any).type === "text" && (block as any).text) {
-            return false
-          }
+        if (userRecordHasAnyText(JSON.parse(line))) {
+          sawUserText = true
+          return false
         }
       } catch {
         // Skip unparseable lines
       }
-    }
-
-    return true
+      return scanned >= QUICK_SCAN_RECORDS
+    })
   } catch {
     return false
   }
+
+  return !sawUserText
 }
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
-/** Sample lines from beginning, middle, and end of array. */
-function sampleLines(lines: string[], perSection: number): string[] {
-  if (lines.length <= perSection * 3) return lines
-  const start = lines.slice(0, perSection)
-  const midPoint = Math.floor(lines.length / 2)
-  const half = Math.floor(perSection / 2)
-  const middle = lines.slice(midPoint - half, midPoint + half)
-  const end = lines.slice(-perSection)
-  return [...start, ...middle, ...end]
+interface FileIdentity {
+  dev: number
+  ino: number
+  size: number
+  mtimeMs: number
+  ctimeMs: number
+}
+
+/** The transcript's identity fields, all of which must hold across a read. */
+function readFileIdentity(filePath: string): FileIdentity | null {
+  try {
+    const stat = fs.statSync(filePath)
+    return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs }
+  } catch {
+    // silent-fallback-allow: an unreadable transcript stat makes this session unavailable for extraction.
+    return null
+  }
+}
+
+/**
+ * ctime is the field mtime cannot fake: a same-size in-place rewrite with the
+ * mtime restored still moves ctime, so the pair of passes cannot silently
+ * summarize a mix of two file versions.
+ */
+function sameFileIdentity(a: FileIdentity, b: FileIdentity): boolean {
+  return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs
+}
+
+function formatTime(createdAt?: number): string {
+  return createdAt
+    ? new Date(createdAt).toLocaleTimeString("en-US", {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : ""
+}
+
+/** Pass 1: count the records the reader will report, without retaining them. */
+function countJsonlRecords(jsonlPath: string): number {
+  let count = 0
+  const tally = (): void => {
+    count++
+  }
+  forEachJsonlLine(jsonlPath, tally, { onOversized: tally })
+  return count
+}
+
+/**
+ * The legacy first/middle/last selection, computed from the record count: all
+ * records when there are `SAMPLE_PER_SECTION * 3` or fewer, otherwise the first
+ * 40, the 40 around the midpoint, and the last 40.
+ */
+function selectedRecordIndices(total: number): Set<number> | "all" {
+  const per = SAMPLE_PER_SECTION
+  if (total <= per * 3) return "all"
+
+  const midPoint = Math.floor(total / 2)
+  const half = Math.floor(per / 2)
+  const selected = new Set<number>()
+  for (let i = 0; i < per; i++) selected.add(i)
+  for (let i = midPoint - half; i < midPoint + half; i++) selected.add(i)
+  for (let i = total - per; i < total; i++) selected.add(i)
+  return selected
+}
+
+/**
+ * Pass 2: keep only the selected records. The reader reports one callback per
+ * non-blank record, in file order, so the running index is the record's
+ * position in N — over-budget records included, which is what preserves the
+ * sample's positions.
+ */
+function collectSampledRecords(jsonlPath: string, selected: Set<number> | "all"): SampledRecord[] {
+  const records: SampledRecord[] = []
+  let index = -1
+  const consider = (record: SampledRecord): void => {
+    index++
+    if (selected === "all" || selected.has(index)) records.push(record)
+  }
+  forEachJsonlLine(jsonlPath, (line) => consider({ line }), {
+    onOversized: (oversized) => consider({ line: null, oversized }),
+  })
+  return records
+}
+
+/** A named stand-in for a record the reader elided; its bytes never reach content. */
+function oversizedPlaceholder(record: OversizedJsonlRecord | undefined): string {
+  if (!record) return "[oversized record elided]"
+  return `[oversized record elided: physical line ${record.physicalLine}, ${record.bytes} bytes over the ${record.limit}-byte record limit]`
+}
+
+/**
+ * The legacy sub-agent signal: a sampled user record carrying real text. Only
+ * object text blocks count, exactly as the legacy extractor counted them.
+ */
+function recordsCarryUserText(records: SampledRecord[]): boolean {
+  for (const record of records) {
+    if (record.line === null) continue
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const entry = JSON.parse(record.line) as any
+      if (entry.type !== "user") continue
+      const content = entry.message?.content
+      if (!Array.isArray(content)) continue
+      for (const block of content) {
+        if (!block || typeof block !== "object") continue
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const b = block as any
+        if (b.type === "text" && b.text && b.text.length > MIN_TEXT_LENGTH) return true
+      }
+    } catch {
+      // Skip unparseable lines
+    }
+  }
+  return false
+}
+
+/** The quick probe's legacy test: any user text block, empty string included. */
+function userRecordHasAnyText(entry: unknown): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const e = entry as any
+  if (e?.type !== "user") return false
+  const content = e.message?.content
+  if (!Array.isArray(content)) return false
+  for (const block of content) {
+    if (typeof block === "string" && block.length > 0) return true
+    if (block && typeof block === "object") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const b = block as any
+      if (b.type === "text" && b.text) return true
+    }
+  }
+  return false
 }
 
 /** Truncate text to max length. */

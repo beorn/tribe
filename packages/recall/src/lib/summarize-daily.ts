@@ -1,5 +1,6 @@
 import { assertSingleStatement } from "@bearly/sqlite"
 import { atomicWriteFileSync } from "@bearly/durable-file"
+import { tryAcquireFlock, type FlockHandle } from "@bearly/flock"
 /**
  * Daily and weekly summary rollups from per-session summaries.
  *
@@ -13,7 +14,7 @@ import { atomicWriteFileSync } from "@bearly/durable-file"
 import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
-import { getDb, closeDb } from "../history/db"
+import { getDb, closeDb, DB_PATH } from "../history/db"
 import { summarizeSessionBatch, type SessionSummary } from "./summarize-session"
 import { findSessionJsonl } from "./extract"
 import { loadLlm, resolveAvailableCheapModel } from "./llm-backend.ts"
@@ -110,7 +111,68 @@ Rules:
 // Core: summarize a single day
 // ============================================================================
 
+// ============================================================================
+// Summary-operation lock
+// ============================================================================
+
+/**
+ * Canonical identity of the selected Recall DB, so two symlink aliases of one
+ * database share a single summary lock (27702 §4 identity rule). Falls back to
+ * the literal path only when neither the DB nor its parent resolves, where an
+ * alias cannot exist anyway.
+ */
+function canonicalRecallDbPath(): string {
+  const dbPath = process.env.RECALL_DB_PATH?.trim() || DB_PATH
+  try {
+    return fs.realpathSync(dbPath)
+  } catch {
+    try {
+      return path.join(fs.realpathSync(path.dirname(dbPath)), path.basename(dbPath))
+    } catch {
+      // silent-fallback-allow: an unresolvable DB path cannot be aliased, so the literal path still serialises it.
+      return dbPath
+    }
+  }
+}
+
+/**
+ * One kernel flock per DB for the whole summary operation, separate from the
+ * index rebuild lock. Returns null only when another engine holds it; any other
+ * fault (bad path, permissions, EISDIR) propagates loudly.
+ */
+function acquireSummaryLock(): FlockHandle | null {
+  return tryAcquireFlock(`${canonicalRecallDbPath()}.summary.lock`, {
+    body: JSON.stringify({ startedAt: Date.now() }),
+  })
+}
+
+/** The existing skipped shape for a day whose operation is already running. */
+function summaryBusyResult(date: string): DailySummaryResult {
+  return { date, sessionsCount: 0, summary: null, memoryFile: null, skipped: true, reason: "summary_busy" }
+}
+
+/**
+ * Summarize one day. Holds the summary-operation lock across extraction,
+ * synthesis and daily-file publication, so a second engine cannot write the
+ * same files concurrently.
+ */
 export async function summarizeDay(
+  date: string,
+  opts: { projectFilter?: string; verbose?: boolean } = {},
+): Promise<DailySummaryResult> {
+  // An invalid date never touches the DB or the lock.
+  if (isNaN(new Date(`${date}T00:00:00`).getTime())) {
+    return { date, sessionsCount: 0, summary: null, memoryFile: null, skipped: true, reason: "invalid_date" }
+  }
+
+  using lock = acquireSummaryLock()
+  if (lock === null) return summaryBusyResult(date)
+
+  return summarizeDayOwned(date, opts)
+}
+
+/** The already-owned daily implementation, called with the summary lock held. */
+async function summarizeDayOwned(
   date: string,
   opts: { projectFilter?: string; verbose?: boolean } = {},
 ): Promise<DailySummaryResult> {
@@ -382,9 +444,17 @@ export async function summarizeUnprocessedDays(
 
   log(`${unprocessed.length} unprocessed day(s): ${unprocessed.join(", ")}`)
 
+  // One lock for the whole selected batch; the owned day implementation is
+  // called directly so it never re-acquires (27702 §4, no nested acquisition).
+  using lock = acquireSummaryLock()
+  if (lock === null) {
+    log(`summary operation busy; skipping ${unprocessed.length} day(s)`)
+    return unprocessed.map((day) => summaryBusyResult(day))
+  }
+
   const results: DailySummaryResult[] = []
   for (const day of unprocessed) {
-    const r = await summarizeDay(day, opts)
+    const r = await summarizeDayOwned(day, opts)
     results.push(r)
   }
 

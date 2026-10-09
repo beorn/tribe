@@ -9,7 +9,7 @@ import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
 import { atomicWriteFileSync } from "@bearly/durable-file"
-import { extractSessionContent } from "./extract"
+import { renderSessionContent, scanSessionTranscript } from "./extract"
 import { loadLlm, resolveAvailableCheapModel } from "./llm-backend.ts"
 
 // ============================================================================
@@ -99,13 +99,19 @@ export async function summarizeSession(
 ): Promise<SessionSummary> {
   const log = opts?.verbose ? (msg: string) => console.error(`[summarize-session] ${msg}`) : () => {}
 
-  // Extract content first (needed for metadata even if cached)
-  const extract = extractSessionContent(sessionId, {
+  // Cheap admission first: a cached summary needs no LLM backend, and the
+  // bounded metadata scan below is the only transcript I/O it pays.
+  const cached = getSessionSummaryCache(sessionId)
+
+  // Bounded metadata scan (two streaming passes): classification and identity,
+  // before any content is constructed. A transcript that changes mid-read is a
+  // named skip, not a silent mix of two versions.
+  const scan = scanSessionTranscript(sessionId, {
     title: opts?.title,
     createdAt: opts?.createdAt,
   })
 
-  if (!extract) {
+  if (!scan) {
     log(`${sessionId.slice(0, 8)}: no content extracted`)
     return {
       id: sessionId,
@@ -118,58 +124,59 @@ export async function summarizeSession(
     }
   }
 
-  // Check cache (sessions are immutable after ending)
-  const cached = getSessionSummaryCache(sessionId)
+  // Cache hit: return the cached summary with the scan's real classification,
+  // and never load the backend (27702 §3).
   if (cached) {
-    log(`${extract.shortId}: cached`)
+    log(`${scan.shortId}: cached`)
     return {
-      id: extract.id,
-      shortId: extract.shortId,
-      title: extract.title,
-      time: extract.time,
-      isSubAgent: extract.isSubAgent,
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
+      isSubAgent: scan.isSubAgent,
       summary: cached,
       cached: true,
     }
   }
 
-  // Skip sub-agent sessions
-  if (extract.isSubAgent) {
-    log(`${extract.shortId}: sub-agent, skipping`)
+  if (scan.reason) {
+    log(`${scan.shortId}: ${scan.reason}`)
     return {
-      id: extract.id,
-      shortId: extract.shortId,
-      title: extract.title,
-      time: extract.time,
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
+      isSubAgent: scan.isSubAgent,
+      summary: null,
+      cached: false,
+      reason: scan.reason,
+    }
+  }
+
+  // Skip sub-agent sessions
+  if (scan.isSubAgent) {
+    log(`${scan.shortId}: sub-agent, skipping`)
+    return {
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
       isSubAgent: true,
       summary: null,
       cached: false,
     }
   }
 
-  // Skip content that's too short
-  if (extract.content.length < MIN_CONTENT_LENGTH) {
-    log(`${extract.shortId}: content too short (${extract.content.length} chars)`)
-    return {
-      id: extract.id,
-      shortId: extract.shortId,
-      title: extract.title,
-      time: extract.time,
-      isSubAgent: false,
-      summary: null,
-      cached: false,
-    }
-  }
-
-  // Check LLM availability
+  // Check LLM availability BEFORE constructing content: an unsummarisable
+  // session must not pay for the content string (27702 §3).
   const resolution = resolveAvailableCheapModel(await loadLlm())
   if (!resolution.model) {
-    log(`${extract.shortId}: ${resolution.failure}`)
+    log(`${scan.shortId}: ${resolution.failure}`)
     return {
-      id: extract.id,
-      shortId: extract.shortId,
-      title: extract.title,
-      time: extract.time,
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
       isSubAgent: false,
       summary: null,
       cached: false,
@@ -179,13 +186,30 @@ export async function summarizeSession(
   const model = resolution.model
   const llm = resolution.backend
 
+  // Build content from the records already sampled by the scan — no re-read.
+  const { content: extracted } = renderSessionContent(scan.records)
+
+  // Skip content that's too short
+  if (extracted.length < MIN_CONTENT_LENGTH) {
+    log(`${scan.shortId}: content too short (${extracted.length} chars)`)
+    return {
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
+      isSubAgent: false,
+      summary: null,
+      cached: false,
+    }
+  }
+
   // Build context for LLM
-  let context = extract.content
+  let context = extracted
   if (context.length > 30000) {
     context = context.slice(0, 30000) + "\n\n[...truncated]"
   }
 
-  log(`${extract.shortId}: sending to LLM (${context.length} chars)`)
+  log(`${scan.shortId}: sending to LLM (${context.length} chars)`)
   const startTime = Date.now()
 
   const result = await llm.queryModel({
@@ -195,16 +219,16 @@ export async function summarizeSession(
   })
 
   const summary = result.response.content
-  log(`${extract.shortId}: LLM responded in ${Date.now() - startTime}ms`)
+  log(`${scan.shortId}: LLM responded in ${Date.now() - startTime}ms`)
 
   // Handle empty / NONE responses
   if (!summary || /^NONE$/im.test(summary.trim())) {
-    log(`${extract.shortId}: nothing noteworthy`)
+    log(`${scan.shortId}: nothing noteworthy`)
     return {
-      id: extract.id,
-      shortId: extract.shortId,
-      title: extract.title,
-      time: extract.time,
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
       isSubAgent: false,
       summary: null,
       cached: false,
@@ -212,14 +236,14 @@ export async function summarizeSession(
   }
 
   // Cache the result
-  writeCache(extract.shortId, summary)
-  log(`${extract.shortId}: cached summary`)
+  writeCache(scan.shortId, summary)
+  log(`${scan.shortId}: cached summary`)
 
   return {
-    id: extract.id,
-    shortId: extract.shortId,
-    title: extract.title,
-    time: extract.time,
+    id: scan.id,
+    shortId: scan.shortId,
+    title: scan.title,
+    time: scan.time,
     isSubAgent: false,
     summary,
     cached: false,
