@@ -29,6 +29,17 @@ export const DELIVERY_DUPLICATE_ALERT_RATE = 0.2
 /** @cto 9a077460 - the minimum successful deliveries before the rate is actionable. */
 export const DELIVERY_DUPLICATE_ALERT_MIN_DELIVERIES = 100
 /**
+ * #28283 (@chief 2026-10-09) - a window no adapter has written in a full roll
+ * period cannot be read as a CURRENT total, and a failed save that keeps failing
+ * writes nothing at all, so nothing on disk records it. The expected cadence of
+ * a window is the ledger's own roll period; past TWICE it the row renders
+ * incomplete WITH ITS AGE, exactly as a declared coverage gap does - never a
+ * silently complete stale total. A pane that has simply been idle for a full
+ * roll period reads the same way, which is the honest reading of a window no
+ * adapter has written.
+ */
+export const DELIVERY_LEDGER_STALE_AFTER_MS = 2 * DELIVERY_LEDGER_WINDOW_MS
+/**
  * #27488 phase 0 - @chief's measured harness wrapper from the 2026-10-04
  * composition window: every queued delivery carried ~460 chars of identical
  * harness text. An ESTIMATE (the harness is not ours to measure), named here so
@@ -155,12 +166,17 @@ export type FleetDeliveryReport = {
 export function buildSeatDeliveryReport(state: DeliveryLedgerState, now: number): SeatDeliveryReport {
   const { counters, coverage } = state
   const duplicateRate = counters.deliveries > 0 ? counters.duplicateDeliveries / counters.deliveries : null
+  const staleMs = Math.max(0, now - state.updatedAtMs)
+  // #28283 - a window past twice its expected cadence is incomplete even with no
+  // declared gap: nothing proves its counts still reach this report.
+  const staleIncomplete = staleMs > DELIVERY_LEDGER_STALE_AFTER_MS
+  const incomplete = coverage.gap || staleIncomplete
   return {
     pane: state.pane,
     windowStartMs: state.windowStartMs,
     windowEndMs: state.windowStartMs + DELIVERY_LEDGER_WINDOW_MS,
     observedThroughMs: state.updatedAtMs,
-    staleMs: Math.max(0, now - state.updatedAtMs),
+    staleMs,
     deliveries: counters.deliveries,
     newDeliveries: counters.newDeliveries,
     duplicateDeliveries: counters.duplicateDeliveries,
@@ -170,13 +186,13 @@ export function buildSeatDeliveryReport(state: DeliveryLedgerState, now: number)
     duplicatePresentations: counters.duplicatePresentations,
     suppressed: counters.suppressed,
     coverage,
-    complete: !coverage.gap,
+    complete: !incomplete,
     alert:
-      !coverage.gap &&
+      !incomplete &&
       duplicateRate !== null &&
       duplicateRate > DELIVERY_DUPLICATE_ALERT_RATE &&
       counters.deliveries >= DELIVERY_DUPLICATE_ALERT_MIN_DELIVERIES,
-    alertInconclusive: coverage.gap,
+    alertInconclusive: incomplete,
     pageEdges: null,
     cost: buildSeatCost(counters, state.costSinceMs ?? state.windowStartMs, state.updatedAtMs),
   }
@@ -304,7 +320,14 @@ export function formatFleetDeliveryReport(report: FleetDeliveryReport): string {
     )
   } else {
     for (const seat of report.seats) {
-      const flags = [seat.complete ? "" : `GAP:${seat.coverage.gapReason}`, seat.alert ? "ALERT" : ""].filter(Boolean)
+      // #28283 - an incomplete row says WHY: a declared gap, or a window no
+      // adapter has written in twice its expected cadence (with its age).
+      const incompleteFlag = seat.complete
+        ? ""
+        : seat.coverage.gap
+          ? `GAP:${seat.coverage.gapReason}`
+          : `STALE:${formatSpan(seat.staleMs)}`
+      const flags = [incompleteFlag, seat.alert ? "ALERT" : ""].filter(Boolean)
       const rate = `${formatPercent(seat.duplicateRate)}${seat.alertInconclusive ? " (inconclusive)" : ""}`
       const window = `${new Date(seat.windowStartMs).toISOString()}..${new Date(seat.windowEndMs).toISOString()}`
       lines.push(
