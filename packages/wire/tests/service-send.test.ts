@@ -152,10 +152,10 @@ describe("the one sender registers as what its launch's token names (25074 3d-1c
   /**
    * @failure A register refusal is replaced by a timeout when the one-shot bootstrap retries its closed client.
    * @level l1
-   * @consumer 28263 caller and incident page preserve the daemon's instance-is-live rule
+   * @consumer 28263 caller and shared outcome formatter preserve the daemon's instance-is-live rule
    * @testonly none
    */
-  it("preserves a registration refusal through the caller and page outcome formatter", async () => {
+  it("preserves a registration refusal through the caller and shared outcome formatter", async () => {
     const refusal = "instance-is-live: longproc-reading launch longproc-reading:probe generation 0 is not live"
     const { socketPath, calls } = await fakeDaemon(refusal)
     const outcome = await tribeDaemonCalls("longproc-reading", {
