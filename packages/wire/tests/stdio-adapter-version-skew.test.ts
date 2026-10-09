@@ -834,7 +834,9 @@ describe("stdio adapter — protocol version skew", () => {
         params: { name: "fetch", arguments: {} },
       }) + "\n",
     )
-    await waitFor(() => output.includes("after-change"), 10_000, "the post-change fetch result")
+    // Recovery is an event: wait for it inside the row's own 60 s budget. A fixed 10 s missed on a loaded CI runner
+    // (tribe CI run 37970288448, 300 s of tests on the runner), while a real hang still fails here.
+    await waitFor(() => output.includes("after-change"), 50_000, "the post-change fetch result")
     expect(child.exitCode).toBeNull()
   }, 60_000)
 
@@ -923,7 +925,9 @@ describe("stdio adapter — protocol version skew", () => {
         params: { name: "fetch", arguments: {} },
       }) + "\n",
     )
-    await waitFor(() => output.includes("after-change"), 10_000, "the post-change fetch result")
+    // Recovery is an event: wait for it inside the row's own 60 s budget. A fixed 10 s missed on a loaded CI runner
+    // (tribe CI run 37970288448, 300 s of tests on the runner), while a real hang still fails here.
+    await waitFor(() => output.includes("after-change"), 50_000, "the post-change fetch result")
     expect(child.exitCode).toBeNull()
   }, 60_000)
 })
