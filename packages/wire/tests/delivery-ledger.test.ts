@@ -10,7 +10,7 @@
  * @consumer @cto 9a077460 adapter/Tribe delivery counter and the 4h per-seat report
  * @testonly none
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -18,10 +18,13 @@ import {
   DELIVERY_LEDGER_VERSION,
   DELIVERY_LEDGER_WINDOW_MS,
   deliveryLedgerDir,
+  deliveryLedgerLegacyPaneKey,
+  deliveryLedgerLegacyPath,
   deliveryLedgerPaneKey,
   deliveryLedgerPath,
   loadDeliveryLedger,
   openDeliveryLedgerWindow,
+  resumeDeliveryLedger,
   saveDeliveryLedger,
   TRIBE_DELIVERY_LEDGER_DIR_ENV,
   TRIBE_DELIVERY_LEDGER_ENV,
@@ -63,9 +66,22 @@ const counters = (over: Partial<DeliveryLedgerState["counters"]> = {}): Delivery
 
 describe("delivery ledger path resolution (#27459)", () => {
   it("sanitizes a pane name into a file fragment, keeping @ and -", () => {
-    expect(deliveryLedgerPaneKey("@agent/test")).toBe("@agent_test")
-    expect(deliveryLedgerPaneKey("@dev/luna6")).toBe("@dev_luna6")
+    // #28376 — the key is INJECTIVE: an unsafe byte is percent-encoded and `%`
+    // itself is encoded, so no two distinct personas can share one key/file.
+    expect(deliveryLedgerPaneKey("@agent/test")).toBe("@agent%2Ftest")
+    expect(deliveryLedgerPaneKey("@dev/luna6")).toBe("@dev%2Fluna6")
+    expect(deliveryLedgerPaneKey("@dev.5-imber")).toBe("@dev.5-imber")
+    expect(deliveryLedgerPaneKey("100%")).toBe("100%25")
     expect(deliveryLedgerPaneKey("   ")).toBe("unregistered")
+    expect(deliveryLedgerPaneKey("@dev/6")).not.toBe(deliveryLedgerPaneKey("@dev_6"))
+  })
+
+  it("keeps the pre-fix SANITIZING key only to locate a legacy file (#28376)", () => {
+    expect(deliveryLedgerLegacyPaneKey("@agent/test")).toBe("@agent_test")
+    expect(deliveryLedgerLegacyPaneKey("@dev/luna6")).toBe("@dev_luna6")
+    expect(deliveryLedgerLegacyPaneKey("   ")).toBe("unregistered")
+    // The collision the v2 namespace exists to end: two personas, one legacy key.
+    expect(deliveryLedgerLegacyPaneKey("@dev/6")).toBe(deliveryLedgerLegacyPaneKey("@dev_6"))
   })
 
   it("prefers an explicit ledger file over any directory", () => {
@@ -79,6 +95,19 @@ describe("delivery ledger path resolution (#27459)", () => {
     // never writes outside the habitat (25231).
     expect(deliveryLedgerDir({})).toBeNull()
     expect(deliveryLedgerPath({ pane: "@dev/luna6", env: {} })).toBeNull()
+  })
+
+  it("names a new ledger in a DISJOINT v2 namespace, never equal to a legacy path (#28376)", () => {
+    const env = { [TRIBE_DELIVERY_LEDGER_DIR_ENV]: "/tmp/kpi" }
+    expect(deliveryLedgerPath({ pane: "@dev/6", env })).toBe("/tmp/kpi/tribe-delivery-v2-@dev%2F6.json")
+    expect(deliveryLedgerPath({ pane: "@dev_6", env })).toBe("/tmp/kpi/tribe-delivery-v2-@dev_6.json")
+    expect(deliveryLedgerLegacyPath({ pane: "@dev_6", env })).toBe("/tmp/kpi/tribe-delivery-@dev_6.json")
+    for (const pane of ["@dev/6", "@dev_6", "@agent/test"]) {
+      expect(deliveryLedgerPath({ pane, env })).not.toBe(deliveryLedgerLegacyPath({ pane, env }))
+    }
+    // An explicit ledger file IS the ledger: nothing is invented beside it.
+    const explicit = { [TRIBE_DELIVERY_LEDGER_ENV]: "/tmp/explicit.json" }
+    expect(deliveryLedgerLegacyPath({ pane: "@dev/6", env: explicit })).toBeNull()
   })
 })
 
@@ -445,5 +474,160 @@ describe("delivery ledger cost (#27488 phase 0)", () => {
     const loaded = loadDeliveryLedger(path)
     expect(loaded.state).toBeNull()
     expect(loaded.coverage.gapReason).toBe("schema")
+  })
+})
+
+// #28376 — @cto's option B: an injective key in a DISJOINT `v2` namespace, plus a
+// one-time, read-only adoption of a LIVE legacy window this pane owns. These are
+// the ruling's acceptance rows, driven through the real helpers the adapter uses.
+describe("colliding personas and the legacy window adoption (#28376)", () => {
+  const ORIGINAL = "@dev/6"
+  const UNDERSCORE = "@dev_6"
+
+  function ledgerDir(): string {
+    return mkdtempSync(join(tmpdir(), "tribe-delivery-28376-"))
+  }
+
+  /** A persisted ledger file body, as `saveDeliveryLedger` would write it. */
+  function fixture(pane: string, windowStartMs: number, ids: string[]): string {
+    return JSON.stringify({
+      version: DELIVERY_LEDGER_VERSION,
+      pane,
+      windowStartMs,
+      updatedAtMs: windowStartMs,
+      ids,
+      counters: counters(),
+      pendingBallSummary: null,
+      coverage: { restarts: 0, gap: false, gapReason: "none" },
+    })
+  }
+
+  function resumeIn(dir: string, pane: string, now: number) {
+    const r = resumeDeliveryLedger({ pane, env: { [TRIBE_DELIVERY_LEDGER_DIR_ENV]: dir }, now })
+    if (r === null) throw new Error(`no ledger path for ${pane}`)
+    return r
+  }
+
+  function pathIn(dir: string, pane: string): string {
+    const p = deliveryLedgerPath({ pane, env: { [TRIBE_DELIVERY_LEDGER_DIR_ENV]: dir } })
+    if (p === null) throw new Error(`no ledger path for ${pane}`)
+    return p
+  }
+
+  /** The adapter's own persist step, mirrored: resume, open, save under `path`. */
+  function persist(dir: string, pane: string, ids: string[], deliveries: number, now: number): string {
+    const r = resumeIn(dir, pane, now)
+    const opened = openDeliveryLedgerWindow({ existing: r.load.state, coverage: r.load.coverage, pane, now })
+    saveDeliveryLedger(r.path, {
+      ...opened,
+      updatedAtMs: now,
+      ids,
+      counters: counters({ deliveries, newDeliveries: deliveries }),
+    })
+    return r.path
+  }
+
+  it("alternates both personas' persists and restarts: each keeps its own ids, counters and window", () => {
+    const dir = ledgerDir()
+    // A (@dev/6) and B (@dev_6) write in turn; A then B again.
+    const pathA = persist(dir, ORIGINAL, ["only-a"], 1, NOW)
+    const pathB = persist(dir, UNDERSCORE, ["only-b"], 5, NOW + 1)
+    expect(pathA).not.toBe(pathB)
+    persist(dir, ORIGINAL, ["only-a", "only-a2"], 2, NOW + 2)
+    persist(dir, UNDERSCORE, ["only-b", "only-b2"], 6, NOW + 3)
+
+    // A restart for each: its OWN window, ids and counters, not the other's.
+    const a = resumeIn(dir, ORIGINAL, NOW + 4)
+    const b = resumeIn(dir, UNDERSCORE, NOW + 4)
+    expect(a.adoptedFrom).toBeNull()
+    expect(b.adoptedFrom).toBeNull()
+    expect(a.foreign).toBeNull()
+    expect(b.foreign).toBeNull()
+    expect(a.load.state?.pane).toBe(ORIGINAL)
+    expect(b.load.state?.pane).toBe(UNDERSCORE)
+    expect([...(a.load.state?.ids ?? [])].sort()).toEqual(["only-a", "only-a2"])
+    expect([...(b.load.state?.ids ?? [])].sort()).toEqual(["only-b", "only-b2"])
+    expect(a.load.state?.counters.deliveries).toBe(2)
+    expect(b.load.state?.counters.deliveries).toBe(6)
+    // Each kept its own window start: no roll, and no adopting the other's.
+    expect(a.load.state?.windowStartMs).toBe(NOW)
+    expect(b.load.state?.windowStartMs).toBe(NOW + 1)
+    expect(a.load.coverage.gap).toBe(false)
+    expect(b.load.coverage.gap).toBe(false)
+  })
+
+  it("adopts a LIVE legacy window this pane owns, once, and re-persists it under the v2 path", () => {
+    const dir = ledgerDir()
+    const legacyPath = deliveryLedgerLegacyPath({ pane: UNDERSCORE, env: { [TRIBE_DELIVERY_LEDGER_DIR_ENV]: dir } })
+    expect(legacyPath).not.toBeNull()
+    writeFileSync(legacyPath!, fixture(UNDERSCORE, NOW - 60_000, ["legacy-row"]), "utf8")
+    const legacyBefore = readFileSync(legacyPath!, "utf8")
+
+    const first = resumeIn(dir, UNDERSCORE, NOW)
+    expect(first.adoptedFrom).toBe(legacyPath)
+    expect(first.foreign).toBeNull()
+    expect(first.expiredLegacy).toBeNull()
+    expect(first.load.state?.ids).toEqual(["legacy-row"])
+    expect(first.path).toBe(pathIn(dir, UNDERSCORE))
+    expect(first.path).not.toBe(legacyPath)
+
+    // The adoption is a READ: the persist goes to the v2 path and the legacy file
+    // is left exactly as it was.
+    persist(dir, UNDERSCORE, ["legacy-row"], 1, NOW)
+    expect(readFileSync(legacyPath!, "utf8")).toBe(legacyBefore)
+    expect(existsSync(pathIn(dir, UNDERSCORE))).toBe(true)
+
+    // The next resume reads its OWN v2 file: the adoption read has retired itself.
+    const second = resumeIn(dir, UNDERSCORE, NOW + 1)
+    expect(second.adoptedFrom).toBeNull()
+    expect(second.load.state?.ids).toEqual(["legacy-row"])
+  })
+
+  it("never adopts a legacy window recorded for ANOTHER persona; opens the named gap", () => {
+    const dir = ledgerDir()
+    const legacyPath = deliveryLedgerLegacyPath({ pane: UNDERSCORE, env: { [TRIBE_DELIVERY_LEDGER_DIR_ENV]: dir } })
+    writeFileSync(legacyPath!, fixture(ORIGINAL, NOW - 60_000, ["only-a"]), "utf8")
+    const legacyBefore = readFileSync(legacyPath!, "utf8")
+
+    const r = resumeIn(dir, UNDERSCORE, NOW)
+    expect(r.adoptedFrom).toBeNull()
+    expect(r.foreign).toEqual({ path: legacyPath, owner: ORIGINAL })
+    expect(r.expiredLegacy).toBeNull()
+    expect(r.load.state).toBeNull()
+    expect(r.load.coverage).toMatchObject({ gap: true, gapReason: "schema" })
+
+    // Persisting this pane must never write or delete the other persona's file.
+    persist(dir, UNDERSCORE, ["only-b"], 1, NOW)
+    expect(readFileSync(legacyPath!, "utf8")).toBe(legacyBefore)
+  })
+
+  it("does not adopt an EXPIRED legacy window this pane owns", () => {
+    const dir = ledgerDir()
+    const legacyPath = deliveryLedgerLegacyPath({ pane: UNDERSCORE, env: { [TRIBE_DELIVERY_LEDGER_DIR_ENV]: dir } })
+    writeFileSync(legacyPath!, fixture(UNDERSCORE, NOW - DELIVERY_LEDGER_WINDOW_MS - 1, ["stale-row"]), "utf8")
+    const legacyBefore = readFileSync(legacyPath!, "utf8")
+
+    const r = resumeIn(dir, UNDERSCORE, NOW)
+    expect(r.adoptedFrom).toBeNull()
+    expect(r.expiredLegacy).toBe(legacyPath)
+    expect(r.foreign).toBeNull()
+    expect(r.load.state).toBeNull()
+    expect(r.load.coverage.gap).toBe(true)
+
+    persist(dir, UNDERSCORE, ["fresh"], 1, NOW)
+    expect(readFileSync(legacyPath!, "utf8")).toBe(legacyBefore)
+  })
+
+  it("honours an explicit ledger file: no v2 namespace and no legacy adoption", () => {
+    const dir = ledgerDir()
+    const explicit = join(dir, "explicit.json")
+    const env = { [TRIBE_DELIVERY_LEDGER_ENV]: explicit }
+    expect(deliveryLedgerPath({ pane: ORIGINAL, env })).toBe(explicit)
+    expect(deliveryLedgerLegacyPath({ pane: ORIGINAL, env })).toBeNull()
+    // A live window at the explicit path is resumed directly, never "adopted".
+    writeFileSync(explicit, fixture(ORIGINAL, NOW - 60_000, ["row"]), "utf8")
+    const r = resumeDeliveryLedger({ pane: ORIGINAL, env, now: NOW })
+    expect(r?.adoptedFrom).toBeNull()
+    expect(r?.load.state?.ids).toEqual(["row"])
   })
 })

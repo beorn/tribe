@@ -1875,7 +1875,7 @@ describe("stdio adapter delivery modes", () => {
     await handshake()
     await drain("gap-7 first drain")
     expect(countOf(summaryText)).toBe(1)
-    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
     await waitForCondition(() => existsSync(ledgerPath), "gap-7 delivery ledger")
 
     child!.kill("SIGTERM")
@@ -2025,7 +2025,7 @@ describe("stdio adapter delivery modes", () => {
     await drain("first counted drain")
     await drain("second counted drain")
 
-    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
     await waitForCondition(() => existsSync(ledgerPath), "delivery ledger written")
     const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
       ids: string[]
@@ -2194,7 +2194,11 @@ describe("stdio adapter delivery modes", () => {
   // render as a clean 0 with gap:false.
   it("keeps the resumed same-window counter totals across an adapter restart (#27459 REVISE)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
+    // #28376 — the seed is a LEGACY (pre-fix) file that holds THIS pane's own
+    // live window: the adapter adopts it once, then persists under the v2 path.
+    // The legacy bytes are left exactly as written.
     const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    const v2Path = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
     const windowStartMs = Date.now() - 60_000
     writeFileSync(
       ledgerPath,
@@ -2219,6 +2223,7 @@ describe("stdio adapter delivery modes", () => {
       }),
       "utf8",
     )
+    const legacyBefore = readFileSync(ledgerPath, "utf8")
     // No new activity: this drain exists only to make the adapter load and
     // re-persist the resumed window.
     const fetchAttention = { actionable_unread: [], pending_balls: [] }
@@ -2249,11 +2254,11 @@ describe("stdio adapter delivery modes", () => {
     // The fetch request is not a completed drain: wait for the adapter's first
     // persist rather than reading the seed ledger while the child is delayed.
     await waitForCondition(
-      () => (JSON.parse(readFileSync(ledgerPath, "utf8")) as { updatedAtMs: number }).updatedAtMs > windowStartMs,
+      () => (JSON.parse(readFileSync(v2Path, "utf8")) as { updatedAtMs: number }).updatedAtMs > windowStartMs,
       "REVISE resumed window persisted",
     )
 
-    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
+    const ledger = JSON.parse(readFileSync(v2Path, "utf8")) as {
       windowStartMs: number
       ids: string[]
       counters: Record<string, number>
@@ -2270,30 +2275,45 @@ describe("stdio adapter delivery modes", () => {
     expect([...ledger.ids].sort()).toEqual(["seed-row-a", "seed-row-b"])
     expect(ledger.coverage.restarts).toBe(2)
     expect(ledger.coverage.gap).toBe(false)
+    // The adoption is a READ: the legacy file is never rewritten or deleted.
+    expect(readFileSync(ledgerPath, "utf8")).toBe(legacyBefore)
   })
 
-  // #28376 — two distinct VALID personas in one habitat can name one ledger
-  // file: `deliveryLedgerPaneKey` sanitizes `/` to `_`, so `@dev/6` and `@dev_6`
-  // both resolve to `tribe-delivery-@dev_6.json`. Before the fix the second
-  // persona adopted the first's delivered-id set, counters and summary throttle
-  // (with `coverage.gap=false`) and so SUPPRESSED a broadcast handoff it was
-  // never handed. The persisted `pane` is the owner: a foreign file is ignored
-  // with one line and opens as a NAMED gap, never adopted.
-  it("does not adopt a delivery ledger another persona owns (#28376)", async () => {
-    const socketPath = join(tmpDir, "tribe.sock")
-    const ledgerPath = join(tmpDir, "tribe-delivery-@dev_6.json")
+  // #28376 — two distinct VALID personas in one habitat named one ledger file:
+  // the pre-fix `deliveryLedgerPaneKey` sanitized `/` to `_`, so `@dev/6` and
+  // `@dev_6` both resolved to `tribe-delivery-@dev_6.json`. Before the fix the
+  // second persona adopted the first's delivered-id set and counters (with
+  // `coverage.gap=false`) and so SUPPRESSED a broadcast handoff it was never
+  // handed. @cto's ruling: an injective `v2` key in a disjoint namespace, plus a
+  // one-time read-only adoption of a LEGACY file only when it records this pane
+  // and its window is still live. This row runs BOTH personas through the REAL
+  // adapter, one after the other, in one habitat:
+  //   - @dev_6 never inherits @dev/6's id: its own row reaches it, and it opens a
+  //     NAMED gap and persists its own window under its own v2 path;
+  //   - @dev/6 still adopts its own LIVE legacy window: its row stays suppressed
+  //     as already handed off, and it re-persists under its own v2 path;
+  //   - the legacy file's bytes are unchanged throughout.
+  it("keeps two colliding personas on separate delivery windows through the real adapter (#28376)", async () => {
+    type FakeAttention = {
+      actionable_unread?: Array<Record<string, unknown>>
+      pending_balls?: Array<Record<string, unknown>>
+    }
+    const legacyPath = join(tmpDir, "tribe-delivery-@dev_6.json")
+    const v2Dev6 = join(tmpDir, "tribe-delivery-v2-@dev_6.json")
+    const v2DevSlash6 = join(tmpDir, "tribe-delivery-v2-@dev%2F6.json")
     const windowStartMs = Date.now() - 60_000
-    // The @dev/6 persona's own ledger, reached under @dev_6's default path
-    // because the two names sanitize to one key. The id was handed to @dev/6.
-    const foreignId = "broadcast-row-first-handed-only-to-dev-6"
+    // @dev/6's own LIVE ledger, reached under @dev_6's default legacy path
+    // because the two names sanitized to one key. `dev6Row` was handed to @dev/6
+    // and to nobody else.
+    const dev6Row = "broadcast-row-first-handed-only-to-dev-6"
     writeFileSync(
-      ledgerPath,
+      legacyPath,
       JSON.stringify({
         version: 2,
         pane: "@dev/6",
         windowStartMs,
         updatedAtMs: windowStartMs,
-        ids: [foreignId],
+        ids: [dev6Row],
         counters: {
           presentations: 1,
           newPresentations: 1,
@@ -2317,71 +2337,124 @@ describe("stdio adapter delivery modes", () => {
       }),
       "utf8",
     )
-    const fetchAttention = {
-      actionable_unread: [
-        { id: foreignId, type: "verdict", from: "@chief", content: "FOREIGN-LEDGER-ROW", ts: new Date().toISOString() },
-      ],
-      pending_balls: [],
+    const legacyBefore = readFileSync(legacyPath, "utf8")
+
+    const ledgerOf = (path: string) =>
+      JSON.parse(readFileSync(path, "utf8")) as {
+        pane: string
+        ids: string[]
+        counters: Record<string, number>
+        coverage: { restarts: number; gap: boolean; gapReason: string }
+      }
+    // One adapter process for one persona: spawn its own daemon (the fake daemon
+    // pins the name), join, drain once, and return the channel lines it forwarded.
+    const runAdapter = async (opts: {
+      socket: string
+      ackName: string
+      log: string
+      fetchAttention: FakeAttention
+    }): Promise<string[]> => {
+      daemon = await spawnFakeDaemon(opts.socket, {
+        fetchAttention: opts.fetchAttention,
+        registerAck: { name: opts.ackName },
+        joinAck: { name: opts.ackName },
+      })
+      child = spawn(BUN_BIN, [ADAPTER, "--socket", opts.socket, "--name", opts.ackName], {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          TRIBE_DELIVERY: "push",
+          TRIBE_NO_AUTOSTART: "1",
+          TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+          DEBUG_LOG: join(tmpDir, opts.log),
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      })
+      const stdout = collectStdoutJson(child)
+      await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+      writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+      await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: opts.ackName }), (line) => line.id === 2)
+      const before = daemon.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon.clients[0]?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        `${opts.ackName} drain`,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 300))
+      return stdout
+        .filter((line) => line.method === "notifications/claude/channel")
+        .map((line) => JSON.stringify(line) as string)
     }
-    // The fake daemon pins `@agent/test` unless the ack says otherwise, and the
-    // adapter takes its pane (and so its ledger path) from the ack.
-    daemon = await spawnFakeDaemon(socketPath, {
-      fetchAttention,
-      registerAck: { name: "@dev_6" },
-      joinAck: { name: "@dev_6" },
-    })
-    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@dev_6"], {
-      cwd: tmpDir,
-      env: {
-        ...process.env,
-        TRIBE_DELIVERY: "push",
-        TRIBE_NO_AUTOSTART: "1",
-        TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
-        DEBUG_LOG: join(tmpDir, "adapter.log"),
+    const stopAdapter = async () => {
+      child?.kill("SIGTERM")
+      if (child) await waitForExit(child)
+      for (const socket of daemon?.clients ?? []) socket.destroy()
+      if (daemon) await new Promise<void>((resolveClose) => daemon!.server.close(() => resolveClose()))
+      daemon = undefined
+      child = undefined
+    }
+
+    // ---- @dev_6 first: the colliding persona must NOT inherit @dev/6's id. ----
+    const underscoreRow = "row-handed-to-dev-6-underscore"
+    const underscoreText = await runAdapter({
+      socket: join(tmpDir, "tribe-underscore.sock"),
+      ackName: "@dev_6",
+      log: "adapter-underscore.log",
+      fetchAttention: {
+        actionable_unread: [
+          {
+            id: underscoreRow,
+            type: "verdict",
+            from: "@chief",
+            content: "UNDERSCORE-ROW",
+            ts: new Date().toISOString(),
+          },
+        ],
+        pending_balls: [],
       },
-      stdio: ["pipe", "pipe", "pipe"],
     })
-    const stdout = collectStdoutJson(child)
-    const channelText = () =>
-      stdout.filter((line) => line.method === "notifications/claude/channel").map((line) => JSON.stringify(line))
+    // RED before the fix: @dev/6's id was restored into the forwarded set, so
+    // @dev_6's own row read as already handed off and never reached this host.
+    expect(underscoreText.some((line) => line.includes("UNDERSCORE-ROW"))).toBe(true)
+    await waitForCondition(() => existsSync(v2Dev6), "@dev_6 persisted its own v2 ledger")
+    const underscoreLedger = ledgerOf(v2Dev6)
+    expect(underscoreLedger.pane).toBe("@dev_6")
+    expect(underscoreLedger.coverage.gap).toBe(true)
+    expect(underscoreLedger.coverage.gapReason).toBe("schema")
+    // PRE-EXISTING foreign counters are not inherited: this window counts only
+    // the one row it was actually handed.
+    expect(underscoreLedger.counters.presentations).toBe(1)
+    // The refusal is loud on the adapter's own log.
+    const underscoreLog = readFileSync(join(tmpDir, "adapter-underscore.log"), "utf8")
+    expect(underscoreLog).toContain("records owner @dev/6, not @dev_6")
+    expect(underscoreLog).toContain("ignoring it (28376)")
+    // The legacy file still belongs to the persona it records, byte for byte.
+    expect(readFileSync(legacyPath, "utf8")).toBe(legacyBefore)
+    await stopAdapter()
 
-    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
-    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@dev_6" }), (line) => line.id === 2)
-
-    const before = daemon.requests.filter((request) => request.method === "tribe.fetch").length
-    daemon.clients[0]?.write(makeNotification("wakeup", {}))
-    await waitForCondition(
-      () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
-      "28376 foreign-owner drain",
-    )
-    // RED before the fix: the foreign id was restored into the forwarded set, so
-    // this row was read as already handed off and never reached this host.
-    await waitForCondition(
-      () => channelText().some((line) => line.includes("FOREIGN-LEDGER-ROW")),
-      "the row owned by the other persona still reached this host (#28376)",
-    )
-
-    // The refusal is loud on the adapter's own log, and the window this pane
-    // persists is its own: named gap, no inherited id set.
-    await waitForCondition(
-      () =>
-        existsSync(join(tmpDir, "adapter.log")) &&
-        readFileSync(join(tmpDir, "adapter.log"), "utf8").includes("ignoring it (28376)"),
-      "the foreign-owner refusal line",
-    )
-    expect(readFileSync(join(tmpDir, "adapter.log"), "utf8")).toContain("records owner @dev/6, not @dev_6")
-    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
-      pane: string
-      ids: string[]
-      counters: Record<string, number>
-      coverage: { restarts: number; gap: boolean; gapReason: string }
-    }
-    expect(ledger.pane).toBe("@dev_6")
-    expect(ledger.coverage.gap).toBe(true)
-    expect(ledger.coverage.gapReason).toBe("schema")
-    // The PRE-EXISTING foreign counters are not inherited by this pane's window.
-    expect(ledger.counters.presentations).toBe(1)
+    // ---- @dev/6 next: it adopts its OWN live window, so its row stays suppressed. ----
+    const dev6Text = await runAdapter({
+      socket: join(tmpDir, "tribe-slash.sock"),
+      ackName: "@dev/6",
+      log: "adapter-slash.log",
+      fetchAttention: {
+        actionable_unread: [
+          { id: dev6Row, type: "verdict", from: "@chief", content: "DEV-6-OWN-ROW", ts: new Date().toISOString() },
+        ],
+        pending_balls: [],
+      },
+    })
+    // The v2 file appearing is the drained-and-persisted signal: only then is the
+    // absence of the row a real "already handed off", not a drain that never ran.
+    await waitForCondition(() => existsSync(v2DevSlash6), "@dev/6 re-persisted under its own v2 path")
+    expect(dev6Text.some((line) => line.includes("DEV-6-OWN-ROW"))).toBe(false)
+    const dev6LedgerV2 = ledgerOf(v2DevSlash6)
+    expect(dev6LedgerV2.pane).toBe("@dev/6")
+    expect(dev6LedgerV2.ids).toEqual([dev6Row])
+    expect(dev6LedgerV2.coverage.gap).toBe(false)
+    // Each persona kept its own file, and the legacy bytes survived both runs.
+    expect(ledgerOf(v2Dev6).pane).toBe("@dev_6")
+    expect(readFileSync(legacyPath, "utf8")).toBe(legacyBefore)
   })
 
   // #27459 - the ambient `events` path is the same pane inbox as attention: a
@@ -2436,7 +2509,7 @@ describe("stdio adapter delivery modes", () => {
     expect(channelText().filter((line) => line.includes("AMBIENT-FRESH"))).toHaveLength(1)
     expect(channelText().filter((line) => line.includes("AMBIENT-COUNTED"))).toHaveLength(1)
 
-    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
     await waitForCondition(() => existsSync(ledgerPath), "ambient delivery ledger written")
     const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
       ids: string[]
@@ -2502,7 +2575,7 @@ describe("stdio adapter delivery modes", () => {
     await drain("pre-restart drain")
     expect(firstText().filter((line) => line.includes("AMBIENT-RESTART"))).toHaveLength(1)
 
-    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
     await waitForCondition(() => existsSync(ledgerPath), "delivery ledger before restart")
 
     child!.kill("SIGTERM")
@@ -2648,7 +2721,7 @@ describe("stdio adapter delivery modes", () => {
     expect(count("GAP1-RECONNECT-C")).toBe(0)
     expect(count("GAP1-RECONNECT-NEW")).toBe(1)
 
-    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
     await waitForCondition(() => existsSync(ledgerPath), "gap-1 delivery ledger written")
     const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
       ids: string[]
@@ -2776,7 +2849,7 @@ describe("stdio adapter delivery modes", () => {
         Buffer.byteLength(replyText(pendingReply), "utf8") +
         Buffer.byteLength(replyText(waitReply), "utf8")
 
-      const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+      const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
       await waitForCondition(() => existsSync(ledgerPath), "cost ledger written")
       const cost = (
         JSON.parse(readFileSync(ledgerPath, "utf8")) as {

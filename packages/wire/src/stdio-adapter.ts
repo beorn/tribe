@@ -72,10 +72,8 @@ import {
 } from "./lib/replay-cap.ts"
 import {
   DELIVERY_LEDGER_WINDOW_MS,
-  deliveryLedgerOwnerMismatch,
-  deliveryLedgerPath,
-  loadDeliveryLedger,
   openDeliveryLedgerWindow,
+  resumeDeliveryLedger,
   saveDeliveryLedger,
   type DeliveryLedgerState,
 } from "./lib/delivery-ledger.ts"
@@ -1494,22 +1492,34 @@ let deliveryLedgerReady = false
 function ensureDeliveryLedger(now: number): void {
   if (deliveryLedgerReady) return
   const pane = myName !== "" ? myName : process.env[TRIBE_NAME_ENV]?.trim() || "@unknown"
-  const path = deliveryLedgerPath({ pane, env: process.env })
-  if (path === null) {
+  const resume = resumeDeliveryLedger({ pane, env: process.env, now })
+  if (resume === null) {
     // No habitat kpi root and no override: count in memory only, and never invent
     // a $HOME location (25231). The counters still work; only durability is off.
     deliveryLedgerReady = true
     return
   }
-  const loaded = loadDeliveryLedger(path)
-  // #28376 — the persisted `pane` is the ledger's owner, and the file name is
-  // only a hint: the key sanitizes `/` to `_`, so two distinct valid personas
-  // (`@dev/6`, `@dev_6`) can name one file. One line, then never adopted — the
-  // open below refuses it, so this pane cannot inherit another's forwarded ids.
-  if (deliveryLedgerOwnerMismatch(loaded.state, pane)) {
-    log.warn?.(`Tribe delivery ledger ${path} records owner ${loaded.state?.pane}, not ${pane}; ignoring it (28376).`)
+  // #28376 — the persisted `pane` is the ledger's OWNER and the file name is a
+  // hint at best: the pre-fix key sanitized `/` to `_`, so two distinct valid
+  // personas (`@dev/6`, `@dev_6`) named ONE file and the second resumed the
+  // first's forwarded ids and counters. A window recorded for another persona is
+  // refused with one line and never adopted; a legacy file this pane owns is
+  // adopted only while its window is live, and is otherwise left alone.
+  if (resume.foreign !== null) {
+    log.warn?.(
+      `Tribe delivery ledger ${resume.foreign.path} records owner ${resume.foreign.owner}, not ${pane}; ignoring it (28376).`,
+    )
+  } else if (resume.expiredLegacy !== null) {
+    log.warn?.(
+      `Tribe delivery ledger ${resume.expiredLegacy} is ${pane}'s but its window expired; opening a fresh window (28376).`,
+    )
   }
-  const opened = openDeliveryLedgerWindow({ existing: loaded.state, coverage: loaded.coverage, pane, now })
+  const opened = openDeliveryLedgerWindow({
+    existing: resume.load.state,
+    coverage: resume.load.coverage,
+    pane,
+    now,
+  })
   // #27459 REVISE — seed the cumulative same-window totals too, not just the
   // id set, or the first persist of a resumed window reads as all-zero.
   deliveryCounter.restore(opened.ids, opened.counters)
@@ -1517,7 +1527,7 @@ function ensureDeliveryLedger(now: number): void {
   // #27459 gap-7 — the summary throttle is restored too, or a restart re-presents
   // an unchanged "You own N balls ..." line (the class the id set just closed).
   pendingBallSummaryState = opened.pendingBallSummary
-  deliveryLedgerFilePath = path
+  deliveryLedgerFilePath = resume.path
   deliveryLedgerState = opened
   deliveryLedgerReady = true
 }

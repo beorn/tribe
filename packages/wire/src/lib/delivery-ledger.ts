@@ -76,11 +76,51 @@ export type DeliveryLedgerState = {
   coverage: DeliveryLedgerCoverage
 }
 
-/** The file-name fragment for a pane: `@agent/test` -> `@agent_test`. */
+/** A loaded window, or the named coverage of one that could not be read. */
+export type DeliveryLedgerLoad = {
+  state: DeliveryLedgerState | null
+  coverage: DeliveryLedgerCoverage
+}
+
+/** The characters a pane key keeps verbatim; every other byte is percent-encoded. */
+const PANE_KEY_SAFE_CHAR = /^[A-Za-z0-9._@-]$/
+
+/**
+ * #28376 — an INJECTIVE file-name fragment for a pane: every byte outside the
+ * safe set is percent-encoded and `%` itself is encoded, so no two distinct
+ * personas can share a key. The old sanitizer mapped `/` to `_`, which made the
+ * two VALID personas `@dev/6` and `@dev_6` one key (`@dev_6`) and so one file;
+ * the ledger of whoever wrote last then silently suppressed the other's rows.
+ */
 export function deliveryLedgerPaneKey(pane: string): string {
+  const trimmed = pane.trim()
+  if (trimmed === "") return "unregistered"
+  let key = ""
+  for (const byte of Buffer.from(trimmed, "utf8")) {
+    const char = String.fromCharCode(byte)
+    key += PANE_KEY_SAFE_CHAR.test(char) ? char : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`
+  }
+  return key
+}
+
+/**
+ * #28376 — the pre-fix SANITIZING key (`/` -> `_`; runs collapse to `_`). NOT
+ * injective, so it names a legacy file that a colliding persona may also have
+ * written to. Used only to find that file for the one-time, read-only adoption
+ * (`deliveryLedgerLegacyPath`); a new ledger never uses it.
+ */
+export function deliveryLedgerLegacyPaneKey(pane: string): string {
   const key = pane.trim().replace(/[^A-Za-z0-9._@-]+/gu, "_")
   return key === "" ? "unregistered" : key
 }
+
+/**
+ * #28376 — the `v2` namespace segment (@cto ruling). It keeps a new path from
+ * EVER equalling a legacy path, so a colliding pair's files never overlap even
+ * transiently: without it, `@dev_6`'s new key equals `@dev/6`'s legacy file
+ * `tribe-delivery-@dev_6.json`, one more case to reason about.
+ */
+const DELIVERY_LEDGER_FILE_PREFIX = "tribe-delivery-v2-"
 
 /**
  * The habitat kpi directory, or null when neither an override nor a habitat root
@@ -100,7 +140,20 @@ export function deliveryLedgerPath(opts: { pane: string; env: NodeJS.ProcessEnv 
   if (explicit) return explicit
   const dir = deliveryLedgerDir(opts.env)
   if (dir === null) return null
-  return join(dir, `tribe-delivery-${deliveryLedgerPaneKey(opts.pane)}.json`)
+  return join(dir, `${DELIVERY_LEDGER_FILE_PREFIX}${deliveryLedgerPaneKey(opts.pane)}.json`)
+}
+
+/**
+ * #28376 — the legacy (pre-fix) file a pane's window may still live in, read
+ * only to ADOPT a live window this pane owns (`resumeDeliveryLedger`). Null when
+ * an explicit ledger file is configured: that path IS the ledger, so nothing is
+ * invented beside it.
+ */
+export function deliveryLedgerLegacyPath(opts: { pane: string; env: NodeJS.ProcessEnv }): string | null {
+  if (opts.env[TRIBE_DELIVERY_LEDGER_ENV]?.trim()) return null
+  const dir = deliveryLedgerDir(opts.env)
+  if (dir === null) return null
+  return join(dir, `tribe-delivery-${deliveryLedgerLegacyPaneKey(opts.pane)}.json`)
 }
 
 /**
@@ -204,10 +257,7 @@ function isRepresentableTime(value: number): boolean {
  * Read a pane's ledger. A missing file is a FRESH window (gap false); a file
  * that exists but cannot be read back is a LOST window (gap true, with reason).
  */
-export function loadDeliveryLedger(path: string): {
-  state: DeliveryLedgerState | null
-  coverage: DeliveryLedgerCoverage
-} {
+export function loadDeliveryLedger(path: string): DeliveryLedgerLoad {
   if (!existsSync(path)) {
     return { state: null, coverage: { restarts: 0, gap: false, gapReason: "none" } }
   }
@@ -269,6 +319,71 @@ export function loadDeliveryLedger(path: string): {
     }
   } catch {
     return { state: null, coverage: { restarts: 0, gap: true, gapReason: "unreadable" } }
+  }
+}
+
+/** Where this pane's window was found, and any file that refused to be its own (#28376). */
+export type DeliveryLedgerResume = {
+  /** The path this pane WRITES to (the `v2` namespace). */
+  path: string
+  load: DeliveryLedgerLoad
+  /**
+   * A file that records ANOTHER persona: refused with one line, never adopted.
+   * Null when the window found belongs to the caller (or none was found).
+   */
+  foreign: { path: string; owner: string } | null
+  /** A legacy file this pane owns but whose window had expired: not adopted. */
+  expiredLegacy: string | null
+  /** The legacy file a LIVE window this pane owns was adopted from, once. */
+  adoptedFrom: string | null
+}
+
+/**
+ * #28376 — find this pane's window: its own `v2` file when present; otherwise,
+ * and only then, a LEGACY file this pane owns whose window is still LIVE (the
+ * one-time, read-only migration; @cto ruling). A foreign or expired legacy file
+ * is a LOST window: nothing is adopted, the gap is NAMED, and the legacy bytes
+ * are never written or deleted. The caller persists under `path` either way, so
+ * this adoption read retires itself once every seat has upgraded.
+ */
+export function resumeDeliveryLedger(opts: {
+  pane: string
+  env: NodeJS.ProcessEnv
+  now: number
+}): DeliveryLedgerResume | null {
+  const path = deliveryLedgerPath(opts)
+  if (path === null) return null
+  const own = loadDeliveryLedger(path)
+  if (existsSync(path)) {
+    return {
+      path,
+      load: own,
+      foreign: own.state !== null && own.state.pane !== opts.pane ? { path, owner: own.state.pane } : null,
+      expiredLegacy: null,
+      adoptedFrom: null,
+    }
+  }
+  const legacyPath = deliveryLedgerLegacyPath(opts)
+  if (legacyPath === null || legacyPath === path || !existsSync(legacyPath)) {
+    // No file anywhere: a fresh first run, which is not a gap.
+    return { path, load: own, foreign: null, expiredLegacy: null, adoptedFrom: null }
+  }
+  const legacy = loadDeliveryLedger(legacyPath)
+  const owner = legacy.state?.pane ?? null
+  if (owner === opts.pane && opts.now - (legacy.state?.windowStartMs ?? 0) < DELIVERY_LEDGER_WINDOW_MS) {
+    // A live window that is exactly this pane's: adopt it once; the next persist
+    // writes it under `path`, and the legacy file is left untouched.
+    return { path, load: legacy, foreign: null, expiredLegacy: null, adoptedFrom: legacyPath }
+  }
+  return {
+    path,
+    load: {
+      state: null,
+      coverage: { restarts: 0, gap: true, gapReason: legacy.coverage.gap ? legacy.coverage.gapReason : "schema" },
+    },
+    foreign: owner !== null && owner !== opts.pane ? { path: legacyPath, owner } : null,
+    expiredLegacy: owner === opts.pane ? legacyPath : null,
+    adoptedFrom: null,
   }
 }
 

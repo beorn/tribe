@@ -176,6 +176,23 @@ describe("delivery report coverage (#27459)", () => {
     }
   })
 
+  it("reads the v2-namespaced ledgers of a colliding pair, and the legacy file beside them (#28376)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-delivery-report-v2-"))
+    try {
+      // #28376 — the adapter writes `tribe-delivery-v2-*`. The report must read
+      // those, or a namespace change silently blanks every seat's row. It still
+      // reads a legacy file left behind by the one-time adoption.
+      writeFileSync(join(dir, "tribe-delivery-v2-@dev%2F6.json"), JSON.stringify(ledger({ pane: "@dev/6" })), "utf8")
+      writeFileSync(join(dir, "tribe-delivery-v2-@dev_6.json"), JSON.stringify(ledger({ pane: "@dev_6" })), "utf8")
+      writeFileSync(join(dir, "tribe-delivery-@dev_6.json"), JSON.stringify(ledger({ pane: "@dev/6" })), "utf8")
+      const read = readDeliveryLedgers(dir)
+      expect(read.states.map((state) => state.pane).sort()).toEqual(["@dev/6", "@dev/6", "@dev_6"])
+      expect(read.gaps).toHaveLength(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("a valid-JSON corrupt timestamp becomes a named gap, and the healthy row still renders", () => {
     // Reproduces the @dev/11 REVISE: windowStartMs 1e400 parses as Infinity, and the
     // ISO formatter used to throw RangeError with every row — including this healthy
