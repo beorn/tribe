@@ -2880,18 +2880,39 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
     }
     expect(refused).toBe(5)
 
-    // The same empty shape through the MCP tool path is refused with the same words.
-    const toolRead = parseResult<{ content: Array<{ text: string }> }>(
-      await harness.request("tribe.fetch", { topics: [] }),
-    )
-    expect(toolRead.content[0]!.text).toContain("empty selector")
+    // The CANONICAL MCP read keeps its existing semantics (review 2026-10-09):
+    // a registered seat's own model read is not the snapshot-only CLI/RPC
+    // capability, so an empty unused field there is inert, not a refusal.
+    // `{since: 0, topics: []}` is a valid read-only history call: it returns the
+    // window and leaves the session cursor, the mailbox cursor and the attention
+    // stamp untouched.
+    const mcpFetch = (params: Record<string, unknown>): Promise<string> =>
+      harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "mcp-fetch-empty-selector", method: "tribe.fetch", params },
+        "conn-empty-selector",
+      )
 
-    // Nothing acknowledged: the fresh verdict is still the seat's unread row.
+    const historyBefore = readState()
+    const history = parseResult<{ content: Array<{ text: string }> }>(await mcpFetch({ since: 0, topics: [] }))
+    expect(history.content[0]!.text).toContain("EMPTY-SELECTOR-VERDICT")
+    expect((JSON.parse(history.content[0]!.text) as { attention?: unknown }).attention).toBeUndefined()
+    expect(readState()).toEqual(historyBefore)
+
+    // Nothing acknowledged yet: the fresh verdict is still the seat's unread row.
     const inbox = parseResult<{ content: Array<{ text: string }> }>(
       await harness.request("cli_self_inbox_v1", { authority: null, idToken: "token-dev7", limit: 5, peek: true }),
     )
     expect(inbox.content[0]!.text).toContain("EMPTY-SELECTOR-VERDICT")
     expect(readState().mailbox).toBe(0)
+
+    // And `{topics: []}` on the canonical MCP read is still the ordinary default
+    // drain: it returns the unread verdict under attention and advances the
+    // mailbox — the shape a registered seat's own model read relies on.
+    const drained = parseResult<{ content: Array<{ text: string }> }>(await mcpFetch({ topics: [] }))
+    const drainedPayload = JSON.parse(drained.content[0]!.text) as { attention?: unknown }
+    expect(drainedPayload.attention).toBeDefined()
+    expect(drained.content[0]!.text).toContain("EMPTY-SELECTOR-VERDICT")
+    expect(readState().mailbox).toBeGreaterThan(0)
   })
 
   it("refuses a verified token no session registered under, and a contradicted token", async () => {

@@ -480,16 +480,21 @@ async function cmdFetch(opts: {
   if (opts.with !== undefined) params.with = opts.with
   if (opts.from !== undefined) params.from = opts.from
   if (opts.to !== undefined) params.to = opts.to
-  // At least one snapshot selector; `--limit` only bounds a window, so it does
-  // not count. A selector-less call is refused HERE and in the daemon RPC's own
-  // contract, and the refusal names the verb that owns the live read.
+  // At least one EFFECTIVE snapshot selector; `--limit` only bounds a window,
+  // so it does not count, and neither does an explicitly empty value: `--topics
+  // ""` parses to `[]`, and `--with ""` stays `""`, both of which select
+  // nothing. Reading one of those as a selector let the daemon fall through to
+  // the acknowledging default drain, marking rows read that no model saw (the
+  // 21757 hazard, 28402). A selector-less or empty-only call is refused HERE and
+  // again by the daemon RPC's own contract, and the refusal names the verb that
+  // owns the live read.
   const hasSelector =
-    ids !== undefined ||
-    topics !== undefined ||
+    (ids?.length ?? 0) > 0 ||
+    (topics?.length ?? 0) > 0 ||
     opts.since !== undefined ||
-    opts.with !== undefined ||
-    opts.from !== undefined ||
-    opts.to !== undefined
+    (opts.with?.length ?? 0) > 0 ||
+    (opts.from?.length ?? 0) > 0 ||
+    (opts.to?.length ?? 0) > 0
   if (!hasSelector) {
     console.error(
       "tribe fetch: snapshot lookups require at least one selector (--ids, --topics, --since, --with, --from, --to). " +

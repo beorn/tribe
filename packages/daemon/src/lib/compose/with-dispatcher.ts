@@ -75,7 +75,7 @@ import {
   type HandlerOpts,
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
-import { emptyFetchReadSelectorError } from "../fetch-read-selector.ts"
+import { emptyFetchReadSelectorRefusal, hasEffectiveFetchReadSelector } from "../fetch-read-selector.ts"
 import type { TribePluginHandle } from "../plugin-api.ts"
 import { createInboxWaitManager, readInboxWaitWokenBy } from "../inbox-wait.ts"
 import {
@@ -474,16 +474,9 @@ export function withDispatcher<
      * advancing branch. The canonical handleFetch then owns the semantics and
      * returns the same `{error}` the MCP tool does, so the two cannot drift.
      */
-    const FETCH_READ_SELECTOR_KEYS = ["ids", "topics", "since", "with", "from", "to"] as const
-
     function invalidFetchReadFilter(params: Record<string, unknown>): string | undefined {
       const isStringArray = (value: unknown): value is string[] =>
         Array.isArray(value) && value.every((entry) => typeof entry === "string")
-      // 28402 — an empty selector is not an absent one; the canonical handler
-      // refuses it too, from this same predicate, so no transport can widen a
-      // history lookup into the acknowledging default drain.
-      const emptySelector = emptyFetchReadSelectorError(params)
-      if (emptySelector !== undefined) return emptySelector
       if (params.ids !== undefined && !isStringArray(params.ids)) {
         return "Authenticated fetch read filter 'ids' must be an array of strings"
       }
@@ -512,7 +505,18 @@ export function withDispatcher<
           return `Authenticated fetch read is snapshot-only; '${key}' is not accepted`
         }
       }
-      if (!FETCH_READ_SELECTOR_KEYS.some((key) => Object.prototype.hasOwnProperty.call(params, key))) {
+      // 28402 — an EFFECTIVE selector, not merely a present key. `topics: []`,
+      // `ids: []`, `from: ''`, `to: ''` and `with: ''` are present selectors
+      // that select nothing, and accepting one here let the read fall through
+      // to the acknowledging default drain, so a fresh unread verdict vanished
+      // from the caller's unread view (the 21757 hazard). A present non-empty
+      // sibling — `since: 0` counts — makes the read a snapshot on its own, so
+      // the empty field beside it stays inert. The refusal lives only at this
+      // snapshot-only boundary; the canonical handleFetch keeps its existing
+      // MCP semantics for a registered seat's own read (review 2026-10-09).
+      const emptySelector = emptyFetchReadSelectorRefusal(params)
+      if (emptySelector !== undefined) return emptySelector
+      if (!hasEffectiveFetchReadSelector(params)) {
         return "Authenticated fetch read requires a snapshot selector (ids, topics, since, with, from, to); the live read is tribe inbox"
       }
       return undefined

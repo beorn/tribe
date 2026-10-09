@@ -685,15 +685,34 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     ])
   })
 
-  // 28402 — an explicitly empty selector flag is STILL a selector: the CLI must
-  // forward it so the daemon can refuse it by name. Dropping an empty value here
-  // (parseCommaList already maps '' to [] and the raw string flags keep '')
-  // would hand the daemon a different request than the caller wrote, and the
-  // widening default drain is exactly what the empty shape must never reach.
-  it("fetch forwards an explicitly empty selector instead of dropping it (#28402)", async () => {
+  // 28402 — an explicitly EMPTY selector flag is not an effective selector:
+  // `--topics ''` parses to `[]` and `--with ''` stays `''`, both select
+  // nothing, and reading either as a selector sent the call to the daemon's
+  // acknowledging default drain, marking rows read that no model saw (the 21757
+  // hazard). An empty-only call is refused HERE, before any socket is opened,
+  // naming the verb that owns the live read.
+  it("fetch refuses an explicitly empty selector before connecting (#28402)", async () => {
+    const empty = { events: [], cursor: 0 }
+    const { result, calls } = await runManagedFetchCliAgainst(["fetch", "--json", "--topics", ""], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify(empty) }], structuredContent: empty },
+    }))
+
+    expect(result).toMatchObject({
+      code: 2,
+      stderr:
+        "tribe fetch: snapshot lookups require at least one selector (--ids, --topics, --since, --with, --from, --to). " +
+        "The live read is `tribe inbox`; `tribe log` is the daemon log.\n",
+    })
+    expect(calls).toEqual([])
+  })
+
+  // 28402 — an empty field beside an effective selector is inert, not a reason
+  // to refuse: the daemon treats the read as a snapshot on the strength of the
+  // effective sibling. The CLI still forwards exactly what the caller wrote.
+  it("fetch forwards an empty field alongside an effective selector (#28402)", async () => {
     const empty = { events: [], cursor: 0 }
     const { result, calls } = await runManagedFetchCliAgainst(
-      ["fetch", "--json", "--topics", "", "--with", "", "--from", ""],
+      ["fetch", "--json", "--since", "0", "--topics", "", "--with", "", "--from", ""],
       () => ({ result: { content: [{ type: "text", text: JSON.stringify(empty) }], structuredContent: empty } }),
     )
 
@@ -701,7 +720,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(calls).toEqual([
       {
         method: "cli_session_fetch_read_v1",
-        params: { idToken: MANAGED_PENDING_TOKEN, topics: [], with: "", from: "" },
+        params: { idToken: MANAGED_PENDING_TOKEN, since: 0, topics: [], with: "", from: "" },
       },
     ])
   })
