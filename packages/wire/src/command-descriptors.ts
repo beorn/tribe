@@ -606,7 +606,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "close",
           flags: "--close <request_id>",
-          description: "Close one ordinary request; an incident requires --evidence and its owner or dispatcher @chief",
+          description:
+            "Requires --owner. Close one ordinary request; an incident requires --evidence and its owner or dispatcher @chief",
           requires: ["owner"],
         },
         {
