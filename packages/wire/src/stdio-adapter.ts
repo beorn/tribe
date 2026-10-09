@@ -317,13 +317,32 @@ let daemonDegradedReason: string | null = null
  *
  * `meta` is harness/tribe routing metadata (from / type / bead /
  * message_id) — not user-visible content — so it's left as-is.
+ *
+ * #28378: the returned promise is the TRANSPORT's own — it resolves when the
+ * host accepted the notification and rejects with the transport's cause when it
+ * did not. `undefined` means there was nothing to send (not joined yet, no
+ * channel capability, no MCP server) and is not a failure. A caller that
+ * records delivery awaits this and records only on success; a diagnostic caller
+ * uses `sendChannelDetached`.
  */
-function sendChannel(content: string, meta: Record<string, string | undefined>): void {
-  if (meta.from !== "tribe-startup" && (!joined || !currentDeliveryCapability().channel)) return
-  if (!CLAUDE_CHANNEL_ENABLED) return
-  if (!mcp) return // Not yet initialized
+function sendChannel(content: string, meta: Record<string, string | undefined>): Promise<void> | undefined {
+  if (meta.from !== "tribe-startup" && (!joined || !currentDeliveryCapability().channel)) return undefined
+  if (!CLAUDE_CHANNEL_ENABLED) return undefined
+  if (!mcp) return undefined // Not yet initialized
   const safeContent = defangModelInput(content)
-  mcp.notification({ method: "notifications/claude/channel", params: { content: safeContent, meta } }).catch(() => {})
+  return mcp.notification({ method: "notifications/claude/channel", params: { content: safeContent, meta } })
+}
+
+/**
+ * Fire-and-forget channel notification for callers with no delivery accounting
+ * (startup banner, degrade notice, join acknowledgement, cwd guardrail, pending
+ * ball summary, session events). The rejection is surfaced on the adapter log
+ * with its cause — never swallowed (#28378).
+ */
+function sendChannelDetached(content: string, meta: Record<string, string | undefined>): void {
+  void sendChannel(content, meta)?.catch((error) => {
+    log.warn?.(`tribe channel notification was not delivered: ${errorMessage(error)}`)
+  })
 }
 
 const NOTIFICATION_ONLY_MARKER = "notification-only:do-not-acknowledge-or-respond-to"
@@ -864,7 +883,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
 
         const shortSocket = SOCKET_PATH.replace(process.env.HOME ?? "", "~")
         const banner = `**tribe** ${myName} (${myRole}) · chief: ${chief} · ${deliveryAcknowledgementSummary()} · peers: ${peers} · ${shortSocket}`
-        sendChannel(banner, { from: "tribe-startup", type: "system" })
+        sendChannelDetached(banner, { from: "tribe-startup", type: "system" })
       } catch {
         // Non-fatal — banner is diagnostic, don't block startup
         log.debug?.("Startup banner failed (non-fatal)")
@@ -912,10 +931,13 @@ function armDegradeNotice(p: Promise<DaemonClient>): void {
     degradeAnnounced = true
     log.warn?.(`tribe daemon unavailable — running solo (${daemonDegradedReason})`)
     try {
-      sendChannel(`**tribe** unavailable — running solo. This session works normally; tribe tools are disabled.`, {
-        from: "tribe-startup",
-        type: "system",
-      })
+      sendChannelDetached(
+        `**tribe** unavailable — running solo. This session works normally; tribe tools are disabled.`,
+        {
+          from: "tribe-startup",
+          type: "system",
+        },
+      )
     } catch {
       // Channel may not be wired yet/at all — the log line above is the notice.
     }
@@ -1213,7 +1235,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
         log.warn?.(`tribe delivery acknowledgement ${deliveryAcknowledgementSummary()}`)
       }
-      sendChannel(`**tribe** ${myName} · ${deliveryAcknowledgementSummary()}`, {
+      sendChannelDetached(`**tribe** ${myName} · ${deliveryAcknowledgementSummary()}`, {
         from: "tribe-startup",
         type: "system",
       })
@@ -1293,7 +1315,7 @@ await mcp.connect(new StdioServerTransport())
 if (CWD_EVAL.kind === "warn" || CWD_EVAL.kind === "refuse") {
   const prefix = CWD_EVAL.kind === "refuse" ? "system" : "warning"
   timers.setTimeout(() => {
-    sendChannel(CWD_EVAL.message, { from: "stdio-adapter", type: prefix })
+    sendChannelDetached(CWD_EVAL.message, { from: "stdio-adapter", type: prefix })
     // Also log to the daemon's activity stream so diagnostics can surface it.
     daemon
       ?.call("log_event", {
@@ -1381,11 +1403,11 @@ function tryAutoRenameOnClaim(content: string): void {
     })
 }
 
-function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[number]): void {
+async function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[number]): Promise<void> {
   const content = String(event.content ?? "")
   const type = markedType(String(event.type ?? "notify"))
   if (type === "bead:claimed") tryAutoRenameOnClaim(content)
-  sendChannel(content, {
+  await sendChannel(content, {
     from: String(event.from ?? "unknown"),
     type,
     bead: event.bead ? String(event.bead) : undefined,
@@ -1439,10 +1461,13 @@ function forwardPendingBallSummary(
     withheld && (withheld.total ?? 0) > 0
       ? ` Preview withheld ${withheld.total} (${withheld.by_kind?.request ?? 0} request, ${withheld.by_kind?.incident ?? 0} incident).`
       : ""
-  sendChannel(`You own ${total} ${total === 1 ? "ball" : "balls"}, oldest ${oldest}.${topText}${withheldText}`, {
-    from: "tribe",
-    type: "attention:pending-balls",
-  })
+  sendChannelDetached(
+    `You own ${total} ${total === 1 ? "ball" : "balls"}, oldest ${oldest}.${topText}${withheldText}`,
+    {
+      from: "tribe",
+      type: "attention:pending-balls",
+    },
+  )
 }
 
 let drainInFlight = false
@@ -1628,13 +1653,22 @@ function drainDaemonInbox(): void {
           (event) => !forwardedAttention.has(event.id ? String(event.id) : undefined),
         )
         for (const event of attentionEvents) {
-          forwardFetchedEvent(event)
+          const eventId = event.id ? String(event.id) : undefined
+          try {
+            await forwardFetchedEvent(event)
+          } catch (error) {
+            // #28378 — a REJECTED channel notification is not a completed
+            // handoff: it must not enter the forwarded-id record, the delivery
+            // counter or the durable ledger, and the next drain must be free to
+            // forward the same row again. The cause is surfaced, not swallowed.
+            log.warn?.(
+              `tribe drain: channel notification for ${eventId ?? "a row"} was rejected and is not recorded as delivered; it can be forwarded again next drain: ${errorMessage(error)}`,
+            )
+            continue
+          }
           // Marked only AFTER the handoff, so a throw re-delivers next drain.
-          forwardedAttention.remember(event.id ? String(event.id) : undefined)
-          deliveryCounter.deliver(
-            event.id ? String(event.id) : undefined,
-            Buffer.byteLength(String(event.content ?? ""), "utf8"),
-          )
+          forwardedAttention.remember(eventId)
+          deliveryCounter.deliver(eventId, Buffer.byteLength(String(event.content ?? ""), "utf8"))
         }
         const currentPendingBalls = result?.attention?.pending_balls ?? []
         const currentPendingBallSummary = result?.attention?.pending_balls_summary
@@ -1661,12 +1695,19 @@ function drainDaemonInbox(): void {
         const freshEvents = events.filter((event) => !forwardedAttention.has(event.id ? String(event.id) : undefined))
         const { forward, skippedOld, capped } = selectReplayEvents(freshEvents, { now: Date.now() })
         for (const event of forward) {
-          forwardFetchedEvent(event)
-          forwardedAttention.remember(event.id ? String(event.id) : undefined)
-          deliveryCounter.deliver(
-            event.id ? String(event.id) : undefined,
-            Buffer.byteLength(String(event.content ?? ""), "utf8"),
-          )
+          const eventId = event.id ? String(event.id) : undefined
+          try {
+            await forwardFetchedEvent(event)
+          } catch (error) {
+            // #28378 — same rule on the ambient path: no completed handoff, no
+            // record, no count; the row stays deliverable and the cause is loud.
+            log.warn?.(
+              `tribe drain: channel notification for ${eventId ?? "a row"} was rejected and is not recorded as delivered; it can be forwarded again next drain: ${errorMessage(error)}`,
+            )
+            continue
+          }
+          forwardedAttention.remember(eventId)
+          deliveryCounter.deliver(eventId, Buffer.byteLength(String(event.content ?? ""), "utf8"))
         }
         if (skippedOld > 0 || capped > 0) {
           log.warn?.(
@@ -1715,23 +1756,41 @@ function handleDaemonNotification(method: string, params?: Record<string, unknow
     // model-backed receipt, not transport, retires custody).
     const pushedId = params?.message_id ? String(params.message_id) : undefined
     if (pushedId !== undefined && forwardedAttention.has(pushedId)) return
-    sendChannel(content, {
+    const pushMeta = {
       from: String(params?.from ?? "unknown"),
       type,
       bead: params?.bead_id ? String(params.bead_id) : undefined,
       message_id: params?.message_id ? String(params.message_id) : undefined,
-    })
-    if (pushedId !== undefined) {
-      // Marked only AFTER the handoff, and persisted, so an adapter restart
-      // cannot make the daemon's reconnect re-push read as a fresh delivery.
-      ensureDeliveryLedger(Date.now())
-      forwardedAttention.remember(pushedId)
-      deliveryCounter.deliver(pushedId, Buffer.byteLength(content, "utf8"))
-      persistDeliveryLedger(Date.now())
     }
+    if (pushedId === undefined) {
+      // A push with no message id fails open: there is nothing to record, but
+      // the rejection must still be surfaced and consumed (#28378 — an
+      // unhandled rejection from here took the whole adapter down).
+      sendChannelDetached(content, pushMeta)
+      return
+    }
+    const pushHandoff = sendChannel(content, pushMeta)
+    // Marked only AFTER the handoff, and persisted, so an adapter restart
+    // cannot make the daemon's reconnect re-push read as a fresh delivery.
+    // #28378 — a rejected push is not a handoff: nothing is remembered or
+    // counted, the cause is surfaced, and a later drain or push can still
+    // forward the row.
+    void (async () => {
+      try {
+        await (pushHandoff ?? Promise.resolve())
+        ensureDeliveryLedger(Date.now())
+        forwardedAttention.remember(pushedId)
+        deliveryCounter.deliver(pushedId, Buffer.byteLength(content, "utf8"))
+        persistDeliveryLedger(Date.now())
+      } catch (error) {
+        log.warn?.(
+          `tribe channel-push: notification for ${pushedId} was rejected and is not recorded as delivered; it can be forwarded again: ${errorMessage(error)}`,
+        )
+      }
+    })()
   } else if (method === "session.joined" || method === "session.left") {
     const action = method === "session.joined" ? "joined" : "left"
-    sendChannel(`${String(params?.name ?? "unknown")} ${action} the tribe`, { from: "daemon", type: "status" })
+    sendChannelDetached(`${String(params?.name ?? "unknown")} ${action} the tribe`, { from: "daemon", type: "status" })
   }
 }
 

@@ -11,6 +11,9 @@ import { MAX_REPLAY_EVENTS } from "../src/lib/replay-cap.ts"
 import { launchEnvironment } from "./launch-token.ts"
 
 const ADAPTER = resolve(dirname(fileURLToPath(import.meta.url)), "../src/stdio-adapter.ts")
+// #28378 — the same adapter entered through a transport fault seam that rejects
+// the first FAULT-ROW channel notification (see notification-fault-entry.ts).
+const FAULT_ENTRY = resolve(dirname(fileURLToPath(import.meta.url)), "./notification-fault-entry.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
 
 type FakeDaemon = {
@@ -2036,6 +2039,151 @@ describe("stdio adapter delivery modes", () => {
     expect(ledger.counters.duplicatePresentations).toBe(2)
     expect(ledger.counters.suppressed).toBe(2)
     expect([...ledger.ids].sort()).toEqual(["count-row-a", "count-row-b"])
+  })
+
+  // #28378 — a channel notification the host transport REJECTED is not a
+  // completed handoff. The failed row must not enter the forwarded-id record,
+  // the delivery counter or the durable ledger; the next healthy drain must be
+  // able to forward the same row again; and the transport's cause must reach
+  // the adapter log rather than being swallowed. The reviewed reproduction
+  // injected exactly this rejection at the SDK transport boundary, so the
+  // fixture patches that one seam and imports the real adapter unchanged.
+  it("does not record a rejected channel notification as delivered, retries it, and surfaces the cause (#28378)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const ledgerPath = join(tmpDir, "fault-ledger.json")
+    const faultLog = join(tmpDir, "fault-attempts.jsonl")
+    const adapterLog = join(tmpDir, "adapter.log")
+    const recentTs = new Date().toISOString()
+    const faultRow = { id: "fault-row-28378", type: "request", from: "@chief", content: "FAULT-ROW", ts: recentTs }
+    const controlRow = {
+      id: "control-row-28378",
+      type: "request",
+      from: "@chief",
+      content: "CONTROL-ROW",
+      ts: recentTs,
+    }
+    const fetchAttention: {
+      actionable_unread: Array<Record<string, unknown>>
+      pending_balls: Array<Record<string, unknown>>
+    } = {
+      actionable_unread: [],
+      pending_balls: [],
+    }
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
+    child = spawn(BUN_BIN, [FAULT_ENTRY, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_DELIVERY_LEDGER: ledgerPath,
+        PROBE_FAULT_LOG: faultLog,
+        DEBUG_LOG: adapterLog,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const channelText = () =>
+      stdout.filter((line) => line.method === "notifications/claude/channel").map((line) => JSON.stringify(line))
+    const attempts = (): string[] =>
+      existsSync(faultLog)
+        ? readFileSync(faultLog, "utf8")
+            .split("\n")
+            .filter((row) => row.length > 0)
+        : []
+    const readLedger = () =>
+      JSON.parse(readFileSync(ledgerPath, "utf8")) as { ids: string[]; counters: Record<string, number> }
+    const drain = async (label: string) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients.at(-1)?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 250))
+    }
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    // First drain: the only row's notification is rejected by the transport.
+    fetchAttention.actionable_unread = [faultRow]
+    await drain("first faulted drain")
+    await waitForCondition(() => attempts().length === 1, "one rejected send attempt")
+    expect(channelText().some((line) => line.includes("FAULT-ROW"))).toBe(false)
+    await waitForCondition(() => existsSync(ledgerPath), "the per-pane ledger written")
+    const afterFailure = readLedger()
+    expect(afterFailure.ids).not.toContain(faultRow.id)
+    expect(afterFailure.counters.deliveries).toBe(0)
+    expect(afterFailure.counters.newDeliveries).toBe(0)
+    await waitForCondition(
+      () => existsSync(adapterLog) && readFileSync(adapterLog, "utf8").includes("TEST_FAULT_SEND_REJECTED"),
+      "the transport cause surfaced on the adapter log",
+    )
+
+    // Second drain: the same row is offered again and now its send succeeds.
+    fetchAttention.actionable_unread = [faultRow, controlRow]
+    await drain("second healthy drain")
+    await waitForCondition(() => attempts().length === 2, "the rejected row retried")
+    await waitForCondition(
+      () => channelText().some((line) => line.includes("FAULT-ROW")),
+      "the retried row forwarded to the host",
+    )
+    await waitForCondition(() => readLedger().ids.includes(faultRow.id), "the retried row recorded as delivered")
+    expect(channelText().filter((line) => line.includes("CONTROL-ROW"))).toHaveLength(1)
+    const afterRetry = readLedger()
+    expect([...afterRetry.ids].sort()).toEqual([faultRow.id, controlRow.id].sort())
+    expect(afterRetry.counters.deliveries).toBe(2)
+  })
+
+  // #28378 REVIEW (@dev/6) — the LIVE channel-push path. A push with no message
+  // id fails open (nothing to record), but its rejection must still be consumed
+  // and surfaced: an unhandled rejection here exited the adapter. The next
+  // healthy ID-less push must reach the host on the same running adapter.
+  it("survives a rejected ID-less channel push and still forwards the next one (#28378)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const adapterLog = join(tmpDir, "adapter.log")
+    const faultLog = join(tmpDir, "fault-attempts.jsonl")
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention: { actionable_unread: [], pending_balls: [] } })
+    child = spawn(BUN_BIN, [FAULT_ENTRY, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_DELIVERY_LEDGER: join(tmpDir, "push-ledger.json"),
+        PROBE_FAULT_LOG: faultLog,
+        DEBUG_LOG: adapterLog,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const channelText = () =>
+      stdout.filter((line) => line.method === "notifications/claude/channel").map((line) => JSON.stringify(line))
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    daemon.clients
+      .at(-1)
+      ?.write(makeNotification("channel", { from: "chief", type: "request", content: "FAULT-ROW id-less push" }))
+    await waitForCondition(() => existsSync(faultLog), "the ID-less push attempted")
+    await waitForCondition(
+      () => existsSync(adapterLog) && readFileSync(adapterLog, "utf8").includes("TEST_FAULT_SEND_REJECTED"),
+      "the ID-less push cause surfaced on the adapter log",
+    )
+    expect(child.exitCode).toBeNull()
+
+    daemon.clients
+      .at(-1)
+      ?.write(makeNotification("channel", { from: "chief", type: "request", content: "HEALTHY-IDLESS-PUSH" }))
+    await waitForCondition(
+      () => channelText().some((line) => line.includes("HEALTHY-IDLESS-PUSH")),
+      "the next healthy ID-less push forwarded",
+    )
+    expect(child.exitCode).toBeNull()
   })
 
   // #27459 REVISE (@dev/11): a restart RESUMES the in-flight 4h window, so the
