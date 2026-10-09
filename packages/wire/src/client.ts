@@ -671,14 +671,24 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
   // anonymous pipe, so a consumed/closed launch fd cannot silently strip
   // operator authority after a crash or restart.
   const readOperatorCapability = createOperatorCapabilityReader()
+  let closed = false
+  let registering: DaemonClient | undefined
 
   async function connectAndRegister(): Promise<DaemonClient> {
     const candidate = await connectOrStartWithCapability(socketPath, startOpts, readOperatorCapability)
+    if (closed) {
+      candidate.close()
+      candidate.socket.destroy()
+      return candidate
+    }
+    registering = candidate
     try {
       if (onConnect) await onConnect(candidate)
     } catch (error) {
       candidate.close()
       throw isDeliberateDaemonRefusal(error) ? error : new RegistrationError(error)
+    } finally {
+      if (registering === candidate) registering = undefined
     }
     return candidate
   }
@@ -730,7 +740,6 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
   }
 
   let current = await connectInitialWithRetry()
-  let closed = false
   let reconnectAc: AbortController | null = null
   // Persistent notification handlers — replayed onto each new connection
   const notificationHandlers: Array<(method: string, params?: Record<string, unknown>) => void> = []
@@ -774,12 +783,18 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
           if (closed) return
           try {
             const candidate = await connectAndRegister()
+            if (closed) {
+              candidate.close()
+              candidate.socket.destroy()
+              return
+            }
             current = candidate
             for (const h of notificationHandlers) candidate.onNotification(h)
             setupReconnect()
             onReconnect?.()
             return
           } catch (error) {
+            if (closed) return
             // Reconnects retry EITHER failure kind uniformly (unchanged
             // from before RegistrationError existed) — only the initial
             // connect distinguishes them. Unwrap so the reported error
@@ -809,6 +824,7 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
     get(_, prop) {
       if (prop === "call") {
         return (...args: Parameters<DaemonClient["call"]>) => {
+          if (closed) return Promise.reject(new Error("daemon client closed"))
           // 22994 — after a disconnect, `current` still names the retired
           // client until the bounded reconnect loop installs its successor.
           // Writing a request to that destroyed socket creates a pending call
@@ -826,6 +842,8 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
         return () => {
           closed = true
           reconnectAc?.abort()
+          registering?.close()
+          registering?.socket.destroy()
           current.close()
           current.socket.unref()
         }
