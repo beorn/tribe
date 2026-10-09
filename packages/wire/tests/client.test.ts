@@ -1005,6 +1005,56 @@ describe("createReconnectingClient transport recovery", () => {
     }
   })
 
+  /**
+   * @failure A closed owner adopts its pending handshake and sends RPCs afterward.
+   * @level l2
+   * @consumer createReconnectingClient public close/call over a native socket
+   * @testonly none
+   */
+  it("retires a reconnect handshake when its client closes", async () => {
+    const { server, clients } = await spawnFakeDaemon(join(tmpDir, "close-handshake.sock"))
+    let release = () => {}
+    const handshake = new Promise<void>((resolve) => { release = resolve })
+    let candidate: DaemonClient | undefined
+    let connections = 0
+    let reconnects = 0
+    let exhausted = 0
+    const received: string[] = []
+    const client = await createReconnectingClient({
+      socketPath: join(tmpDir, "close-handshake.sock"), noSpawn: true, maxAttempts: 1,
+      async onConnect(next) {
+        if (++connections === 2) {
+          candidate = next
+          await handshake
+        }
+      },
+      onReconnect: () => { reconnects++ },
+      onReconnectExhausted: () => { exhausted++ },
+    })
+    try {
+      clients[0]?.destroy()
+      await vi.waitFor(() => expect(candidate).toBeDefined())
+      clients[1]?.on("data", createLineParser((message) => {
+        if (isRequest(message)) received.push(message.method)
+      }))
+      client.close()
+      expect(candidate?.socket.destroyed).toBe(true)
+      await expect(client.call("echo", { after: "close" })).rejects.toThrow(/closed/i)
+      release()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(reconnects).toBe(0)
+      expect(exhausted).toBe(0)
+      await expect(client.call("echo", { after: "handshake" })).rejects.toThrow(/closed/i)
+      expect(received).toEqual([])
+    } finally {
+      release()
+      client.close()
+      candidate?.close()
+      for (const socket of clients) socket.destroy()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
   it("re-arms callbacks and notifications after one client transport closes while the daemon stays healthy", async () => {
     const sock = join(tmpDir, "d.sock")
     const { server, clients } = await spawnFakeDaemon(sock)
