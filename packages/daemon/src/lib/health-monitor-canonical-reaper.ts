@@ -63,7 +63,7 @@ function identityKey(row: ProcessObservationRow): string {
 function attributionSignature(row: ProcessObservationRow): string {
   const attribution = row.attribution
   if (attribution.kind === "owned" || attribution.kind === "exempt") {
-    return `${attribution.kind}\0${attribution.ownerId}\0${attribution.via}`
+    return `${attribution.kind}\0${attribution.ownerId}\0${attribution.via}\0${attribution.ownerLiveness ?? "unknown"}`
   }
   if (attribution.kind === "unknown") return `unknown\0${attribution.reason}`
   return "unowned"
@@ -217,32 +217,27 @@ export function checkCanonicalReaper(
   noteSourceHealthy(state, api)
 
   const liveNames = new Set(sessions.map(({ name }) => name))
-  /**
-   * 28276: a declared hab service's owner is a hab unit, never a Tribe recipient, so `liveNames`
-   * cannot answer whether it is alive — every live unit read as an orphaned seat and was paged to be
-   * stopped. The census CAN answer: `via` root/tree is emitted only for a process under a
-   * registration root whose exact incarnation THIS census observed (hab-core resolveProcessOwnerRoots),
-   * so an owner named by such a row is proven live from the hab plan/supervisor records, not from Tribe.
-   */
-  const corroboratedOwners = new Set<string>()
-  for (const row of observation.processes) {
+  // Custody roots can outlive their owning occurrence. Trust lifecycle from the selected incarnation, never
+  // another root or live recipient with the same unit name (@cto 28276). A recipient may only lift unknown.
+  const ownerLiveness = (row: ProcessObservationRow): "live" | "down" | "unknown" => {
     const attribution = row.attribution
-    if (attribution.kind === "owned" && (attribution.via === "root" || attribution.via === "tree")) {
-      corroboratedOwners.add(attribution.ownerId)
-    }
+    if (attribution.kind !== "owned") return "unknown"
+    const liveness = attribution.ownerLiveness ?? "unknown"
+    return liveness === "unknown" && liveNames.has(attribution.ownerId) ? "live" : liveness
   }
-  const ownerIsLive = (ownerId: string): boolean => liveNames.has(ownerId) || corroboratedOwners.has(ownerId)
   const seen = new Set<string>()
   const rowsByKey = new Map<string, ProcessObservationRow>()
   for (const row of observation.processes) {
     const cpu = row.process.cpuPercent ?? 0
     const command = row.process.command
-    // 27765: a process whose canonical owner is no longer live — neither a live recipient nor an owner process this
-    // census observed (see ownerIsLive) — is evidence in itself: it outlived its seat. At rest it never crosses the
-    // CPU threshold, so the CPU filter hid it (the specimen sat parked for three days). CPU stays the admission test
-    // for everything else; ownership admits this one.
-    const ownerGone = row.attribution.kind === "owned" && !ownerIsLive(row.attribution.ownerId)
-    if (!/\b(bun|node)\b/u.test(command) || (cpu <= thresholds.reaperCpuThreshold && !ownerGone)) continue
+    // 27765: an explicitly down owner admits its parked survivor. Unknown liveness also admits its diagnostic,
+    // including a legacy producer that supplied no lifecycle; it never admits an owner-down decision.
+    const ownerState = ownerLiveness(row)
+    const ownerGone = row.attribution.kind === "owned" && ownerState === "down"
+    const ownerUnknown = row.attribution.kind === "owned" && ownerState === "unknown"
+    if (!/\b(bun|node)\b/u.test(command) || (cpu <= thresholds.reaperCpuThreshold && !ownerGone && !ownerUnknown)) {
+      continue
+    }
     const key = identityKey(row)
     seen.add(key)
     rowsByKey.set(key, row)
@@ -251,6 +246,18 @@ export function checkCanonicalReaper(
       continue
     }
     const suspect = updateSuspect(row, thresholds, state, observation.observedAt)
+    if (ownerUnknown && row.attribution.kind === "owned") {
+      resetDecisionClock(suspect, observation.observedAt)
+      const signature = `owner-liveness-unknown\0${row.attribution.ownerId}\0${row.attribution.via}`
+      if (suspect.lastUnknownSignature !== signature) {
+        suspect.lastUnknownSignature = signature
+        sendUnknown(
+          api,
+          `health:reaper: PID ${row.process.pid} (${suspect.command}) owner ${row.attribution.ownerId} lifecycle unknown (ownerLiveness=${row.attribution.ownerLiveness ?? "absent"}, via=${row.attribution.via}); this census did not prove its selected owner incarnation live or down; ${diagnosticContext(observation)}`,
+        )
+      }
+      continue
+    }
     if (row.attribution.kind !== "unknown") continue
     resetDecisionClock(suspect, observation.observedAt)
     const evidence = row.attribution.evidence
@@ -290,14 +297,16 @@ export function checkCanonicalReaper(
     if (row === undefined || row.attribution.kind === "unknown" || row.attribution.kind === "exempt") continue
     const observedSeconds = Math.floor((observation.observedAt - suspect.firstSeen) / 1_000)
     if (row.attribution.kind === "owned") {
+      const liveness = ownerLiveness(row)
+      if (liveness === "unknown") continue
       if (suspect.samples < 3) continue
-      if (!ownerIsLive(row.attribution.ownerId)) {
+      if (liveness === "down") {
         // Once per exact incarnation: the seat and the start time are what an operator needs to find this again.
         const signature = `owner-down\0${row.attribution.ownerId}\0${suspect.pid}\0${suspect.startTime}`
         if (suspect.lastUnknownSignature !== signature) {
           suspect.lastUnknownSignature = signature
           api.broadcast(
-            `health:reaper: PID ${suspect.pid} (${suspect.command}) START ${JSON.stringify(suspect.startTime)} at ${suspect.cpu}% CPU, observed for ${observedSeconds}s: its canonical owner ${row.attribution.ownerId} (via=${row.attribution.via}) is not live — no live recipient and no owner process in this census — so this process outlived its owner. Stop it if it is yours, or start a probe that must outlive its owner through \`hab run\`; ${diagnosticContext(observation)}`,
+            `health:reaper: PID ${suspect.pid} (${suspect.command}) START ${JSON.stringify(suspect.startTime)} at ${suspect.cpu}% CPU, observed for ${observedSeconds}s: its selected canonical owner incarnation ${row.attribution.ownerId} (via=${row.attribution.via}, ownerLiveness=down) is explicitly down in this census, so this process outlived its owner. Stop it if it is yours, or start a probe that must outlive its owner through \`hab run\`; ${diagnosticContext(observation)}`,
             "health:reaper:owner-down",
             undefined,
             { delivery: "push", topic: "health:reaper:owner-down" },

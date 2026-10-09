@@ -105,7 +105,12 @@ const SCALAR_UNAVAILABLE_REASONS = new Set([
 ])
 
 export type ProcessRoutingAttribution =
-  | { readonly kind: "exempt" | "owned"; readonly ownerId: string; readonly via: string }
+  | {
+      readonly kind: "exempt" | "owned"
+      readonly ownerId: string
+      readonly ownerLiveness?: "live" | "down" | "unknown"
+      readonly via: string
+    }
   | { readonly kind: "unowned" }
   | {
       readonly evidence: {
@@ -326,7 +331,15 @@ function isAttribution(value: unknown): value is ProcessRoutingAttribution {
   if (!isRecord(value) || typeof value.kind !== "string") return false
   if (value.kind === "unowned") return true
   if (value.kind === "owned" || value.kind === "exempt") {
-    return isBoundedText(value.ownerId) && typeof value.via === "string" && ROUTING_VIAS.has(value.via)
+    return (
+      isBoundedText(value.ownerId) &&
+      typeof value.via === "string" &&
+      ROUTING_VIAS.has(value.via) &&
+      (value.ownerLiveness === undefined ||
+        value.ownerLiveness === "live" ||
+        value.ownerLiveness === "down" ||
+        value.ownerLiveness === "unknown")
+    )
   }
   if (value.kind !== "unknown" || !isBoundedText(value.reason) || !isRecord(value.evidence)) return false
   return (
