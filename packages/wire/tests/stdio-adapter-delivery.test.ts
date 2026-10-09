@@ -2636,21 +2636,30 @@ describe("stdio adapter delivery modes", () => {
       stdout
         .filter((line) => line.method === "notifications/claude/channel")
         .map((line) => JSON.stringify(line) as string)
-    const drain = async (label: string) => {
+    // #28282 follow-up (@dev/6): the drain is complete when the adapter has
+    // EMITTED, not when a fixed settle elapses. Waiting on the observed channel
+    // notification count is what makes this witness independent of host timing —
+    // with a slow child the assertion below read 0 notifications while the
+    // forwards were still in flight, so the test could fail on load alone.
+    const drain = async (label: string, expected: { marker: string; count: number }) => {
       const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
       daemon!.clients[0]?.write(makeNotification("wakeup", {}))
       await waitForCondition(
         () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
         label,
       )
-      await new Promise((resolveTick) => setTimeout(resolveTick, 250))
+      await waitForCondition(
+        () => channelText().filter((line) => line.includes(expected.marker)).length >= expected.count,
+        `${label}: ${expected.count} channel notification(s) carrying ${expected.marker}`,
+        { timeoutMs: 10_000 },
+      )
     }
 
     await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
     await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
 
-    await drain("the batch is drained")
+    await drain("the batch is drained", { marker: "DUP-COUNTED", count: 2 })
 
     // The pane really received it twice: this is the residual, not a re-offer.
     expect(channelText().filter((line) => line.includes("DUP-COUNTED"))).toHaveLength(2)
@@ -2659,9 +2668,7 @@ describe("stdio adapter delivery modes", () => {
     // Poll rather than read once: the drain persists asynchronously.
     await waitForCondition(() => {
       if (!existsSync(ledgerPath)) return false
-      const counters = (
-        JSON.parse(readFileSync(ledgerPath, "utf8")) as { counters?: Record<string, number> }
-      ).counters
+      const counters = (JSON.parse(readFileSync(ledgerPath, "utf8")) as { counters?: Record<string, number> }).counters
       return (counters?.deliveries ?? 0) >= 2
     }, "both handoffs persisted")
     const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
