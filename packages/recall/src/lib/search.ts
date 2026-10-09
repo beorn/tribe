@@ -29,7 +29,7 @@ import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
 import { searchLiveSession } from "../history/search"
 import { bindVaultDb, getVaultDbPath, searchVault, type VaultMatch } from "../history/vault-fts.ts"
-import { findSessionFiles, extractTextContent } from "../history/indexer"
+import { findSessionFiles, extractTextContent, parseSessionPath } from "../history/indexer"
 import type { ContentType, ContentRecord, MessageRecord, JsonlRecord } from "../history/types"
 import {
   BOLD,
@@ -231,7 +231,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
       process.exit(1)
     }
     const limit = limitStr ? parseInt(limitStr, 10) : 50
-    await cmdGrep(query, { project, limit })
+    await cmdGrep(query, { project, limit, session, json })
     return
   }
 
@@ -1214,11 +1214,20 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
 // Grep (regex search through raw session files)
 // ============================================================================
 
-async function cmdGrep(pattern: string, options: { project?: string; limit?: number }): Promise<void> {
-  const { project, limit = 50 } = options
+async function cmdGrep(
+  pattern: string,
+  options: { project?: string; limit?: number; session?: string; json?: boolean },
+): Promise<void> {
+  const { project, limit = 50, session, json = false } = options
   const contextLines = 2
+  const startedAt = Date.now()
 
-  console.log(`Searching for "${pattern}" in session content...\n`)
+  // @i/20-search-and-memory/28427: in regex mode a scoped query must never
+  // answer wider than asked. --session and --json reach this function now;
+  // a --json caller gets one JSON envelope on stdout and nothing else, so the
+  // prefaces go to stderr exactly as rawSearch does.
+  const preface = (line: string) => (json ? console.error(line) : console.log(line))
+  preface(`Searching for "${pattern}" in session content...\n`)
 
   const regex = new RegExp(pattern, "i")
   interface GrepMatch {
@@ -1232,10 +1241,22 @@ async function cmdGrep(pattern: string, options: { project?: string; limit?: num
   }
   const matches: GrepMatch[] = []
   let filesSearched = 0
+  // Files belonging to the requested session, counted before any other filter
+  // so "no Claude transcript for this id" is distinguishable from "no hits".
+  let sessionFilesSeen = 0
 
   for await (const sessionFile of findSessionFiles()) {
     const relativePath = path.relative(PROJECTS_DIR, sessionFile)
     const projectName = relativePath.split(path.sep)[0] || ""
+
+    if (session) {
+      // One mapping, the indexer's own: parseSessionPath is what names a
+      // transcript's session at index time, so the regex scan scopes by the
+      // same identity an indexed query would.
+      const info = parseSessionPath(relativePath, sessionFile)
+      if (info.id !== session) continue
+      sessionFilesSeen++
+    }
 
     if (project && !projectName.toLowerCase().includes(project.toLowerCase())) {
       continue
@@ -1282,6 +1303,49 @@ async function cmdGrep(pattern: string, options: { project?: string; limit?: num
       }
     }
     if (matches.length >= limit) break
+  }
+
+  // A requested session with no Claude transcript is a refusal, never a wider
+  // answer: regex mode scans Claude transcript files only, so a codex/grok/agy
+  // id (or a typo) can never be answered here.
+  if (session && sessionFilesSeen === 0) {
+    console.error(
+      `recall: no Claude transcript for session ${session} — regex mode scans Claude transcript files only ` +
+        `(codex/grok/agy transcripts are not read here). Refusing rather than searching every session; ` +
+        `use an indexed query for that provider.`,
+    )
+    process.exitCode = 1
+    return
+  }
+
+  const durationMs = Date.now() - startedAt
+
+  if (json) {
+    console.log(
+      JSON.stringify(
+        {
+          query: pattern,
+          // Not the index's `provenance` envelope: regex mode scans transcript
+          // files and judges no index, so claiming a provenance verdict here
+          // would be a claim the run never made.
+          mode: "regex",
+          total: matches.length,
+          filesSearched,
+          durationMs,
+          results: matches.map((m) => ({
+            sessionId: m.sessionId,
+            project: m.sessionFile.split(path.sep)[0] || "",
+            timestamp: m.timestamp || null,
+            type: m.type,
+            lineNumber: m.lineNumber,
+            snippet: m.context,
+          })),
+        },
+        null,
+        2,
+      ),
+    )
+    return
   }
 
   if (matches.length === 0) {
