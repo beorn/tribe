@@ -1014,29 +1014,40 @@ describe("createReconnectingClient transport recovery", () => {
   it("retires a reconnect handshake when its client closes", async () => {
     const { server, clients } = await spawnFakeDaemon(join(tmpDir, "close-handshake.sock"))
     let release = () => {}
-    const handshake = new Promise<void>((resolve) => { release = resolve })
+    const handshake = new Promise<void>((resolve) => {
+      release = resolve
+    })
     let candidate: DaemonClient | undefined
     let connections = 0
     let reconnects = 0
     let exhausted = 0
     const received: string[] = []
     const client = await createReconnectingClient({
-      socketPath: join(tmpDir, "close-handshake.sock"), noSpawn: true, maxAttempts: 1,
+      socketPath: join(tmpDir, "close-handshake.sock"),
+      noSpawn: true,
+      maxAttempts: 1,
       async onConnect(next) {
         if (++connections === 2) {
           candidate = next
           await handshake
         }
       },
-      onReconnect: () => { reconnects++ },
-      onReconnectExhausted: () => { exhausted++ },
+      onReconnect: () => {
+        reconnects++
+      },
+      onReconnectExhausted: () => {
+        exhausted++
+      },
     })
     try {
       clients[0]?.destroy()
       await vi.waitFor(() => expect(candidate).toBeDefined())
-      clients[1]?.on("data", createLineParser((message) => {
-        if (isRequest(message)) received.push(message.method)
-      }))
+      clients[1]?.on(
+        "data",
+        createLineParser((message) => {
+          if (isRequest(message)) received.push(message.method)
+        }),
+      )
       client.close()
       expect(candidate?.socket.destroyed).toBe(true)
       await expect(client.call("echo", { after: "close" })).rejects.toThrow(/closed/i)
