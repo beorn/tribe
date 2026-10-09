@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest"
 import {
   DELIVERY_DUPLICATE_ALERT_MIN_DELIVERIES,
   DELIVERY_DUPLICATE_ALERT_RATE,
+  DELIVERY_LEDGER_STALE_AFTER_MS,
   buildFleetDeliveryReport,
   buildSeatDeliveryReport,
   formatFleetDeliveryReport,
@@ -158,6 +159,37 @@ describe("delivery report coverage (#27459)", () => {
       source: "/tmp/kpi",
     })
     expect(fleet.seats[0]?.complete).toBe(false)
+  })
+
+  // #28283 (@chief 2026-10-09) - a save that keeps failing writes nothing, so no
+  // file records the failure. Twice the window's expected cadence is the bound at
+  // which a row stops reading as a current total: it renders incomplete WITH ITS
+  // AGE, exactly as a declared gap does, and never fires the alert.
+  it("marks a window older than twice its expected cadence incomplete, with its age (#28283)", () => {
+    const atBound = buildSeatDeliveryReport(ledger({ updatedAtMs: NOW - DELIVERY_LEDGER_STALE_AFTER_MS }), NOW)
+    expect(atBound.complete).toBe(true)
+    expect(atBound.alertInconclusive).toBe(false)
+
+    const staleCounters = counters({ deliveries: 200, newDeliveries: 150, duplicateDeliveries: 50 })
+    const stale = buildSeatDeliveryReport(
+      ledger({ updatedAtMs: NOW - DELIVERY_LEDGER_STALE_AFTER_MS - 1, counters: staleCounters }),
+      NOW,
+    )
+    expect(stale.complete).toBe(false)
+    expect(stale.alertInconclusive).toBe(true)
+    expect(stale.alert).toBe(false) // an incomplete denominator never proves the rule
+    expect(stale.coverage.gap).toBe(false) // stale, not a declared coverage gap
+    expect(stale.deliveries).toBe(200) // observed counters stay visible
+
+    const fleet = buildFleetDeliveryReport({
+      states: [ledger({ updatedAtMs: NOW - DELIVERY_LEDGER_STALE_AFTER_MS - 1, counters: staleCounters })],
+      now: NOW,
+      source: "/tmp/kpi",
+    })
+    expect(fleet.alerts).toEqual([])
+    const text = formatFleetDeliveryReport(fleet)
+    expect(text).toContain("STALE:") // the row names staleness, and its age
+    expect(text).not.toContain("GAP:")
   })
 
   it("reads only tribe-delivery-*.json, and surfaces an unreadable one as a gap (not skipped)", () => {
