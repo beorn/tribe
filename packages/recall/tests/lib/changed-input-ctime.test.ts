@@ -3,6 +3,7 @@
  *          mixed input, or the change is silently retried, instead of a named changed-input skip.
  * @level l1
  * @consumer Recall summarizeSession (extraction identity check)
+ * @testonly none
  *
  * Approved contract (27702 plan §2, @cto ruling b2b6724c): the two-pass identity check uses
  * dev, ino, size, mtime AND ctime (mtime can be set back; ctime cannot). A change produces a named
@@ -64,7 +65,9 @@ beforeEach(() => {
     Array.from({ length: 200 }, (_, i) =>
       JSON.stringify({
         type: i % 2 === 0 ? "user" : "assistant",
-        message: { content: [{ type: "text", text: `CHANGED-INPUT-${String(i).padStart(3, "0")}: ${"x".repeat(40)}` }] },
+        message: {
+          content: [{ type: "text", text: `CHANGED-INPUT-${String(i).padStart(3, "0")}: ${"x".repeat(40)}` }],
+        },
       }),
     ).join("\n") + "\n"
   writeFileSync(transcriptPath, text, "utf8")

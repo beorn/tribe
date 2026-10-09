@@ -3,6 +3,7 @@
  *          and skipped in the same run is invisible in the log.
  * @level l1
  * @consumer Recall cmdRemember (remember log)
+ * @testonly none
  *
  * Approved contract (27702 plan §5, @cto ruling b2b6724c): mixed success/skips retain both
  * outcomes — the summarized days AND the skipped days with their existing reasons. A first reason
@@ -57,9 +58,7 @@ afterAll(() => {
 
 /** Every logged arg rendered to text: strings stay verbatim, structured payloads are serialized. */
 function logText(): string {
-  return logs
-    .map((l) => l.msg.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "))
-    .join("\n")
+  return logs.map((l) => l.msg.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ")).join("\n")
 }
 
 describe("remember mixed success/skip log", () => {

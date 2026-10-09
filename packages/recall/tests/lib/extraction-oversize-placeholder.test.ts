@@ -3,6 +3,7 @@
  *          when selected, its leading bytes reach the summary content as if it were ordinary text.
  * @level l1
  * @consumer Recall summarize (extractSessionContent)
+ * @testonly none
  *
  * Approved contract (27702 plan §1, @cto ruling b2b6724c): the summary bound is 4 MiB per JSONL
  * record, excluding the newline. An oversized record keeps its position in N; its bytes are
@@ -15,8 +16,14 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
 
-import { extractSessionContent } from "../../src/lib/extract.ts"
+import { extractSessionContent, scanSessionTranscript } from "../../src/lib/extract.ts"
 import { closeDb, getDb } from "../../src/history/db.ts"
+
+/** The production pair: a bounded scan, then the content rendered from it. */
+function extractFor(id: string) {
+  const scan = scanSessionTranscript(id)
+  return scan ? extractSessionContent(scan) : null
+}
 
 const SESSION_ID = "sess-extract-oversize"
 const CAP_BYTES = 4 * 1024 * 1024
@@ -71,7 +78,7 @@ describe("extractSessionContent oversized-record placeholders", () => {
     const records = [smallRecord(0), smallRecord(1), oversizedRecord(), smallRecord(3), smallRecord(4)]
     writeFixture(records)
 
-    const out = extractSessionContent(SESSION_ID)
+    const out = extractFor(SESSION_ID)
     expect(out).not.toBeNull()
 
     // Bytes discarded: the record's leading bytes must not reach the summary content.

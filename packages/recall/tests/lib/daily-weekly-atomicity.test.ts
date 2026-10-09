@@ -3,6 +3,7 @@
  *          running weekly reader can synthesise from a half-written day and lose the real content.
  * @level l1
  * @consumer Recall summarizeDay -> summarizeWeek
+ * @testonly none
  *
  * Approved contract (27702 plan, CTO condition): daily files need atomic temp-file/rename writes;
  * a partial daily file must never reach a concurrent weekly reader. One armed observation required.

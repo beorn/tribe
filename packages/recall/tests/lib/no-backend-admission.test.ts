@@ -3,6 +3,7 @@
  *          configured, so an unsummarisable session still pays the full extraction cost.
  * @level l1
  * @consumer Recall summarizeSession (model-selection admission)
+ * @testonly none
  *
  * Approved contract (27702 plan, CTO condition): with no backend, the skip is named and happens
  * BEFORE transcript content construction; the real rejection text is kept, not zeros.

@@ -73,6 +73,20 @@ const MIN_TEXT_LENGTH = 20
 /** Legacy cap on the quick sub-agent probe's head scan. */
 const QUICK_SCAN_RECORDS = 50
 
+/** The transcript fields this extractor reads; everything else is left unread. */
+interface JsonlEntry {
+  type?: string
+  message?: { content?: unknown }
+}
+
+/** The content-block fields this extractor reads. */
+interface ContentBlock {
+  type?: string
+  text?: string
+  name?: string
+  input?: Record<string, unknown>
+}
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -173,8 +187,7 @@ export function renderSessionContent(records: SampledRecord[]): { content: strin
       continue
     }
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const entry = JSON.parse(record.line) as any
+      const entry = JSON.parse(record.line) as JsonlEntry
       if (entry.type !== "user" && entry.type !== "assistant") continue
 
       const parts: string[] = []
@@ -188,8 +201,7 @@ export function renderSessionContent(records: SampledRecord[]): { content: strin
         }
         if (!block || typeof block !== "object") continue
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const b = block as any
+        const b = block as ContentBlock
         if (b.type === "text" && b.text && b.text.length > MIN_TEXT_LENGTH) {
           parts.push(truncStr(b.text, 1500))
           if (entry.type === "user") hasUserText = true
@@ -204,7 +216,7 @@ export function renderSessionContent(records: SampledRecord[]): { content: strin
         messages.push(`[${entry.type}]: ${parts.join(" | ")}`)
       }
     } catch {
-      // Skip unparseable lines
+      // silent-fallback-allow: a malformed JSONL line carries no content; skipping it is the legacy behavior.
     }
   }
 
@@ -216,17 +228,12 @@ export function renderSessionContent(records: SampledRecord[]): { content: strin
 }
 
 /**
- * Extract structured content from a session's JSONL transcript.
- * Samples from beginning (40 records), middle (40), and end (40) to
- * capture initial goals, mid-session work, and final outcomes.
+ * Compose the structured extract from a scan already taken: the sampled
+ * records are rendered here, so a caller that already paid for the transcript
+ * I/O (the summary caller, after cheap admission) never re-reads it.
+ * Returns null when no usable content remains.
  */
-export function extractSessionContent(
-  sessionId: string,
-  opts?: { title?: string | null; createdAt?: number },
-): SessionExtract | null {
-  const scan = scanSessionTranscript(sessionId, opts)
-  if (!scan) return null
-
+export function extractSessionContent(scan: SessionScan): SessionExtract | null {
   if (scan.reason) {
     return {
       id: scan.id,
@@ -273,7 +280,7 @@ export function isSubAgent(sessionId: string): boolean {
           return false
         }
       } catch {
-        // Skip unparseable lines
+        // silent-fallback-allow: a malformed JSONL line carries no content; skipping it is the legacy behavior.
       }
       return scanned >= QUICK_SCAN_RECORDS
     })
@@ -386,19 +393,17 @@ function recordsCarryUserText(records: SampledRecord[]): boolean {
   for (const record of records) {
     if (record.line === null) continue
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const entry = JSON.parse(record.line) as any
+      const entry = JSON.parse(record.line) as JsonlEntry
       if (entry.type !== "user") continue
       const content = entry.message?.content
       if (!Array.isArray(content)) continue
       for (const block of content) {
         if (!block || typeof block !== "object") continue
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const b = block as any
+        const b = block as ContentBlock
         if (b.type === "text" && b.text && b.text.length > MIN_TEXT_LENGTH) return true
       }
     } catch {
-      // Skip unparseable lines
+      // silent-fallback-allow: a malformed JSONL line carries no content; skipping it is the legacy behavior.
     }
   }
   return false
@@ -406,16 +411,14 @@ function recordsCarryUserText(records: SampledRecord[]): boolean {
 
 /** The quick probe's legacy test: any user text block, empty string included. */
 function userRecordHasAnyText(entry: unknown): boolean {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const e = entry as any
+  const e = entry as JsonlEntry
   if (e?.type !== "user") return false
   const content = e.message?.content
   if (!Array.isArray(content)) return false
   for (const block of content) {
     if (typeof block === "string" && block.length > 0) return true
     if (block && typeof block === "object") {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const b = block as any
+      const b = block as ContentBlock
       if (b.type === "text" && b.text) return true
     }
   }
@@ -428,10 +431,9 @@ function truncStr(text: string, max: number): string {
 }
 
 /** Summarize a tool_use block into a brief description. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function summarizeToolUse(block: any): string | null {
-  const name = block.name as string | undefined
-  const input = block.input as Record<string, unknown> | undefined
+function summarizeToolUse(block: ContentBlock): string | null {
+  const name = block.name
+  const input = block.input
   if (!name || !input) return null
 
   switch (name) {

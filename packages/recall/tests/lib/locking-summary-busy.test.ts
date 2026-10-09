@@ -3,6 +3,7 @@
  *          symlink alias path — so two processes write the same daily and cache files.
  * @level l1
  * @consumer Recall summarizeDay (the manual / opt-in daily engine)
+ * @testonly none
  *
  * Approved contract (27702 plan §4, @cto ruling b2b6724c): one summary-operation lock keyed on the
  * canonical realpath of the selected Recall DB plus `.summary.lock`, reusing @bearly/flock.
@@ -46,7 +47,7 @@ beforeEach(() => {
   try {
     rmSync(aliasDir, { recursive: true, force: true })
   } catch {
-    // no prior alias
+    // silent-fallback-allow: the alias directory simply does not exist on the first run.
   }
   symlinkSync(realDir, aliasDir)
   realDb = join(realDir, "recall.db")

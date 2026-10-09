@@ -3,6 +3,7 @@
  *          every one was skipped, so a real skip is reported as no work at all.
  * @level l1
  * @consumer Recall cmdRemember (remember log)
+ * @testonly none
  *
  * Approved contract (27702 plan, CTO condition): a nonempty all-skipped result set logs the actual
  * days and their existing reasons, never "no unprocessed days".
@@ -71,7 +72,10 @@ beforeEach(() => {
     writeFileSync(
       transcriptPath,
       [
-        JSON.stringify({ type: "user", message: { content: [{ type: "text", text: `Eligible day ${day} fixture.` }] } }),
+        JSON.stringify({
+          type: "user",
+          message: { content: [{ type: "text", text: `Eligible day ${day} fixture.` }] },
+        }),
         JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "z".repeat(6000) }] } }),
       ].join("\n") + "\n",
       "utf8",

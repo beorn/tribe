@@ -3,6 +3,7 @@
  *          lost on the cache path.
  * @level l1
  * @consumer Recall summarizeSession (cache-hit admission)
+ * @testonly none
  *
  * Approved contract (27702 plan §3, @cto ruling b2b6724c): a cached session returns the cached
  * result with the SAME legacy classification, and the backend loader is never used. The cache-hit
@@ -62,7 +63,10 @@ beforeEach(() => {
   writeFileSync(
     transcriptPath,
     [
-      JSON.stringify({ type: "user", message: { content: [{ type: "text", text: "A real user request for the cached session." }] } }),
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "text", text: "A real user request for the cached session." }] },
+      }),
       JSON.stringify({
         type: "assistant",
         message: { content: [{ type: "text", text: "An assistant response that is long enough to summarize." }] },

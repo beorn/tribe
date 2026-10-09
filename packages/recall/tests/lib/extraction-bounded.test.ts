@@ -2,6 +2,7 @@
  * @failure Recall summary extraction reads the whole transcript into the JS heap before sampling.
  * @level l1
  * @consumer Recall summarize (extractSessionContent)
+ * @testonly none
  *
  * Approved contract (27702 plan, CTO conditions): extraction must not materialise the whole
  * transcript, and the existing beginning/middle/end sampling and user-vs-subagent classification
@@ -26,8 +27,14 @@ vi.mock("fs", async (importOriginal) => {
   }
 })
 
-import { extractSessionContent } from "../../src/lib/extract.ts"
+import { extractSessionContent, scanSessionTranscript } from "../../src/lib/extract.ts"
 import { closeDb, getDb } from "../../src/history/db.ts"
+
+/** The production pair: a bounded scan, then the content rendered from it. */
+function extractFor(id: string) {
+  const scan = scanSessionTranscript(id)
+  return scan ? extractSessionContent(scan) : null
+}
 
 const SESSION_ID = "sess-extract-bounded"
 let dir: string | undefined
@@ -76,7 +83,7 @@ function writeFixture(records: string[]): string {
 describe("extractSessionContent bounded loading", () => {
   test("does not read the whole transcript into the heap", () => {
     const transcriptPath = writeFixture(Array.from({ length: 200 }, (_, i) => record(i)))
-    const out = extractSessionContent(SESSION_ID)
+    const out = extractFor(SESSION_ID)
     expect(out).not.toBeNull()
     expect(readCalls).not.toContain(transcriptPath)
   })
@@ -85,14 +92,14 @@ describe("extractSessionContent bounded loading", () => {
 describe("extractSessionContent summary sampling", () => {
   test("N=120 selects every record", () => {
     writeFixture(Array.from({ length: 120 }, (_, i) => record(i)))
-    const out = extractSessionContent(SESSION_ID)
+    const out = extractFor(SESSION_ID)
     expect(out?.content).toContain("REC-000:")
     expect(out?.content).toContain("REC-119:")
   })
 
   test("N=121 selects indices 0-79 and 81-120", () => {
     writeFixture(Array.from({ length: 121 }, (_, i) => record(i)))
-    const out = extractSessionContent(SESSION_ID)
+    const out = extractFor(SESSION_ID)
     expect(out?.content).toContain("REC-000:")
     expect(out?.content).toContain("REC-079:")
     expect(out?.content).not.toContain("REC-080:")
@@ -103,7 +110,7 @@ describe("extractSessionContent summary sampling", () => {
   test("selected user evidence keeps subagent classification after the 4000-char tail drops it", () => {
     const records = Array.from({ length: 161 }, (_, i) => longRecord(i))
     writeFixture(records)
-    const out = extractSessionContent(SESSION_ID)
+    const out = extractFor(SESSION_ID)
     expect(out).not.toBeNull()
     // The early user record is pushed out of the retained tail, but classification must hold.
     expect(out?.content).not.toContain("REC-000:")

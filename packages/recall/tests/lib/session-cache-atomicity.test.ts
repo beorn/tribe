@@ -3,6 +3,7 @@
  *          concurrent cache reader can observe a half-written file and treat it as a summary.
  * @level l1
  * @consumer Recall summarizeSession -> getSessionSummaryCache
+ * @testonly none
  *
  * Approved contract (27702 plan, CTO condition): daily files and session caches need atomic
  * temp-file/rename writes; a partial write must never be visible to a reader. One armed
@@ -97,11 +98,15 @@ beforeEach(() => {
     [
       JSON.stringify({
         type: "user",
-        message: { content: [{ type: "text", text: "Summarize this fixture session about atomic cache publication." }] },
+        message: {
+          content: [{ type: "text", text: "Summarize this fixture session about atomic cache publication." }],
+        },
       }),
       JSON.stringify({
         type: "assistant",
-        message: { content: [{ type: "text", text: "The cache must publish atomically so a reader never sees a prefix." }] },
+        message: {
+          content: [{ type: "text", text: "The cache must publish atomically so a reader never sees a prefix." }],
+        },
       }),
     ].join("\n") + "\n",
     "utf8",

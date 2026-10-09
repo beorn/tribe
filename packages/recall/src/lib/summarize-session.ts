@@ -9,7 +9,7 @@ import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
 import { atomicWriteFileSync } from "@bearly/durable-file"
-import { renderSessionContent, scanSessionTranscript } from "./extract"
+import { extractSessionContent, scanSessionTranscript } from "./extract"
 import { loadLlm, resolveAvailableCheapModel } from "./llm-backend.ts"
 
 // ============================================================================
@@ -187,11 +187,23 @@ export async function summarizeSession(
   const llm = resolution.backend
 
   // Build content from the records already sampled by the scan — no re-read.
-  const { content: extracted } = renderSessionContent(scan.records)
+  const extract = extractSessionContent(scan)
+  if (!extract) {
+    log(`${scan.shortId}: no content extracted`)
+    return {
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
+      isSubAgent: false,
+      summary: null,
+      cached: false,
+    }
+  }
 
   // Skip content that's too short
-  if (extracted.length < MIN_CONTENT_LENGTH) {
-    log(`${scan.shortId}: content too short (${extracted.length} chars)`)
+  if (extract.content.length < MIN_CONTENT_LENGTH) {
+    log(`${scan.shortId}: content too short (${extract.content.length} chars)`)
     return {
       id: scan.id,
       shortId: scan.shortId,
@@ -204,7 +216,7 @@ export async function summarizeSession(
   }
 
   // Build context for LLM
-  let context = extracted
+  let context = extract.content
   if (context.length > 30000) {
     context = context.slice(0, 30000) + "\n\n[...truncated]"
   }
