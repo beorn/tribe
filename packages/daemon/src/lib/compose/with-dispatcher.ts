@@ -75,6 +75,7 @@ import {
   type HandlerOpts,
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
+import { emptyFetchReadSelectorError } from "../fetch-read-selector.ts"
 import type { TribePluginHandle } from "../plugin-api.ts"
 import { createInboxWaitManager, readInboxWaitWokenBy } from "../inbox-wait.ts"
 import {
@@ -478,6 +479,11 @@ export function withDispatcher<
     function invalidFetchReadFilter(params: Record<string, unknown>): string | undefined {
       const isStringArray = (value: unknown): value is string[] =>
         Array.isArray(value) && value.every((entry) => typeof entry === "string")
+      // 28402 — an empty selector is not an absent one; the canonical handler
+      // refuses it too, from this same predicate, so no transport can widen a
+      // history lookup into the acknowledging default drain.
+      const emptySelector = emptyFetchReadSelectorError(params)
+      if (emptySelector !== undefined) return emptySelector
       if (params.ids !== undefined && !isStringArray(params.ids)) {
         return "Authenticated fetch read filter 'ids' must be an array of strings"
       }

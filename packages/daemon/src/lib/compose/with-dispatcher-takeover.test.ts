@@ -2814,6 +2814,86 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
     ).toMatchObject({ code: -32602, message: expect.stringContaining("identity and owner overrides are forbidden") })
   })
 
+  // 28402 — a PRESENT but EMPTY selector is not an absent one. `topics: []`,
+  // `ids: []`, `from: ""`, `to: ""` and `with: ""` used to fall through to the
+  // DEFAULT drain branch, which ACKNOWLEDGES: it advanced the mailbox cursor and
+  // touched the attention-read stamp, so a fresh unread verdict disappeared from
+  // the seat's unread view. Every empty shape is refused by name and leaves the
+  // session cursor, the mailbox cursor and the attention stamp where they were.
+  it("refuses an empty snapshot selector by name and leaves unread state intact (#28402)", async () => {
+    const harness = createDispatcherHarness({ identityVerifier }, (ctx) => {
+      sendMessage(
+        ctx,
+        "@dev/7",
+        "EMPTY-SELECTOR-VERDICT",
+        "verdict",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        {},
+        { sender: "@chief" },
+      )
+    })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-empty-selector")
+    parseResult<RegisterResult>(
+      await harness.register("conn-empty-selector", {
+        name: "@dev/7",
+        pid: 4811,
+        project: "/tmp/p",
+        launchParentPid: 4810,
+        idToken: "token-dev7",
+      }),
+    )
+    const readState = (): { session: number; mailbox: number; attention: number | null } => ({
+      session:
+        (
+          harness.db.prepare("SELECT last_inbox_pull_seq FROM sessions WHERE name = '@dev/7'").get() as {
+            last_inbox_pull_seq: number
+          } | null
+        )?.last_inbox_pull_seq ?? 0,
+      mailbox:
+        (
+          harness.db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = '@dev/7'").get() as {
+            last_actionable_seq: number
+          } | null
+        )?.last_actionable_seq ?? 0,
+      attention:
+        (
+          harness.db.prepare("SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = '@dev/7'").get() as {
+            last_attention_read_at: number | null
+          } | null
+        )?.last_attention_read_at ?? null,
+    })
+
+    let refused = 0
+    for (const selector of [{ topics: [] }, { ids: [] }, { from: "" }, { to: "" }, { with: "" }]) {
+      const before = readState()
+      expect(
+        parseError(
+          await harness.request("cli_session_fetch_read_v1", { authority: null, idToken: "token-dev7", ...selector }),
+        ),
+      ).toMatchObject({ code: -32602, message: expect.stringContaining("empty selector") })
+      refused++
+      expect(readState()).toEqual(before)
+    }
+    expect(refused).toBe(5)
+
+    // The same empty shape through the MCP tool path is refused with the same words.
+    const toolRead = parseResult<{ content: Array<{ text: string }> }>(
+      await harness.request("tribe.fetch", { topics: [] }),
+    )
+    expect(toolRead.content[0]!.text).toContain("empty selector")
+
+    // Nothing acknowledged: the fresh verdict is still the seat's unread row.
+    const inbox = parseResult<{ content: Array<{ text: string }> }>(
+      await harness.request("cli_self_inbox_v1", { authority: null, idToken: "token-dev7", limit: 5, peek: true }),
+    )
+    expect(inbox.content[0]!.text).toContain("EMPTY-SELECTOR-VERDICT")
+    expect(readState().mailbox).toBe(0)
+  })
+
   it("refuses a verified token no session registered under, and a contradicted token", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose

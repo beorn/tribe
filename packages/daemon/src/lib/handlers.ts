@@ -58,6 +58,7 @@ import {
 } from "./session.ts"
 import { incidentConditionSummary, incidentKey, parseIncidentKey, type IncidentIdentity } from "tribe-wire"
 import { gatherCodePin } from "./code-pin.ts"
+import { emptyFetchReadSelectorError } from "./fetch-read-selector.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { registeredTrustTierForTopic, senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
@@ -4636,6 +4637,13 @@ function inboxFilterParams(ctx: TribeContext): {
 }
 
 function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolResult {
+  // 28402 — a PRESENT but EMPTY selector is not an absent one: it selects
+  // nothing, and treating it as absent widened this snapshot lookup into the
+  // default acknowledging drain (mailbox cursor + attention-read stamp), so a
+  // fresh unread verdict vanished from the caller's unread view. Refuse it by
+  // name, from the one predicate the snapshot RPC also uses.
+  const emptySelector = emptyFetchReadSelectorError(a as Record<string, unknown>)
+  if (emptySelector !== undefined) return jsonResult({ error: emptySelector }, { isError: true })
   // 24284 — acknowledgement rides delivery. Read once here; the socket can die
   // between now and the write, which is exactly the case this gate covers.
   const deliveryAlive = (): boolean => opts?.callerDeliveryAlive?.() ?? true

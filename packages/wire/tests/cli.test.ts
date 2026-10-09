@@ -685,6 +685,27 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     ])
   })
 
+  // 28402 — an explicitly empty selector flag is STILL a selector: the CLI must
+  // forward it so the daemon can refuse it by name. Dropping an empty value here
+  // (parseCommaList already maps '' to [] and the raw string flags keep '')
+  // would hand the daemon a different request than the caller wrote, and the
+  // widening default drain is exactly what the empty shape must never reach.
+  it("fetch forwards an explicitly empty selector instead of dropping it (#28402)", async () => {
+    const empty = { events: [], cursor: 0 }
+    const { result, calls } = await runManagedFetchCliAgainst(
+      ["fetch", "--json", "--topics", "", "--with", "", "--from", ""],
+      () => ({ result: { content: [{ type: "text", text: JSON.stringify(empty) }], structuredContent: empty } }),
+    )
+
+    expect(result).toMatchObject({ code: 0, stderr: "" })
+    expect(calls).toEqual([
+      {
+        method: "cli_session_fetch_read_v1",
+        params: { idToken: MANAGED_PENDING_TOKEN, topics: [], with: "", from: "" },
+      },
+    ])
+  })
+
   it("fetch refuses a selector-less call before connecting, naming tribe inbox", async () => {
     const { result, calls } = await runManagedFetchCliAgainst(["fetch", "--limit", "10", "--json"], () => ({
       result: { content: [{ type: "text", text: JSON.stringify({ events: [], cursor: 0 }) }] },
