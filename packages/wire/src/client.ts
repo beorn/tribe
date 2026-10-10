@@ -217,6 +217,8 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
       })()
       const client: DaemonClient = {
         call(method, params, callOpts) {
+          // Closure retires the managed timers, so a later call cannot arm its deadline (28504).
+          if (ac.signal.aborted || socket.destroyed) return Promise.reject(new Error("Connection closed"))
           return new Promise((res, rej) => {
             const id = nextId++
             const explicitTimeoutMs = callOpts?.timeoutMs

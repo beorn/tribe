@@ -163,17 +163,57 @@ describe("connectToDaemon", () => {
     }
   })
 
-  it("rejects pending calls when the socket closes without a response", async () => {
-    const sock = join(tmpDir, "d.sock")
-    const { server } = await spawnFakeDaemon(sock)
-    try {
-      const client = await connectToDaemon(sock)
-      await expect(client.call("closeWithoutResponse")).rejects.toThrow("Connection closed")
-      client.close()
-    } finally {
-      await new Promise<void>((r) => server.close(() => r()))
-    }
-  })
+  /**
+   * @failure Calls made after disconnect lose their deadline and leave incident paging hung.
+   * @level l2
+   * @consumer connectToDaemon public call/close over a native socket
+   * @testonly none
+   * Existing pending-call coverage missed calls issued after closure had already aborted the timers (28504).
+   */
+  it.each(["peer disconnect", "explicit close", "socket error"])(
+    "rejects in-flight and later calls after %s",
+    async (ending) => {
+      const sock = join(tmpDir, "d.sock")
+      const { server, clients } = await spawnFakeDaemon(sock)
+      const errorLog = ending === "socket error" ? vi.spyOn(console, "error").mockImplementation(() => {}) : undefined
+      let client: DaemonClient | undefined
+      try {
+        client = await connectToDaemon(sock)
+        const pending = client.call("never", {}, { timeoutMs: 60_000 }).catch((error: Error) => error.message)
+        expect(await client.call("echo", { before: "disconnect" })).toEqual({ echoed: { before: "disconnect" } })
+        if (ending === "peer disconnect") {
+          await expect(client.call("closeWithoutResponse")).rejects.toThrow("Connection closed")
+        } else if (ending === "explicit close") client.close()
+        else client.socket.emit("error", new Error("fixture transport failed"))
+        expect(await pending).toBe(ending === "socket error" ? "fixture transport failed" : "Connection closed")
+        const results: string[] = []
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          let deadline: ReturnType<typeof setTimeout> | undefined
+          const result = await Promise.race([
+            client.call("echo", { after: "disconnect" }, { timeoutMs: 200 }).then(
+              () => "unexpected success",
+              (error: Error) => error.message,
+            ),
+            new Promise<string>((resolve) => {
+              deadline = setTimeout(() => resolve("still pending after 600ms"), 600)
+            }),
+          ])
+          if (deadline !== undefined) clearTimeout(deadline)
+          results.push(result)
+        }
+        expect(results).toEqual(["Connection closed", "Connection closed"])
+        if (errorLog !== undefined) {
+          expect(errorLog).toHaveBeenCalledTimes(1)
+          expect(errorLog.mock.calls.flat().join(" ")).toContain("Connection error: fixture transport failed")
+        }
+      } finally {
+        errorLog?.mockRestore()
+        client?.close()
+        for (const socket of clients) socket.destroy()
+        await new Promise<void>((r) => server.close(() => r()))
+      }
+    },
+  )
 
   it("treats a peer half-close ('end' with no following 'close') as connection death", async () => {
     // task/wire-postreg-close-cto — reproduced under CPU contention
