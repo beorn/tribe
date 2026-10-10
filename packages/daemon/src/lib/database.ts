@@ -2022,13 +2022,13 @@ export function createStatements(db: Database) {
 			UNION SELECT request, 1 FROM messages WHERE id = $request_id AND request IS NOT NULL
 			UNION SELECT request, 1 FROM messages_archive WHERE id = $request_id AND request IS NOT NULL
 		), outcomes AS (
-			SELECT m.id, m.type, m.content, m.ts, r.priority FROM messages m
-			JOIN request_ids r ON m.ref = r.request_id
-			WHERE m.kind = 'event' AND m.type IN ('event.ball.expired', 'event.ball.settled')
+			SELECT m.id, m.type, m.content, m.ts, r.priority FROM request_ids r
+			CROSS JOIN messages m INDEXED BY idx_messages_event_type_ref_ts
+			WHERE m.ref = r.request_id AND m.kind = 'event' AND m.type IN ('event.ball.expired', 'event.ball.settled')
 			UNION
-			SELECT m.id, m.type, m.content, m.ts, r.priority FROM messages_archive m
-			JOIN request_ids r ON m.ref = r.request_id
-			WHERE m.kind = 'event' AND m.type IN ('event.ball.expired', 'event.ball.settled')
+			SELECT m.id, m.type, m.content, m.ts, r.priority FROM request_ids r
+			CROSS JOIN messages_archive m INDEXED BY idx_messages_archive_event_type_ref_ts
+			WHERE m.ref = r.request_id AND m.kind = 'event' AND m.type IN ('event.ball.expired', 'event.ball.settled')
 		)
 		SELECT id, type, content, ts FROM outcomes
 		WHERE priority = (SELECT MIN(priority) FROM outcomes)

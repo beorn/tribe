@@ -539,6 +539,19 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       })
       expect((late.tracker as { cause: string }).cause).toContain("first answer settled every owner's row")
       expect(pendingRecipients(db, "req-first")).toEqual([])
+      if (shape === "direct") {
+        // The diagnostic must seek this request in both tiers; behavioral
+        // assertions alone also pass while scanning every settlement event.
+        const sql = stmts.selectPendingOutcomeFactsForRequest.toString()
+        const plan = db
+          .query(assertSingleStatement(`EXPLAIN QUERY PLAN ${sql}`))
+          .all({ $request_id: messageId }) as Array<{
+          detail: string
+        }>
+        for (const index of ["idx_messages_event_type_ref_ts", "idx_messages_archive_event_type_ref_ts"]) {
+          expect(plan.some(({ detail }) => detail.includes(index) && /\bref=\?/.test(detail))).toBe(true)
+        }
+      }
     },
   )
 
