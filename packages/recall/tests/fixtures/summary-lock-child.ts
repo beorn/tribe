@@ -5,10 +5,11 @@
  *   Pre-imports the real engine, prints "ready", waits for one stdin line, then runs the
  *   unmodified `summarizeDay` for <day> with RECALL_DB_PATH=<db-path>, printing its JSON result
  *   on stdout. Pre-booting lets the parent fire the two contenders within milliseconds of each
- *   other, so contention is deterministic without a timing race; the day is sized so the running
- *   engine holds the lock for hundreds of ms, which is where the "held through settlement"
- *   contract is actually observed (a released-at-return lock is gone before the second process
- *   can even be signalled).
+ *   other, so contention is deterministic without a timing race.
+ *   SCOPE (measured, @dev/review2 1180059): the engine's expensive work runs in a SYNCHRONOUS
+ *   prefix, so this child's lock is observed by a peer even when released at the return statement.
+ *   This fixture proves adoption and crash-release, NOT the early-return ordering — that is the
+ *   in-process settlement row in locking-summary-busy.test.ts.
  *
  * <db-path> is the symlink alias: the engine must canonicalise it to the real DB so both
  * processes name one lock.

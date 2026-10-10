@@ -10,7 +10,7 @@
  * valid Claude content.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
@@ -94,5 +94,51 @@ describe("unsupported sampled format diagnostics", () => {
     const scan = scanSessionTranscript(SESSION_ID)
     expect(scan?.diagnostics.malformed).toBe(1)
     expect(scan?.content).toContain("kept-marker")
+  })
+
+  test("verbose diagnostics carry every count and the affected input, not only the first reason", async () => {
+    writeFixture(["{ not json", unsupported()])
+
+    const lines: string[] = []
+    const spy = vi.spyOn(console, "error").mockImplementation((m: unknown) => {
+      lines.push(String(m))
+    })
+    const summary = await summarizeSession(SESSION_ID, { verbose: true })
+    spy.mockRestore()
+
+    expect(summary.reason).toBe("unsupported-sampled-format")
+    const text = lines.join("\n")
+    // Both causes must survive: the first reason must not hide the malformed count.
+    expect(text).toContain("malformed=1")
+    expect(text).toContain("unsupported=1")
+    expect(text).toContain("rendered=0")
+    expect(text).toContain("source=")
+  })
+
+  test("an unreadable transcript is named read-failure, never changed-input", () => {
+    if (dir) rmSync(dir, { recursive: true, force: true })
+    dir = mkdtempSync(join(tmpdir(), "recall-format-diag-"))
+    fake.home = dir
+    // A path that exists and stats, but cannot be read as a transcript.
+    const asDirectory = join(dir, "session.jsonl")
+    mkdirSync(asDirectory)
+    process.env.RECALL_DB_PATH = join(dir, "recall.db")
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(SESSION_ID, "/test", asDirectory, Date.now() - 1000, Date.now(), 1, "fixture")
+    closeDb()
+
+    const scan = scanSessionTranscript(SESSION_ID)
+    expect(scan?.reason).toBe("read-failure")
+    expect(scan?.content).toBe("")
+  })
+
+  test("a session with no readable transcript path is named unavailable-path", async () => {
+    writeFixture([claudeUser("present")])
+    const summary = await summarizeSession("sess-does-not-exist")
+    expect(summary.reason).toBe("unavailable-path")
+    expect(summary.summary).toBeNull()
   })
 })

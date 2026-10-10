@@ -111,6 +111,33 @@ describe("extractSessionContent bounded loading", () => {
     expect(scan?.diagnostics.sampled).toBe(120)
     expect(JSON.stringify(scan).length).toBeLessThan(1000)
   })
+
+  test("metadata mode formats nothing: content renders messages, metadata renders none", () => {
+    // Records carry BOTH a text block and a tool_use block, so the guard is exercised on the
+    // text-truncation AND the tool-description path. `content === ""` alone passes even when
+    // metadata builds and discards every message; `rendered` is the discriminator (@dev/review2 1180059).
+    const records = Array.from({ length: 120 }, (_, i) =>
+      JSON.stringify({
+        type: i % 2 === 0 ? "user" : "assistant",
+        message: {
+          content: [
+            { type: "text", text: `T-${String(i).padStart(3, "0")}: ${"z".repeat(30)}` },
+            { type: "tool_use", name: "Bash", input: { command: `echo ${i}` } },
+          ],
+        },
+      }),
+    )
+    writeFixture(records)
+
+    const meta = scanSessionTranscript(SESSION_ID, { mode: "metadata" })
+    expect(meta?.content).toBe("")
+    expect(meta?.diagnostics.sampled).toBe(120)
+    expect(meta?.diagnostics.rendered).toBe(0)
+
+    const content = scanSessionTranscript(SESSION_ID, { mode: "content" })
+    expect(content?.diagnostics.rendered).toBe(120)
+    expect(content?.content).toContain("[Bash]")
+  })
 })
 
 describe("extractSessionContent summary sampling", () => {

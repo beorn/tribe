@@ -8,11 +8,14 @@
  * @testonly none
  *
  * The two-real-process row of the 27702 §4 lock contract (@chief 7a748277; @dev/review2 revise): a first real
- * process runs the engine and HOLDS the lock through settlement, and a second real process on the same DB
- * through the same alias reports summary_busy. The day is sized so the running engine holds the lock for
- * hundreds of ms, which is where "hold through settlement" is observable at all: a lock released at the return
- * statement is gone before the second process can be signalled, so this row fails against that defect.
- * The in-process row (locking-summary-busy.test.ts) stays the fast admission/settlement case.
+ * process runs the engine and holds the lock, and a second real process on the same DB through the same alias
+ * reports summary_busy; terminating the runner releases the fd lock for the next process.
+ * SCOPE OF THIS ROW (measured, @dev/review2 1180059): it proves adoption, alias canonicalisation and
+ * crash-release — NOT the early-return ordering. The engine's expensive work sits in a SYNCHRONOUS prefix with
+ * no await before it, so a lock released at the return statement is still held for that whole prefix and a peer
+ * process observes it anyway; this row therefore does NOT fail against that defect and must not claim to. The
+ * ORDERING regression is the in-process settlement row (locking-summary-busy.test.ts), whose contender is
+ * refused only while the lock is held past the returned promise settling.
  */
 
 import { spawn, type ChildProcess } from "node:child_process"

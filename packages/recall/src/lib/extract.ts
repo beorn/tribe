@@ -51,6 +51,13 @@ export interface ScanDiagnostics {
   oversized: number
   /** Sampled records carrying a recognised non-Claude (unsupported) envelope. */
   unsupported: number
+  /** Selected messages actually rendered into the tail (27702 plan §2: whether any selected message
+   *  rendered). Always 0 in metadata mode — a zero here is what proves metadata paid no formatting. */
+  rendered: number
+  /** The transcript this scan read: the affected input named alongside the counts. */
+  source: string
+  /** The first selected over-budget record's attribution; absent when the sample selected none. */
+  oversizedSample?: { physicalLine: number; bytes: number; limit: number }
 }
 
 /**
@@ -149,14 +156,27 @@ export function scanSessionTranscript(
   const jsonlPath = findSessionJsonl(sessionId)
   if (!jsonlPath) return null
 
-  const before = readFileIdentity(jsonlPath)
-  if (!before) return null
-
   const shortId = sessionId.slice(0, 8)
   const title = opts?.title ?? null
   const time = formatTime(opts?.createdAt)
   const mode: ScanMode = opts?.mode ?? "content"
-  const none = { records: 0, sampled: 0, malformed: 0, oversized: 0, unsupported: 0 }
+
+  // A stat failure is NAMED, never silently nulled: "read-failure" is the plan §2 read-fail
+  // explanation, and an absent scan is not proof of changed input.
+  const before = readFileIdentity(jsonlPath)
+  if (!before) {
+    return {
+      id: sessionId,
+      shortId,
+      title,
+      time,
+      isSubAgent: false,
+      sizeBytes: 0,
+      reason: "read-failure",
+      content: "",
+      diagnostics: zeroDiagnostics(jsonlPath),
+    }
+  }
 
   try {
     const total = countJsonlRecords(jsonlPath)
@@ -173,7 +193,7 @@ export function scanSessionTranscript(
         sizeBytes: after?.size ?? before.size,
         reason: "changed-input",
         content: "",
-        diagnostics: none,
+        diagnostics: diagnosticsOf(total, sampled, jsonlPath),
       }
     }
 
@@ -188,17 +208,22 @@ export function scanSessionTranscript(
       sizeBytes: before.size,
       reason: sampled.reason,
       content: sampled.content,
-      diagnostics: {
-        records: total,
-        sampled: sampled.sampled,
-        malformed: sampled.malformed,
-        oversized: sampled.oversized,
-        unsupported: sampled.unsupported,
-      },
+      diagnostics: diagnosticsOf(total, sampled, jsonlPath),
     }
   } catch {
     // silent-fallback-allow: an unreadable transcript makes this session unavailable for extraction.
-    return null
+    // 27702 plan §2: name the read failure; never reclassify it as changed-input or a null scan.
+    return {
+      id: sessionId,
+      shortId,
+      title,
+      time,
+      isSubAgent: false,
+      sizeBytes: before.size,
+      reason: "read-failure",
+      content: "",
+      diagnostics: zeroDiagnostics(jsonlPath),
+    }
   }
 }
 
@@ -345,7 +370,28 @@ interface SampledScan {
   unsupported: number
   supported: number
   claudeUserText: boolean
+  rendered: number
+  oversizedSample?: { physicalLine: number; bytes: number; limit: number }
   reason?: string
+}
+
+/** Counts-only diagnostics for a scan that read no records (identity/read failure). */
+function zeroDiagnostics(source: string): ScanDiagnostics {
+  return { records: 0, sampled: 0, malformed: 0, oversized: 0, unsupported: 0, rendered: 0, source }
+}
+
+/** Compose the counts-only diagnostics for one completed sampled scan. */
+function diagnosticsOf(total: number, sampled: SampledScan, source: string): ScanDiagnostics {
+  return {
+    records: total,
+    sampled: sampled.sampled,
+    malformed: sampled.malformed,
+    oversized: sampled.oversized,
+    unsupported: sampled.unsupported,
+    rendered: sampled.rendered,
+    source,
+    ...(sampled.oversizedSample ? { oversizedSample: sampled.oversizedSample } : {}),
+  }
 }
 
 /**
@@ -367,6 +413,7 @@ function scanSampledRecords(jsonlPath: string, selected: Set<number> | "all", mo
     unsupported: 0,
     supported: 0,
     claudeUserText: false,
+    rendered: 0,
   }
   let tail = ""
   let tailStarted = false
@@ -382,7 +429,14 @@ function scanSampledRecords(jsonlPath: string, selected: Set<number> | "all", mo
     acc.sampled++
     if (line === null) {
       acc.oversized++
-      appendMessage(oversizedPlaceholder(oversized))
+      if (acc.oversizedSample === undefined && oversized) {
+        acc.oversizedSample = { physicalLine: oversized.physicalLine, bytes: oversized.bytes, limit: oversized.limit }
+      }
+      // Metadata mode keeps the attribution above; only the content pass formats the placeholder.
+      if (mode === "content") {
+        acc.rendered++
+        appendMessage(oversizedPlaceholder(oversized))
+      }
       return
     }
 
@@ -404,26 +458,35 @@ function scanSampledRecords(jsonlPath: string, selected: Set<number> | "all", mo
     const content = entry.message?.content
     if (!Array.isArray(content)) return
 
+    // 27702 plan §2: metadata mode keeps classification and counts ONLY. It must not format
+    // text/tool descriptions, join parts or build a message string — that work belongs to the
+    // content pass alone. A metadata `rendered` of 0 is the proof; content==empty alone is not.
+    const buildContent = mode === "content"
     const parts: string[] = []
     for (const block of content) {
       if (typeof block === "string") {
-        if (block.length > MIN_TEXT_LENGTH) parts.push(block)
+        if (buildContent && block.length > MIN_TEXT_LENGTH) parts.push(block)
         continue
       }
       if (!block || typeof block !== "object") continue
 
       const b = block as ContentBlock
       if (b.type === "text" && b.text && b.text.length > MIN_TEXT_LENGTH) {
-        parts.push(truncStr(b.text, 1500))
+        // Classification is mode-independent: it feeds the reason and the sub-agent verdict.
         if (entry.type === "user") acc.claudeUserText = true
+        if (buildContent) parts.push(truncStr(b.text, 1500))
       } else if (b.type === "tool_use") {
+        if (!buildContent) continue
         const summary = summarizeToolUse(b)
         if (summary) parts.push(summary)
       }
       // Skip tool_result (large file dumps, noise)
     }
 
-    if (parts.length > 0) appendMessage(`[${entry.type}]: ${parts.join(" | ")}`)
+    if (parts.length > 0) {
+      acc.rendered++
+      appendMessage(`[${entry.type}]: ${parts.join(" | ")}`)
+    }
   }
 
   let index = -1
