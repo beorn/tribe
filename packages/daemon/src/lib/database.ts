@@ -2010,17 +2010,28 @@ export function createStatements(db: Database) {
 	`),
 
     /** Same two outcome-fact types as `selectPendingOutcomeFacts` above, but
-     *  scoped to one request by `ref` — the read behind a `closed: 0` ball
+     *  scoped to one request by `ref`, resolving retained message aliases —
+     *  the read behind a `closed: 0` ball
      *  result's cause (@ag/tribe/an-advertised-ball-owner-disappears-before-
      *  it-can-settle). A single miss must never pay for a scan of every ball
      *  ever settled, which is what reusing the unbounded statement above
      *  would cost. */
     selectPendingOutcomeFactsForRequest: db.prepare(`
-		SELECT id, type, content, ts FROM messages
-		WHERE kind = 'event' AND type IN ('event.ball.expired', 'event.ball.settled') AND ref = $request_id
-		UNION
-		SELECT id, type, content, ts FROM messages_archive
-		WHERE kind = 'event' AND type IN ('event.ball.expired', 'event.ball.settled') AND ref = $request_id
+		WITH request_ids(request_id, priority) AS (
+			SELECT $request_id, 0
+			UNION SELECT request, 1 FROM messages WHERE id = $request_id AND request IS NOT NULL
+			UNION SELECT request, 1 FROM messages_archive WHERE id = $request_id AND request IS NOT NULL
+		), outcomes AS (
+			SELECT m.id, m.type, m.content, m.ts, r.priority FROM messages m
+			JOIN request_ids r ON m.ref = r.request_id
+			WHERE m.kind = 'event' AND m.type IN ('event.ball.expired', 'event.ball.settled')
+			UNION
+			SELECT m.id, m.type, m.content, m.ts, r.priority FROM messages_archive m
+			JOIN request_ids r ON m.ref = r.request_id
+			WHERE m.kind = 'event' AND m.type IN ('event.ball.expired', 'event.ball.settled')
+		)
+		SELECT id, type, content, ts FROM outcomes
+		WHERE priority = (SELECT MIN(priority) FROM outcomes)
 		ORDER BY ts, id
 	`),
 

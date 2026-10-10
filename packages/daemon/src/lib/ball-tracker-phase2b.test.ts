@@ -17,6 +17,7 @@ import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { MAX_BALL_TTL_MS } from "./messaging.ts"
+import { resolveRetentionConfig, runRetentionSweep } from "./retention.ts"
 import { registerSession } from "./session.ts"
 
 const PROJECT_ID = "ball-tracker-phase2b"
@@ -461,37 +462,85 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect((db.prepare("SELECT COUNT(*) AS count FROM pending_request").get() as { count: number }).count).toBe(0)
   })
 
-  it("fanout='first' closes every pending recipient row on the first valid reply", () => {
-    parseToolJson(
-      handleToolCall(
-        chief,
-        "tribe.send",
-        { to: "*", message: "who can take this?", type: "request", request: "req-first", fanout: "first" },
-        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
-      ),
-    )
-    expect(pendingRecipients(db, "req-first")).toEqual(["@agent/1", "@agent/2"])
+  /**
+   * @failure A late message-id reply says never-tracked after another owner settled the shared request (#28545).
+   * @level l1 @consumer Recipients replying to shared Tribe requests.
+   * @testonly none
+   */
+  it.each(["broadcast", "direct", "archived"] as const)(
+    "fanout='first' preserves settlement for late message-id replies (%s)",
+    (shape) => {
+      const opened = parseToolJson(
+        handleToolCall(
+          chief,
+          "tribe.send",
+          {
+            to: shape === "broadcast" ? "*" : ["@agent/1", "@agent/2"],
+            message: "who can take this?",
+            type: "query",
+            request: "req-first",
+            fanout: "first",
+          },
+          makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+        ),
+      )
+      expect(pendingRecipients(db, "req-first")).toEqual(["@agent/1", "@agent/2"])
 
-    parseToolJson(
-      handleToolCall(
-        agent1,
-        "tribe.send",
-        { to: "@chief", message: "I can", type: "response", reply: "req-first" },
-        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
-      ),
-    )
+      parseToolJson(
+        handleToolCall(
+          agent1,
+          "tribe.send",
+          { to: "@chief", message: "I can", type: "response", reply: "req-first" },
+          makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+        ),
+      )
 
-    expect(pendingRecipients(db, "req-first")).toEqual([])
-    const settlements = db
-      .prepare("SELECT content FROM messages WHERE kind = 'event' AND type = 'event.ball.settled'")
-      .all() as Array<{ content: string }>
-    expect(settlements.map((row) => JSON.parse(row.content))).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ request_id: "req-first", recipient: "@agent/1", settlement: "answered" }),
-        expect.objectContaining({ request_id: "req-first", recipient: "@agent/2", settlement: "answered" }),
-      ]),
-    )
-  })
+      expect(pendingRecipients(db, "req-first")).toEqual([])
+      const settlements = db
+        .prepare("SELECT content FROM messages WHERE kind = 'event' AND type = 'event.ball.settled'")
+        .all() as Array<{ content: string }>
+      expect(settlements.map((row) => JSON.parse(row.content))).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ request_id: "req-first", recipient: "@agent/1", settlement: "answered" }),
+          expect.objectContaining({ request_id: "req-first", recipient: "@agent/2", settlement: "answered" }),
+        ]),
+      )
+      const messageId = shape === "broadcast" ? opened.id : (opened.ids as string[])[1]
+      if (shape === "archived") {
+        const retention = runRetentionSweep(db, stmts, resolveRetentionConfig({}), Date.now() + 30 * 86_400_000)
+        expect(retention.archiveMove.moved).toBeGreaterThan(0)
+        expect(db.prepare("SELECT id FROM messages_archive WHERE id = ?").get(messageId as string)).toBeTruthy()
+        expect(db.prepare("SELECT id FROM messages WHERE id = ?").get(messageId as string)).toBeNull()
+      }
+      const late = parseToolJson(
+        handleToolCall(
+          agent2,
+          "tribe.send",
+          {
+            to: "@chief",
+            message: "later answer",
+            type: "response",
+            reply: messageId,
+          },
+          makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+        ),
+      )
+      expect(late.sent).toBe(true)
+      expect(late.tracker).toMatchObject({
+        closed: 0,
+        cause_fact: {
+          kind: "settled",
+          settlement: "answered",
+          settled_by: "@agent/1",
+          recipient: "@agent/2",
+          fanout: "first",
+          by_another_owner: true,
+        },
+      })
+      expect((late.tracker as { cause: string }).cause).toContain("first answer settled every owner's row")
+      expect(pendingRecipients(db, "req-first")).toEqual([])
+    },
+  )
 
   it("fanout='all' closes only the replying recipient row", () => {
     parseToolJson(
