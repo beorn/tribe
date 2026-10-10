@@ -53,6 +53,23 @@ vi.mock("fs", async (importOriginal) => {
   return { ...actual, writeFileSync, renameSync }
 })
 
+// The real atomic publish lives behind @bearly/durable-file, whose node:fs internals Vitest cannot
+// intercept (measured 2026-10-09: a mock of both "fs" and "node:fs" never sees durable-file's
+// rename). Supply the temp-sibling + rename boundary here so the single armed observation really
+// fires. durable-file's own suite proves its atomicity; this fixture proves recall publishes
+// through it — a revert to a direct write is still caught by the "fs" mock above, and the
+// `h.seen.length` assertion below fails loudly if the boundary ever stops being exercised.
+vi.mock("@bearly/durable-file", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@bearly/durable-file")>()
+  const fs = await import("node:fs")
+  const atomicWriteFileSync = ((path: string, body: string | Uint8Array) => {
+    const temporary = `${path}.tmp-fixture`
+    fs.writeFileSync(temporary, body)
+    fs.renameSync(temporary, path) // the "fs" mock observes here, while the final path is unpublished
+  }) as typeof actual.atomicWriteFileSync
+  return { ...actual, atomicWriteFileSync }
+})
+
 vi.mock("../../src/lib/llm-backend.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/lib/llm-backend.ts")>()
   const model = { modelId: "cheap-fixture", provider: "fixture" }
