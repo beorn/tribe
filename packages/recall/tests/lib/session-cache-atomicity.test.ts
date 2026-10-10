@@ -86,7 +86,8 @@ vi.mock("../../src/lib/llm-backend.ts", async (importOriginal) => {
   }
 })
 
-const { summarizeSession, getSessionSummaryCache } = await import("../../src/lib/summarize-session.ts")
+const { summarizeSession, getSessionSummaryCache, getSessionSummaryCachePath } =
+  await import("../../src/lib/summarize-session.ts")
 const { closeDb, getDb } = await import("../../src/history/db.ts")
 
 h.home = mkdtempSync(join(realpathSync(tmpdir()), "recall-cache-atomic-"))
@@ -99,16 +100,10 @@ beforeEach(() => {
   h.seen = []
   h.sessionId = SESSION_ID
   h.reader = getSessionSummaryCache
-  h.cachePath = join(
-    h.home,
-    ".claude",
-    "projects",
-    h.project.replace(/\//g, "-"),
-    "memory",
-    "session-summaries",
-    `${SESSION_ID.slice(0, 8)}.md`,
-  )
+  // The cache file is keyed on the full session id (28490), so the path comes from production
+  // rather than a re-derived short key.
   process.env.CLAUDE_PROJECT_DIR = h.project
+  h.cachePath = getSessionSummaryCachePath(SESSION_ID)
   const transcriptPath = join(h.home, "session.jsonl")
   writeFileSync(
     transcriptPath,

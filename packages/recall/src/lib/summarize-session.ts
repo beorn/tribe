@@ -8,6 +8,7 @@
 import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
+import { createHash } from "crypto"
 import { atomicWriteFileSync } from "@bearly/durable-file"
 import { extractSessionContent, scanSessionTranscript, type ScanDiagnostics } from "./extract"
 import { loadLlm, resolveAvailableCheapModel } from "./llm-backend.ts"
@@ -89,26 +90,29 @@ function getCacheDir(): string {
   return path.join(os.homedir(), ".claude", "projects", encodedPath, "memory", "session-summaries")
 }
 
-function getCachePath(shortId: string): string {
-  return path.join(getCacheDir(), `${shortId}.md`)
+// The cache file for one session. The key is a digest of the FULL session id: keying on its first
+// 8 characters collapsed every Codex session (all sharing the "codex:01" prefix) onto a single
+// file, so one session's summary was served for another (28490). The digest is also a portable
+// filename where the id is not — ids carry ':' (codex:<uuid>).
+export function getSessionSummaryCachePath(sessionId: string): string {
+  const key = createHash("sha256").update(sessionId).digest("hex").slice(0, 32)
+  return path.join(getCacheDir(), `${key}.md`)
 }
 
 export function getSessionSummaryCache(sessionId: string): string | null {
-  const shortId = sessionId.slice(0, 8)
-  const cachePath = getCachePath(shortId)
   try {
-    return fs.readFileSync(cachePath, "utf8")
+    return fs.readFileSync(getSessionSummaryCachePath(sessionId), "utf8")
   } catch {
     // silent-fallback-allow: absent summary cache falls through to live summarization.
     return null
   }
 }
 
-function writeCache(shortId: string, content: string): void {
+function writeCache(sessionId: string, content: string): void {
   const cacheDir = getCacheDir()
   fs.mkdirSync(cacheDir, { recursive: true })
   // 27702: publish the summary atomically — a concurrent reader must never see a prefix.
-  atomicWriteFileSync(getCachePath(shortId), content)
+  atomicWriteFileSync(getSessionSummaryCachePath(sessionId), content)
 }
 
 // ============================================================================
@@ -253,7 +257,9 @@ export async function summarizeSession(
 
   // Skip content that's too short
   if (extract.content.length < MIN_CONTENT_LENGTH) {
-    log(`${scan.shortId}: content too short (${extract.content.length} chars) — ${diagnosticsLine(contentScan.diagnostics)}`)
+    log(
+      `${scan.shortId}: content too short (${extract.content.length} chars) — ${diagnosticsLine(contentScan.diagnostics)}`,
+    )
     return {
       id: scan.id,
       shortId: scan.shortId,
@@ -298,7 +304,7 @@ export async function summarizeSession(
   }
 
   // Cache the result
-  writeCache(scan.shortId, summary)
+  writeCache(scan.id, summary)
   log(`${scan.shortId}: cached summary`)
 
   return {
