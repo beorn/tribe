@@ -927,6 +927,48 @@ async function cmdTaking(
 // ---------------------------------------------------------------------------
 
 /**
+ * A VALUE FOR `--request` / `--reply` MUST NEVER BE A RECIPIENT.
+ *
+ * Both flags carry their id as the token that follows them, and `--request`
+ * takes that value OPTIONALLY — so `tribe send --request @chief ...` (the
+ * reporter's exact form, 24017) bound `@chief` as the request id and delivered
+ * the ball under it. A request id is a UUID or an author-supplied id; it never
+ * begins with `@`, so an `@`-leading value is always the swallowed recipient.
+ *
+ * The refusal runs in the option PARSER rather than the action so it also
+ * covers the shortest form, `tribe send --request @chief "<message>"`, where
+ * the swallow starves `<message...>` and Commander's own argument check would
+ * otherwise report the misleading "missing required argument 'message'".
+ * A bare `--request` (no value at all) never reaches here and still means
+ * "track it and generate an id", as its help says.
+ */
+export function refuseSeatShapedId(flag: "--request" | "--reply"): (value: unknown) => unknown {
+  return (value: unknown) => {
+    if (typeof value === "string" && value.startsWith("@")) {
+      const consequence =
+        flag === "--request"
+          ? `a bare ${flag} swallowed it as the id, so the ball would open under '${value}'`
+          : `${flag} took it as the id it settles, so the settlement would land on '${value}'`
+      console.error(
+        `tribe.send: invalid ${flag} '${value}' — a request id never begins with '@'; that is a recipient, and ` +
+          `${consequence} while this command still reported success.`,
+      )
+      if (flag === "--request") {
+        console.error(`Put the recipient first and the bare flag last, or name an explicit id:`)
+        console.error(`  tribe send ${value} "<message>" --request`)
+        console.error(`  tribe send <recipient> "<message>" --request=<request_id>`)
+      } else {
+        // `--reply` has no bare form: it always requires the id it settles.
+        console.error(`Name the request this reply settles:`)
+        console.error(`  tribe send <recipient> "<message>" --type response --reply=<request_id>`)
+      }
+      process.exit(2)
+    }
+    return value
+  }
+}
+
+/**
  * Register the shipping send/messaging verbs on the unified dispatcher.
  *
  * Bead: @km/bearly/19231-tribe-cli-unify-phase-a2-verbs
@@ -957,9 +999,9 @@ export function registerSendCommands(program: Command): void {
     .option(sendMessageId.flags, sendMessageId.description)
     .option(sendDelivery.flags, sendDelivery.description)
     .option(sendRef.flags, sendRef.description)
-    .option(sendReply.flags, sendReply.description)
+    .option(sendReply.flags, sendReply.description, refuseSeatShapedId("--reply"))
     .option(sendAnonymous.flags, sendAnonymous.description)
-    .option(sendRequest.flags, sendRequest.description)
+    .option(sendRequest.flags, sendRequest.description, refuseSeatShapedId("--request"))
     .option(sendFanout.flags, sendFanout.description)
     .option(sendExpiresInMs.flags, sendExpiresInMs.description)
     .option(sendIncident.flags, sendIncident.description)

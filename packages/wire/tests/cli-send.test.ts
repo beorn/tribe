@@ -1591,6 +1591,79 @@ describe("a second recipient must never be absorbed into the message body", () =
   })
 })
 
+describe("a bare --request/--reply must never swallow the recipient", () => {
+  /**
+   * `--request` takes an OPTIONAL value, so Commander binds whatever token
+   * follows the bare flag: `tribe send --request @chief @dev/9 "text"` made
+   * `@chief` the request id and delivered the ball under it — the ball opens
+   * against the wrong owner (or none) while the command still reports success.
+   * The reporter's exact form was `tribe send --request @chief ...`; the only
+   * workaround was to put `--request` last.
+   *
+   * A request id is a UUID (or an author-supplied id) and never begins with
+   * `@`, so an `@`-leading value is always the swallowed recipient. The
+   * refusal runs in the option parser, which beats Commander's own argument
+   * check — that is what makes the shortest form refuse too, instead of
+   * reporting the misleading "missing required argument 'message'".
+   */
+  function runSend(args: string[]): Promise<{ code: number | null; stderr: string }> {
+    return new Promise((resolveProcess) => {
+      const child = spawn(BUN_BIN, [CLI, ...args], {
+        cwd: TEST_ROOT,
+        env: {
+          ...process.env,
+          TRIBE_SOCKET: join(TEST_ROOT, "isolated-test-tribe.sock"),
+          ...launchEnvironment(""),
+          TRIBE_SESSION_NAME: "",
+          TRIBE_NAME: "",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+      let stderr = ""
+      child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+      child.on("close", (code) => resolveProcess({ code, stderr }))
+    })
+  }
+
+  test("refuses `--request @recipient` when another positional follows it", async () => {
+    const res = await runSend(["send", "--request", "@mock-target", "@mock-recipient", "the", "actual", "message"])
+
+    expect(res.code).toBe(2)
+    // Names the value, so the reader sees exactly what would have been swallowed.
+    expect(res.stderr).toContain("tribe.send: invalid --request '@mock-target'")
+    expect(res.stderr).toMatch(/recipient|swallow/iu)
+  })
+
+  test('refuses the shortest `--request @recipient "body"` shape, not Commander\'s missing-argument error', async () => {
+    const res = await runSend(["send", "--request", "@mock-target", "the message"])
+
+    expect(res.code).toBe(2)
+    expect(res.stderr).toContain("tribe.send: invalid --request '@mock-target'")
+    expect(res.stderr).not.toContain("missing required argument")
+  })
+
+  test("refuses `--reply @recipient` for the same reason", async () => {
+    const res = await runSend(["send", "--reply", "@mock-target", "@mock-recipient", "body"])
+
+    expect(res.code).toBe(2)
+    expect(res.stderr).toContain("tribe.send: invalid --reply '@mock-target'")
+    expect(res.stderr).toMatch(/recipient|swallow/iu)
+    // `--reply` has no bare form, so the remedy must carry the id it settles —
+    // the bare-last advice would itself fail ("option '--reply <request_id>'
+    // argument missing").
+    expect(res.stderr).toContain("--reply=<request_id>")
+    expect(res.stderr).not.toContain('"<message>" --reply')
+  })
+
+  test("still accepts the bare flag last, and an explicit id", async () => {
+    const bare = await runSend(["send", "@mock-target", "body", "--request"])
+    expect(bare.stderr).not.toMatch(/invalid --request/iu)
+
+    const explicit = await runSend(["send", "@mock-target", "body", "--request=mock-request-id"])
+    expect(explicit.stderr).not.toMatch(/invalid --request/iu)
+  })
+})
+
 describe("reply and taking convenience commands (25028)", () => {
   test("deriveFirstLineSummary extracts the first non-empty trimmed line", () => {
     expect(deriveFirstLineSummary("simple message")).toBe("simple message")

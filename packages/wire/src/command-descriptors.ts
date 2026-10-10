@@ -424,7 +424,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "reply",
           flags: "--reply <request_id>",
-          description: "Settlement reference; pair response + reply for final disposition",
+          description:
+            "Settlement reference; pair response + reply for final disposition. The value is a request id, never a seat: an @-leading value is refused",
         },
         {
           name: "anonymous",
@@ -435,7 +436,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           name: "request",
           flags: "--request [request_id]",
           description:
-            'Explicitly track any direct type or override its id; bare `--request` and `--request true` generate a unique id, while "true" is reserved',
+            'Explicitly track any direct type or override its id; bare `--request` and `--request true` generate a unique id, while "true" is reserved. The value is a request id, never a seat: an @-leading value is refused, so a bare flag can never swallow the recipient',
         },
         {
           name: "fanout",
