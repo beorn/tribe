@@ -77,6 +77,11 @@ export type TribeContext = {
   getRole(): TribeRole
   setRole(role: TribeRole): void
   onMessageInserted?: (info: MessageInsertedInfo) => void
+  /**
+   * Pending-connection token auth (#28294): the verified launch identity used as
+   * `messages.session_id` (`sid@gen`) and `sender_authority=verified` with no session row.
+   */
+  sessionlessLaunch?: { readonly sid: string; readonly gen: number }
 }
 
 export function createTribeContext(opts: {
@@ -89,6 +94,7 @@ export function createTribeContext(opts: {
   claudeSessionId: string | null
   claudeSessionName: string | null
   onMessageInserted?: (info: MessageInsertedInfo) => void
+  sessionlessLaunch?: { readonly sid: string; readonly gen: number }
 }): TribeContext {
   let currentName = opts.initialName
   let currentRole = opts.sessionRole
@@ -96,6 +102,7 @@ export function createTribeContext(opts: {
     db: opts.db,
     stmts: opts.stmts,
     sessionId: opts.sessionId,
+    ...(opts.sessionlessLaunch === undefined ? {} : { sessionlessLaunch: opts.sessionlessLaunch }),
     get sessionRole() {
       return currentRole
     },

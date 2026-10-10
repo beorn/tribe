@@ -2458,7 +2458,7 @@ export function withDispatcher<
           case TRIBE_COORD_METHODS.lifecycle:
           case TRIBE_COORD_METHODS.pending: {
             const client = clients.get(connId)
-            const ctx = client?.ctx ?? daemonCtx
+            let ctx = client?.ctx ?? daemonCtx
             const incident = p.incident as { emitter?: unknown; active?: unknown } | undefined
             const rawEmitter =
               method === TRIBE_COORD_METHODS.pending
@@ -2471,7 +2471,99 @@ export function withDispatcher<
             let incidentAuthorization: HandlerOpts["incidentAuthorization"]
             const managedWrite =
               typeof emitter === "string" && (t.config.requiredIncidentEmitters ?? []).includes(emitter)
-            if (emitterRead || managedWrite) {
+            const pendingConnection = client?.role === "pending"
+            const sessionlessSend = pendingConnection && method === TRIBE_COORD_METHODS.send
+            const sessionlessPendingRead = pendingConnection && emitterRead
+            let toolParams: Record<string, unknown> = p
+            if (sessionlessSend || sessionlessPendingRead) {
+              const overrideKeys = ["session", "name", "launch_id", "launch_parent_pid", "pid"] as const
+              const override = overrideKeys.find((key) => Object.prototype.hasOwnProperty.call(p, key))
+              if (override !== undefined) {
+                return makeError(
+                  id,
+                  -32003,
+                  `sessionless ${method} refuses ${override}: identity comes from the token only`,
+                  { kind: "unauthenticated", reason: "sessionless-identity-override" },
+                )
+              }
+              if (sessionlessSend && incident === undefined) {
+                const sendType = typeof p.type === "string" ? p.type : "notify"
+                if (sendType !== "notify" && sendType !== "status") {
+                  return makeError(
+                    id,
+                    -32003,
+                    `sessionless principal cannot send type ${JSON.stringify(sendType)}: request, query, assign, verdict and response refuse by name`,
+                    { kind: "unauthenticated", reason: "sessionless-type-refused" },
+                  )
+                }
+              }
+              const { idToken: sessionlessToken, ...restParams } = p
+              toolParams = restParams
+              if (typeof sessionlessToken !== "string" || sessionlessToken.length === 0) {
+                return makeError(id, -32003, "sessionless call carries no identity token", {
+                  kind: "unauthenticated",
+                  reason: "sessionless-token-missing",
+                })
+              }
+              const current = await verifyOneShotToken(undefined, sessionlessToken)
+              if (!("verdict" in current)) {
+                return makeError(id, -32003, current.errorMessage, current.errorData)
+              }
+              const gen = current.verdict.gen
+              if (typeof gen !== "number" || !Number.isSafeInteger(gen)) {
+                return makeError(
+                  id,
+                  -32003,
+                  "sessionless send requires the token's generation so the row can carry sid@gen",
+                  { kind: "unauthenticated", reason: "sessionless-gen-missing" },
+                )
+              }
+              ctx = createTribeContext({
+                db,
+                stmts,
+                sessionId: ctx.sessionId,
+                sessionRole: "pending",
+                initialName: current.verdict.actor,
+                domains: ["service"],
+                claudeSessionId: null,
+                claudeSessionName: null,
+                onMessageInserted,
+                sessionlessLaunch: { sid: current.verdict.sid, gen },
+              })
+              if (emitterRead || managedWrite) {
+                const verifier = hooks.identityVerifier
+                const policyPath = verifier?.path ?? "(no --identity-verifier configured)"
+                const refuseIncident = (reason: string) =>
+                  makeError(
+                    id,
+                    -32003,
+                    `managed incident ${JSON.stringify(emitter)} refused by incident policy ${policyPath}: ${reason}`,
+                  )
+                if (typeof emitter !== "string" || emitter.length === 0) {
+                  return refuseIncident("emitter must be a nonempty string")
+                }
+                if (!verifier?.readIncidentPolicy) {
+                  return refuseIncident("required INCIDENT_POLICY export is unavailable")
+                }
+                let policy: ReturnType<NonNullable<LoadedIdentityVerifier["readIncidentPolicy"]>>
+                try {
+                  policy = verifier.readIncidentPolicy()
+                } catch (error) {
+                  return refuseIncident(error instanceof Error ? error.message : String(error))
+                }
+                if (!policy.emitters.includes(emitter)) {
+                  return refuseIncident("emitter is not managed by this host policy")
+                }
+                const operation = emitterRead ? "read" : incident?.active === false ? "clear" : "raise"
+                try {
+                  const allowed = policy.authorize(current.verdict, emitter, operation)
+                  if (allowed !== true) return refuseIncident("verified identity is not authorized for this emitter")
+                  incidentAuthorization = { emitter, operation }
+                } catch (error) {
+                  return refuseIncident(error instanceof Error ? error.message : String(error))
+                }
+              }
+            } else if (emitterRead || managedWrite) {
               const verifier = hooks.identityVerifier
               const policyPath = verifier?.path ?? "(no --identity-verifier configured)"
               const refuseIncident = (reason: string) =>
@@ -2546,8 +2638,11 @@ export function withDispatcher<
                       return { transportDelivery, delivery: registry.getSessionDelivery(ctx.sessionId) }
                     },
                   }
-                : DAEMON_HANDLER_OPTS
-            const result = await handleToolCall(ctx, method, p, opts, connId)
+                : {
+                    ...DAEMON_HANDLER_OPTS,
+                    ...(incidentAuthorization === undefined ? {} : { incidentAuthorization }),
+                  }
+            const result = await handleToolCall(ctx, method, toolParams, opts, connId)
             const current = clients.get(connId)
             if ((method === TRIBE_COORD_METHODS.join || method === TRIBE_COORD_METHODS.rename) && current) {
               current.name = ctx.getName()

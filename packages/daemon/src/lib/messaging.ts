@@ -688,7 +688,10 @@ export function sendMessage(
       $sender: sender,
       // Provenance (v26): the daemon's connection identity, not the caller's
       // claim. Joins to sessions for pid / cwd / launch_id.
-      $session_id: ctx.sessionId,
+      $session_id:
+        ctx.sessionlessLaunch === undefined
+          ? ctx.sessionId
+          : `${ctx.sessionlessLaunch.sid}@${String(ctx.sessionlessLaunch.gen)}`,
       $recipient: recipient,
       $kind: resolvedKind,
       $content: content,
@@ -961,6 +964,7 @@ export type SenderAuthority = SessionAuthority | "bearer" | "unrecorded"
  */
 function senderAuthorityOf(ctx: TribeContext, sender: string): SessionAuthority | null {
   if (ctx.getRole() === "daemon" || sender !== ctx.getName()) return null
+  if (ctx.sessionlessLaunch !== undefined) return "verified"
   const row = ctx.stmts.selectSessionAuthority.get({ $id: ctx.sessionId }) as { identity_sid: string | null } | null
   return row === null ? "claimed" : sessionAuthority(row)
 }
