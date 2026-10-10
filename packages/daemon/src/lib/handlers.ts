@@ -4407,6 +4407,7 @@ export function fetchEvent(row: FetchRow, replay?: boolean): FetchEvent {
 type SnapshotFilters = {
   currentName: string
   limit: number
+  topics: string[]
   since: number | null
   withPeer: string | null
   from: string | null
@@ -4558,11 +4559,14 @@ export function readAttentionProjection(
 
 function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRow[] {
   const conditions = ["kind != 'event'"]
-  const params: Record<string, number | string> = { $limit: filters.limit }
+  const params: Record<string, number | string> = { $limit: filters.topics.length > 0 ? 500 : filters.limit }
 
   if (filters.since !== null) {
     conditions.push("rowid > $since")
     params.$since = filters.since
+  } else if (filters.topics.length > 0) {
+    conditions.push("rowid < $before")
+    params.$before = Number.MAX_SAFE_INTEGER
   }
   if (filters.withPeer !== null) {
     conditions.push("((sender = $self AND recipient = $peer) OR (sender = $peer AND recipient = $self))")
@@ -4579,9 +4583,8 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
   }
 
   const order = filters.since !== null ? "ASC" : "DESC"
-  const rows = ctx.db
-    .prepare(
-      assertSingleStatement(`
+  const query = ctx.db.prepare(
+    assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
              attention_required, wakes_owner, is_incident, sender_authority, session_id
       FROM messages
@@ -4589,9 +4592,30 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
       ORDER BY rowid ${order}
       LIMIT $limit
     `),
+  )
+  const rows: FetchRow[] = []
+  // The limit is a MATCH budget, never a scan cap. Unrelated traffic must not
+  // turn a retained topic into an empty result (28539).
+  while (true) {
+    const page = query.all(params) as FetchRow[]
+    rows.push(
+      ...(filters.topics.length > 0
+        ? filterRowsByTrust(ctx, page).filter((row) => matchesGlob(filters.topics, row.topic))
+        : page),
     )
-    .all(params) as FetchRow[]
-  return filters.since !== null ? rows : rows.reverse()
+    const lastRow = page.at(-1)
+    if (
+      !lastRow ||
+      filters.topics.length === 0 ||
+      rows.length >= filters.limit ||
+      page.length < Number(params.$limit)
+    ) {
+      break
+    }
+    params[filters.since !== null ? "$since" : "$before"] = lastRow.rowid
+  }
+  const selected = rows.slice(0, filters.limit)
+  return filters.since !== null ? selected : selected.reverse()
 }
 
 function rowMatchesSnapshotFilters(row: FetchRow, filters: Omit<SnapshotFilters, "limit">): boolean {
@@ -4684,7 +4708,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
   const withPeer = typeof a.with === "string" && a.with.length > 0 ? a.with : null
   const from = typeof a.from === "string" && a.from.length > 0 ? a.from : null
   const to = typeof a.to === "string" && a.to.length > 0 ? a.to : null
-  const snapshotFilters = { currentName, since, withPeer, from, to }
+  const snapshotFilters = { currentName, since, withPeer, from, to, topics: topics ?? [] }
 
   const ids = normalizeStringArray(a.ids)
   if (a.ids !== undefined && ids === null) {
@@ -4752,7 +4776,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
       .map((id) => byId.get(id))
       .filter((r): r is FetchRow => !!r)
       .filter((r) => rowMatchesSnapshotFilters(r, snapshotFilters))
-  } else if (withPeer !== null || from !== null || to !== null || since !== null) {
+  } else if (withPeer !== null || from !== null || to !== null || since !== null || topicsAreSnapshot) {
     rows = querySnapshotRows(ctx, { ...snapshotFilters, limit })
     shouldAdvance = !topicsAreSnapshot && since !== null && a.advance === true
   } else {
