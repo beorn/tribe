@@ -2488,8 +2488,11 @@ export function withDispatcher<
               }
               if (sessionlessSend) {
                 const sendType = typeof p.type === "string" ? p.type : "notify"
-                const typeRefusalApplies = incident === undefined || sendType === "query"
-                if (typeRefusalApplies && sendType !== "notify" && sendType !== "status") {
+                const typeRefusalApplies =
+                  incident === undefined
+                    ? sendType !== "notify" && sendType !== "status"
+                    : !["request", "notify", "status"].includes(sendType)
+                if (typeRefusalApplies) {
                   return makeError(
                     id,
                     -32003,
