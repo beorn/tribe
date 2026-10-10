@@ -545,7 +545,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
         const sql = stmts.selectPendingOutcomeFactsForRequest.toString()
         const plan = db
           .query(assertSingleStatement(`EXPLAIN QUERY PLAN ${sql}`))
-          .all({ $request_id: messageId }) as Array<{
+          .all({ $request_id: messageId as string }) as Array<{
           detail: string
         }>
         for (const index of ["idx_messages_event_type_ref_ts", "idx_messages_archive_event_type_ref_ts"]) {
