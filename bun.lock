@@ -43,6 +43,7 @@
         "recall": "./src/cli.ts",
       },
       "dependencies": {
+        "@bearly/durable-file": "0.1.0",
         "@bearly/flock": "^0.1.0",
         "@bearly/sqlite": "0.1.0",
         "@silvery/commander": "^0.24.0",
@@ -88,6 +89,8 @@
     "tribe-recall",
   ],
   "packages": {
+    "@bearly/durable-file": ["@bearly/durable-file@0.1.0", "", {}, "sha512-mHCRg+rzye+/1OxHbZREcqUjtnABJRvChOjDNBiiC8uvcfstTywxGNsLgH3i48iVoey/ofT3pe9oNyJDTJfzAA=="],
+
     "@bearly/flock": ["@bearly/flock@0.1.0", "", {}, "sha512-L9qQPH3Df+xKaFfOoYOamyL00CmRltbvilx0XfXzylFw76MRMN4SrhydxrVc4ROsZ5nkVZE0prl3G3zv3ZOH5w=="],
 
     "@bearly/pacing": ["@bearly/pacing@0.2.0", "", {}, "sha512-3PxvuxHWpm1X5GNXE9OUQvkSk8R7UDSmUP7cavGjnS5qN43J5kh7ot7YPhLFCDtfLFk6isZH4m0YUINJa0RvHA=="],
