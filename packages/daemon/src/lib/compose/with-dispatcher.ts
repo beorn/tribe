@@ -2471,11 +2471,11 @@ export function withDispatcher<
             let incidentAuthorization: HandlerOpts["incidentAuthorization"]
             const managedWrite =
               typeof emitter === "string" && (t.config.requiredIncidentEmitters ?? []).includes(emitter)
-            const pendingConnection = client?.role === "pending"
-            const sessionlessSend = pendingConnection && method === TRIBE_COORD_METHODS.send
-            const sessionlessPendingRead = pendingConnection && emitterRead
+            const sessionlessAuth = Object.hasOwn(p, "idToken")
+            const sessionlessToken = typeof p.idToken === "string" && p.idToken.length > 0 ? p.idToken : undefined
+            const sessionlessSend = sessionlessAuth && method === TRIBE_COORD_METHODS.send
             let toolParams: Record<string, unknown> = p
-            if (sessionlessSend || sessionlessPendingRead) {
+            if (sessionlessAuth) {
               const overrideKeys = ["session", "name", "launch_id", "launch_parent_pid", "pid"] as const
               const override = overrideKeys.find((key) => Object.prototype.hasOwnProperty.call(p, key))
               if (override !== undefined) {
@@ -2497,9 +2497,9 @@ export function withDispatcher<
                   )
                 }
               }
-              const { idToken: sessionlessToken, ...restParams } = p
+              const { idToken: _strippedToken, ...restParams } = p
               toolParams = restParams
-              if (typeof sessionlessToken !== "string" || sessionlessToken.length === 0) {
+              if (sessionlessToken === undefined) {
                 return makeError(id, -32003, "sessionless call carries no identity token", {
                   kind: "unauthenticated",
                   reason: "sessionless-token-missing",
