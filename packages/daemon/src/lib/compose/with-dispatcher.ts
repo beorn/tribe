@@ -2486,9 +2486,10 @@ export function withDispatcher<
                   { kind: "unauthenticated", reason: "sessionless-identity-override" },
                 )
               }
-              if (sessionlessSend && incident === undefined) {
+              if (sessionlessSend) {
                 const sendType = typeof p.type === "string" ? p.type : "notify"
-                if (sendType !== "notify" && sendType !== "status") {
+                const typeRefusalApplies = incident === undefined || sendType === "query"
+                if (typeRefusalApplies && sendType !== "notify" && sendType !== "status") {
                   return makeError(
                     id,
                     -32003,
