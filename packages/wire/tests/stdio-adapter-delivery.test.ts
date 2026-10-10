@@ -2271,11 +2271,9 @@ describe("stdio adapter delivery modes", () => {
   // render as a clean 0 with gap:false.
   it("keeps the resumed same-window counter totals across an adapter restart (#27459 REVISE)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
-    // #28376 — the seed is a LEGACY (pre-fix) file that holds THIS pane's own
-    // live window: the adapter adopts it once, then persists under the v2 path.
-    // The legacy bytes are left exactly as written.
-    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
-    const v2Path = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
+    // Resume the current filename, retaining schema-v1 counter conversion.
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
+    const v2Path = ledgerPath
     const windowStartMs = Date.now() - 60_000
     writeFileSync(
       ledgerPath,
@@ -2300,7 +2298,6 @@ describe("stdio adapter delivery modes", () => {
       }),
       "utf8",
     )
-    const legacyBefore = readFileSync(ledgerPath, "utf8")
     // No new activity: this drain exists only to make the adapter load and
     // re-persist the resumed window.
     const fetchAttention = { actionable_unread: [], pending_balls: [] }
@@ -2352,39 +2349,26 @@ describe("stdio adapter delivery modes", () => {
     expect([...ledger.ids].sort()).toEqual(["seed-row-a", "seed-row-b"])
     expect(ledger.coverage.restarts).toBe(2)
     expect(ledger.coverage.gap).toBe(false)
-    // The adoption is a READ: the legacy file is never rewritten or deleted.
-    expect(readFileSync(ledgerPath, "utf8")).toBe(legacyBefore)
   })
 
-  // #28376 — two distinct VALID personas in one habitat named one ledger file:
-  // the pre-fix `deliveryLedgerPaneKey` sanitized `/` to `_`, so `@dev/6` and
-  // `@dev_6` both resolved to `tribe-delivery-@dev_6.json`. Before the fix the
-  // second persona adopted the first's delivered-id set and counters (with
-  // `coverage.gap=false`) and so SUPPRESSED a broadcast handoff it was never
-  // handed. @cto's ruling: an injective `v2` key in a disjoint namespace, plus a
-  // one-time read-only adoption of a LEGACY file only when it records this pane
-  // and its window is still live. This row runs BOTH personas through the REAL
-  // adapter, one after the other, in one habitat:
-  //   - @dev_6 never inherits @dev/6's id: its own row reaches it, and it opens a
-  //     NAMED gap and persists its own window under its own v2 path;
-  //   - @dev/6 still adopts its own LIVE legacy window: its row stays suppressed
-  //     as already handed off, and it re-persists under its own v2 path;
-  //   - the legacy file's bytes are unchanged throughout.
+  // @failure A foreign owner at the current filename suppresses unseen handoffs.
+  // @level l3 @consumer adapter delivery and four-hour report
+  // The first persona rejects a foreign v2 window with a named gap; the second
+  // resumes its own v2 window and suppresses an already delivered row.
   it("keeps two colliding personas on separate delivery windows through the real adapter (#28376)", async () => {
     type FakeAttention = {
       actionable_unread?: Array<Record<string, unknown>>
       pending_balls?: Array<Record<string, unknown>>
     }
-    const legacyPath = join(tmpDir, "tribe-delivery-@dev_6.json")
+    const foreignPath = join(tmpDir, "tribe-delivery-v2-@dev_6.json")
     const v2Dev6 = join(tmpDir, "tribe-delivery-v2-@dev_6.json")
     const v2DevSlash6 = join(tmpDir, "tribe-delivery-v2-@dev%2F6.json")
     const windowStartMs = Date.now() - 60_000
-    // @dev/6's own LIVE ledger, reached under @dev_6's default legacy path
-    // because the two names sanitized to one key. `dev6Row` was handed to @dev/6
-    // and to nobody else.
+    // A foreign window at the underscore persona's current path; the slash
+    // persona also has its own v2 file. The row was handed only to @dev/6.
     const dev6Row = "broadcast-row-first-handed-only-to-dev-6"
     writeFileSync(
-      legacyPath,
+      foreignPath,
       JSON.stringify({
         version: 2,
         pane: "@dev/6",
@@ -2414,7 +2398,8 @@ describe("stdio adapter delivery modes", () => {
       }),
       "utf8",
     )
-    const legacyBefore = readFileSync(legacyPath, "utf8")
+    const originalBody = readFileSync(foreignPath, "utf8")
+    writeFileSync(v2DevSlash6, originalBody, "utf8")
 
     const ledgerOf = (path: string) =>
       JSON.parse(readFileSync(path, "utf8")) as {
@@ -2472,7 +2457,7 @@ describe("stdio adapter delivery modes", () => {
     }
 
     // ---- @dev_6 first: the colliding persona must NOT inherit @dev/6's id. ----
-    // The row served to @dev_6 is the SAME id the legacy file records for @dev/6,
+    // The row served to @dev_6 is the same ID the foreign v2 file records for @dev/6,
     // so pre-fix (when @dev_6 restored that id set) this exact row read as already
     // handed off and the assertion below fails: genuine RED.
     const underscoreText = await runAdapter({
@@ -2505,11 +2490,11 @@ describe("stdio adapter delivery modes", () => {
     const underscoreLog = readFileSync(join(tmpDir, "adapter-underscore.log"), "utf8")
     expect(underscoreLog).toContain("records owner @dev/6, not @dev_6")
     expect(underscoreLog).toContain("ignoring it (28376)")
-    // The legacy file still belongs to the persona it records, byte for byte.
-    expect(readFileSync(legacyPath, "utf8")).toBe(legacyBefore)
+    // Rejection leaves the slash persona's own v2 window unchanged.
+    expect(readFileSync(v2DevSlash6, "utf8")).toBe(originalBody)
     await stopAdapter()
 
-    // ---- @dev/6 next: it adopts its OWN live window, so its row stays suppressed. ----
+    // @dev/6 next: it resumes its own v2 window, so its row stays suppressed.
     const dev6Text = await runAdapter({
       socket: join(tmpDir, "tribe-slash.sock"),
       ackName: "@dev/6",
@@ -2521,17 +2506,18 @@ describe("stdio adapter delivery modes", () => {
         pending_balls: [],
       },
     })
-    // The v2 file appearing is the drained-and-persisted signal: only then is the
-    // absence of the row a real "already handed off", not a drain that never ran.
-    await waitForCondition(() => existsSync(v2DevSlash6), "@dev/6 re-persisted under its own v2 path")
+    // A changed timestamp proves the seeded file was actually re-persisted.
+    await waitForCondition(
+      () => (JSON.parse(readFileSync(v2DevSlash6, "utf8")) as { updatedAtMs: number }).updatedAtMs > windowStartMs,
+      "@dev/6 re-persisted its current v2 window",
+    )
     expect(dev6Text.some((line) => line.includes("DEV-6-OWN-ROW"))).toBe(false)
     const dev6LedgerV2 = ledgerOf(v2DevSlash6)
     expect(dev6LedgerV2.pane).toBe("@dev/6")
     expect(dev6LedgerV2.ids).toEqual([dev6Row])
     expect(dev6LedgerV2.coverage.gap).toBe(false)
-    // Each persona kept its own file, and the legacy bytes survived both runs.
+    // Each persona now has its own current file.
     expect(ledgerOf(v2Dev6).pane).toBe("@dev_6")
-    expect(readFileSync(legacyPath, "utf8")).toBe(legacyBefore)
   })
 
   // #27459 - the ambient `events` path is the same pane inbox as attention: a

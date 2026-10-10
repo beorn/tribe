@@ -119,17 +119,6 @@ export function deliveryLedgerPaneKey(pane: string): string {
 }
 
 /**
- * #28376 — the pre-fix SANITIZING key (`/` -> `_`; runs collapse to `_`). NOT
- * injective, so it names a legacy file that a colliding persona may also have
- * written to. Used only to find that file for the one-time, read-only adoption
- * (`deliveryLedgerLegacyPath`); a new ledger never uses it.
- */
-export function deliveryLedgerLegacyPaneKey(pane: string): string {
-  const key = pane.trim().replace(/[^A-Za-z0-9._@-]+/gu, "_")
-  return key === "" ? "unregistered" : key
-}
-
-/**
  * #28376 — the `v2` namespace segment (@cto ruling). It keeps a new path from
  * EVER equalling a legacy path, so a colliding pair's files never overlap even
  * transiently: without it, `@dev_6`'s new key equals `@dev/6`'s legacy file
@@ -159,26 +148,12 @@ export function deliveryLedgerPath(opts: { pane: string; env: NodeJS.ProcessEnv 
 }
 
 /**
- * #28376 — the legacy (pre-fix) file a pane's window may still live in, read
- * only to ADOPT a live window this pane owns (`resumeDeliveryLedger`). Null when
- * an explicit ledger file is configured: that path IS the ledger, so nothing is
- * invented beside it.
- */
-export function deliveryLedgerLegacyPath(opts: { pane: string; env: NodeJS.ProcessEnv }): string | null {
-  if (opts.env[TRIBE_DELIVERY_LEDGER_ENV]?.trim()) return null
-  const dir = deliveryLedgerDir(opts.env)
-  if (dir === null) return null
-  return join(dir, `tribe-delivery-${deliveryLedgerLegacyPaneKey(opts.pane)}.json`)
-}
-
-/**
  * #28376 — the ledger's OWNER is its persisted `pane`, never its file name.
  *
  * The key is now injective (`deliveryLedgerPaneKey`) and namespaced, but the
  * LEGACY key was a sanitizer, not a bijection: `/` became `_`, so the two VALID
- * personas `@dev/6` and `@dev_6` both resolved to one file, and a legacy file
- * that `resumeDeliveryLedger` adopts for its owner may still be another
- * persona's. The file name is therefore a hint; the identity is what the file
+ * personas `@dev/6` and `@dev_6` both resolved to one file. The file name is
+ * therefore a hint; the identity is what the file
  * records about itself. A window whose recorded owner is not the caller is NOT
  * the caller's window: adopting it seeds this pane's forwarded-id set, counters
  * and summary-throttle fingerprint from another persona's handoffs, and the ids
@@ -352,58 +327,20 @@ export type DeliveryLedgerResume = {
    * Null when the window found belongs to the caller (or none was found).
    */
   foreign: { path: string; owner: string } | null
-  /** A legacy file this pane owns but whose window had expired: not adopted. */
-  expiredLegacy: string | null
-  /** The legacy file a LIVE window this pane owns was adopted from, once. */
-  adoptedFrom: string | null
 }
 
 /**
- * #28376 — find this pane's window: its own `v2` file when present; otherwise,
- * and only then, a LEGACY file this pane owns whose window is still LIVE (the
- * one-time, read-only migration; @cto ruling). A foreign or expired legacy file
- * is a LOST window: nothing is adopted, the gap is NAMED, and the legacy bytes
- * are never written or deleted. The caller persists under `path` either way, so
- * this adoption read retires itself once every seat has upgraded.
+ * Resume only the current v2 file or the explicit override. The temporary
+ * legacy filename adoption ended after every legacy window expired (#28409).
  */
-export function resumeDeliveryLedger(opts: {
-  pane: string
-  env: NodeJS.ProcessEnv
-  now: number
-}): DeliveryLedgerResume | null {
+export function resumeDeliveryLedger(opts: { pane: string; env: NodeJS.ProcessEnv }): DeliveryLedgerResume | null {
   const path = deliveryLedgerPath(opts)
   if (path === null) return null
   const own = loadDeliveryLedger(path)
-  if (existsSync(path)) {
-    return {
-      path,
-      load: own,
-      foreign: own.state !== null && own.state.pane !== opts.pane ? { path, owner: own.state.pane } : null,
-      expiredLegacy: null,
-      adoptedFrom: null,
-    }
-  }
-  const legacyPath = deliveryLedgerLegacyPath(opts)
-  if (legacyPath === null || legacyPath === path || !existsSync(legacyPath)) {
-    // No file anywhere: a fresh first run, which is not a gap.
-    return { path, load: own, foreign: null, expiredLegacy: null, adoptedFrom: null }
-  }
-  const legacy = loadDeliveryLedger(legacyPath)
-  const owner = legacy.state?.pane ?? null
-  if (owner === opts.pane && opts.now - (legacy.state?.windowStartMs ?? 0) < DELIVERY_LEDGER_WINDOW_MS) {
-    // A live window that is exactly this pane's: adopt it once; the next persist
-    // writes it under `path`, and the legacy file is left untouched.
-    return { path, load: legacy, foreign: null, expiredLegacy: null, adoptedFrom: legacyPath }
-  }
   return {
     path,
-    load: {
-      state: null,
-      coverage: { restarts: 0, gap: true, gapReason: legacy.coverage.gap ? legacy.coverage.gapReason : "schema" },
-    },
-    foreign: owner !== null && owner !== opts.pane ? { path: legacyPath, owner } : null,
-    expiredLegacy: owner === opts.pane ? legacyPath : null,
-    adoptedFrom: null,
+    load: own,
+    foreign: own.state !== null && own.state.pane !== opts.pane ? { path, owner: own.state.pane } : null,
   }
 }
 

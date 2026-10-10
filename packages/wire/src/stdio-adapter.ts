@@ -1492,7 +1492,7 @@ let deliveryLedgerReady = false
 function ensureDeliveryLedger(now: number): void {
   if (deliveryLedgerReady) return
   const pane = myName !== "" ? myName : process.env[TRIBE_NAME_ENV]?.trim() || "@unknown"
-  const resume = resumeDeliveryLedger({ pane, env: process.env, now })
+  const resume = resumeDeliveryLedger({ pane, env: process.env })
   if (resume === null) {
     // No habitat kpi root and no override: count in memory only, and never invent
     // a $HOME location (25231). The counters still work; only durability is off.
@@ -1503,15 +1503,10 @@ function ensureDeliveryLedger(now: number): void {
   // hint at best: the pre-fix key sanitized `/` to `_`, so two distinct valid
   // personas (`@dev/6`, `@dev_6`) named ONE file and the second resumed the
   // first's forwarded ids and counters. A window recorded for another persona is
-  // refused with one line and never adopted; a legacy file this pane owns is
-  // adopted only while its window is live, and is otherwise left alone.
+  // ignored with one line and never resumed.
   if (resume.foreign !== null) {
     log.warn?.(
       `Tribe delivery ledger ${resume.foreign.path} records owner ${resume.foreign.owner}, not ${pane}; ignoring it (28376).`,
-    )
-  } else if (resume.expiredLegacy !== null) {
-    log.warn?.(
-      `Tribe delivery ledger ${resume.expiredLegacy} is ${pane}'s but its window expired; opening a fresh window (28376).`,
     )
   }
   const opened = openDeliveryLedgerWindow({
