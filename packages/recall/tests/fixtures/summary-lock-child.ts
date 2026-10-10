@@ -1,48 +1,45 @@
 /**
  * Child-process fixture for the two-real-process summary-lock proof (@ag/tribe/27702, AC2).
  *
- * argv: <role> <db-path> <day>
- *   hold — acquire the exact summary-operation lock the production engine uses (the canonical realpath of
- *          <db-path> plus `.summary.lock`) and hold it until the parent closes this process's stdin. Prints
- *          "held" once acquired, so the parent knows the lock is occupied before it starts the second process.
- *   run  — call the real production `summarizeDay` for <day> with RECALL_DB_PATH naming <db-path>, then print
- *          its JSON result on stdout. This is the unmodified engine the two seats' SessionEnd hooks run.
+ * argv: <db-path> <day>
+ *   Pre-imports the real engine, prints "ready", waits for one stdin line, then runs the
+ *   unmodified `summarizeDay` for <day> with RECALL_DB_PATH=<db-path>, printing its JSON result
+ *   on stdout. Pre-booting lets the parent fire the two contenders within milliseconds of each
+ *   other, so contention is deterministic without a timing race; the day is sized so the running
+ *   engine holds the lock for hundreds of ms, which is where the "held through settlement"
+ *   contract is actually observed (a released-at-return lock is gone before the second process
+ *   can even be signalled).
  *
- * The hold role exists so contention is deterministic: `summarizeDay` holds the lock only across a fast
- * fixture, so a plain two-way race could miss the window. The in-process row already binds production to this
- * same lock path; this row proves that occupancy is felt across real OS processes through the symlink alias.
+ * <db-path> is the symlink alias: the engine must canonicalise it to the real DB so both
+ * processes name one lock.
  */
-import { realpathSync } from "node:fs"
-import { tryAcquireFlock } from "@bearly/flock"
+import { createInterface } from "node:readline"
 
-const [role, dbPath, day] = process.argv.slice(2)
-if (!role || !dbPath || !day) {
-  process.stderr.write(
-    `summary-lock-child: expected <role> <db-path> <day>, got ${JSON.stringify(process.argv.slice(2))}\n`,
-  )
+const [dbPath, day] = process.argv.slice(2)
+if (!dbPath || !day) {
+  process.stderr.write(`summary-lock-child: expected <db-path> <day>, got ${JSON.stringify(process.argv.slice(2))}\n`)
   process.exit(2)
 }
+process.env.RECALL_DB_PATH = dbPath
 
-if (role === "hold") {
-  using held = tryAcquireFlock(`${realpathSync(dbPath)}.summary.lock`, {
-    body: JSON.stringify({ startedAt: Date.now() }),
-  })
-  if (held === null) {
-    process.stderr.write("summary-lock-child: hold: another owner already holds the summary lock\n")
-    process.exit(3)
-  }
-  process.stdout.write("held\n")
-  await new Promise<void>((resolve) => {
-    process.stdin.once("end", resolve)
-    process.stdin.once("close", resolve)
-    process.stdin.resume()
-  })
-} else if (role === "run") {
-  process.env.RECALL_DB_PATH = dbPath
-  const { summarizeDay } = await import("../../src/lib/summarize-daily.ts")
+const { summarizeDay } = await import("../../src/lib/summarize-daily.ts")
+
+process.stdout.write("ready\n")
+
+// One line of input is the parent's "go": the operation must not start before it, so both
+// contenders are parked at the same line until the parent sequences them.
+const lines = createInterface({ input: process.stdin })
+await new Promise<void>((resolve) => {
+  lines.once("line", () => resolve())
+})
+
+try {
   const result = await summarizeDay(day)
   process.stdout.write(`${JSON.stringify(result)}\n`)
-} else {
-  process.stderr.write(`summary-lock-child: unknown role ${JSON.stringify(role)}\n`)
-  process.exit(2)
+} catch (error) {
+  process.stderr.write(
+    `summary-lock-child: summarizeDay threw: ${error instanceof Error ? error.message : String(error)}\n`,
+  )
+  process.exit(1)
 }
+process.exit(0)

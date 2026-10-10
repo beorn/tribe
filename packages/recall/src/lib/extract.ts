@@ -5,12 +5,14 @@
  * and indexing. Samples from beginning, middle, and end of sessions to
  * capture goals, work, and outcomes.
  *
- * 27702: the transcript is never materialised. Both the metadata scan and the
- * sampled content pass stream the file through the shared bounded reader
- * (`./qmd-export`), so a multi-GB transcript costs a fixed read buffer plus at
- * most the sampled records. A record over the reader's raw-record budget keeps
- * its position and renders as a named placeholder instead of skipping the whole
- * session.
+ * 27702: the transcript is never materialised and no raw sampled record is
+ * retained. Both passes stream the file through the shared bounded reader
+ * (`./qmd-export`), and the sampled messages are rendered incrementally into a
+ * bounded 4000-character tail, so a multi-GB transcript costs a fixed read
+ * buffer and one bounded output string. A record over the reader's raw-record
+ * budget keeps its position and renders as a named placeholder instead of
+ * skipping the whole session; an unsupported (non-Claude) sampled envelope is
+ * named, never silently reclassified as a sub-agent.
  */
 
 import * as fs from "fs"
@@ -34,18 +36,29 @@ export interface SessionExtract {
   reason?: string
 }
 
-/** A raw record sampled from a transcript: its decoded line, or the account of an elided one. */
-export interface SampledRecord {
-  /** The record's JSON text, or null when the reader elided it as over-budget. */
-  line: string | null
-  /** Present only for an elided record — a named account, never its bytes. */
-  oversized?: OversizedJsonlRecord
+/** Which bounded pass the caller needs: classification only, or classification plus content. */
+export type ScanMode = "metadata" | "content"
+
+/** Per-session extraction diagnostics: counts only, never raw record bytes. */
+export interface ScanDiagnostics {
+  /** N — the nonempty records pass one counted. */
+  records: number
+  /** How many of N the sample selected. */
+  sampled: number
+  /** Sampled records whose JSON did not parse. */
+  malformed: number
+  /** Sampled records the reader elided as over the raw-record budget. */
+  oversized: number
+  /** Sampled records carrying a recognised non-Claude (unsupported) envelope. */
+  unsupported: number
 }
 
 /**
- * One identity-checked, bounded two-pass scan: metadata plus the sampled raw
- * records, WITHOUT building the summary content string. The sole production
- * caller decides whether content is needed after cheap admission.
+ * One identity-checked, bounded two-pass scan. No raw record survives it: in
+ * `content` mode the sampled messages render incrementally into a bounded
+ * 4000-character tail; in `metadata` mode only classification and the counts
+ * are kept. Either way the caller decides, after cheap admission, whether the
+ * content pass is worth a second bounded read.
  */
 export interface SessionScan {
   id: string
@@ -54,10 +67,11 @@ export interface SessionScan {
   time: string
   isSubAgent: boolean
   sizeBytes: number
-  /** Why no usable transcript remained (e.g. "changed-input"); absent when the scan is usable. */
+  /** Why no usable transcript remained (e.g. "changed-input", "unsupported-sampled-format"). */
   reason?: string
-  /** The sampled records in order; empty when `reason` is set. */
-  records: SampledRecord[]
+  /** The bounded rendered content; always "" in `metadata` mode. */
+  content: string
+  diagnostics: ScanDiagnostics
 }
 
 // ============================================================================
@@ -77,6 +91,7 @@ const QUICK_SCAN_RECORDS = 50
 interface JsonlEntry {
   type?: string
   message?: { content?: unknown }
+  payload?: unknown
 }
 
 /** The content-block fields this extractor reads. */
@@ -116,18 +131,20 @@ export function findSessionJsonl(sessionId: string): string | null {
 }
 
 /**
- * Scan a session's transcript without constructing content: identity-checked
- * metadata (sub-agent classification from the sampled records) plus the sampled
- * raw records, kept so the caller can render content later without re-reading.
+ * Scan a session's transcript with bounded retention: identity-checked metadata
+ * (sub-agent classification from the sampled records) plus, in `content` mode,
+ * the incrementally rendered 4000-character tail. No raw record is kept.
  *
  * Two bounded streaming passes: the first counts records to fix the sampling
- * window, the second keeps only the sampled records. A transcript that changes
+ * window, the second renders only the sampled records. A transcript that changes
  * mid-read (even with its mtime restored — ctime moves) yields a named
- * "changed-input" result and no retry.
+ * "changed-input" result and no retry. An unsupported (non-Claude) sampled
+ * envelope yields a named "unsupported-sampled-format" reason rather than a
+ * silent sub-agent classification.
  */
 export function scanSessionTranscript(
   sessionId: string,
-  opts?: { title?: string | null; createdAt?: number },
+  opts?: { title?: string | null; createdAt?: number; mode?: ScanMode },
 ): SessionScan | null {
   const jsonlPath = findSessionJsonl(sessionId)
   if (!jsonlPath) return null
@@ -138,10 +155,12 @@ export function scanSessionTranscript(
   const shortId = sessionId.slice(0, 8)
   const title = opts?.title ?? null
   const time = formatTime(opts?.createdAt)
+  const mode: ScanMode = opts?.mode ?? "content"
+  const none = { records: 0, sampled: 0, malformed: 0, oversized: 0, unsupported: 0 }
 
   try {
     const total = countJsonlRecords(jsonlPath)
-    const records = collectSampledRecords(jsonlPath, selectedRecordIndices(total))
+    const sampled = scanSampledRecords(jsonlPath, selectedRecordIndices(total), mode)
 
     const after = readFileIdentity(jsonlPath)
     if (!after || !sameFileIdentity(before, after)) {
@@ -153,7 +172,8 @@ export function scanSessionTranscript(
         isSubAgent: false,
         sizeBytes: after?.size ?? before.size,
         reason: "changed-input",
-        records: [],
+        content: "",
+        diagnostics: none,
       }
     }
 
@@ -162,9 +182,19 @@ export function scanSessionTranscript(
       shortId,
       title,
       time,
-      isSubAgent: !recordsCarryUserText(records),
+      // A named reason (unsupported format, no usable content) is never a sub-agent; only the
+      // supported Claude path can classify as one.
+      isSubAgent: sampled.reason === undefined && !sampled.claudeUserText,
       sizeBytes: before.size,
-      records,
+      reason: sampled.reason,
+      content: sampled.content,
+      diagnostics: {
+        records: total,
+        sampled: sampled.sampled,
+        malformed: sampled.malformed,
+        oversized: sampled.oversized,
+        unsupported: sampled.unsupported,
+      },
     }
   } catch {
     // silent-fallback-allow: an unreadable transcript makes this session unavailable for extraction.
@@ -173,65 +203,9 @@ export function scanSessionTranscript(
 }
 
 /**
- * Render sampled records into the bounded summary content string.
- * Preserved from the legacy extractor: 120 sampled records maximum, a ~4 KB
- * tail, and the same block/tool-use filtering.
- */
-export function renderSessionContent(records: SampledRecord[]): { content: string; hasUserText: boolean } {
-  const messages: string[] = []
-  let hasUserText = false
-
-  for (const record of records) {
-    if (record.line === null) {
-      messages.push(oversizedPlaceholder(record.oversized))
-      continue
-    }
-    try {
-      const entry = JSON.parse(record.line) as JsonlEntry
-      if (entry.type !== "user" && entry.type !== "assistant") continue
-
-      const parts: string[] = []
-      const content = entry.message?.content
-      if (!Array.isArray(content)) continue
-
-      for (const block of content) {
-        if (typeof block === "string") {
-          if (block.length > MIN_TEXT_LENGTH) parts.push(block)
-          continue
-        }
-        if (!block || typeof block !== "object") continue
-
-        const b = block as ContentBlock
-        if (b.type === "text" && b.text && b.text.length > MIN_TEXT_LENGTH) {
-          parts.push(truncStr(b.text, 1500))
-          if (entry.type === "user") hasUserText = true
-        } else if (b.type === "tool_use") {
-          const summary = summarizeToolUse(b)
-          if (summary) parts.push(summary)
-        }
-        // Skip tool_result (large file dumps, noise)
-      }
-
-      if (parts.length > 0) {
-        messages.push(`[${entry.type}]: ${parts.join(" | ")}`)
-      }
-    } catch {
-      // silent-fallback-allow: a malformed JSONL line carries no content; skipping it is the legacy behavior.
-    }
-  }
-
-  let joined = messages.join("\n")
-  if (joined.length > MAX_CONTENT_CHARS) {
-    joined = joined.slice(-MAX_CONTENT_CHARS)
-  }
-  return { content: joined, hasUserText }
-}
-
-/**
- * Compose the structured extract from a scan already taken: the sampled
- * records are rendered here, so a caller that already paid for the transcript
- * I/O (the summary caller, after cheap admission) never re-reads it.
- * Returns null when no usable content remains.
+ * Compose the structured extract from a scan already taken. The scan built the
+ * bounded content itself (content mode), so a caller that already paid for the
+ * transcript I/O never re-reads it. Returns null when no usable content remains.
  */
 export function extractSessionContent(scan: SessionScan): SessionExtract | null {
   if (scan.reason) {
@@ -247,8 +221,7 @@ export function extractSessionContent(scan: SessionScan): SessionExtract | null 
     }
   }
 
-  const { content } = renderSessionContent(scan.records)
-  if (content.length === 0) return null
+  if (scan.content.length === 0) return null
 
   return {
     id: scan.id,
@@ -256,7 +229,7 @@ export function extractSessionContent(scan: SessionScan): SessionExtract | null 
     title: scan.title,
     time: scan.time,
     isSubAgent: scan.isSubAgent,
-    content,
+    content: scan.content,
     sizeBytes: scan.sizeBytes,
   }
 }
@@ -361,22 +334,116 @@ function selectedRecordIndices(total: number): Set<number> | "all" {
 }
 
 /**
- * Pass 2: keep only the selected records. The reader reports one callback per
- * non-blank record, in file order, so the running index is the record's
- * position in N — over-budget records included, which is what preserves the
- * sample's positions.
+ * The bounded result of pass 2: classification signals plus (content mode only)
+ * the incrementally rendered tail. Nothing here grows with the transcript.
  */
-function collectSampledRecords(jsonlPath: string, selected: Set<number> | "all"): SampledRecord[] {
-  const records: SampledRecord[] = []
-  let index = -1
-  const consider = (record: SampledRecord): void => {
-    index++
-    if (selected === "all" || selected.has(index)) records.push(record)
+interface SampledScan {
+  content: string
+  sampled: number
+  malformed: number
+  oversized: number
+  unsupported: number
+  supported: number
+  claudeUserText: boolean
+  reason?: string
+}
+
+/**
+ * Pass 2: process only the selected records, in order, without retaining any of
+ * them. The reader reports one callback per non-blank record, so the running
+ * index is the record's position in N — over-budget records included, which is
+ * what preserves the sample's positions.
+ *
+ * Rendered messages are appended to a rolling tail trimmed to the legacy
+ * MAX_CONTENT_CHARS after each append, so the joined-then-sliced result is
+ * reproduced exactly while only the last 4000 characters are ever held.
+ */
+function scanSampledRecords(jsonlPath: string, selected: Set<number> | "all", mode: ScanMode): SampledScan {
+  const acc: SampledScan = {
+    content: "",
+    sampled: 0,
+    malformed: 0,
+    oversized: 0,
+    unsupported: 0,
+    supported: 0,
+    claudeUserText: false,
   }
-  forEachJsonlLine(jsonlPath, (line) => consider({ line }), {
-    onOversized: (oversized) => consider({ line: null, oversized }),
+  let tail = ""
+  let tailStarted = false
+
+  const appendMessage = (message: string): void => {
+    if (mode !== "content") return
+    tail = tailStarted ? `${tail}\n${message}` : message
+    tailStarted = true
+    if (tail.length > MAX_CONTENT_CHARS) tail = tail.slice(-MAX_CONTENT_CHARS)
+  }
+
+  const consume = (line: string | null, oversized?: OversizedJsonlRecord): void => {
+    acc.sampled++
+    if (line === null) {
+      acc.oversized++
+      appendMessage(oversizedPlaceholder(oversized))
+      return
+    }
+
+    let entry: JsonlEntry
+    try {
+      entry = JSON.parse(line) as JsonlEntry
+    } catch {
+      // silent-fallback-allow: a malformed JSONL line carries no content; skipping it is the legacy behavior.
+      acc.malformed++
+      return
+    }
+
+    if (entry.type !== "user" && entry.type !== "assistant") {
+      if (isUnsupportedSampledFormat(entry)) acc.unsupported++
+      return
+    }
+    acc.supported++
+
+    const content = entry.message?.content
+    if (!Array.isArray(content)) return
+
+    const parts: string[] = []
+    for (const block of content) {
+      if (typeof block === "string") {
+        if (block.length > MIN_TEXT_LENGTH) parts.push(block)
+        continue
+      }
+      if (!block || typeof block !== "object") continue
+
+      const b = block as ContentBlock
+      if (b.type === "text" && b.text && b.text.length > MIN_TEXT_LENGTH) {
+        parts.push(truncStr(b.text, 1500))
+        if (entry.type === "user") acc.claudeUserText = true
+      } else if (b.type === "tool_use") {
+        const summary = summarizeToolUse(b)
+        if (summary) parts.push(summary)
+      }
+      // Skip tool_result (large file dumps, noise)
+    }
+
+    if (parts.length > 0) appendMessage(`[${entry.type}]: ${parts.join(" | ")}`)
+  }
+
+  let index = -1
+  const consider = (line: string | null, oversized?: OversizedJsonlRecord): void => {
+    index++
+    if (selected !== "all" && !selected.has(index)) return
+    consume(line, oversized)
+  }
+  forEachJsonlLine(jsonlPath, (line) => consider(line), {
+    onOversized: (oversized) => consider(null, oversized),
   })
-  return records
+
+  acc.content = tail
+  // Explain a no-content scan instead of defaulting it to a sub-agent: an unsupported
+  // (non-Claude) envelope is named, and a sample carrying no usable Claude shape at all is
+  // "no-usable-content". Mixed samples keep their valid Claude content and merely count these.
+  if (acc.supported === 0 && !acc.claudeUserText) {
+    acc.reason = acc.unsupported > 0 ? "unsupported-sampled-format" : "no-usable-content"
+  }
+  return acc
 }
 
 /** A named stand-in for a record the reader elided; its bytes never reach content. */
@@ -386,27 +453,23 @@ function oversizedPlaceholder(record: OversizedJsonlRecord | undefined): string 
 }
 
 /**
- * The legacy sub-agent signal: a sampled user record carrying real text. Only
- * object text blocks count, exactly as the legacy extractor counted them.
+ * The known Codex rollout envelope types. Recognised ONLY to explain a
+ * no-content scan as an unsupported sampled format — never decoded, and never
+ * allowed to remove valid Claude content from a mixed sample.
  */
-function recordsCarryUserText(records: SampledRecord[]): boolean {
-  for (const record of records) {
-    if (record.line === null) continue
-    try {
-      const entry = JSON.parse(record.line) as JsonlEntry
-      if (entry.type !== "user") continue
-      const content = entry.message?.content
-      if (!Array.isArray(content)) continue
-      for (const block of content) {
-        if (!block || typeof block !== "object") continue
-        const b = block as ContentBlock
-        if (b.type === "text" && b.text && b.text.length > MIN_TEXT_LENGTH) return true
-      }
-    } catch {
-      // silent-fallback-allow: a malformed JSONL line carries no content; skipping it is the legacy behavior.
-    }
-  }
-  return false
+const UNSUPPORTED_SAMPLED_TYPES = new Set([
+  "session_meta",
+  "response_item",
+  "turn_context",
+  "event_msg",
+  "compacted",
+  "turn_aborted",
+])
+
+/** Whether a non-Claude sampled record is a recognised unsupported envelope. */
+function isUnsupportedSampledFormat(entry: JsonlEntry): boolean {
+  if (typeof entry.type === "string" && UNSUPPORTED_SAMPLED_TYPES.has(entry.type)) return true
+  return typeof entry.payload === "object" && entry.payload !== null
 }
 
 /** The quick probe's legacy test: any user text block, empty string included. */

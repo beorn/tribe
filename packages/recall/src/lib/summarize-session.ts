@@ -103,12 +103,13 @@ export async function summarizeSession(
   // bounded metadata scan below is the only transcript I/O it pays.
   const cached = getSessionSummaryCache(sessionId)
 
-  // Bounded metadata scan (two streaming passes): classification and identity,
-  // before any content is constructed. A transcript that changes mid-read is a
-  // named skip, not a silent mix of two versions.
+  // Bounded metadata-only scan (two streaming passes): classification, identity
+  // and the named reason, before ANY content is constructed. A transcript that
+  // changes mid-read is a named skip, not a silent mix of two versions.
   const scan = scanSessionTranscript(sessionId, {
     title: opts?.title,
     createdAt: opts?.createdAt,
+    mode: "metadata",
   })
 
   if (!scan) {
@@ -186,8 +187,28 @@ export async function summarizeSession(
   const model = resolution.model
   const llm = resolution.backend
 
-  // Build content from the records already sampled by the scan — no re-read.
-  const extract = extractSessionContent(scan)
+  // Cheap admission passed: now pay for the bounded content pass (a second
+  // streaming pair) and build the summary input from it.
+  const contentScan = scanSessionTranscript(sessionId, {
+    title: opts?.title,
+    createdAt: opts?.createdAt,
+    mode: "content",
+  })
+  if (!contentScan || contentScan.reason) {
+    const reason = contentScan?.reason ?? "changed-input"
+    log(`${scan.shortId}: ${reason}`)
+    return {
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
+      isSubAgent: contentScan?.isSubAgent ?? false,
+      summary: null,
+      cached: false,
+      reason,
+    }
+  }
+  const extract = extractSessionContent(contentScan)
   if (!extract) {
     log(`${scan.shortId}: no content extracted`)
     return {

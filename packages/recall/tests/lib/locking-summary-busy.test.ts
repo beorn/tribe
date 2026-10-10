@@ -125,6 +125,25 @@ describe("summary-operation lock", () => {
     expect(result.reason).not.toBe("summary_busy")
   })
 
+  test("the operation owns the lock while its promise is still settling", async () => {
+    process.env.RECALL_DB_PATH = join(aliasDir, "recall.db")
+    // The lock is acquired synchronously before the first await. While the returned promise is pending the
+    // operation must still own it: a flock released at the `return` statement would already be free here, and
+    // this steal (a second holder on the canonical realpath) would succeed.
+    const pending = summarizeDay(DAY)
+    let acquiredByAnother = false
+    {
+      using stolen = tryAcquireFlock(`${realpathSync(join(aliasDir, "recall.db"))}.summary.lock`, {
+        body: JSON.stringify({ probe: "settlement" }),
+      })
+      acquiredByAnother = stolen !== null
+    }
+
+    const result = await pending
+    expect(acquiredByAnother).toBe(false)
+    expect(result.reason).not.toBe("summary_busy")
+  })
+
   test("a non-contention lock fault is loud, not a silent skip", async () => {
     // A directory where the lock file belongs is an open failure (EISDIR), not EAGAIN/EWOULDBLOCK
     // contention. @bearly/flock throws for it, so the engine must not swallow it as a skip.

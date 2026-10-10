@@ -168,7 +168,10 @@ export async function summarizeDay(
   using lock = acquireSummaryLock()
   if (lock === null) return summaryBusyResult(date)
 
-  return summarizeDayOwned(date, opts)
+  // Hold the flock until the async operation SETTLES. `return summarizeDayOwned(...)` would let the
+  // `using` declaration dispose at the return statement — before the promise resolves — so a second
+  // engine could acquire mid-operation. `return await` keeps disposal after settlement (27702 §4).
+  return await summarizeDayOwned(date, opts)
 }
 
 /** The already-owned daily implementation, called with the summary lock held. */

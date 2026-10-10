@@ -87,6 +87,30 @@ describe("extractSessionContent bounded loading", () => {
     expect(out).not.toBeNull()
     expect(readCalls).not.toContain(transcriptPath)
   })
+
+  test("retains no raw sampled record: a 120x10KB transcript yields one bounded tail", () => {
+    // The reviewer's shape: 120 records of 10 KB are sampled, but the scan must not hold those ~1.2 MB.
+    writeFixture(
+      Array.from({ length: 120 }, () =>
+        JSON.stringify({ type: "user", message: { content: [{ type: "text", text: "x".repeat(10000) }] } }),
+      ),
+    )
+    const scan = scanSessionTranscript(SESSION_ID)
+    expect(scan).not.toBeNull()
+    expect(scan?.diagnostics.sampled).toBe(120)
+    expect(scan?.content.length).toBeLessThanOrEqual(4000)
+    // No field carries a raw line: the whole scan serialises to a few KB regardless of the 1.2 MB input.
+    expect(JSON.stringify(scan).length).toBeLessThan(6000)
+  })
+
+  test("metadata mode keeps classification and counts but constructs no content", () => {
+    writeFixture(Array.from({ length: 120 }, (_, i) => record(i)))
+    const scan = scanSessionTranscript(SESSION_ID, { mode: "metadata" })
+    expect(scan?.content).toBe("")
+    expect(scan?.isSubAgent).toBe(false)
+    expect(scan?.diagnostics.sampled).toBe(120)
+    expect(JSON.stringify(scan).length).toBeLessThan(1000)
+  })
 })
 
 describe("extractSessionContent summary sampling", () => {
