@@ -383,6 +383,10 @@ interface ExportManifest {
 
 const SHA256_HEX = /^[0-9a-f]{64}$/
 
+/** The proof an EMPTY day file hashes to — committed as a new day's first
+ *  manifest so "missing" can never mean "lost over committed bytes" (F1). */
+const EMPTY_SHA256 = createHash("sha256").update(Buffer.alloc(0)).digest("hex")
+
 /** The manifest is the durable proof of what the day file holds, and therefore
  *  of what may be deleted. EVERY field is validated — its day, its byte length,
  *  its row count against its id list, its id element types and its checksum.
@@ -469,7 +473,9 @@ function fsyncPath(path: string): void {
 
 function writeExportManifest(dir: string, path: string, manifest: ExportManifest): void {
   const tmp = `${path}.tmp`
-  const fd = openSync(tmp, "w")
+  // The manifest names the ids whose rows may be deleted; it is created 0o600
+  // like the day file it proves (F2, @cto 2026-10-11).
+  const fd = openSync(tmp, "w", 0o600)
   try {
     writeSync(fd, JSON.stringify(manifest))
     fsyncSync(fd)
@@ -507,13 +513,31 @@ function appendExportRows(
   day: string,
   rows: ReadonlyArray<Record<string, unknown>>,
 ): { rows: number; bytes: number } {
-  mkdirSync(dir, { recursive: true })
+  // The export directory and both files hold full message content, so they are
+  // created 0o700/0o600 rather than by umask (F2, @cto 2026-10-11).
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
   const file = join(dir, `messages-archive-${day}.jsonl.gz`)
   const manifestPath = join(dir, `messages-archive-${day}.manifest.json`)
 
   const manifest = readExportManifest(manifestPath, day)
   const recordedBytes = manifest?.bytes ?? 0
   const known = new Set(manifest?.ids ?? [])
+
+  // F1 (@cto 2026-10-11): a MISSING manifest must always mean "never started",
+  // never "lost proof over committed bytes". Two rules enforce it. First, a
+  // missing manifest over a NON-EMPTY day file REFUSES — truncating to 0 here
+  // would destroy the only copy of rows the DB may already have deleted, and a
+  // lost manifest is indistinguishable from a crash before the first manifest.
+  if (manifest === null && existsSync(file) && statSync(file).size > 0) {
+    throw new Error(
+      `archive-export: ${file} is non-empty but its manifest ${manifestPath} is missing; refusing to truncate or append — a missing manifest means "never started", and its loss over committed bytes would destroy the day file's only copy. Cure: restore the manifest, or move ${file} aside if it is known to hold no committed rows`,
+    )
+  }
+  // Second, commit an EMPTY manifest BEFORE the first append of a new day, so
+  // from the first byte the day file is always accompanied by its proof.
+  if (manifest === null) {
+    writeExportManifest(dir, manifestPath, { day, rows: 0, bytes: 0, sha256: EMPTY_SHA256, ids: [] })
+  }
 
   let raw = Buffer.alloc(0)
   if (existsSync(file)) {
@@ -600,7 +624,7 @@ function appendExportRows(
   const fresh = rows.filter((row) => !known.has(String(row.id)))
   if (fresh.length > 0) {
     const payload = Buffer.from(fresh.map((row) => `${JSON.stringify(row)}\n`).join(""), "utf8")
-    const fd = openSync(file, "a")
+    const fd = openSync(file, "a", 0o600)
     try {
       writeSync(fd, gzipSync(payload))
       fsyncSync(fd)

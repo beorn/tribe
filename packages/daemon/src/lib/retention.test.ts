@@ -12,7 +12,7 @@
  *   - every phase is LIMIT-bounded per tick, never a full-table pass
  */
 
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -954,6 +954,59 @@ describe("journal retention sweep", () => {
         } finally {
           db.close()
         }
+      }
+    })
+
+    it("refuses to truncate a committed day file whose manifest was lost, and deletes nothing", () => {
+      const { db, stmts } = setup()
+      try {
+        const oldTs = Date.now() - 200 * DAY
+        const day = dayKey(oldTs)
+        insertArchived(db, { id: "lost-manifest", seq: 1, ts: oldTs })
+        expect(runRetentionSweep(db, stmts, enabledConfig()).archiveDelete.deleted).toBe(1)
+
+        const committed = readFileSync(dayFile(day))
+        expect(committed.length).toBeGreaterThan(0)
+
+        // The manifest is lost; the day file still holds the committed row,
+        // which is now the only copy of a row the DB no longer has.
+        rmSync(manifestFile(day))
+        // The delete never committed: the original row is back.
+        insertArchived(db, { id: "lost-manifest", seq: 1, ts: oldTs, archivedAt: firstLine(day).archived_at as number })
+
+        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+        try {
+          const next = runRetentionSweep(db, stmts, enabledConfig())
+          expect(next.export.status).toBe("failed")
+          expect(next.archiveDelete.deleted).toBe(0)
+          expect(archivedIds(db)).toEqual(["lost-manifest"])
+          expect(errorSpy).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.stringContaining("is non-empty but its manifest"),
+          )
+        } finally {
+          errorSpy.mockRestore()
+        }
+
+        // NOT truncated to zero: the committed bytes are byte-for-byte intact.
+        expect(readFileSync(dayFile(day)).equals(committed)).toBe(true)
+      } finally {
+        db.close()
+      }
+    })
+
+    it("creates the export directory 0o700 and its files 0o600, never by umask", () => {
+      const { db, stmts } = setup()
+      try {
+        const oldTs = Date.now() - 200 * DAY
+        const day = dayKey(oldTs)
+        insertArchived(db, { id: "modes-1", seq: 1, ts: oldTs })
+        expect(runRetentionSweep(db, stmts, enabledConfig()).archiveDelete.deleted).toBe(1)
+        expect(statSync(exportDir()).mode & 0o777).toBe(0o700)
+        expect(statSync(dayFile(day)).mode & 0o777).toBe(0o600)
+        expect(statSync(manifestFile(day)).mode & 0o777).toBe(0o600)
+      } finally {
+        db.close()
       }
     })
 
