@@ -2479,6 +2479,31 @@ export function createStatements(db: Database) {
 		LIMIT 1
 	`),
 
+    /** F3 (@cto 2026-10-11), the second diagnostic: the never-advanced (0)
+     *  cursors the two floor statements above deliberately IGNORE, named so
+     *  retention can log what it set aside. A floor that silently drops a
+     *  reader is the same class of bug the floor-setter line fixes — the
+     *  exclusion has to be attributable from the log without querying the
+     *  DB. Bounded to one row per live zero cursor, LIMIT-guarded and ordered
+     *  so the list is stable across ticks; `family` distinguishes the mailbox
+     *  and session families and retention.ts prints both. LIMIT is 101 so the
+     *  caller can tell a complete list from a truncated one. */
+    selectLiveZeroCursors: db.prepare(`
+		SELECT family, name FROM (
+			SELECT 'mailbox' AS family, recipient AS name
+			FROM mailbox_cursors
+			WHERE COALESCE(last_attention_read_at, updated_at) >= $live_cutoff
+			  AND last_actionable_seq = 0
+			UNION ALL
+			SELECT 'session' AS family, name
+			FROM sessions
+			WHERE MAX(updated_at, COALESCE(last_delivered_ts, 0)) >= $live_cutoff
+			  AND last_inbox_pull_seq = 0
+		)
+		ORDER BY family, name
+		LIMIT 101
+	`),
+
     /** Archive-delete batch candidates: archived rows old enough under the
      *  (longer, independently configurable) delete window, at or below the
      *  live-cursor floor, and not evidence for an open ball. Both its question

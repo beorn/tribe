@@ -87,7 +87,10 @@
  *     void retention fleet-wide — measured: the live probe @probe/28571), and
  *     whenever the floor actually EXCLUDES rows the live reader that sets it
  *     is named at warn, once per setter, so the next stuck reader is visible
- *     instead of silently voiding the promise. A tighter, per-recipient floor
+ *     instead of silently voiding the promise. The cursors it set aside are
+ *     named too: every never-advanced (0) live cursor it ignored is reported
+ *     at warn once per pass, so an exclusion that drops readers is never
+ *     silent in either direction. A tighter, per-recipient floor
  *     is the precise fix if that line shows a stuck NONZERO reader recurring;
  *     that is a policy/tuning question, not a correctness one.
  *
@@ -251,6 +254,7 @@ export type RetentionStatements = Pick<
   | "selectMessagesToArchiveBatch"
   | "selectMailboxCursorFloor"
   | "selectSessionInboxCursorFloor"
+  | "selectLiveZeroCursors"
   | "selectArchiveDeleteBatch"
   | "selectArchiveDeleteDiagnostics"
   | "selectArchiveRowsForExport"
@@ -827,6 +831,10 @@ interface LiveCursorFloor {
    *  at all. Number.MAX_SAFE_INTEGER when no live reader has advanced. */
   readonly floor: number
   readonly setter: { family: "mailbox" | "session"; name: string; value: number; readAt: number } | null
+  /** Live cursors the floor IGNORED because they have never advanced (a 0 is
+   *  not a position). Named so retention can log what it set aside — the
+   *  floor-setter line alone leaves the ignored readers invisible. */
+  readonly ignoredZero: ReadonlyArray<{ readonly family: "mailbox" | "session"; readonly name: string }>
 }
 
 /**
@@ -845,6 +853,11 @@ interface LiveCursorFloor {
  * here and named by the caller whenever the floor actually excludes rows.
  */
 function computeCursorFloor(stmts: RetentionStatements, liveCutoff: number): LiveCursorFloor {
+  const zeroRows = stmts.selectLiveZeroCursors.all({ $live_cutoff: liveCutoff }) as Array<{
+    family: "mailbox" | "session"
+    name: string
+  }>
+  const ignoredZero = zeroRows.map((row) => ({ family: row.family, name: row.name }))
   const mailbox = stmts.selectMailboxCursorFloor.get({ $live_cutoff: liveCutoff }) as {
     floor: number
     setter: string
@@ -864,11 +877,12 @@ function computeCursorFloor(stmts: RetentionStatements, liveCutoff: number): Liv
   }
   // No live reader has advanced (fresh DB, or every live cursor still at 0) —
   // there is no position to protect, so this exclusion contributes nothing.
-  if (advanced.length === 0) return { floor: Number.MAX_SAFE_INTEGER, setter: null }
+  if (advanced.length === 0) return { floor: Number.MAX_SAFE_INTEGER, setter: null, ignoredZero }
   const lowest = advanced.reduce((a, b) => (b.floor < a.floor ? b : a))
   return {
     floor: lowest.floor,
     setter: { family: lowest.family, name: lowest.name, value: lowest.floor, readAt: lowest.readAt },
+    ignoredZero,
   }
 }
 
@@ -893,6 +907,25 @@ function noteFloorSetter(setter: LiveCursorFloor["setter"], floor: number): void
       `(last read ${new Date(setter.readAt).toISOString()}); it excludes archived rows from deletion. ` +
       `A live reader that never advances past this position holds the fleet-wide floor and voids the ` +
       `journal-retention promise until it does.`,
+  )
+}
+
+/** Name every live cursor the floor IGNORED because it has never advanced
+ *  (F3/@cto 2026-10-11, the second diagnostic). The floor-setter line reports
+ *  which reader holds the floor DOWN; this line reports the readers that were
+ *  set ASIDE, so a fleet whose cursors all sit at 0 cannot look identical to
+ *  a fleet that has no zero cursors. Logged every pass (the sweep cadence),
+ *  deliberately not rate-limited: the exclusion has to be attributable from
+ *  the log without querying the DB. Prints the first 20 and says so when the
+ *  bounded read was truncated. */
+function noteIgnoredZeroCursors(ignored: LiveCursorFloor["ignoredZero"]): void {
+  if (ignored.length === 0) return
+  const total = ignored.length >= 101 ? "101 or more" : String(ignored.length)
+  const shown = ignored.slice(0, 20).map((cursor) => `${cursor.family}:${cursor.name}`)
+  const more = ignored.length > shown.length ? ` (first ${String(shown.length)})` : ""
+  log.warn?.(
+    `archive-delete: cursor floor ignored ${total} never-advanced (0) cursor(s)${more}: ${shown.join(", ")}. ` +
+      `A 0 is not a position — it sets no floor in either family and holds no archived row back.`,
   )
 }
 
@@ -935,6 +968,7 @@ function runArchiveDeletePhase(
   // the promise for everyone, and that must be attributable from the log.
   if (excludedByCursor > 0) noteFloorSetter(cursor.setter, cursorFloor)
   else lastFloorSetterNote = null
+  noteIgnoredZeroCursors(cursor.ignoredZero)
 
   const candidates = stmts.selectArchiveRowsForExport.all({
     $cutoff: cutoff,

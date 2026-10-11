@@ -643,6 +643,48 @@ describe("journal retention sweep", () => {
       }
     })
 
+    // F3 (@cto 2026-10-11), the second diagnostic: the floor must say WHAT it
+    // set aside. Ignoring a 0 cursor is only safe if the exclusion is
+    // attributable from the log — otherwise a fleet whose cursors all sit at
+    // 0 is indistinguishable from a fleet that has no zero cursors.
+    it("names the never-advanced cursors the floor ignored, with the count", () => {
+      const { db, stmts } = setup()
+      try {
+        insertArchived(db, { id: "probe-row-2", seq: 100, ts: Date.now() - 200 * DAY, recipient: "@probe/28571" })
+        db.prepare(
+          `INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at, last_attention_read_at)
+           VALUES ('@probe/28571', 0, ?, ?)`,
+        ).run(Date.now(), Date.now())
+        db.prepare(
+          `INSERT INTO sessions (id, name, role, domains, pid, started_at, updated_at, last_inbox_pull_seq)
+           VALUES ('sess-zero', '@agent/zero', 'member', '[]', 1, ?, ?, 0)`,
+        ).run(Date.now(), Date.now())
+
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+        const ignoredLines = () =>
+          warnSpy.mock.calls
+            .map((call) => call.map((arg) => String(arg)).join(" "))
+            .filter((line) => line.includes("never-advanced"))
+        try {
+          const result = runRetentionSweep(db, stmts, enabledConfig({ deleteWindowMs: 90 * DAY }))
+
+          // Both zero cursors set no floor, so nothing is held back...
+          expect(result.archiveDelete.cursorFloor).toBe(Number.MAX_SAFE_INTEGER)
+          expect(result.archiveDelete.deleted).toBe(1)
+
+          // ...and the line names both families with the count.
+          expect(ignoredLines()).toHaveLength(1)
+          expect(ignoredLines()[0]).toContain("2 never-advanced")
+          expect(ignoredLines()[0]).toContain("mailbox:@probe/28571")
+          expect(ignoredLines()[0]).toContain("session:@agent/zero")
+        } finally {
+          warnSpy.mockRestore()
+        }
+      } finally {
+        db.close()
+      }
+    })
+
     it("still pins rows at or above a LIVE reader stuck at a low NONZERO cursor, and names it once", () => {
       const { db, stmts } = setup()
       try {
