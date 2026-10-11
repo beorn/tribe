@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { Socket, createServer, type Server } from "node:net"
@@ -349,7 +349,159 @@ describe("connectToDaemon", () => {
 
   it("rejects with ENOENT when the socket file does not exist", async () => {
     const missing = join(tmpDir, "nope.sock")
-    await expect(connectToDaemon(missing)).rejects.toMatchObject({ code: "ENOENT" })
+    // The socket stays absent for the whole window, so the LAST connect error surfaces (28674). An explicit short
+    // window keeps the assertion fast; the default window is CONNECT_RETRY_WINDOW_MS.
+    await expect(
+      connectToDaemon(missing, { connectRetryWindowMs: 200, connectRetryIntervalMs: 25 }),
+    ).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("retries an absent socket and connects once the daemon appears (#28674)", async () => {
+    const sock = join(tmpDir, "restarting.sock")
+    const started = Date.now()
+    let appeared: { server: Server } | undefined
+    const timer = setTimeout(() => {
+      void spawnFakeDaemon(sock).then((daemon) => {
+        appeared = daemon
+      })
+    }, 300)
+    const client = await connectToDaemon(sock, { connectRetryIntervalMs: 25, connectRetryWindowMs: 3_000 })
+    clearTimeout(timer)
+    try {
+      // The daemon was NOT there on the first attempt: the connect only succeeded by retrying.
+      expect(Date.now() - started).toBeGreaterThanOrEqual(250)
+      expect(await client.call("echo", { retried: true })).toEqual({ echoed: { retried: true } })
+    } finally {
+      client.close()
+      if (appeared) await new Promise<void>((r) => appeared?.server.close(() => r()))
+    }
+  })
+
+  it("surfaces the LAST connect error only after the retry window, never earlier (#28674)", async () => {
+    const sock = join(tmpDir, "never.sock")
+    const started = Date.now()
+    const error = await connectToDaemon(sock, { connectRetryWindowMs: 300, connectRetryIntervalMs: 25 }).then(
+      () => undefined,
+      (e: unknown) => e,
+    )
+    const elapsed = Date.now() - started
+    // ENOENT, unchanged — the code util.ts withDaemonCall maps to `no-daemon` exactly as it did before.
+    expect((error as NodeJS.ErrnoException).code).toBe("ENOENT")
+    // It actually retried (did not give up on the first refusal) and did not run past the window.
+    expect(elapsed).toBeGreaterThanOrEqual(250)
+    expect(elapsed).toBeLessThan(2_000)
+  })
+
+  it("caps the retry window at callTimeoutMs, so a caller never waits longer than it asked (#28674)", async () => {
+    const sock = join(tmpDir, "capped.sock")
+    const started = Date.now()
+    const error = await connectToDaemon(sock, { callTimeoutMs: 150, connectRetryIntervalMs: 25 }).then(
+      () => undefined,
+      (e: unknown) => e,
+    )
+    expect((error as NodeJS.ErrnoException).code).toBe("ENOENT")
+    expect(Date.now() - started).toBeLessThan(1_000)
+  })
+
+  it("retries a REFUSED connect on a stale socket path, then connects (#28674)", async () => {
+    // A regular FILE where the socket belongs answers ECONNREFUSED deterministically (measured on this host, where
+    // server.close() unlinks the path instead). Present but answering nothing is the restart shape, and it must be
+    // retried rather than reported at once.
+    const sock = join(tmpDir, "stale.sock")
+    writeFileSync(sock, "")
+    const started = Date.now()
+    let appeared: { server: Server } | undefined
+    const timer = setTimeout(() => {
+      rmSync(sock, { force: true })
+      void spawnFakeDaemon(sock).then((daemon) => {
+        appeared = daemon
+      })
+    }, 300)
+    const client = await connectToDaemon(sock, { connectRetryIntervalMs: 25, connectRetryWindowMs: 3_000 })
+    clearTimeout(timer)
+    try {
+      expect(Date.now() - started).toBeGreaterThanOrEqual(250)
+      expect(await client.call("echo", { refused: true })).toEqual({ echoed: { refused: true } })
+    } finally {
+      client.close()
+      if (appeared) await new Promise<void>((r) => appeared?.server.close(() => r()))
+    }
+  })
+
+  it("does not retry EACCES: a permission refusal fails at once (#28674)", async () => {
+    const sock = join(tmpDir, "denied.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    chmodSync(sock, 0o000)
+    const started = Date.now()
+    try {
+      const error = await connectToDaemon(sock, { connectRetryIntervalMs: 25, connectRetryWindowMs: 3_000 }).then(
+        () => undefined,
+        (e: unknown) => e,
+      )
+      expect((error as NodeJS.ErrnoException).code).toBe("EACCES")
+      // One attempt only: no retry budget was spent.
+      expect(Date.now() - started).toBeLessThan(1_000)
+    } finally {
+      chmodSync(sock, 0o600)
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  })
+
+  it("clears its retry timer: no connect attempt starts after the promise settles (#28674)", async () => {
+    const sock = join(tmpDir, "settled.sock")
+    let attempts = 0
+    const patched = Socket.prototype.connect
+    Socket.prototype.connect = function (this: Socket, ...args: unknown[]) {
+      attempts++
+      return patched.apply(this, args as never)
+    } as typeof Socket.prototype.connect
+    try {
+      await connectToDaemon(sock, { connectRetryWindowMs: 150, connectRetryIntervalMs: 25 }).catch(() => undefined)
+      const atSettle = attempts
+      await new Promise((r) => setTimeout(r, 200))
+      expect(attempts).toBe(atSettle)
+    } finally {
+      Socket.prototype.connect = patched
+    }
+  })
+
+  it("a delayed retry wake fails with the absent error, never attempts past the deadline (#28674 peer review)", async () => {
+    // @dev/1's finding. The loop checked its ceiling BEFORE the sleep and never after it, so a wake that overran
+    // the caller's deadline started a fresh connect anyway: with callTimeoutMs 150 and the 17 ms retry sleep
+    // delayed to 500 ms, an attempt began at 504 ms and SUCCEEDED at 512 ms — 362 ms past the budget asked for.
+    // Reproduced with the peer review's own instrumentation: only the retry sleep is slowed, the socket is real.
+    const sock = join(tmpDir, "late-wake.sock")
+    let attempts = 0
+    let daemon: { server: Server } | undefined
+    const patchedConnect = Socket.prototype.connect
+    const realSetTimeout = globalThis.setTimeout
+    Socket.prototype.connect = function (this: Socket, ...args: unknown[]) {
+      attempts++
+      return patchedConnect.apply(this, args as never)
+    } as typeof Socket.prototype.connect
+    globalThis.setTimeout = ((callback: () => void, ms?: number) =>
+      realSetTimeout(callback, ms === 17 ? 500 : ms)) as typeof setTimeout
+    // The daemon appears at 200 ms, INSIDE the delayed wake: with the old loop the late attempt finds it and
+    // connects, which is the violation. With the fix the call has already failed with its absent error.
+    const appeared = new Promise<void>((resolveListen) => {
+      realSetTimeout(() => void spawnFakeDaemon(sock).then((spawned) => {
+        daemon = spawned
+        resolveListen()
+      }), 200)
+    })
+    try {
+      const error = await connectToDaemon(sock, { callTimeoutMs: 150, connectRetryIntervalMs: 17 }).then(
+        () => undefined,
+        (e: unknown) => e,
+      )
+      expect(error, "the call must fail, never connect past its deadline").toMatchObject({ code: "ENOENT" })
+      expect(attempts, "no connect attempt may start after the caller's deadline").toBe(1)
+    } finally {
+      globalThis.setTimeout = realSetTimeout
+      Socket.prototype.connect = patchedConnect
+      await appeared
+      if (daemon) await new Promise<void>((r) => daemon?.server.close(() => r()))
+    }
   })
 
   it("rejects when unix connect has not completed before callTimeoutMs", async () => {
