@@ -46,11 +46,13 @@
  *      `cat <exportDir>/messages-archive-YYYY-MM-DD.manifest.json` gives the
  *      day's row count and the sha256 of the whole file. F3 (@cto 2026-10-11)
  *      bounds each tick's verification by the BATCH: the committed prefix is
- *      proven by its sha256 (never re-decoded), and only the bytes appended
- *      this tick are decompressed and required to deep-equal the rows being
- *      deleted — the earlier shape re-decoded the whole accumulated day file
- *      three times per tick (~324 ms on the largest day, synchronous on the
- *      wire daemon's event loop).
+ *      proven by its sha256 and is NEVER re-decoded on the normal tick, and
+ *      only the bytes appended this tick are decompressed and required to
+ *      deep-equal the rows being deleted — the earlier shape re-decoded the
+ *      whole accumulated day file three times per tick (~324 ms on the largest
+ *      day, synchronous on the wire daemon's event loop). One path does decode
+ *      the prefix: a candidate the manifest ALREADY records is proven against
+ *      it (step 2b below), and that path is normally empty.
  *
  * Safety rules for archive-delete (never break the ball-tracker or
  * attention semantics):
@@ -515,16 +517,19 @@ function writeExportManifest(dir: string, path: string, manifest: ExportManifest
  *      since (bit rot, an in-place edit, a partial write) moves this checksum;
  *   2. truncate any tail past the commit point — a crash between append and
  *      manifest leaves an unrecorded tail the next tick discards;
- *
- *      NOTE (F3, @cto 2026-10-11): the check this shape REPLACED — a candidate
- *      id the manifest already records must be backed by an EQUAL COMPLETE row
- *      — existed because messages_archive could, in principle, change a row
- *      under its exported copy. It is safe to drop ONLY because
- *      messages_archive is INSERT-ONLY: its only writers are INSERT OR IGNORE
- *      (database.ts's archiver and archiveMoveBatch below), with no UPDATE
- *      anywhere in the daemon. Add an UPDATE path to messages_archive and that
- *      check must come back, or the delete can drop an already-exported row
- *      whose live content the export never captured;
+ *   2b. ONLY when a candidate is already recorded in the manifest, decode the
+ *      committed prefix and require each such candidate to be backed by an
+ *      EQUAL COMPLETE row; a recorded candidate the prefix does not hold, or
+ *      holds differently, refuses the whole batch and names the id and the
+ *      file. The manifest's id list is NOT bound to the file's bytes (the
+ *      sha256 covers only the gzip prefix), so without this a manifest-only
+ *      edit can name a row that was never exported and the delete discards it
+ *      (@dev/2 NO-GO, 2026-10-11, reproduced at fb229c0b). The path is normally
+ *      empty — an id stays recorded only when a crash landed between export and
+ *      delete — so the normal tick stays O(batch) and pays no decode.
+ *      messages_archive being INSERT-ONLY is still why a deleted candidate
+ *      cannot have changed under its copy; an UPDATE path is exactly what this
+ *      check catches;
  *   3. append only ids the manifest does not already cover, fsync the file;
  *   4. read the appended bytes BACK, decompress and decode ONLY that member,
  *      and verify it holds exactly the rows about to be deleted: the same ids
@@ -609,6 +614,37 @@ function appendExportRows(
   }
 
   const fresh = rows.filter((row) => !known.has(String(row.id)))
+
+  // A candidate the manifest ALREADY records is not proven by the manifest
+  // alone: its id list is not bound to the file's bytes, so a manifest-only
+  // edit can name a row that was never exported (@dev/2 NO-GO 7915d994,
+  // 2026-10-11). When any such candidate exists, decode the committed prefix
+  // ONCE and require each to be backed by an EQUAL COMPLETE row; a missing or
+  // unequal recorded candidate refuses the whole batch. Normally there is none
+  // — an id stays recorded only when a crash landed between export and delete
+  // — so the normal tick never pays for this decode (step 2b).
+  const recorded = rows.filter((row) => known.has(String(row.id)))
+  if (recorded.length > 0) {
+    const stored = new Map<string, Record<string, unknown>>()
+    if (raw.length > 0) {
+      for (const exported of parseExportRows(file, raw)) stored.set(String(exported.id), exported)
+    }
+    for (const row of recorded) {
+      const id = String(row.id)
+      const exported = stored.get(id)
+      if (exported === undefined) {
+        throw new Error(
+          `archive-export: ${file} records id ${id} in its manifest but its committed prefix holds no such row; refusing to delete a row that was never exported`,
+        )
+      }
+      if (!isDeepStrictEqual(exported, JSON.parse(JSON.stringify(row)))) {
+        throw new Error(
+          `archive-export: ${file} committed prefix holds id ${id} whose exported row does not match the row being deleted; refusing to delete it`,
+        )
+      }
+    }
+  }
+
   let appended = Buffer.alloc(0)
   let appendedIds: string[] = []
   if (fresh.length > 0) {
@@ -627,11 +663,10 @@ function appendExportRows(
     // row being deleted. An id-only, truncated or content-changed member
     // refuses the delete. Bounded by the batch, never by the day (F3).
     //
-    // This is the whole of the row-completeness check now (see the F3 note in
-    // the function header): it holds for the rows being deleted because
-    // messages_archive is insert-only, so an already-exported row cannot have
-    // changed under its copy. A future UPDATE path on messages_archive must
-    // bring back the per-id comparison of the committed prefix.
+    // This covers the rows appended THIS tick; a candidate already recorded in
+    // the manifest is covered by the committed-prefix check above (step 2b),
+    // which is what binds the manifest's id list to the file's bytes — the
+    // checksum alone does not.
     appended = readFileSync(file).subarray(recordedBytes)
     if (appended.length !== member.length) {
       throw new Error(
@@ -669,9 +704,16 @@ function appendExportRows(
   // The file is now prefix (+) appended, and the manifest's recorded ids are
   // exactly the prefix's. Whole-file invariants therefore hold by construction:
   // an id already in `known` is never appended, the member was just proven
-  // duplicate-free and complete, and `known` itself was validated duplicate-free
-  // when read. Only an actual append changes the manifest; a tick that appended
-  // nothing (a crash between export and delete) leaves it byte-identical.
+  // duplicate-free and complete, a recorded candidate was just proven present
+  // and equal in the prefix (step 2b), and `known` itself was validated
+  // duplicate-free when read. Only an actual append changes the manifest; a
+  // tick that appended nothing (a crash between export and delete) leaves it
+  // byte-identical.
+  //
+  // STATED RESIDUAL (@cto 2026-10-11): a CONSISTENT rewrite of BOTH the day
+  // file and its manifest has no anchor — neither shape can detect it, because
+  // the old whole-file decode trusted the same manifest. A MANIFEST-ONLY edit
+  // is caught, on the recorded-candidate path (step 2b).
   const bytes = recordedBytes + appended.length
   if (appended.length > 0) {
     writeExportManifest(dir, manifestPath, {

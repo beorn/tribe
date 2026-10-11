@@ -923,6 +923,79 @@ describe("journal retention sweep", () => {
       }
     })
 
+    it("refuses the delete when the manifest names a row the day file does not hold (manifest-only edit)", () => {
+      const { db, stmts } = setup()
+      try {
+        const oldTs = Date.now() - 200 * DAY
+        const day = dayKey(oldTs)
+        insertArchived(db, { id: "exported-A", seq: 1, ts: oldTs })
+        expect(runRetentionSweep(db, stmts, enabledConfig()).archiveDelete.deleted).toBe(1)
+
+        // A DIFFERENT row on the same day: present in the archive, never
+        // exported. It is the positive-control shape of @dev/2's NO-GO
+        // (7915d994) — the delete must not discard it.
+        insertArchived(db, { id: "unexported-B", seq: 2, ts: oldTs })
+
+        // A manifest-only edit: swap the recorded ids for B, leaving the gzip
+        // bytes, rows, bytes and checksum exactly as the export wrote them.
+        // Nothing in the manifest's checksum binds its id list to the file.
+        const manifest = readManifest(day)
+        writeFileSync(manifestFile(day), JSON.stringify({ ...manifest, ids: ["unexported-B"] }))
+
+        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+        try {
+          const next = runRetentionSweep(db, stmts, enabledConfig())
+          expect(next.export.status).toBe("failed")
+          expect(next.archiveDelete.deleted).toBe(0)
+          expect(archivedIds(db)).toEqual(["unexported-B"])
+          expect(errorSpy).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.stringContaining("committed prefix holds no such row"),
+          )
+        } finally {
+          errorSpy.mockRestore()
+        }
+
+        // B was never written to the day file, and the day file is untouched.
+        expect(readLines(day).map((row) => row.id)).toEqual(["exported-A"])
+      } finally {
+        db.close()
+      }
+    })
+
+    it("refuses the delete when a recorded candidate's stored row differs from the row being deleted", () => {
+      const { db, stmts } = setup()
+      try {
+        const oldTs = Date.now() - 200 * DAY
+        const day = dayKey(oldTs)
+        insertArchived(db, { id: "changed-1", seq: 1, ts: oldTs })
+        expect(runRetentionSweep(db, stmts, enabledConfig()).archiveDelete.deleted).toBe(1)
+
+        // The same id comes back (as after a crash before the delete), but its
+        // archived row no longer equals the exported copy — the shape a future
+        // messages_archive UPDATE path would produce.
+        const exported = firstLine(day)
+        insertArchived(db, { id: "changed-1", seq: 1, ts: oldTs, archivedAt: exported.archived_at as number })
+        db.prepare("UPDATE messages_archive SET content = ? WHERE id = ?").run("rewritten body", "changed-1")
+
+        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+        try {
+          const next = runRetentionSweep(db, stmts, enabledConfig())
+          expect(next.export.status).toBe("failed")
+          expect(next.archiveDelete.deleted).toBe(0)
+          expect(archivedIds(db)).toEqual(["changed-1"])
+          expect(errorSpy).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.stringContaining("does not match the row being deleted"),
+          )
+        } finally {
+          errorSpy.mockRestore()
+        }
+      } finally {
+        db.close()
+      }
+    })
+
     it("truncates an unrecorded tail past the manifest's commit point instead of double-counting it", () => {
       const { db, stmts } = setup()
       try {
@@ -992,24 +1065,34 @@ describe("journal retention sweep", () => {
     // ruling, not by oversight. It rewrote an already-committed day file to an
     // id-only member AND rewrote the manifest to describe it consistently, then
     // expected the next tick to catch it by re-decoding the committed prefix.
-    // That whole-day re-decode is exactly what F3 removes: the prefix is now
-    // proven by its sha256 and never re-decoded, and the read-back that catches
-    // an id-only / truncated / content-changed member runs against the APPENDED
-    // member only, so it is bounded by the batch. Stated residual: a CONSISTENT
-    // rewrite of BOTH the day file and its manifest is not detected — neither
-    // design has a trusted anchor for it, because the old re-decode trusted the
-    // same manifest. A change to the committed bytes alone is still refused
-    // (see "refuses the delete when the committed day file was altered under the
-    // recorded length", which is kept). Do not re-add the whole-file decode.
+    // That whole-day re-decode is what F3 removes from the NORMAL tick: the
+    // prefix is proven by its sha256 and never re-decoded there, and the
+    // read-back that catches an id-only / truncated / content-changed member
+    // runs against the APPENDED member only, so it is bounded by the batch.
+    //
+    // STATED RESIDUAL (@cto 2026-10-11, ruling 2b): a CONSISTENT rewrite of
+    // BOTH the day file and its manifest has no anchor — neither shape can
+    // detect it, because the old re-decode trusted the same manifest. A
+    // MANIFEST-ONLY edit IS caught: a candidate the manifest already records is
+    // proven against the committed prefix on the recorded-candidate path
+    // (retention.ts step 2b), the only thing that binds the manifest's id list
+    // to the file's bytes. That decode runs on that path alone, so the normal
+    // tick stays O(batch) — do not re-add it to the normal path. A change to
+    // the committed bytes alone is still refused (see "refuses the delete when
+    // the committed day file was altered under the recorded length", kept).
 
     it("keeps the row and refuses the delete when the manifest's own count or ids are invalid", () => {
       type Manifest = ReturnType<typeof readManifest>
       // F3 (2026-10-11, @cto): the old "count disagrees with the file" and
-      // "ids disagree with the file" scenarios are dropped with the committed
-      // prefix decode they relied on. They were never a delete-safety failure —
-      // the row they named was backed on disk and the delete is correct — only
-      // a mis-indexed manifest; what remains here is the manifest's OWN
-      // structural validity, which readExportManifest still refuses in full.
+      // "ids disagree with the file" scenarios are dropped with the
+      // NORMAL-tick committed-prefix decode they relied on; what remains here
+      // is the manifest's OWN structural validity, which readExportManifest
+      // still refuses in full. (2026-10-11, @cto ruling 2b: the earlier claim
+      // that those scenarios "were never a delete-safety failure" was wrong — a
+      // manifest id with no row in the file DOES delete an unexported row. That
+      // case is caught on the recorded-candidate path and has its own test,
+      // "refuses the delete when the manifest names a row the day file does not
+      // hold".)
       const cases: Array<{ name: string; manifest: (base: Manifest, id: string) => Record<string, unknown> }> = [
         {
           name: "rows omitted",
