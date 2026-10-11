@@ -1058,7 +1058,10 @@ describe("registerSendCommands", () => {
     expect(mismatched.stderr).toContain("message content begins with reply=req-A")
     expect(mismatched.stderr).toContain("remove reply=req-A from the message content")
     expect(mismatched.stderr).not.toContain("No daemon running")
-  })
+    // 28674: two of these five CLI runs take the absent-socket path, where connectToDaemon now retries
+    // for up to its 6 s window before the "No daemon running" diagnostic; above vitest's 5 s default.
+    // No assertion changed.
+  }, 20_000)
 
   // @ag/tribe/21921 originally kept seats from going mute by degrading an
   // unresolvable launch to an anonymous send. That preserved delivery but

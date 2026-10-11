@@ -484,10 +484,14 @@ describe("connectToDaemon", () => {
     // The daemon appears at 200 ms, INSIDE the delayed wake: with the old loop the late attempt finds it and
     // connects, which is the violation. With the fix the call has already failed with its absent error.
     const appeared = new Promise<void>((resolveListen) => {
-      realSetTimeout(() => void spawnFakeDaemon(sock).then((spawned) => {
-        daemon = spawned
-        resolveListen()
-      }), 200)
+      realSetTimeout(
+        () =>
+          void spawnFakeDaemon(sock).then((spawned) => {
+            daemon = spawned
+            resolveListen()
+          }),
+        200,
+      )
     })
     try {
       const error = await connectToDaemon(sock, { callTimeoutMs: 150, connectRetryIntervalMs: 17 }).then(

@@ -2062,7 +2062,10 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+    // 28674: connectToDaemon retries an ABSENT socket for up to its 6 s window, so this deliberately
+    // absent daemon now takes the full wait before it can report "No daemon running" — above vitest's
+    // 5 s default. No assertion changed.
+  }, 20_000)
 
   it("stop --force cleanly stops a real daemon: RPC acknowledged, then daemon exit 0", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-stop-e2e-"))
