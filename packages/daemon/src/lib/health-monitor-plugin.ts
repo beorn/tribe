@@ -1111,46 +1111,6 @@ export function formatStaleLockMessage(lock: GitLockInfo, sessionName: string | 
   return `git lock WARNING: ${lockTarget} held >${Math.floor(durationSec)}s by ${holder} -- may be stale`
 }
 
-/**
- * Chief-authority watchdog: fail loud immediately when actionable messages have no
- * live @chief recipient. Online inbox staleness is deliberately absent here:
- * the generic Tribe cadence facts + Hab policy + WATCH reducer own it for
- * every managed seat, including @chief.
- *
- * Returns null when no alert should fire. Side-effects on `state.firedAlerts`
- * so each absence episode only emits once: the key is cleared when the unread
- * count drops to 0 or a live chief returns.
- *
- * Generic staleness owner: @ag/tribe/21626-per-seat-inbox-staleness-alarm.
- */
-export function checkChiefAbsent(
-  unread: { count: number; oldestTs: number },
-  chiefOnline: boolean,
-  state: AlertState,
-): HealthAlert | null {
-  const absentKey = "chief-absent:critical"
-  if (unread.count === 0) {
-    state.firedAlerts.delete(absentKey)
-    return null
-  }
-  if (!chiefOnline) {
-    if (state.firedAlerts.has(absentKey)) return null
-    state.firedAlerts.add(absentKey)
-    return {
-      type: "chief-absent",
-      severity: "critical",
-      message:
-        `STOP-THE-LINE: @chief is absent with ${unread.count} actionable message${unread.count === 1 ? "" : "s"} ` +
-        `waiting. Delivery has no live authority; a live @cto must assume authority, ` +
-        `or notify the user, then reconcile @chief attention before work continues.`,
-      metrics: {},
-      topOffenders: [],
-    }
-  }
-  state.firedAlerts.delete(absentKey)
-  return null
-}
-
 // ---------------------------------------------------------------------------
 // Bridge-lost paging (25662, @cto 430ba377)
 // ---------------------------------------------------------------------------
@@ -2769,25 +2729,8 @@ export const healthMonitorPlugin: TribePluginApi = {
           )
         }
 
-        // --- Chief-authority watchdog (every 3rd sample — ~30s) ---
-        // Only the no-live-authority stop-line remains here. Generic online
-        // inbox staleness is projected by health cadence and consumed by WATCH.
         chiefPresenceSampleCount++
         if (chiefPresenceSampleCount % 3 === 0) {
-          try {
-            const unread = api.getUnreadDms("@chief")
-            const chiefOnline = sessions.some((s) => s.name === "@chief")
-            const chiefAlert = checkChiefAbsent(unread, chiefOnline, alertState)
-            if (chiefAlert) {
-              log.info?.(`alert: ${chiefAlert.message}`)
-              api.broadcast(chiefAlert.message, `health:${chiefAlert.type}:${chiefAlert.severity}`, undefined, {
-                delivery: "push",
-                topic: `health:${chiefAlert.type}:${chiefAlert.severity}`,
-              })
-            }
-          } catch (err) {
-            log.error?.(`chief-absence check failed: ${err instanceof Error ? err.message : String(err)}`)
-          }
           try {
             runBridgeLostTick(api, currentBridgeLostArming, bridgeLostMemory, Date.now())
           } catch (err) {

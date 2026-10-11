@@ -39,6 +39,7 @@ const INBOX_LAG_EVIDENCE = {
 export type HealthCadenceOptions = {
   now: number
   connectedSessionNames: string[]
+  requestedSessionNames?: string[]
   dbGrowthWarningBytes?: number | null
   /**
    * Session NAME whose actionable-response SLA to project (e.g. `@chief`).
@@ -101,6 +102,7 @@ export type HealthCadenceProjection = ProjectionStamp & {
   inbox_lag: Array<
     ProjectionStamp & {
       session: string
+      transport_state?: "connected" | "disconnected"
       rows: number
       oldest_age_ms: number
       actionable_rows: number
@@ -125,6 +127,7 @@ export type HealthCadenceProjection = ProjectionStamp & {
       evidence: typeof INBOX_LAG_EVIDENCE
     }
   >
+  unknown_sessions?: string[]
   database: ProjectionStamp & {
     bytes: number
     message_rows: number
@@ -428,9 +431,11 @@ function inboxLagProjection(
   db: Database,
   now: number,
   connectedSessionNames: string[],
+  requestedSessionNames?: string[],
 ): {
   rows: HealthCadenceProjection["inbox_lag"]
   warnings: string[]
+  unknownSessions: string[]
 } {
   const cursorQuery = db.prepare(`
     SELECT last_inbox_pull_seq, started_at
@@ -539,7 +544,8 @@ function inboxLagProjection(
   `),
   )
 
-  const rows = [...new Set(connectedSessionNames)].sort().map((session) => {
+  const unknownSessions: string[] = []
+  const rows = [...new Set([...connectedSessionNames, ...(requestedSessionNames ?? [])])].sort().flatMap((session) => {
     const cursor = cursorQuery.get({ $session: session }) as {
       last_inbox_pull_seq: number
       started_at: number
@@ -547,6 +553,10 @@ function inboxLagProjection(
     const receipt = attentionReceiptQuery.get({ $session: session }) as {
       last_attention_read_at: number | null
     } | null
+    if (cursor == null && receipt == null && requestedSessionNames?.includes(session)) {
+      unknownSessions.push(session)
+      return []
+    }
     const lagParams = { $cursor: cursor?.last_inbox_pull_seq ?? 0, $session: session }
     const lag = combineJournalCount(lagQueryMessages.get(lagParams) as LagRow, lagQueryArchive.get(lagParams) as LagRow)
     const actionableLag = combineJournalCount(
@@ -572,30 +582,39 @@ function inboxLagProjection(
             ts: oldestCandidate.ts,
           }
     const lastAttentionReadAt = receipt?.last_attention_read_at ?? null
-    return {
-      as_of_ms: now,
-      session,
-      rows: lag.rows,
-      oldest_age_ms: ageFrom(now, lag.oldest_ts),
-      actionable_rows: actionableLag.rows,
-      actionable_oldest_age_ms: ageFrom(now, actionableLag.oldest_ts),
-      waking_rows: wakingLag.rows,
-      waking_oldest_age_ms: ageFrom(now, wakingLag.oldest_ts),
-      tracking_since_ms: cursor?.started_at ?? now,
-      last_attention_read_at_ms: lastAttentionReadAt,
-      last_attention_read_age_ms: lastAttentionReadAt === null ? null : Math.max(0, now - lastAttentionReadAt),
-      oldest_actionable:
-        oldestActionable === null
-          ? null
+    return [
+      {
+        as_of_ms: now,
+        session,
+        ...(requestedSessionNames === undefined
+          ? {}
           : {
-              id: oldestActionable.id,
-              type: oldestActionable.type,
-              sender: oldestActionable.sender,
-              summary: oldestActionable.summary,
-              ts_ms: oldestActionable.ts,
-            },
-      evidence: INBOX_LAG_EVIDENCE,
-    }
+              transport_state: connectedSessionNames.includes(session)
+                ? ("connected" as const)
+                : ("disconnected" as const),
+            }),
+        rows: lag.rows,
+        oldest_age_ms: ageFrom(now, lag.oldest_ts),
+        actionable_rows: actionableLag.rows,
+        actionable_oldest_age_ms: ageFrom(now, actionableLag.oldest_ts),
+        waking_rows: wakingLag.rows,
+        waking_oldest_age_ms: ageFrom(now, wakingLag.oldest_ts),
+        tracking_since_ms: cursor?.started_at ?? now,
+        last_attention_read_at_ms: lastAttentionReadAt,
+        last_attention_read_age_ms: lastAttentionReadAt === null ? null : Math.max(0, now - lastAttentionReadAt),
+        oldest_actionable:
+          oldestActionable === null
+            ? null
+            : {
+                id: oldestActionable.id,
+                type: oldestActionable.type,
+                sender: oldestActionable.sender,
+                summary: oldestActionable.summary,
+                ts_ms: oldestActionable.ts,
+              },
+        evidence: INBOX_LAG_EVIDENCE,
+      },
+    ]
   })
   const warnings = rows
     .filter(
@@ -610,7 +629,7 @@ function inboxLagProjection(
         `${row.actionable_rows} actionable row(s), oldest ${durationLabel(row.actionable_oldest_age_ms)}; ` +
         `projection-only, pane/turn liveness excluded (threshold 30m)`,
     )
-  return { rows, warnings }
+  return { rows, warnings, unknownSessions }
 }
 
 function databaseProjection(
@@ -716,7 +735,7 @@ function resolveSlaTargetMs(option: number | null | undefined): number {
 export function projectHealthCadence(db: Database, options: HealthCadenceOptions): HealthCadenceProjection {
   const { now } = options
   const responseLatency = responseLatencyProjection(db, now)
-  const inboxLag = inboxLagProjection(db, now, options.connectedSessionNames)
+  const inboxLag = inboxLagProjection(db, now, options.connectedSessionNames, options.requestedSessionNames)
   const database = databaseProjection(db, now, options.dbGrowthWarningBytes ?? null)
 
   const slaRole = resolveSlaRole(options.slaRole)
@@ -737,6 +756,7 @@ export function projectHealthCadence(db: Database, options: HealthCadenceOptions
     response_latency: responseLatency.summary,
     open_balls: openBallProjection(db, now),
     inbox_lag: inboxLag.rows,
+    ...(options.requestedSessionNames === undefined ? {} : { unknown_sessions: inboxLag.unknownSessions }),
     database: database.projection,
     warnings: [...responseLatency.warnings, ...(sla ? sla.warnings : []), ...inboxLag.warnings, ...database.warnings],
   }
