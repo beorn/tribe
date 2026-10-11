@@ -7,6 +7,8 @@
  * @consumer @ag/recall/27930 — the one freshness verdict (src/lib/staleness.ts,
  *           read by src/lib/search.ts and src/history/scanner.ts)
  * @testonly none
+ * @source-grep evaluateStaleDefaultMs reads the exported cadence, timeout and slack constants from staleness.ts
+ *           source, so a mutated timeout shows as a different stale window rather than the value the test imported
  */
 /**
  * ONE freshness verdict — @ag/recall/27930.
