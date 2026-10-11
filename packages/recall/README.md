@@ -98,7 +98,7 @@ incident.
 
 The session hooks never write the index: run `recall index --incremental` outside them, for example on a schedule, so the index has one writer. An index older than the threshold reads as stale. Search itself is read-only: `bun recall <query>` checks the index age, reports degraded provenance when it is stale or unavailable, and never starts index work.
 
-- Default threshold: **16m**, covering the `recall-index` timer's 15-minute cadence plus a one-minute rebuild allowance. The timer is declared in `tools/hh-cli/hab-projects.ts`; revisit the allowance if its cadence changes. Slower or delayed rebuilds still report stale provenance.
+- Default threshold: **61m**, covering the `recall-index` timer's hourly cadence plus a one-minute rebuild allowance. The timer is declared in `tools/hh-cli/hab-projects.ts`; revisit the allowance if its cadence changes. Slower or delayed rebuilds still report stale provenance.
 - Override: `RECALL_STALE_THRESHOLD=10m` (or `1h`, `30s`, `500ms`, bare number = minutes).
 - Legacy compatibility: `bun recall "query" --no-refresh` skips freshness classification, reports `unknown` provenance, and exits 3.
 

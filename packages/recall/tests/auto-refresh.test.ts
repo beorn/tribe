@@ -59,9 +59,9 @@ describe("parseThreshold", () => {
     expect(() => parseThreshold("")).toThrow(/invalid duration/)
   })
 
-  test('default RECALL_STALE_THRESHOLD_DEFAULT is "16m" — covers the scheduled rebuild', () => {
-    expect(RECALL_STALE_THRESHOLD_DEFAULT).toBe("16m")
-    expect(parseThreshold(RECALL_STALE_THRESHOLD_DEFAULT)).toBe(16 * 60 * 1000)
+  test('default RECALL_STALE_THRESHOLD_DEFAULT is "61m" — covers the scheduled rebuild', () => {
+    expect(RECALL_STALE_THRESHOLD_DEFAULT).toBe("61m")
+    expect(parseThreshold(RECALL_STALE_THRESHOLD_DEFAULT)).toBe(61 * 60 * 1000)
   })
 })
 
@@ -73,9 +73,9 @@ describe("getStaleThresholdMs (env override)", () => {
     else process.env.RECALL_STALE_THRESHOLD = originalEnv
   })
 
-  test("defaults to 16m when env unset", () => {
+  test("defaults to 61m when env unset", () => {
     delete process.env.RECALL_STALE_THRESHOLD
-    expect(getStaleThresholdMs()).toBe(16 * 60 * 1000)
+    expect(getStaleThresholdMs()).toBe(61 * 60 * 1000)
   })
 
   test('honors RECALL_STALE_THRESHOLD="10m"', () => {
