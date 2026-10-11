@@ -80,6 +80,35 @@ only wakes for the canonical actionable types: `request`, `query`, `assign`,
 and `verdict`. This is a generic session preference; role policy belongs to the
 launch controller, not the Tribe daemon.
 
+### Doctor
+
+`tribe-wire doctor` checks daemon identity, protocol versions, membership and
+the coordination rail. `--json` emits one report document. Exit codes are
+0 for OK, 3 for warnings only, 1 for a critical failure and 2 for UNKNOWN;
+UNKNOWN takes precedence over every other check. An absent daemon produces an
+UNKNOWN report naming the socket, retaining contributed checks in `--json`.
+`--fix` prints remedies without restarting or repairing anything.
+
+Hosts can contribute read-only facts through the existing CLI entry:
+
+```ts
+import { main } from "tribe-wire/cli"
+
+const code = await main(process.argv, {
+  doctorSections: async () => [{
+    name: "my-host",
+    checks: { config: { severity: "WARNING", diagnosis: "optional config is absent" } },
+  }],
+})
+process.exitCode = code
+```
+
+Wire invokes the provider only after accepting the doctor arguments, awaits it
+and adds its named `sections` to JSON. Existing integrity fields stay at the
+top level. Collection errors produce an UNKNOWN `extensions.collection` check
+with the error details. Wire uses one renderer and verdict table for every
+section; a host does not need its own doctor parser or formatter.
+
 ### Library exports
 
 Outside tribe's own packages, import the narrowest subpath. The root barrel
