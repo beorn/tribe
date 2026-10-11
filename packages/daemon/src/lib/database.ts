@@ -1848,6 +1848,27 @@ function takingStatusProtectsOpenBallPredicateSql(receipt: string, receiptSequen
     )`
 }
 
+/** 27889 — the single "an archived row may be deleted" predicate, shared by
+ *  the delete selection, the full-row export that MUST precede it, and the
+ *  by-id re-verify read that guards the delete. One definition, so the export
+ *  and the delete can never disagree about which rows are eligible. */
+function archiveDeleteEligiblePredicateSql(
+  archive: string,
+  cutoffParam = "$cutoff",
+  cursorFloorParam = "$cursor_floor",
+): string {
+  return `${archive}.ts < ${cutoffParam}
+      AND ${archive}.seq <= ${cursorFloorParam}
+      AND NOT EXISTS (SELECT 1 FROM pending_request p WHERE p.message_id = ${archive}.id)
+      AND NOT (${takingStatusProtectsOpenBallPredicateSql(archive, "seq")})`
+}
+
+/** 27889 — the full archive row (the export file's unit), alias-qualified so
+ *  every archive statement can share it. */
+const MESSAGE_ARCHIVE_COLUMNS_ALIASED = MESSAGE_ARCHIVE_COLUMNS.split(", ")
+  .map((column) => `a.${column}`)
+  .join(", ")
+
 export type TribeStatements = ReturnType<typeof createStatements>
 
 export function createStatements(db: Database) {
@@ -2033,17 +2054,28 @@ export function createStatements(db: Database) {
 	`),
 
     /** Same two outcome-fact types as `selectPendingOutcomeFacts` above, but
-     *  scoped to one request by `ref` — the read behind a `closed: 0` ball
+     *  scoped to one request by `ref`, resolving retained message aliases —
+     *  the read behind a `closed: 0` ball
      *  result's cause (@ag/tribe/an-advertised-ball-owner-disappears-before-
      *  it-can-settle). A single miss must never pay for a scan of every ball
      *  ever settled, which is what reusing the unbounded statement above
      *  would cost. */
     selectPendingOutcomeFactsForRequest: db.prepare(`
-		SELECT id, type, content, ts FROM messages
-		WHERE kind = 'event' AND type IN ('event.ball.expired', 'event.ball.settled') AND ref = $request_id
-		UNION
-		SELECT id, type, content, ts FROM messages_archive
-		WHERE kind = 'event' AND type IN ('event.ball.expired', 'event.ball.settled') AND ref = $request_id
+		WITH request_ids(request_id, priority) AS (
+			SELECT $request_id, 0
+			UNION SELECT request, 1 FROM messages WHERE id = $request_id AND request IS NOT NULL
+			UNION SELECT request, 1 FROM messages_archive WHERE id = $request_id AND request IS NOT NULL
+		), outcomes AS (
+			SELECT m.id, m.type, m.content, m.ts, r.priority FROM request_ids r
+			CROSS JOIN messages m INDEXED BY idx_messages_event_type_ref_ts
+			WHERE m.ref = r.request_id AND m.kind = 'event' AND m.type IN ('event.ball.expired', 'event.ball.settled')
+			UNION
+			SELECT m.id, m.type, m.content, m.ts, r.priority FROM request_ids r
+			CROSS JOIN messages_archive m INDEXED BY idx_messages_archive_event_type_ref_ts
+			WHERE m.ref = r.request_id AND m.kind = 'event' AND m.type IN ('event.ball.expired', 'event.ball.settled')
+		)
+		SELECT id, type, content, ts FROM outcomes
+		WHERE priority = (SELECT MIN(priority) FROM outcomes)
 		ORDER BY ts, id
 	`),
 
@@ -2368,6 +2400,19 @@ export function createStatements(db: Database) {
 		GROUP BY m.recipient
 	`,
 
+    /** 27889 — re-verify read for the cold-export delete: of the ids just
+     *  exported and verified on disk, which are STILL eligible right now.
+     *  A row can gain a pending_request or a TAKING receipt between the
+     *  export select and the delete, so the delete removes the intersection,
+     *  never the stale selection. Built per batch because the id list varies;
+     *  see retention.ts. */
+    selectArchiveRowsByIdsSql: (placeholders: string): string => `
+		SELECT a.id
+		FROM messages_archive a
+		WHERE a.id IN (${placeholders})
+			AND ${archiveDeleteEligiblePredicateSql("a", "?", "?")}
+	`,
+
     upsertMailboxPrune: db.prepare(`
 		INSERT INTO mailbox_prunes (recipient, pruned_count, pruned_before, recorded_at)
 		VALUES ($recipient, $count, $before, $now)
@@ -2389,11 +2434,29 @@ export function createStatements(db: Database) {
      *  age with a prune notice (mailbox_prunes) instead. Before 21757 this
      *  was a bare MIN over every row, and retention.ts's own header named
      *  the cost: one dormant seat held the floor down for the whole fleet.
-     *  NULL (no live cursor rows, e.g. a fresh DB) contributes no
-     *  constraint; retention.ts treats that as "unbounded". */
+     *
+     *  F3 (@cto 2026-10-11): `last_actionable_seq > 0` — a cursor that has
+     *  NEVER advanced is not a position. `seq <= 0` admits no row, so one
+     *  live recipient that had acknowledged nothing (measured: @probe/28571)
+     *  held the fleet floor at 0 and voided retention fleet-wide for good.
+     *  A recipient whose actionable rows are still unread is protected by
+     *  the ARCHIVE-MOVE live rule, which keeps its unread direct actionables
+     *  out of messages_archive in the first place.
+     *
+     *  Returns the floor AND the recipient who sets it (retention.ts logs
+     *  that name when the floor excludes rows, so a reader stuck at a low
+     *  NONZERO position is visible rather than silently voiding the
+     *  promise); NO ROW (no live cursor has advanced, e.g. a fresh DB)
+     *  contributes no constraint, which retention.ts treats as "unbounded". */
     selectMailboxCursorFloor: db.prepare(`
-		SELECT MIN(last_actionable_seq) AS floor FROM mailbox_cursors
+		SELECT last_actionable_seq AS floor,
+		       recipient AS setter,
+		       COALESCE(last_attention_read_at, updated_at) AS setter_read_at
+		FROM mailbox_cursors
 		WHERE COALESCE(last_attention_read_at, updated_at) >= $live_cutoff
+		  AND last_actionable_seq > 0
+		ORDER BY last_actionable_seq ASC
+		LIMIT 1
 	`),
 
     /** Live-cursor floor, half 2: the oldest ambient inbox-pull position
@@ -2402,10 +2465,18 @@ export function createStatements(db: Database) {
      *  actionableLagQuery, scoped to kind='direct'); the ambient lag query
      *  there also counts broadcast rows (recipient = '*') against each
      *  session's own last_inbox_pull_seq, so retention takes the floor
-     *  across both cursor families rather than mailbox_cursors alone. */
+     *  across both cursor families rather than mailbox_cursors alone. F3:
+     *  same never-advanced rule as half 1 (`last_inbox_pull_seq > 0`), and
+     *  it also returns the session that sets the floor. */
     selectSessionInboxCursorFloor: db.prepare(`
-		SELECT MIN(last_inbox_pull_seq) AS floor FROM sessions
+		SELECT last_inbox_pull_seq AS floor,
+		       name AS setter,
+		       MAX(updated_at, COALESCE(last_delivered_ts, 0)) AS setter_read_at
+		FROM sessions
 		WHERE MAX(updated_at, COALESCE(last_delivered_ts, 0)) >= $live_cutoff
+		  AND last_inbox_pull_seq > 0
+		ORDER BY last_inbox_pull_seq ASC
+		LIMIT 1
 	`),
 
     /** Archive-delete batch candidates: archived rows old enough under the
@@ -2418,10 +2489,23 @@ export function createStatements(db: Database) {
       assertSingleStatement(`
 		SELECT a.id, a.seq
 		FROM messages_archive a
-		WHERE a.ts < $cutoff
-			AND a.seq <= $cursor_floor
-			AND NOT EXISTS (SELECT 1 FROM pending_request p WHERE p.message_id = a.id)
-			AND NOT (${takingStatusProtectsOpenBallPredicateSql("a", "seq")})
+		WHERE ${archiveDeleteEligiblePredicateSql("a")}
+		ORDER BY a.seq ASC
+		LIMIT $limit
+	`),
+    ),
+
+    /** 27889 — the cold export that MUST run before any delete: the SAME
+     *  eligible rows as selectArchiveDeleteBatch, projected in full so the
+     *  export file is a durable copy of exactly the bytes the delete is about
+     *  to remove. A cited tribe id whose row is deleted without this copy
+     *  becomes dangling evidence, so the two statements share one predicate
+     *  and can never disagree. Oldest-first, LIMIT-bounded. */
+    selectArchiveRowsForExport: db.prepare(
+      assertSingleStatement(`
+		SELECT a.seq, ${MESSAGE_ARCHIVE_COLUMNS_ALIASED}, a.archived_at
+		FROM messages_archive a
+		WHERE ${archiveDeleteEligiblePredicateSql("a")}
 		ORDER BY a.seq ASC
 		LIMIT $limit
 	`),

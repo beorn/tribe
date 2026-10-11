@@ -13,6 +13,11 @@
  *
  * NO INVENTED ZERO: a ledger that exists but cannot be read back yields coverage
  * `gap: true` with a reason, and the report must render that, never a clean 0.
+ * A save that FAILED is the same class from the other side (#28283): the counts
+ * are whole in memory, but a restart would resume the last file that did land,
+ * so the window is not provably complete. Its reason is `write`, named apart
+ * from `unreadable` so an operator is not sent looking for a corrupt file when
+ * the disk refused a write.
  * A non-representable `windowStartMs`/window end/`updatedAtMs`/`costSinceMs` is
  * a SCHEMA gap: the report formats those as ISO dates, and one such row must not
  * crash every other row.
@@ -40,7 +45,17 @@ export const TRIBE_DELIVERY_LEDGER_DIR_ENV = "TRIBE_DELIVERY_LEDGER_DIR"
 export const DELIVERY_LEDGER_VERSION = 2
 const DELIVERY_LEDGER_VERSION_LEGACY = 1
 
-export type DeliveryGapReason = "none" | "unreadable" | "schema"
+export type DeliveryGapReason =
+  | "none"
+  | "unreadable"
+  | "schema"
+  /**
+   * #28283 - a save of this window could not be written. The window's counts are
+   * complete in memory, but the durable copy is behind, so the window can never
+   * be read back as a complete total. Set in memory by the adapter at the failed
+   * save and carried by the next save that lands.
+   */
+  | "write"
 
 export type DeliveryLedgerCoverage = {
   /** Adapter processes that resumed this window's ledger (a restart count). */
@@ -76,11 +91,40 @@ export type DeliveryLedgerState = {
   coverage: DeliveryLedgerCoverage
 }
 
-/** The file-name fragment for a pane: `@agent/test` -> `@agent_test`. */
-export function deliveryLedgerPaneKey(pane: string): string {
-  const key = pane.trim().replace(/[^A-Za-z0-9._@-]+/gu, "_")
-  return key === "" ? "unregistered" : key
+/** A loaded window, or the named coverage of one that could not be read. */
+export type DeliveryLedgerLoad = {
+  state: DeliveryLedgerState | null
+  coverage: DeliveryLedgerCoverage
 }
+
+/** The characters a pane key keeps verbatim; every other byte is percent-encoded. */
+const PANE_KEY_SAFE_CHAR = /^[A-Za-z0-9._@-]$/
+
+/**
+ * #28376 — an INJECTIVE file-name fragment for a pane: every byte outside the
+ * safe set is percent-encoded and `%` itself is encoded, so no two distinct
+ * personas can share a key. The old sanitizer mapped `/` to `_`, which made the
+ * two VALID personas `@dev/6` and `@dev_6` one key (`@dev_6`) and so one file;
+ * the ledger of whoever wrote last then silently suppressed the other's rows.
+ */
+export function deliveryLedgerPaneKey(pane: string): string {
+  const trimmed = pane.trim()
+  if (trimmed === "") return "unregistered"
+  let key = ""
+  for (const byte of Buffer.from(trimmed, "utf8")) {
+    const char = String.fromCharCode(byte)
+    key += PANE_KEY_SAFE_CHAR.test(char) ? char : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`
+  }
+  return key
+}
+
+/**
+ * #28376 — the `v2` namespace segment (@cto ruling). It keeps a new path from
+ * EVER equalling a legacy path, so a colliding pair's files never overlap even
+ * transiently: without it, `@dev_6`'s new key equals `@dev/6`'s legacy file
+ * `tribe-delivery-@dev_6.json`, one more case to reason about.
+ */
+const DELIVERY_LEDGER_FILE_PREFIX = "tribe-delivery-v2-"
 
 /**
  * The habitat kpi directory, or null when neither an override nor a habitat root
@@ -100,7 +144,23 @@ export function deliveryLedgerPath(opts: { pane: string; env: NodeJS.ProcessEnv 
   if (explicit) return explicit
   const dir = deliveryLedgerDir(opts.env)
   if (dir === null) return null
-  return join(dir, `tribe-delivery-${deliveryLedgerPaneKey(opts.pane)}.json`)
+  return join(dir, `${DELIVERY_LEDGER_FILE_PREFIX}${deliveryLedgerPaneKey(opts.pane)}.json`)
+}
+
+/**
+ * #28376 — the ledger's OWNER is its persisted `pane`, never its file name.
+ *
+ * The key is now injective (`deliveryLedgerPaneKey`) and namespaced, but the
+ * LEGACY key was a sanitizer, not a bijection: `/` became `_`, so the two VALID
+ * personas `@dev/6` and `@dev_6` both resolved to one file. The file name is
+ * therefore a hint; the identity is what the file
+ * records about itself. A window whose recorded owner is not the caller is NOT
+ * the caller's window: adopting it seeds this pane's forwarded-id set, counters
+ * and summary-throttle fingerprint from another persona's handoffs, and the ids
+ * it never received then suppress a broadcast handoff that was never made to it.
+ */
+export function deliveryLedgerOwnerMismatch(state: DeliveryLedgerState | null, pane: string): boolean {
+  return state !== null && state.pane !== pane
 }
 
 function zeroCounters(): DeliveryCounters {
@@ -188,10 +248,7 @@ function isRepresentableTime(value: number): boolean {
  * Read a pane's ledger. A missing file is a FRESH window (gap false); a file
  * that exists but cannot be read back is a LOST window (gap true, with reason).
  */
-export function loadDeliveryLedger(path: string): {
-  state: DeliveryLedgerState | null
-  coverage: DeliveryLedgerCoverage
-} {
+export function loadDeliveryLedger(path: string): DeliveryLedgerLoad {
   if (!existsSync(path)) {
     return { state: null, coverage: { restarts: 0, gap: false, gapReason: "none" } }
   }
@@ -232,7 +289,11 @@ export function loadDeliveryLedger(path: string): {
     const restarts = typeof parsed.coverage?.restarts === "number" ? parsed.coverage.restarts : 0
     const gap = parsed.coverage?.gap === true
     const gapReason =
-      parsed.coverage?.gapReason === "unreadable" || parsed.coverage?.gapReason === "schema"
+      parsed.coverage?.gapReason === "unreadable" ||
+      parsed.coverage?.gapReason === "schema" ||
+      // #28283 - a failed save names itself; an older reader that does not know
+      // this reason still reads a gap (it degrades to "schema"), never a total.
+      parsed.coverage?.gapReason === "write"
         ? parsed.coverage.gapReason
         : gap
           ? "schema"
@@ -256,6 +317,33 @@ export function loadDeliveryLedger(path: string): {
   }
 }
 
+/** Where this pane's window was found, and any file that refused to be its own (#28376). */
+export type DeliveryLedgerResume = {
+  /** The path this pane WRITES to (the `v2` namespace). */
+  path: string
+  load: DeliveryLedgerLoad
+  /**
+   * A file that records ANOTHER persona: refused with one line, never adopted.
+   * Null when the window found belongs to the caller (or none was found).
+   */
+  foreign: { path: string; owner: string } | null
+}
+
+/**
+ * Resume only the current v2 file or the explicit override. The temporary
+ * legacy filename adoption ended after every legacy window expired (#28409).
+ */
+export function resumeDeliveryLedger(opts: { pane: string; env: NodeJS.ProcessEnv }): DeliveryLedgerResume | null {
+  const path = deliveryLedgerPath(opts)
+  if (path === null) return null
+  const own = loadDeliveryLedger(path)
+  return {
+    path,
+    load: own,
+    foreign: own.state !== null && own.state.pane !== opts.pane ? { path, owner: own.state.pane } : null,
+  }
+}
+
 /**
  * Resume the in-flight 4h window (a restart: `restarts` + 1, counters kept) or
  * roll a fresh one (counters zeroed). The id set carries across a roll so a
@@ -267,7 +355,14 @@ export function openDeliveryLedgerWindow(input: {
   pane: string
   now: number
 }): DeliveryLedgerState {
-  const { existing, coverage, pane, now } = input
+  const { existing: loaded, coverage: loadedCoverage, pane, now } = input
+  // #28376 — a file whose recorded owner is another persona is a LOST window,
+  // never an adopted one: it is ignored here, and its gap is NAMED so the report
+  // reads it as incomplete rather than as this pane's clean zero. Nothing is
+  // deleted: the file still belongs to the owner it records.
+  const existing = deliveryLedgerOwnerMismatch(loaded, pane) ? null : loaded
+  const coverage: DeliveryLedgerCoverage =
+    existing === null && loaded !== null ? { restarts: 0, gap: true, gapReason: "schema" } : loadedCoverage
   if (existing && now - existing.windowStartMs < DELIVERY_LEDGER_WINDOW_MS) {
     return {
       ...existing,

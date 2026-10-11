@@ -18,6 +18,7 @@ import {
   type BallOutcomeFactRow,
   type BallSettlementFact,
   type InboxWaitResult,
+  TRIBE_MESSAGE_TYPES,
 } from "tribe-wire"
 import type { TribeContext } from "./context.ts"
 import type { TribeRole } from "tribe-wire/lib/config"
@@ -642,7 +643,7 @@ export function handleToolCall(
     case TRIBE_COORD_METHODS.join:
       return handleJoin(ctx, a, opts)
     case TRIBE_COORD_METHODS.health:
-      return handleHealth(ctx, opts)
+      return handleHealth(ctx, a, opts)
     case TRIBE_COORD_METHODS.restart:
       return handleRestart(ctx, a, opts.cleanup)
     case TRIBE_COORD_METHODS.stop:
@@ -767,6 +768,21 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const recipients = normalizeRecipients(a.to)
   if (recipients === null) {
     return jsonResult({ error: "tribe.send: invalid to - must be a non-empty string or array of non-empty strings" })
+  }
+  // The MCP surface is where a model writes `type` by hand, so it is the ONE
+  // place an unknown value can arrive; the CLI already refuses it
+  // (wire/src/cli/send.ts). Accepting it here STORED the message and opened no
+  // ball — a quoted `"request"` from an agent's tool call rode through as a
+  // type no consumer recognises, and the sender believed it had asked
+  // (@i/21-wire/28200). Refuse it like the CLI, naming the value and the list.
+  // `!= null` (not `!== undefined`): the old `(a.type as string) ?? "notify"`
+  // treats an explicit null — a harness serializing an unset optional that way
+  // — exactly like omitted, and a census cannot see that population. Only a
+  // non-null unknown value is refused (@cto 74b5accb).
+  if (a.type != null && !(TRIBE_MESSAGE_TYPES as readonly string[]).includes(a.type as string)) {
+    return jsonResult({
+      error: `tribe.send: invalid type '${String(a.type)}' - expected one of: ${TRIBE_MESSAGE_TYPES.join(", ")}`,
+    })
   }
   const msgType = (a.type as string) ?? "notify"
   const truncation = sanitizeMessageWithReport(a.message as string)
@@ -2094,6 +2110,7 @@ function closeOneBall(
   attemptedId: string,
   now: number,
   transport: OwnerTransportProjector,
+  closeEvidence?: string,
 ): { request_id: string; closed: number; reason?: string } {
   const requestId = pendingRequestIdForOwner(ctx, owner, attemptedId)
   const row = ctx.stmts.selectPendingSettlementForRecipient.get({
@@ -2105,12 +2122,14 @@ function closeOneBall(
     return { request_id: requestId, closed: 0, reason }
   }
   const settlement =
-    ctx.getName() !== owner && ctx.getName() !== row.sender && offlineOwnerCloseAllowed(ctx, row, now, transport)
-      ? "offline-owner-close"
-      : ctx.getName() === row.sender && ctx.getName() !== owner
-        ? "sender-withdrawn"
-        : "manual-close"
-  return { request_id: requestId, closed: settlePendingRows(ctx, [row], settlement, ctx.getName(), now) }
+    closeEvidence !== undefined
+      ? "manual-close"
+      : ctx.getName() !== owner && ctx.getName() !== row.sender && offlineOwnerCloseAllowed(ctx, row, now, transport)
+        ? "offline-owner-close"
+        : ctx.getName() === row.sender && ctx.getName() !== owner
+          ? "sender-withdrawn"
+          : "manual-close"
+  return { request_id: requestId, closed: settlePendingRows(ctx, [row], settlement, ctx.getName(), now, closeEvidence) }
 }
 
 /** Dispatcher custody uses daemon facts; habitat roster policy stays with the caller. */
@@ -2196,12 +2215,21 @@ function pendingCloseAuthorityRefusalResult(
     attemptedIds.length > 1
       ? `the entire ${attemptedIds.length}-id close batch remains open`
       : `ball ${JSON.stringify(refusal.requestId)} remains open`
+  const kind = ctx.stmts.selectPendingKindForRecipient.get({
+    $request_id: refusal.requestId,
+    $recipient: owner,
+  }) as { request_kind: "request" | "incident" } | null
+  const allowedClosers =
+    kind?.request_kind === "incident"
+      ? `For this incident, its owner or ${ANDON_OWNER} may record a manual-close with ` +
+        `\`tribe pending --owner ${JSON.stringify(owner)} --close ${JSON.stringify(refusal.requestId)} --evidence '<attestation>'\`; ` +
+        `the emitter may send its --incident-cleared edge`
+      : `Allowed closers are the owner (manual-close) or original sender (sender-withdrawn), or ${ANDON_OWNER} ` +
+        `after its structured deadline with an observed offline owner (offline-owner-close)`
   const error =
     `tribe.pending: refusing --close before mutation: authenticated caller ${JSON.stringify(refusal.caller)} ` +
     `is neither owner ${JSON.stringify(refusal.owner)} nor original sender ${JSON.stringify(refusal.originalSender)} ` +
-    `for ball ${JSON.stringify(refusal.requestId)}. Allowed closers are the owner (manual-close) or original sender ` +
-    `(sender-withdrawn), or ${ANDON_OWNER} after its structured deadline with an observed offline owner ` +
-    `(offline-owner-close); ${remainsOpen}, and no pending row was mutated.`
+    `for ball ${JSON.stringify(refusal.requestId)}. ${allowedClosers}; ${remainsOpen}, and no pending row was mutated.`
   return jsonResult({
     error,
     refusal: {
@@ -2235,7 +2263,12 @@ function pendingPruneAuthorityRefusalResult(ctx: TribeContext, owner: string, no
   })
 }
 
-function incidentCloseRefusal(ctx: TribeContext, owner: string, attemptedIds: readonly string[]): string | undefined {
+function incidentCloseRefusal(
+  ctx: TribeContext,
+  owner: string,
+  attemptedIds: readonly string[],
+  closeEvidence?: string,
+): string | undefined {
   const incidentId = attemptedIds
     .map((id) => pendingRequestIdForOwner(ctx, owner, id))
     .find((requestId) => {
@@ -2246,9 +2279,24 @@ function incidentCloseRefusal(ctx: TribeContext, owner: string, attemptedIds: re
       return row?.request_kind === "incident"
     })
   if (incidentId === undefined) return undefined
+  if (
+    attemptedIds.length === 1 &&
+    closeEvidence !== undefined &&
+    (ctx.getName() === owner || ctx.getName() === ANDON_OWNER)
+  ) {
+    return undefined
+  }
+  const manualRemedy =
+    attemptedIds.length === 1
+      ? `The authenticated owner ${JSON.stringify(owner)} or ${ANDON_OWNER} may manually clear this incident with nonblank ` +
+        `--evidence: \`tribe pending --owner ${JSON.stringify(owner)} --close ${JSON.stringify(incidentId)} --evidence '<attestation>'\`. `
+      : ""
   return (
     `tribe.pending: refusing --close for incident ${JSON.stringify(incidentId)}; ` +
-    "only the incident emitter can clear it when the condition ends. " +
+    manualRemedy +
+    (attemptedIds.length > 1
+      ? "only the incident emitter can clear it when the condition ends. "
+      : "The incident emitter can also clear it when the condition ends. ") +
     `From the emitter, run \`tribe send ${owner} 'incident cleared' --type notify --summary 'incident cleared' ` +
     `--incident ${JSON.stringify(incidentId)} --incident-cleared\`.`
   )
@@ -2381,6 +2429,24 @@ function pendingExplicitOwner(value: unknown): string | undefined {
 }
 
 function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
+  if (
+    a.close_evidence !== undefined &&
+    (typeof a.close_evidence !== "string" ||
+      a.close_evidence.trim().length === 0 ||
+      typeof a.close !== "string" ||
+      a.close.length === 0 ||
+      a.prune === true ||
+      a.all === true ||
+      a.expired === true ||
+      a.owed === true ||
+      a.stale_ms !== undefined ||
+      a.emitter !== undefined)
+  ) {
+    return jsonResult({
+      error:
+        "tribe.pending: --evidence requires nonblank attestation text for one incident --close; read, prune and batch operations do not accept evidence.",
+    })
+  }
   if (typeof a.emitter === "string") {
     const emitter = a.emitter.trim()
     if (
@@ -2469,6 +2535,20 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
 
   const now = Date.now()
   const transport = ownerTransportObservationProjector(ctx, opts, now)
+  const closeEvidence = typeof a.close_evidence === "string" ? a.close_evidence : undefined
+  const evidenceKind =
+    closeEvidence === undefined
+      ? null
+      : (ctx.stmts.selectPendingKindForRecipient.get({
+          $request_id: pendingRequestIdForOwner(ctx, owner, a.close as string),
+          $recipient: owner,
+        }) as { request_kind: "request" | "incident" } | null)
+  if (closeEvidence !== undefined && evidenceKind !== null && evidenceKind.request_kind !== "incident") {
+    return jsonResult({
+      error:
+        "tribe.pending: --evidence is only accepted for an incident --close; ordinary request closes do not accept evidence.",
+    })
+  }
   const withOwnerTransport = <T extends PendingBall>(rows: readonly T[]): Array<T & OwnerTransportObservation> =>
     rows.map((row) => ({ ...row, ...transport.observe(row.recipient) }))
 
@@ -2579,11 +2659,16 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
 
   const closeId = typeof a.close === "string" && a.close.length > 0 ? a.close : null
   if (closeId) {
-    const authorityRefusal = pendingCloseAuthorityRefusalResult(ctx, owner, [closeId], now, transport)
+    // The evidence-bearing incident exception is independent of offline
+    // deadline custody. All ordinary and batch authority stays on its path.
+    const authorityRefusal =
+      closeEvidence !== undefined && evidenceKind?.request_kind === "incident" && ctx.getName() === ANDON_OWNER
+        ? undefined
+        : pendingCloseAuthorityRefusalResult(ctx, owner, [closeId], now, transport)
     if (authorityRefusal !== undefined) return authorityRefusal
-    const refusal = incidentCloseRefusal(ctx, owner, [closeId])
+    const refusal = incidentCloseRefusal(ctx, owner, [closeId], closeEvidence)
     if (refusal !== undefined) return jsonResult({ error: refusal })
-    const outcome = ctx.db.transaction(() => closeOneBall(ctx, owner, closeId, now, transport))()
+    const outcome = ctx.db.transaction(() => closeOneBall(ctx, owner, closeId, now, transport, closeEvidence))()
     const warning = outcome.closed === 0 ? pendingCloseMissWarning(ctx, owner, undefined, closeId) : undefined
     // The one query that ASKS ABOUT a ball: a close aimed at a conflicted id
     // carries every fact in its own result (25654), so the CLI can exit
@@ -3784,7 +3869,13 @@ export function readSeatTransportFacts(
   return { missing, exited, unreachable, connected: new Set(liveSessions.map((session) => session.name)) }
 }
 
-function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
+function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
+  if (
+    a.sessions !== undefined &&
+    (!Array.isArray(a.sessions) || a.sessions.some((name) => typeof name !== "string" || name.trim().length === 0))
+  ) {
+    throw new Error("tribe.health sessions must be an array of nonempty exact session names")
+  }
   const now = Date.now()
   const silentThreshold = now - 300_000 // 5 minutes
 
@@ -3934,6 +4025,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   const cadence = projectHealthCadence(ctx.db, {
     now,
     connectedSessionNames: liveSessions.map((session) => session.name),
+    ...(a.sessions === undefined ? {} : { requestedSessionNames: a.sessions as string[] }),
     dbGrowthWarningBytes: parseDbGrowthWarningBytes(process.env.TRIBE_HEALTH_DB_GROWTH_WARN_BYTES),
   })
   const mailboxReadIssues = liveSessions.flatMap((session) => {
@@ -4344,6 +4436,7 @@ export function fetchEvent(row: FetchRow, replay?: boolean): FetchEvent {
 type SnapshotFilters = {
   currentName: string
   limit: number
+  topics: string[]
   since: number | null
   withPeer: string | null
   from: string | null
@@ -4495,11 +4588,14 @@ export function readAttentionProjection(
 
 function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRow[] {
   const conditions = ["kind != 'event'"]
-  const params: Record<string, number | string> = { $limit: filters.limit }
+  const params: Record<string, number | string> = { $limit: filters.topics.length > 0 ? 500 : filters.limit }
 
   if (filters.since !== null) {
     conditions.push("rowid > $since")
     params.$since = filters.since
+  } else if (filters.topics.length > 0) {
+    conditions.push("rowid < $before")
+    params.$before = Number.MAX_SAFE_INTEGER
   }
   if (filters.withPeer !== null) {
     conditions.push("((sender = $self AND recipient = $peer) OR (sender = $peer AND recipient = $self))")
@@ -4516,9 +4612,8 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
   }
 
   const order = filters.since !== null ? "ASC" : "DESC"
-  const rows = ctx.db
-    .prepare(
-      assertSingleStatement(`
+  const query = ctx.db.prepare(
+    assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
              attention_required, wakes_owner, is_incident, sender_authority, session_id, ask
       FROM messages
@@ -4526,9 +4621,30 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
       ORDER BY rowid ${order}
       LIMIT $limit
     `),
+  )
+  const rows: FetchRow[] = []
+  // The limit is a MATCH budget, never a scan cap. Unrelated traffic must not
+  // turn a retained topic into an empty result (28539).
+  while (true) {
+    const page = query.all(params) as FetchRow[]
+    rows.push(
+      ...(filters.topics.length > 0
+        ? filterRowsByTrust(ctx, page).filter((row) => matchesGlob(filters.topics, row.topic))
+        : page),
     )
-    .all(params) as FetchRow[]
-  return filters.since !== null ? rows : rows.reverse()
+    const lastRow = page.at(-1)
+    if (
+      !lastRow ||
+      filters.topics.length === 0 ||
+      rows.length >= filters.limit ||
+      page.length < Number(params.$limit)
+    ) {
+      break
+    }
+    params[filters.since !== null ? "$since" : "$before"] = lastRow.rowid
+  }
+  const selected = rows.slice(0, filters.limit)
+  return filters.since !== null ? selected : selected.reverse()
 }
 
 function rowMatchesSnapshotFilters(row: FetchRow, filters: Omit<SnapshotFilters, "limit">): boolean {
@@ -4621,7 +4737,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
   const withPeer = typeof a.with === "string" && a.with.length > 0 ? a.with : null
   const from = typeof a.from === "string" && a.from.length > 0 ? a.from : null
   const to = typeof a.to === "string" && a.to.length > 0 ? a.to : null
-  const snapshotFilters = { currentName, since, withPeer, from, to }
+  const snapshotFilters = { currentName, since, withPeer, from, to, topics: topics ?? [] }
 
   const ids = normalizeStringArray(a.ids)
   if (a.ids !== undefined && ids === null) {
@@ -4689,7 +4805,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
       .map((id) => byId.get(id))
       .filter((r): r is FetchRow => !!r)
       .filter((r) => rowMatchesSnapshotFilters(r, snapshotFilters))
-  } else if (withPeer !== null || from !== null || to !== null || since !== null) {
+  } else if (withPeer !== null || from !== null || to !== null || since !== null || topicsAreSnapshot) {
     rows = querySnapshotRows(ctx, { ...snapshotFilters, limit })
     shouldAdvance = !topicsAreSnapshot && since !== null && a.advance === true
   } else {
@@ -4706,8 +4822,9 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
     // ahead of the ambient window. Owned tracked broadcasts already remain in
     // actionable_unread until TAKING/settlement; reinjecting one below the
     // ambient cursor would duplicate its event after an explicit advancing
-    // snapshot. Operator inbox-drain has no separate attention projection and
-    // therefore includes them through readUnackedAttentionRows's default.
+    // snapshot. Operator inbox-drain uses the same direct-only recovery and
+    // excludes tracked broadcasts: their durable ownership stays in
+    // actionable_unread until TAKING/settlement instead of being replayed as events.
     const recovered = readUnackedDirectAttentionRows(ctx, currentName, cursorBase, limit)
     const windowBudget = limit - recovered.length
     // Read the high-water mark BEFORE the window so it can only be

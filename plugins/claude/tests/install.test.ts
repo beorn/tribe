@@ -22,7 +22,6 @@ import {
   doctorReport,
   formatInstallPlan,
   formatUninstallPlan,
-  formatDoctorReport,
   type InstallEnv,
 } from "../../../packages/daemon/src/lib/install.ts"
 import { readTribeConfig } from "../../../packages/daemon/src/lib/autostart-config.ts"
@@ -424,12 +423,21 @@ describe("doctorReport", () => {
     expect(mcp?.level).toBe("warn")
   })
 
-  test("formatDoctorReport prints a readable summary", async () => {
+  test("doctorReport names the default config path without repeating daemon liveness", async () => {
     writeJson(env.claudeSettingsPath, { hooks: {} })
     const report = await doctorReport(env)
-    const text = formatDoctorReport(report)
-    expect(text).toContain("tribe doctor")
-    expect(text).toMatch(/pass|warn|fail/i)
+    expect(report.checks.some((check) => check.name === "daemon")).toBe(false)
+    expect(report.checks.find((check) => check.name === "autostart")).toMatchObject({
+      level: "pass",
+      message: `daemon (default; config=${env.autostartConfigPath})`,
+    })
+  })
+
+  test("doctorReport names invalid autostart config instead of reporting a healthy default", async () => {
+    writeJson(env.autostartConfigPath, { autostart: "not-a-mode" })
+    await expect(doctorReport(env)).rejects.toThrow(env.autostartConfigPath)
+    writeFileSync(env.autostartConfigPath, "{broken json")
+    await expect(doctorReport(env)).rejects.toThrow(env.autostartConfigPath)
   })
 
   test("formatInstallPlan and formatUninstallPlan are string-producing", () => {
@@ -437,7 +445,7 @@ describe("doctorReport", () => {
     expect(formatUninstallPlan(planUninstall(env), true)).toContain("tribe uninstall")
   })
 
-  test("doctorReport checks tribe.sock for daemon autostart", async () => {
+  test("doctorReport reports declared autostart unchanged by a file at the socket path", async () => {
     writeJson(env.autostartConfigPath, { autostart: "daemon" })
     writeJson(env.claudeSettingsPath, { hooks: {} })
     const sock = resolve(root, "test-tribe.sock")
@@ -447,14 +455,14 @@ describe("doctorReport", () => {
       // Socket not created yet
       let report = await doctorReport(env)
       let autostartCheck = report.checks.find((c) => c.name === "autostart")
-      expect(autostartCheck?.message).toBe("daemon (tribe daemon not running — will spawn on next hook)")
+      expect(autostartCheck?.message).toBe(`daemon (config=${env.autostartConfigPath})`)
       expect(autostartCheck?.message).not.toContain("lore")
 
       // Socket exists
       writeFileSync(sock, "")
       report = await doctorReport(env)
       autostartCheck = report.checks.find((c) => c.name === "autostart")
-      expect(autostartCheck?.message).toBe(`daemon (tribe daemon alive at ${sock})`)
+      expect(autostartCheck?.message).toBe(`daemon (config=${env.autostartConfigPath})`)
       expect(autostartCheck?.message).not.toContain("lore")
     } finally {
       if (prevSocket !== undefined) {

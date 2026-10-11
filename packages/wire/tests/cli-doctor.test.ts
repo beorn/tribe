@@ -120,7 +120,9 @@ describe("evaluateDoctor (@km/tribe/20033 daemon staleness probe)", () => {
 describe("deriveDoctorOutcome (worst-of verdict algebra)", () => {
   test.each([
     { checks: ["OK", "OK"], expected: { verdict: "OK", exitCode: 0 } },
-    { checks: ["OK", "WARNING"], expected: { verdict: "FAIL", exitCode: 1 } },
+    { checks: ["OK", "WARNING"], expected: { verdict: "WARNING", exitCode: 3 } },
+    { checks: ["WARNING", "CRITICAL"], expected: { verdict: "FAIL", exitCode: 1 } },
+    { checks: ["WARNING", "UNKNOWN"], expected: { verdict: "UNKNOWN", exitCode: 2 } },
     { checks: ["OK", "CRITICAL"], expected: { verdict: "FAIL", exitCode: 1 } },
     { checks: ["CRITICAL", "UNKNOWN"], expected: { verdict: "UNKNOWN", exitCode: 2 } },
   ] as const)("derives $expected.verdict from $checks", ({ checks, expected }) => {

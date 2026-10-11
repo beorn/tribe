@@ -103,9 +103,87 @@ export type ConnectToDaemonOpts = {
   stallSampleAfterMs?: number
   /** @internal test seam — replace the /proc+WAL collector. */
   stallSample?: () => StallSample | Promise<StallSample>
+  /** @internal test seam — retry cadence for an absent/refused socket. Default 250 ms. */
+  connectRetryIntervalMs?: number
+  /**
+   * Retry ceiling for an absent/refused socket. Default 6000 ms. 0 disables the restart wait, for a caller
+   * that owns its own connect retry.
+   */
+  connectRetryWindowMs?: number
 }
 
-export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts): Promise<DaemonClient> {
+/**
+ * Retry cadence and ceiling for a socket that is ABSENT or REFUSED because the daemon is restarting (28674).
+ *
+ * A wire restart leaves the socket absent for ~2-4 s: the old wire exits, the new one spawns ~2 s later, and it
+ * re-pins the socket ~1.3 s after that (measured over the retained 7 days in decisions.jsonl and the wire spawn
+ * log). Before this, only the INITIAL connect was unretried, so a scheduled job or a seat CLI that connected
+ * inside that window read a healthy restart as `no-daemon` and failed — and for a Tribe-reading job the failure
+ * pages. The window is never longer than the caller's own deadline, so no caller waits more than it asked for.
+ */
+export const CONNECT_RETRY_INTERVAL_MS = 250
+export const CONNECT_RETRY_WINDOW_MS = 6_000
+
+/** Codes that mean "the daemon is not there (yet)" — a restart, not a refusal. Anything else fails at once. */
+function isDaemonAbsent(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === "ENOENT" || code === "ECONNREFUSED"
+}
+
+/**
+ * Connect to the daemon, retrying an ABSENT or REFUSED socket every `CONNECT_RETRY_INTERVAL_MS` until
+ * min(callTimeoutMs, `CONNECT_RETRY_WINDOW_MS`), then surfacing the LAST connect error — which callers read as
+ * `no-daemon` (util.ts withDaemonCall), exactly as before (28674). A socket that is present but never accepts
+ * fails at once with the connect deadline, and so does EACCES, EPERM, and every other error: only "not there
+ * yet" is retried.
+ */
+export async function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts): Promise<DaemonClient> {
+  const callTimeoutMs = opts?.callTimeoutMs ?? 10_000
+  const intervalMs = Math.max(1, opts?.connectRetryIntervalMs ?? CONNECT_RETRY_INTERVAL_MS)
+  const windowMs = Math.max(0, opts?.connectRetryWindowMs ?? CONNECT_RETRY_WINDOW_MS)
+  const startedAt = Date.now()
+  const deadlineAt = startedAt + Math.max(0, callTimeoutMs)
+  const retryUntil = Math.min(deadlineAt, startedAt + windowMs)
+  let attempts = 0
+  let lastAbsentError: Error | undefined
+  for (;;) {
+    // The ceiling is checked AGAIN on the way OUT of the sleep, not only before it. A sleep can wake far later
+    // than it asked (a loaded event loop, a paused process), and an attempt started after that wake is an attempt
+    // started after the caller's deadline: with callTimeoutMs 150 and the retry sleep delayed 25 ms -> 500 ms, the
+    // old loop began a fresh connect at 504 ms and CONNECTED at 512 ms, 362 ms past the budget asked for. A wake
+    // that overran therefore fails with the absent error it already held (@dev/1, 28674 peer review).
+    if (lastAbsentError !== undefined && Date.now() + intervalMs > retryUntil) throw lastAbsentError
+    attempts++
+    try {
+      const client = await connectToDaemonOnce(socketPath, opts, deadlineAt)
+      if (attempts > 1) {
+        log.info?.(
+          `connected to ${socketPath} after ${Date.now() - startedAt} ms and ${attempts} attempts ` +
+            `(the socket was absent or refused, so the connect was retried every ${intervalMs} ms)`,
+        )
+      }
+      return client
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      if (!isDaemonAbsent(err)) throw err
+      lastAbsentError = err
+      const now = Date.now()
+      if (now + intervalMs > retryUntil) {
+        // No log here: the error is already loud (it propagates, and every caller reports it), and a per-caller
+        // warning on a real outage is noise the test harness rightly refuses.
+        throw err
+      }
+      await new Promise<void>((resolveSleep) => setTimeout(resolveSleep, intervalMs))
+    }
+  }
+}
+
+/** One connect attempt. Its deadline is the caller's ABSOLUTE `deadlineAt`, so retries never extend the budget. */
+function connectToDaemonOnce(
+  socketPath: string,
+  opts: ConnectToDaemonOpts | undefined,
+  deadlineAt: number,
+): Promise<DaemonClient> {
   const callTimeoutMs = opts?.callTimeoutMs ?? 10_000
   const stallSampleAfterMs = opts?.stallSampleAfterMs ?? STALL_SAMPLE_AFTER_MS
   return new Promise((resolvePromise, reject) => {
@@ -137,9 +215,14 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
       if (!socket.destroyed) socket.destroy()
       reject(err)
     }
-    const connectTimer = timers.setTimeout(() => {
-      failConnect(new DaemonConnectTimeoutError(socketPath, callTimeoutMs))
-    }, callTimeoutMs)
+    // Bound by the caller's ABSOLUTE deadline, not a fresh callTimeoutMs per attempt, so a retry can never extend
+    // the budget past what was asked for (28674).
+    const connectTimer = timers.setTimeout(
+      () => {
+        failConnect(new DaemonConnectTimeoutError(socketPath, callTimeoutMs))
+      },
+      Math.max(1, deadlineAt - Date.now()),
+    )
     const onConnectError = (err: Error) => {
       failConnect(err)
     }
@@ -217,6 +300,8 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
       })()
       const client: DaemonClient = {
         call(method, params, callOpts) {
+          // Closure retires the managed timers, so a later call cannot arm its deadline (28504).
+          if (ac.signal.aborted || socket.destroyed) return Promise.reject(new Error("Connection closed"))
           return new Promise((res, rej) => {
             const id = nextId++
             const explicitTimeoutMs = callOpts?.timeoutMs
@@ -469,7 +554,12 @@ export async function connectExisting(
   const delayFn = opts?.delayFn ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
-      return await connectFn(socketPath, { callTimeoutMs: opts?.callTimeoutMs })
+      // A ZERO retry window on purpose: this loop IS the connect-retry layer for the spawn path, so the one inside
+      // connectToDaemon (28674) must not multiply under it. Two layers would stack a 6 s wait per attempt onto this
+      // backoff, and ENOENT must stay fast here anyway — no socket file means the caller should spawn, not wait
+      // (the reason this function short-circuits ENOENT below). Direct connectToDaemon callers — the seat CLIs,
+      // seat-await, coordination-watch, tribe-incident and the Tribe-reading jobs — keep the 28674 retry.
+      return await connectFn(socketPath, { callTimeoutMs: opts?.callTimeoutMs, connectRetryWindowMs: 0 })
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException).code
       // No socket file → daemon truly absent; don't burn the retry budget.
@@ -671,14 +761,24 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
   // anonymous pipe, so a consumed/closed launch fd cannot silently strip
   // operator authority after a crash or restart.
   const readOperatorCapability = createOperatorCapabilityReader()
+  let closed = false
+  let registering: DaemonClient | undefined
 
   async function connectAndRegister(): Promise<DaemonClient> {
     const candidate = await connectOrStartWithCapability(socketPath, startOpts, readOperatorCapability)
+    if (closed) {
+      candidate.close()
+      candidate.socket.destroy()
+      return candidate
+    }
+    registering = candidate
     try {
       if (onConnect) await onConnect(candidate)
     } catch (error) {
       candidate.close()
       throw isDeliberateDaemonRefusal(error) ? error : new RegistrationError(error)
+    } finally {
+      if (registering === candidate) registering = undefined
     }
     return candidate
   }
@@ -730,7 +830,6 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
   }
 
   let current = await connectInitialWithRetry()
-  let closed = false
   let reconnectAc: AbortController | null = null
   // Persistent notification handlers — replayed onto each new connection
   const notificationHandlers: Array<(method: string, params?: Record<string, unknown>) => void> = []
@@ -774,12 +873,18 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
           if (closed) return
           try {
             const candidate = await connectAndRegister()
+            if (closed) {
+              candidate.close()
+              candidate.socket.destroy()
+              return
+            }
             current = candidate
             for (const h of notificationHandlers) candidate.onNotification(h)
             setupReconnect()
             onReconnect?.()
             return
           } catch (error) {
+            if (closed) return
             // Reconnects retry EITHER failure kind uniformly (unchanged
             // from before RegistrationError existed) — only the initial
             // connect distinguishes them. Unwrap so the reported error
@@ -809,6 +914,7 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
     get(_, prop) {
       if (prop === "call") {
         return (...args: Parameters<DaemonClient["call"]>) => {
+          if (closed) return Promise.reject(new Error("daemon client closed"))
           // 22994 — after a disconnect, `current` still names the retired
           // client until the bounded reconnect loop installs its successor.
           // Writing a request to that destroyed socket creates a pending call
@@ -826,6 +932,8 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
         return () => {
           closed = true
           reconnectAc?.abort()
+          registering?.close()
+          registering?.socket.destroy()
           current.close()
           current.socket.unref()
         }

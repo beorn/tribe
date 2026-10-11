@@ -8,13 +8,6 @@
 
 import type { IndexProvenance } from "../history/recall-shared.ts"
 
-/**
- * Covers the recall-index timer's 15m cadence plus a 1m rebuild allowance.
- * Timer declaration: tools/hh-cli/hab-projects.ts, rootServiceDefinitions["recall-index"].
- * Revisit this allowance when that cadence changes; slower runs still report stale.
- */
-export const RECALL_STALE_THRESHOLD_DEFAULT = "16m"
-
 /** Parse "5m" / "30s" / "1h" / "500ms" / bare number-as-minutes → ms. */
 export function parseThreshold(s: string): number {
   const m = /^(\d+)\s*(ms|s|m|h)?$/.exec(s.trim())
@@ -42,6 +35,25 @@ export function parseThreshold(s: string): number {
   }
 }
 
+/**
+ * The recall-index timer's cadence. Hab fragments cannot import this module
+ * (config purity); `tools/hh-cli/hab-projects.ts` exports the same string and
+ * `tools/hab-live-config.test.ts` locks the pair, so the reader window cannot
+ * drift onto a second hand-kept number.
+ */
+export const RECALL_INDEX_CADENCE = "1h"
+/** `timeout -k 10 600` on the recall-index command. */
+export const RECALL_INDEX_RUN_TIMEOUT_SEC = 600
+/** Extra window beyond the command timeout so a full-length run still counts as on-cadence. */
+export const RECALL_INDEX_RUN_SLACK = "5m"
+/** Timeout plus slack. Derived: a longer timeout widens the reader window. */
+export const RECALL_INDEX_RUN_ALLOWANCE = `${(RECALL_INDEX_RUN_TIMEOUT_SEC * 1000 + parseThreshold(RECALL_INDEX_RUN_SLACK)) / 60_000}m`
+/**
+ * Cadence plus run time. Derived, not a second literal: a slower cadence
+ * widens the window; a faster one shrinks it.
+ */
+export const RECALL_STALE_THRESHOLD_DEFAULT = `${(parseThreshold(RECALL_INDEX_CADENCE) + parseThreshold(RECALL_INDEX_RUN_ALLOWANCE)) / 60_000}m`
+
 /** Read the env-or-default stale threshold (ms). */
 export function getStaleThresholdMs(): number {
   return parseThreshold(process.env.RECALL_STALE_THRESHOLD ?? RECALL_STALE_THRESHOLD_DEFAULT)
@@ -68,10 +80,14 @@ export interface IndexFreshness {
   provenance: IndexProvenance
 }
 
-/** ms → "45s" / "14m" / "3.0h", for a verdict's own label. */
+/**
+ * ms → "45s" / "62m" / "3.0h", for a verdict's own label. Minutes hold to two hours: the default window is cadence
+ * plus run time (75m at 1h), and in tenths of an hour a 76m-old index against it would read "1.3h old vs 1.3h window",
+ * a stale verdict naming two equal numbers.
+ */
 export function describeMs(ms: number): string {
   if (ms < 60_000) return `${Math.round(ms / 1000)}s`
-  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`
+  if (ms < 7_200_000) return `${Math.round(ms / 60_000)}m`
   return `${(ms / 3_600_000).toFixed(1)}h`
 }
 

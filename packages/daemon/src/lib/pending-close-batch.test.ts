@@ -105,6 +105,30 @@ describe("closing a ball backlog in one call", () => {
 
   const openCount = (): number => (db.prepare("SELECT count(*) AS c FROM pending_request").get() as { c: number }).c
 
+  /**
+   * @failure Supplied incident evidence is silently ignored on another operation.
+   * @level l2
+   * @consumer tribe.pending callers attaching close_evidence (28159).
+   */
+  it.each([{}, { prune: true, stale_ms: 0 }, { close: ["req-a"] }, { close: "req-a" }])(
+    "refuses evidence outside a single incident close: %j",
+    (operation) => {
+      openBall("req-a")
+      const result = handleToolCall(
+        ctx,
+        "tribe.pending",
+        { owner: OWNER, ...operation, close_evidence: "qualified clear" },
+        opts,
+      )
+      const payload = JSON.parse((result as { content: Array<{ text: string }> }).content[0]!.text) as {
+        error?: string
+      }
+      expect(payload.error).toMatch(/evidence/i)
+      expect(openCount()).toBe(1)
+      expect(db.prepare("SELECT count(*) AS c FROM messages WHERE type = 'event.ball.settled'").get()).toEqual({ c: 0 })
+    },
+  )
+
   it("closes many balls in one call", () => {
     for (let i = 0; i < 25; i++) openBall(`req-${i}`)
     const ids = Array.from({ length: 25 }, (_, i) => `req-${i}`)

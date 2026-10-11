@@ -1,7 +1,6 @@
 import { describe, expect, test } from "vitest"
 import {
   createAlertState,
-  checkChiefAbsent,
   defaultThresholds,
   deliverHealthAlert,
   evaluateAlerts,
@@ -31,26 +30,6 @@ describe("health alert delivery", () => {
       kind: "standalone-os",
       unavailable: ["disk.bytes", "disk.inodes"],
     })
-  })
-
-  test("absent chief with actionable unread escalates immediately to a live authority", () => {
-    const state = createAlertState()
-    const check = (chiefOnline: boolean) => checkChiefAbsent({ count: 1, oldestTs: BASE_TIME_MS }, chiefOnline, state)
-
-    expect(check(false)).toMatchObject({
-      type: "chief-absent",
-      severity: "critical",
-      message: expect.stringMatching(/@chief is absent.*live @cto.*user/iu),
-    })
-    expect(check(false)).toBeNull()
-    expect(check(true)).toBeNull()
-    expect(check(false)?.type).toBe("chief-absent")
-  })
-
-  test("online chief inbox staleness is delegated to the generic WATCH fact consumer", () => {
-    const state = createAlertState()
-    expect(checkChiefAbsent({ count: 2, oldestTs: BASE_TIME_MS - 10 * 60_000 }, true, state)).toBeNull()
-    expect(state.firedAlerts.has("chief-silent:warning")).toBe(false)
   })
 
   test("uses one broadcast for fleet alerts and unique direct recipients only for attributable warnings", () => {

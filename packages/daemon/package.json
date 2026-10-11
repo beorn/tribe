@@ -19,7 +19,8 @@
   ],
   "type": "module",
   "exports": {
-    ".": "./src/daemon.ts"
+    ".": "./src/daemon.ts",
+    "./install-diagnostics": "./src/install-diagnostics.ts"
   },
   "dependencies": {
     "@bearly/flock": "^0.1.0",

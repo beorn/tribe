@@ -1,25 +1,64 @@
 /**
- * @failure Periodic and on-demand health paths diverge, managed mode executes
+ * @failure Periodic health paths diverge, managed mode executes
  *          ps, or exact canonical attribution is discarded before delivery.
- * @level   l2
- * @consumer @hab/21960-hab-sysmon S2 routing cutover
+ *          Tribe still pages role absence after ownership moves to WATCH,
+ *          or the retirement accidentally removes bridge checks.
+ * @level   l3
+ * @consumer @hab/21960-hab-sysmon S2 routing cutover; #28277 role-alarm retirement
+ * @testonly none
  */
 
 import { describe, expect, it, vi } from "vitest"
+import type { TribeClientApi } from "./plugin-api.ts"
+import type { SingleFlightRunner } from "./single-flight-ticker.ts"
 import type {
   CanonicalHostScalarObservation,
   CanonicalProcessObservation,
   HealthProcessSource,
 } from "./health-process-source.ts"
 import {
+  healthMonitorPlugin,
   collectFullMetrics,
   createAlertState,
   defaultThresholds,
   evaluateAlerts,
   formatCanonicalHealthAlertForDelivery,
-  getHealthSnapshot,
   ownerForLockHolder,
 } from "./health-monitor-plugin.ts"
+
+const sampler = vi.hoisted(() => ({
+  source: undefined as HealthProcessSource | undefined,
+  runner: undefined as SingleFlightRunner | undefined,
+}))
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>()
+  return {
+    ...actual,
+    existsSync: (path: Parameters<typeof actual.existsSync>[0]) =>
+      sampler.source && String(path).includes(".git") ? false : actual.existsSync(path),
+  }
+})
+
+vi.mock("./health-process-source.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./health-process-source.ts")>()
+  return { ...actual, createHealthProcessSource: () => sampler.source ?? actual.createHealthProcessSource() }
+})
+
+vi.mock("./single-flight-ticker.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./single-flight-ticker.ts")>()
+  return {
+    ...actual,
+    startSingleFlightTicker: (options: Parameters<typeof actual.startSingleFlightTicker>[0]) => {
+      sampler.runner = actual.createSingleFlightRunner(options)
+      return sampler.runner
+    },
+  }
+})
+
+function registeredSampler(): SingleFlightRunner | undefined {
+  return sampler.runner
+}
 
 function observation(kind: "owned" | "unknown" = "owned"): Extract<CanonicalProcessObservation, { kind: "available" }> {
   return {
@@ -120,6 +159,71 @@ function stubPeripheralCommands() {
 }
 
 describe("health monitor managed process source", () => {
+  it("leaves role-absence paging to WATCH without removing the third-sample bridge check (#28277)", async () => {
+    // The imported ticker boundary controls cadence; its production runner still
+    // invokes the actual plugin-start callback and records completed samples.
+    vi.useFakeTimers()
+    vi.stubEnv("TRIBE_BRIDGE_LOST_OWNERS", "@chief,@cto")
+    vi.stubEnv("TRIBE_BRIDGE_LOST_GRACE_SEC", "180")
+    vi.stubEnv("HEALTH_REAPER_ENABLED", "0")
+    const source = managed({ ...observation(), processes: [] })
+    sampler.source = source
+    sampler.runner = undefined
+    const broadcast = vi.fn()
+    const getActiveSessions = vi.fn(() => [{ name: "@cto", pid: 42, role: "member" }])
+    const getSeatTransportFacts = vi.fn(() => ({
+      missing: [],
+      connected: new Set(["@cto"]),
+      exited: new Map(),
+      unreachable: new Map(),
+    }))
+    const api = {
+      broadcast,
+      send: vi.fn(),
+      getActiveSessions,
+      getUnreadDms: vi.fn(() => ({ count: 20, oldestTs: Date.now() - 33_000 })),
+      getSeatTransportFacts,
+      listOpenIncidents: vi.fn(() => []),
+      getExpectedMemberCount: () => 2,
+    } as unknown as TribeClientApi
+    // No lock walk or real subprocess can mutate the test runner's checkout.
+    vi.spyOn(Bun, "spawn").mockImplementation((argv) => {
+      if (!Array.isArray(argv) || argv.join(" ") !== "git worktree list") {
+        throw new Error(`Unexpected sampler subprocess: ${JSON.stringify(argv)}`)
+      }
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Response("/fixture branch\n").body,
+        stderr: new Response("").body,
+      } as unknown as ReturnType<typeof Bun.spawn>
+    })
+    let stop: (() => void) | undefined
+    try {
+      stop = healthMonitorPlugin.start(api) as () => void
+      const runner = registeredSampler()
+      expect(runner).toBeDefined()
+      if (!runner) throw new Error("health plugin did not register its sample callback")
+      for (let sample = 1; sample <= 3; sample++) {
+        runner.tick()
+        await runner.settled()
+        expect(runner.stats()).toMatchObject({ started: sample, completed: sample, failed: 0 })
+        expect(getActiveSessions).toHaveBeenCalledTimes(sample)
+        expect(getSeatTransportFacts).toHaveBeenCalledTimes(sample === 3 ? 1 : 0)
+      }
+      if (source.kind !== "managed") throw new Error("fixture must use canonical managed reads")
+      expect(source.read).toHaveBeenCalledTimes(3)
+      expect(source.readScalars).toHaveBeenCalledTimes(3)
+      expect(broadcast.mock.calls.filter(([, type]) => type === "health:chief-absent:critical")).toEqual([])
+    } finally {
+      stop?.()
+      sampler.source = undefined
+      sampler.runner = undefined
+      vi.restoreAllMocks()
+      vi.unstubAllEnvs()
+      vi.useRealTimers()
+    }
+  })
+
   it("maps canonical host scalars and never invokes standalone OS acquisition", async () => {
     const spawn = stubPeripheralCommands()
     const osSampler = vi.fn(() => {
@@ -305,7 +409,7 @@ describe("health monitor managed process source", () => {
     spawn.mockRestore()
   })
 
-  it("keeps managed unavailability explicit in periodic and on-demand snapshots without ps fallback", async () => {
+  it("keeps managed unavailability explicit in the periodic snapshot without ps fallback", async () => {
     const unavailable: CanonicalProcessObservation = {
       diagnostic: {
         detail: "journal unreadable",
@@ -321,14 +425,12 @@ describe("health monitor managed process source", () => {
     const spawn = stubPeripheralCommands()
 
     const periodic = await collectFullMetrics(source)
-    const onDemand = await getHealthSnapshot(source)
 
     expect(periodic.metrics.processObservation).toMatchObject({
       diagnostic: unavailable.diagnostic,
       kind: "canonical-unavailable",
       reason: "journal-diagnostic",
     })
-    expect(onDemand.processObservation).toEqual(periodic.metrics.processObservation)
     expect(periodic.metrics.cpu.topProcesses).toEqual([])
     expect(spawn.mock.calls.some(([argv]) => Array.isArray(argv) && argv[0] === "ps")).toBe(false)
     spawn.mockRestore()

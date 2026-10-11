@@ -8,7 +8,9 @@
 import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
-import { extractSessionContent } from "./extract"
+import { createHash } from "crypto"
+import { atomicWriteFileSync } from "@bearly/durable-file"
+import { extractSessionContent, scanSessionTranscript, type ScanDiagnostics } from "./extract"
 import { loadLlm, resolveAvailableCheapModel } from "./llm-backend.ts"
 
 // ============================================================================
@@ -56,6 +58,28 @@ Lesson: Short deterministic delays can stabilize race-prone UI init more reliabl
 
 const MIN_CONTENT_LENGTH = 100
 
+/**
+ * The counts-only diagnostic tail for one session (27702 plan §5): the per-session counts plus the
+ * affected input, so a first reason cannot hide the other skip causes. It rides the existing verbose
+ * log channel — no new report field or ledger.
+ */
+function diagnosticsLine(d: ScanDiagnostics): string {
+  const fields = [
+    `records=${d.records}`,
+    `sampled=${d.sampled}`,
+    `malformed=${d.malformed}`,
+    `oversized=${d.oversized}`,
+    `unsupported=${d.unsupported}`,
+    `rendered=${d.rendered}`,
+    `source=${d.source}`,
+  ]
+  if (d.oversizedSample) {
+    const s = d.oversizedSample
+    fields.push(`oversized@line=${s.physicalLine} bytes=${s.bytes} limit=${s.limit}`)
+  }
+  return fields.join(" ")
+}
+
 // ============================================================================
 // Cache
 // ============================================================================
@@ -66,25 +90,29 @@ function getCacheDir(): string {
   return path.join(os.homedir(), ".claude", "projects", encodedPath, "memory", "session-summaries")
 }
 
-function getCachePath(shortId: string): string {
-  return path.join(getCacheDir(), `${shortId}.md`)
+// The cache file for one session. The key is a digest of the FULL session id: keying on its first
+// 8 characters collapsed every Codex session (all sharing the "codex:01" prefix) onto a single
+// file, so one session's summary was served for another (28490). The digest is also a portable
+// filename where the id is not — ids carry ':' (codex:<uuid>).
+export function getSessionSummaryCachePath(sessionId: string): string {
+  const key = createHash("sha256").update(sessionId).digest("hex").slice(0, 32)
+  return path.join(getCacheDir(), `${key}.md`)
 }
 
 export function getSessionSummaryCache(sessionId: string): string | null {
-  const shortId = sessionId.slice(0, 8)
-  const cachePath = getCachePath(shortId)
   try {
-    return fs.readFileSync(cachePath, "utf8")
+    return fs.readFileSync(getSessionSummaryCachePath(sessionId), "utf8")
   } catch {
     // silent-fallback-allow: absent summary cache falls through to live summarization.
     return null
   }
 }
 
-function writeCache(shortId: string, content: string): void {
+function writeCache(sessionId: string, content: string): void {
   const cacheDir = getCacheDir()
   fs.mkdirSync(cacheDir, { recursive: true })
-  fs.writeFileSync(getCachePath(shortId), content)
+  // 27702: publish the summary atomically — a concurrent reader must never see a prefix.
+  atomicWriteFileSync(getSessionSummaryCachePath(sessionId), content)
 }
 
 // ============================================================================
@@ -97,14 +125,22 @@ export async function summarizeSession(
 ): Promise<SessionSummary> {
   const log = opts?.verbose ? (msg: string) => console.error(`[summarize-session] ${msg}`) : () => {}
 
-  // Extract content first (needed for metadata even if cached)
-  const extract = extractSessionContent(sessionId, {
+  // Cheap admission first: a cached summary needs no LLM backend, and the
+  // bounded metadata scan below is the only transcript I/O it pays.
+  const cached = getSessionSummaryCache(sessionId)
+
+  // Bounded metadata-only scan (two streaming passes): classification, identity
+  // and the named reason, before ANY content is constructed. A transcript that
+  // changes mid-read is a named skip, not a silent mix of two versions.
+  const scan = scanSessionTranscript(sessionId, {
     title: opts?.title,
     createdAt: opts?.createdAt,
+    mode: "metadata",
   })
 
-  if (!extract) {
-    log(`${sessionId.slice(0, 8)}: no content extracted`)
+  if (!scan) {
+    // 27702 plan §2: name the unavailable path. A missing row or transcript is not "changed-input".
+    log(`${sessionId.slice(0, 8)}: unavailable-path (no readable transcript)`)
     return {
       id: sessionId,
       shortId: sessionId.slice(0, 8),
@@ -113,61 +149,66 @@ export async function summarizeSession(
       isSubAgent: false,
       summary: null,
       cached: false,
+      reason: "unavailable-path",
     }
   }
 
-  // Check cache (sessions are immutable after ending)
-  const cached = getSessionSummaryCache(sessionId)
+  // Counts for the cheap metadata pass, so the content pass below is not the only evidence.
+  log(`${scan.shortId}: metadata scan — ${diagnosticsLine(scan.diagnostics)}`)
+
+  // Cache hit: return the cached summary with the scan's real classification,
+  // and never load the backend (27702 §3).
   if (cached) {
-    log(`${extract.shortId}: cached`)
+    log(`${scan.shortId}: cached — ${diagnosticsLine(scan.diagnostics)}`)
     return {
-      id: extract.id,
-      shortId: extract.shortId,
-      title: extract.title,
-      time: extract.time,
-      isSubAgent: extract.isSubAgent,
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
+      isSubAgent: scan.isSubAgent,
       summary: cached,
       cached: true,
     }
   }
 
-  // Skip sub-agent sessions
-  if (extract.isSubAgent) {
-    log(`${extract.shortId}: sub-agent, skipping`)
+  if (scan.reason) {
+    log(`${scan.shortId}: ${scan.reason} — ${diagnosticsLine(scan.diagnostics)}`)
     return {
-      id: extract.id,
-      shortId: extract.shortId,
-      title: extract.title,
-      time: extract.time,
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
+      isSubAgent: scan.isSubAgent,
+      summary: null,
+      cached: false,
+      reason: scan.reason,
+    }
+  }
+
+  // Skip sub-agent sessions
+  if (scan.isSubAgent) {
+    log(`${scan.shortId}: sub-agent, skipping — ${diagnosticsLine(scan.diagnostics)}`)
+    return {
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
       isSubAgent: true,
       summary: null,
       cached: false,
     }
   }
 
-  // Skip content that's too short
-  if (extract.content.length < MIN_CONTENT_LENGTH) {
-    log(`${extract.shortId}: content too short (${extract.content.length} chars)`)
-    return {
-      id: extract.id,
-      shortId: extract.shortId,
-      title: extract.title,
-      time: extract.time,
-      isSubAgent: false,
-      summary: null,
-      cached: false,
-    }
-  }
-
-  // Check LLM availability
+  // Check LLM availability BEFORE constructing content: an unsummarisable
+  // session must not pay for the content string (27702 §3).
   const resolution = resolveAvailableCheapModel(await loadLlm())
   if (!resolution.model) {
-    log(`${extract.shortId}: ${resolution.failure}`)
+    log(`${scan.shortId}: ${resolution.failure} — ${diagnosticsLine(scan.diagnostics)}`)
     return {
-      id: extract.id,
-      shortId: extract.shortId,
-      title: extract.title,
-      time: extract.time,
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
       isSubAgent: false,
       summary: null,
       cached: false,
@@ -177,13 +218,66 @@ export async function summarizeSession(
   const model = resolution.model
   const llm = resolution.backend
 
+  // Cheap admission passed: now pay for the bounded content pass (a second
+  // streaming pair) and build the summary input from it.
+  const contentScan = scanSessionTranscript(sessionId, {
+    title: opts?.title,
+    createdAt: opts?.createdAt,
+    mode: "content",
+  })
+  if (!contentScan || contentScan.reason) {
+    // An absent content scan is a READ FAILURE, not proof the transcript changed (27702 plan §2):
+    // "changed-input" is reserved for a scan that actually observed a different identity.
+    const reason = contentScan ? contentScan.reason : "read-failure"
+    log(`${scan.shortId}: ${reason} — ${diagnosticsLine(contentScan?.diagnostics ?? scan.diagnostics)}`)
+    return {
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
+      isSubAgent: contentScan?.isSubAgent ?? false,
+      summary: null,
+      cached: false,
+      reason,
+    }
+  }
+  const extract = extractSessionContent(contentScan)
+  if (!extract) {
+    log(`${scan.shortId}: no content extracted — ${diagnosticsLine(contentScan.diagnostics)}`)
+    return {
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
+      isSubAgent: false,
+      summary: null,
+      cached: false,
+    }
+  }
+
+  // Skip content that's too short
+  if (extract.content.length < MIN_CONTENT_LENGTH) {
+    log(
+      `${scan.shortId}: content too short (${extract.content.length} chars) — ${diagnosticsLine(contentScan.diagnostics)}`,
+    )
+    return {
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
+      isSubAgent: false,
+      summary: null,
+      cached: false,
+    }
+  }
+
   // Build context for LLM
   let context = extract.content
   if (context.length > 30000) {
     context = context.slice(0, 30000) + "\n\n[...truncated]"
   }
 
-  log(`${extract.shortId}: sending to LLM (${context.length} chars)`)
+  log(`${scan.shortId}: sending to LLM (${context.length} chars) — ${diagnosticsLine(contentScan.diagnostics)}`)
   const startTime = Date.now()
 
   const result = await llm.queryModel({
@@ -193,16 +287,16 @@ export async function summarizeSession(
   })
 
   const summary = result.response.content
-  log(`${extract.shortId}: LLM responded in ${Date.now() - startTime}ms`)
+  log(`${scan.shortId}: LLM responded in ${Date.now() - startTime}ms`)
 
   // Handle empty / NONE responses
   if (!summary || /^NONE$/im.test(summary.trim())) {
-    log(`${extract.shortId}: nothing noteworthy`)
+    log(`${scan.shortId}: nothing noteworthy`)
     return {
-      id: extract.id,
-      shortId: extract.shortId,
-      title: extract.title,
-      time: extract.time,
+      id: scan.id,
+      shortId: scan.shortId,
+      title: scan.title,
+      time: scan.time,
       isSubAgent: false,
       summary: null,
       cached: false,
@@ -210,14 +304,14 @@ export async function summarizeSession(
   }
 
   // Cache the result
-  writeCache(extract.shortId, summary)
-  log(`${extract.shortId}: cached summary`)
+  writeCache(scan.id, summary)
+  log(`${scan.shortId}: cached summary`)
 
   return {
-    id: extract.id,
-    shortId: extract.shortId,
-    title: extract.title,
-    time: extract.time,
+    id: scan.id,
+    shortId: scan.shortId,
+    title: scan.title,
+    time: scan.time,
     isSubAgent: false,
     summary,
     cached: false,

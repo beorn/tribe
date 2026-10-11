@@ -131,6 +131,65 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
     expect(harness.messageSender(sent.id)).toBe(client.name)
   })
 
+  it("a pending notify without idToken keeps pre-sessionless session_id and sender_authority (#28294)", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+
+    const sent = parseResult<{ structuredContent: SendResult }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "pending-notify-no-token",
+          method: "tribe.send",
+          params: {
+            to: "@agent/7",
+            message: "legacy pending notify",
+            type: "notify",
+            summary: "legacy pending notify",
+          },
+        },
+        client.connId,
+      ),
+    ).structuredContent
+
+    expect(sent.sent).toBe(true)
+    const row = harness.messageProvenance(sent.id)
+    expect(row).toEqual({
+      sender: client.name,
+      sender_authority: "claimed",
+      session_id: client.sessionId,
+    })
+    expect(row?.session_id).not.toMatch(/@/u)
+  })
+
+  it("an unidentified pending socket may still send type verdict without a token (#28294 doctor canary)", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+
+    const sent = parseResult<{ structuredContent: SendResult }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "pending-verdict",
+          method: "tribe.send",
+          params: {
+            to: `pending-${client.connId}`,
+            message: "tribe doctor coordination-rail canary",
+            type: "verdict",
+            delivery: "pull",
+            summary: "doctor rail canary",
+          },
+        },
+        client.connId,
+      ),
+    ).structuredContent
+
+    expect(sent.sent).toBe(true)
+    expect(harness.messageSender(sent.id)).toBe(client.name)
+  })
+
   it("26899: an unidentified socket still pulls the andon cord; cli_alarm_get records pending-<connId> as by", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
@@ -2837,18 +2896,36 @@ function createDispatcherHarness(
     healthLogs() {
       return [...healthLogs]
     },
-    connectClient(): { connId: string; name: string; socket: TestSocket } {
+    connectClient(): { connId: string; name: string; socket: TestSocket; sessionId: string } {
       const socket = createTestSocket()
       daemon.dispatcher.handleConnection(socket)
       const connId = socketToClient.get(socket)
       if (!connId) throw new Error("dispatcher did not register the connected socket")
-      const name = clients.get(connId)?.name
+      const registered = clients.get(connId)
+      const name = registered?.name
+      const sessionId = registered?.ctx.sessionId
       if (!name) throw new Error("dispatcher did not name the connected socket")
-      return { connId, name, socket }
+      if (typeof sessionId !== "string" || sessionId.length === 0) {
+        throw new Error("dispatcher did not assign a session id to the connected socket")
+      }
+      return { connId, name, socket, sessionId }
     },
     messageSender(id: string): string | null {
       const row = db.prepare("SELECT sender FROM messages WHERE id = ?").get(id) as { sender: string } | null
       return row?.sender ?? null
+    },
+    messageProvenance(id: string): {
+      sender: string
+      sender_authority: string | null
+      session_id: string | null
+    } | null {
+      return (
+        (db.prepare("SELECT sender, sender_authority, session_id FROM messages WHERE id = ?").get(id) as {
+          sender: string
+          sender_authority: string | null
+          session_id: string | null
+        } | null) ?? null
+      )
     },
     sessionAnnouncements(name: string): string[] {
       const rows = db

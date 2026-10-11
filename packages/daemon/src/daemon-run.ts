@@ -1,6 +1,6 @@
 /**
  * The tribe daemon's boot, run by daemon.ts's main (hh #26691): it reads process.argv at module scope and dispatches
- * the hook/install/uninstall/doctor verbs or boots the daemon. Importing this module runs it; import daemon.ts instead.
+ * the hook/install/uninstall verbs or boots the daemon. Importing this module runs it; import daemon.ts instead.
  *
  * The boot sequence reads top-down through the pipe(...) call below — that IS
  * the architecture. Each `withX` factory adds one capability to the daemon
@@ -83,21 +83,15 @@ if (process.argv[2] === "hook") {
 }
 
 // ---------------------------------------------------------------------------
-// `daemon.ts install|uninstall|doctor` — Claude Code setup automation. Wires
+// `daemon.ts install|uninstall` — Claude Code setup automation. Wires
 // the hooks `daemon.ts hook <event>` command into `~/.claude/settings.json`,
 // the `tribe` MCP server into the project's `.mcp.json`, and the autostart
 // mode file — see lib/install.ts for the plan/apply/doctor split (pure plan,
 // then a separate write step so `--dry-run` is trivial). Same shape as the
 // `hook` block above: dispatch and exit before the daemon pipe boots.
 //
-// This is a distinct diagnostic from `tribe-wire doctor` (which checks
-// whether a RUNNING daemon's code is stale vs on-disk/pin). `doctor` here
-// checks whether the Claude Code integration (hooks, MCP entry, autostart
-// config) is wired up correctly — a different question, answered by
-// lib/install.ts's doctorReport, that nothing else in this repo answers.
-// ---------------------------------------------------------------------------
-
-if (process.argv[2] === "install" || process.argv[2] === "uninstall" || process.argv[2] === "doctor") {
+// Doctor diagnostics compose through the Wire CLI; daemon.ts rejects its retired spelling.
+if (process.argv[2] === "install" || process.argv[2] === "uninstall") {
   const sub = process.argv[2]
   const { values: installArgs } = parseArgs({
     args: process.argv.slice(3),
@@ -116,8 +110,6 @@ if (process.argv[2] === "install" || process.argv[2] === "uninstall" || process.
     planUninstall,
     applyUninstall,
     formatUninstallPlan,
-    doctorReport,
-    formatDoctorReport,
   } = await import("./lib/install.ts")
   const { VALID_AUTOSTART_MODES } = await import("./lib/autostart-config.ts")
 
@@ -147,13 +139,6 @@ if (process.argv[2] === "install" || process.argv[2] === "uninstall" || process.
     await drainOutput()
     process.exit(0)
   }
-
-  // doctor — read-only, exits non-zero when any check fails (loud by design;
-  // scriptable in CI/health checks without parsing stdout).
-  const report = await doctorReport(env)
-  console.log(formatDoctorReport(report))
-  await drainOutput()
-  process.exit(report.hasFailures ? 1 : 0)
 }
 
 sanitizeDaemonProcessEnvironment(process.env)

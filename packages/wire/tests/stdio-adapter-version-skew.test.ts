@@ -84,9 +84,12 @@ function spawnGenerationDaemon(
   setCert(cert: string | null): void
   setProtocolVersion(version: number | null): void
   holdNextMethod(method: string): void
+  /** Answer later registrations after `ms`: the daemon has recorded the registration, the client has not yet swapped. */
+  delayRegistrationReply(ms: number): void
 }> {
   const clients: Socket[] = []
   const registrations: number[] = []
+  let registrationReplyDelayMs = 0
   const receivedMethods: string[] = []
   const heldOnce = new Set<string>()
   let daemonPid = 1001
@@ -105,16 +108,16 @@ function spawnGenerationDaemon(
         if (heldOnce.delete(msg.method)) return
         if (msg.method === "register") {
           registrations.push(daemonPid)
-          socket.write(
-            makeResponse(msg.id, {
-              sessionId: `generation-${daemonPid}`,
-              name: "generation-test",
-              role: "member",
-              chief: "",
-              protocolVersion: TRIBE_PROTOCOL_VERSION,
-              daemon: { pid: daemonPid, uptime: 0 },
-            }),
-          )
+          const reply = makeResponse(msg.id, {
+            sessionId: `generation-${daemonPid}`,
+            name: "generation-test",
+            role: "member",
+            chief: "",
+            protocolVersion: TRIBE_PROTOCOL_VERSION,
+            daemon: { pid: daemonPid, uptime: 0 },
+          })
+          if (registrationReplyDelayMs > 0) setTimeout(() => socket.write(reply), registrationReplyDelayMs)
+          else socket.write(reply)
           return
         }
         if (msg.method === "tribe.members") {
@@ -198,6 +201,9 @@ function spawnGenerationDaemon(
         },
         holdNextMethod(method: string) {
           heldOnce.add(method)
+        },
+        delayRegistrationReply(ms: number) {
+          registrationReplyDelayMs = ms
         },
       }),
     )
@@ -390,6 +396,43 @@ function spawnClampDaemon(socketPath: string): Promise<{
     })
     server.listen(socketPath, () => resolveServer({ server, clients, registrations }))
   })
+}
+
+/**
+ * Fetch over the re-established bridge until it delivers the new generation's message, within `timeoutMs`.
+ * The daemon records a re-registration before the client installs that connection, and in between the adapter
+ * answers a call "daemon connection closed; reconnecting" so the caller retries (22994). Only that answer is retried;
+ * any other error fails the row (25945, tribe CI runs 37890954491 and 37970288448).
+ */
+async function fetchAfterRecovery(
+  child: ChildProcessWithoutNullStreams,
+  read: () => string,
+  firstId: number,
+  timeoutMs: number,
+): Promise<number> {
+  const deadline = Date.now() + timeoutMs
+  for (let id = firstId; Date.now() < deadline; id++) {
+    child.stdin.write(
+      JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "fetch", arguments: {} } }) + "\n",
+    )
+    let answer: { result?: { isError?: boolean } } | undefined
+    while (answer === undefined && Date.now() < deadline) {
+      answer = read()
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as { id?: number; result?: { isError?: boolean } })
+        .find((response) => response.id === id)
+      if (answer === undefined) await new Promise((r) => setTimeout(r, 25))
+    }
+    if (answer === undefined) break
+    const text = JSON.stringify(answer)
+    if (answer.result?.isError !== true && text.includes("after-change")) return id - firstId
+    if (answer.result?.isError !== true || !text.includes("daemon connection closed; reconnecting")) {
+      throw new Error(`the post-change fetch failed with something other than the reconnect state: ${text}`)
+    }
+    await new Promise((r) => setTimeout(r, 25))
+  }
+  throw new Error(`timed out waiting for the post-change fetch result; output: ${read().slice(-1_000)}`)
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 5_000, label = "condition"): Promise<void> {
@@ -826,15 +869,7 @@ describe("stdio adapter — protocol version skew", () => {
     expect(log.match(/Registered as generation-test/gu)?.length ?? 0).toBeGreaterThanOrEqual(2)
 
     // It still delivers after the change: a fetch over the same bridge returns the new generation's message.
-    child.stdin.write(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "tools/call",
-        params: { name: "fetch", arguments: {} },
-      }) + "\n",
-    )
-    await waitFor(() => output.includes("after-change"), 10_000, "the post-change fetch result")
+    await fetchAfterRecovery(child, () => output, 1, 10_000)
     expect(child.exitCode).toBeNull()
   }, 60_000)
 
@@ -890,7 +925,9 @@ describe("stdio adapter — protocol version skew", () => {
       "the in-flight fetch reaching the daemon",
     )
 
-    // The generation changes while that request is still unanswered.
+    // The generation changes while that request is still unanswered. Its re-registration is answered 1 s late, so the
+    // recovery check always meets the window in which the adapter still says "reconnecting" (25945).
+    generationDaemon.delayRegistrationReply(1_000)
     generationDaemon.setPid(2002)
     for (const socket of generationDaemon.clients.splice(0)) socket.destroy()
 
@@ -915,15 +952,9 @@ describe("stdio adapter — protocol version skew", () => {
       "re-registration after the mid-request change",
       logPath,
     )
-    child.stdin.write(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        id: 12,
-        method: "tools/call",
-        params: { name: "fetch", arguments: {} },
-      }) + "\n",
-    )
-    await waitFor(() => output.includes("after-change"), 10_000, "the post-change fetch result")
+    const retries = await fetchAfterRecovery(child, () => output, 12, 10_000)
+    // The 1 s reply hold puts the first fetch inside the swap window: it is answered "reconnecting", never lost.
+    expect(retries).toBeGreaterThanOrEqual(1)
     expect(child.exitCode).toBeNull()
   }, 60_000)
 })

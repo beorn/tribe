@@ -808,10 +808,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         delivery: "pull",
       })
 
-      const ambientCases = [
-        { type: "notify", content: "notification-only diet row" },
-        { type: "github:push", content: "github ambient diet row" },
-      ]
+      const ambientCases = [{ type: "notify", content: "notification-only diet row" }]
       for (const ambientCase of ambientCases) {
         const sent = (await sender.call("tribe.send", {
           to: observerName,
@@ -821,6 +818,24 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         })) as { structuredContent?: Record<string, unknown> }
         expect(sent.structuredContent).toMatchObject({ sent: true })
       }
+
+      // 28200: a member can no longer forge a topic-shaped type through
+      // tribe.send. The daemon's open vocabulary belongs to its PRODUCERS —
+      // github-plugin calls api.broadcast → sendMessage(daemonCtx, "*", …) —
+      // not to a member's tool call, which the daemon now refuses.
+      const forged = (await sender.call("tribe.send", {
+        to: observerName,
+        message: "forged github row",
+        type: "github:push",
+        summary: "forged github row",
+      })) as { structuredContent?: Record<string, unknown> }
+      expect(forged.structuredContent?.error).toBe(
+        "tribe.send: invalid type 'github:push' - expected one of: assign, status, query, response, notify, request, verdict",
+      )
+      expect(
+        channelNotifications(observer.stdout).some((line) => JSON.stringify(line).includes("forged github row")),
+        "a refused send must not reach the observer",
+      ).toBe(false)
       const afterAmbient = sessionDeliveryOffsets(dbPath, observerName)
       expect(afterAmbient).toEqual(beforeAmbient)
       for (const ambientCase of ambientCases) {
@@ -1267,6 +1282,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(attributed.sender).toBe("@chief")
   }, 120_000)
 
+  /**
+   * @failure CLI evidence is discarded between parsing and authenticated close RPC (28159).
+   * @level l4
+   * @consumer Managed seats using pending --close --evidence.
+   */
   it("authenticates managed CLI pending reads and closes through the launch's identity token", async () => {
     const socketPath = join(tmpDir, "managed-cli-pending-close.sock")
     const dbPath = join(tmpDir, "managed-cli-pending-close.db")
@@ -1493,6 +1513,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       expect(invalidFilter.structuredContent).not.toHaveProperty("count")
 
       for (const [field, value, message] of [
+        ["close_evidence", "qualified clear", "Authenticated pending read does not accept close evidence"],
         ["expired", "yes", "Authenticated pending read filter 'expired' must be boolean"],
         ["owed", 1, "Authenticated pending read filter 'owed' must be boolean"],
         ["stale_ms", -1, "Authenticated pending read filter 'stale_ms' must be a finite non-negative number"],
@@ -1600,6 +1621,56 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     } finally {
       db.close()
     }
+
+    // Same boot, distinct transport contract: exact evidence crosses the CLI
+    // descriptor and token-derived close RPC into the durable settlement.
+    const incident = { emitter: sender, subject: "service-evidence", condition: "red" }
+    const incidentId = sender + ":service-evidence:red"
+    const evidence = "  nightly run-42; descendant head abc123; no matching red bucket\nattested  "
+    const raised = (await callLaunchToolWhenRegistered(senderAdapter, 90, "send", {
+      to: owner,
+      message: "red observed",
+      type: "notify",
+      summary: "red observed",
+      incident,
+    })) as { sent?: boolean }
+    expect(raised.sent).toBe(true)
+    const evidenceProbe = await connectToDaemon(socketPath)
+    try {
+      for (const filter of [{ emitter: sender }, { owed: true }]) {
+        await expect(
+          evidenceProbe.call("cli_session_pending_close_v1", {
+            idToken: ownerToken,
+            owner,
+            close: incidentId,
+            close_evidence: evidence,
+            ...filter,
+          }),
+        ).rejects.toThrow(/read filter/i)
+        const retained = await runCli(["pending", "--owner", owner, "--json"], cliEnv, {
+          idToken: ownerToken,
+          throughParent: true,
+        })
+        expect(retained.exitCode, retained.stderr).toBe(0)
+        const retainedSnapshot = JSON.parse(retained.stdout) as { pending: Array<{ request_id: string }> }
+        expect(retainedSnapshot.pending).toEqual(
+          expect.arrayContaining([expect.objectContaining({ request_id: incidentId })]),
+        )
+        expect(settlementFacts(dbPath).filter((fact) => fact.request_id === incidentId)).toEqual([])
+      }
+    } finally {
+      evidenceProbe.close()
+    }
+    const incidentClose = await runCli(
+      ["pending", "--owner", owner, "--close", incidentId, "--evidence", evidence, "--json"],
+      cliEnv,
+      { idToken: ownerToken, throughParent: true },
+    )
+    expect(incidentClose.exitCode, incidentClose.stderr).toBe(0)
+    expect(JSON.parse(incidentClose.stdout)).toMatchObject({ owner, request_id: incidentId, closed: 1 })
+    expect(settlementFacts(dbPath).filter((fact) => fact.request_id === incidentId)).toEqual([
+      expect.objectContaining({ settlement: "manual-close", settled_by: owner, close_evidence: evidence, sender }),
+    ])
   }, 120_000)
 
   it("routes attributed CLI replies from two personas sharing one provider launch", async () => {

@@ -1,6 +1,7 @@
 /** Read and inspect verbs for the canonical `tribe-wire` CLI. */
 
 import { readFileSync } from "node:fs"
+import { inspect } from "node:util"
 import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
 import {
@@ -23,6 +24,7 @@ import {
   isSupportedProtocolVersion,
   TRIBE_PROTOCOL_VERSION,
   TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
+  type ConnectToDaemonOpts,
   type DaemonClient,
 } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
@@ -110,21 +112,30 @@ function invalidAuthenticatedPendingSnapshot(
 // Daemon connection
 // ---------------------------------------------------------------------------
 
-async function callDaemon(method: string, params?: Record<string, unknown>): Promise<unknown> {
-  return withCliDaemonClient(async (client) => {
-    try {
-      return await client.call(method, params)
-    } catch (error) {
-      const code = (error as { code?: string | number }).code
-      if (code === -32601 && method.endsWith("_by_launch_v1")) {
-        throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
+async function callDaemon(
+  method: string,
+  params?: Record<string, unknown>,
+  missingDaemon: "exit" | "throw" = "exit",
+  connectOpts?: ConnectToDaemonOpts,
+): Promise<unknown> {
+  return withCliDaemonClient(
+    async (client) => {
+      try {
+        return await client.call(method, params)
+      } catch (error) {
+        const code = (error as { code?: string | number }).code
+        if (code === -32601 && method.endsWith("_by_launch_v1")) {
+          throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
+        }
+        if (code === -32601 && method === "cli_session_pending_read_v1") {
+          throw new Error(STALE_MANAGED_PENDING_DAEMON_ERROR)
+        }
+        throw error
       }
-      if (code === -32601 && method === "cli_session_pending_read_v1") {
-        throw new Error(STALE_MANAGED_PENDING_DAEMON_ERROR)
-      }
-      throw error
-    }
-  })
+    },
+    missingDaemon,
+    connectOpts,
+  )
 }
 
 function cliInboxTargetParams(verb: string, session: string | undefined): Record<string, unknown> {
@@ -480,16 +491,21 @@ async function cmdFetch(opts: {
   if (opts.with !== undefined) params.with = opts.with
   if (opts.from !== undefined) params.from = opts.from
   if (opts.to !== undefined) params.to = opts.to
-  // At least one snapshot selector; `--limit` only bounds a window, so it does
-  // not count. A selector-less call is refused HERE and in the daemon RPC's own
-  // contract, and the refusal names the verb that owns the live read.
+  // At least one EFFECTIVE snapshot selector; `--limit` only bounds a window,
+  // so it does not count, and neither does an explicitly empty value: `--topics
+  // ""` parses to `[]`, and `--with ""` stays `""`, both of which select
+  // nothing. Reading one of those as a selector let the daemon fall through to
+  // the acknowledging default drain, marking rows read that no model saw (the
+  // 21757 hazard, 28402). A selector-less or empty-only call is refused HERE and
+  // again by the daemon RPC's own contract, and the refusal names the verb that
+  // owns the live read.
   const hasSelector =
-    ids !== undefined ||
-    topics !== undefined ||
+    (ids?.length ?? 0) > 0 ||
+    (topics?.length ?? 0) > 0 ||
     opts.since !== undefined ||
-    opts.with !== undefined ||
-    opts.from !== undefined ||
-    opts.to !== undefined
+    (opts.with?.length ?? 0) > 0 ||
+    (opts.from?.length ?? 0) > 0 ||
+    (opts.to?.length ?? 0) > 0
   if (!hasSelector) {
     console.error(
       "tribe fetch: snapshot lookups require at least one selector (--ids, --topics, --since, --with, --from, --to). " +
@@ -746,6 +762,7 @@ async function cmdPending(
   staleMs: number | undefined,
   close: string | undefined,
   emitter?: string,
+  evidence?: string,
 ): Promise<void> {
   if (emitter !== undefined) {
     const outcome = await tribeDaemonCalls(`tribe pending emitter ${JSON.stringify(emitter)}`).pendingForEmitter(
@@ -786,6 +803,7 @@ async function cmdPending(
   if (owner) args.owner = owner
   if (staleMs !== undefined) args.stale_ms = staleMs
   if (close) args.close = close
+  if (evidence !== undefined) args.close_evidence = evidence
   const explicitRecoveryCommand = pendingReadRecoveryCommand(expired, owed, staleMs)
   let method = "tribe.pending"
   let rawResult: unknown
@@ -1052,7 +1070,13 @@ async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
     const socketPath = resolveSocketPath()
     let client: DaemonClient
     try {
-      client = await connectToDaemon(socketPath)
+      // 28674: the restart-retry window bridges a CLIENT call across a wire restart. The health probe is the
+      // opposite: it MEASURES the socket, and its whole answer — `absent + stopped` on ENOENT/ECONNREFUSED — must
+      // describe the socket NOW, not after a 6 s wait. Without this, an absent socket answered in ~50 ms before the
+      // retry existed took ~5.8 s after it, and a probe that outran its reader's patience stopped being a
+      // measurement at all. 0 disables the restart wait for a caller that owns the timing (client.ts
+      // connectRetryWindowMs).
+      client = await connectToDaemon(socketPath, { connectRetryWindowMs: 0 })
     } catch (error) {
       const { exitCode, document } = evaluateWireHealthDocument(null, error, socketPath)
       await writeHealthDocument(document, exitCode)
@@ -1156,11 +1180,11 @@ export interface DoctorVerdict {
 }
 
 export type DoctorCheckVerdict = "OK" | "WARNING" | "CRITICAL" | "UNKNOWN"
-export type DoctorFinalVerdict = "OK" | "FAIL" | "UNKNOWN"
+export type DoctorFinalVerdict = "OK" | "WARNING" | "FAIL" | "UNKNOWN"
 
 export interface DoctorOutcome {
   verdict: DoctorFinalVerdict
-  exitCode: 0 | 1 | 2
+  exitCode: 0 | 1 | 2 | 3
 }
 
 /**
@@ -1169,9 +1193,8 @@ export interface DoctorOutcome {
  */
 export function deriveDoctorOutcome(checks: readonly DoctorCheckVerdict[]): DoctorOutcome {
   if (checks.includes("UNKNOWN")) return { verdict: "UNKNOWN", exitCode: 2 }
-  if (checks.some((check) => check === "WARNING" || check === "CRITICAL")) {
-    return { verdict: "FAIL", exitCode: 1 }
-  }
+  if (checks.includes("CRITICAL")) return { verdict: "FAIL", exitCode: 1 }
+  if (checks.includes("WARNING")) return { verdict: "WARNING", exitCode: 3 }
   return { verdict: "OK", exitCode: 0 }
 }
 
@@ -1637,7 +1660,43 @@ async function assertInboxWaitProtocol(client: DaemonClient, timeoutMs: number):
   throw inboxWaitProtocolMismatchError(daemonProtocolVersion, health)
 }
 
-async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void> {
+export type DoctorSection = Readonly<{
+  name: string
+  checks: Readonly<Record<string, DoctorDiagnosticCheck>>
+}>
+
+function printDoctorCheck(check: DoctorDiagnosticCheck, okPrefix = "", problemPrefix = ""): void {
+  const prefix = check.severity === "OK" ? okPrefix : problemPrefix
+  const line = `  ${check.severity} — ${prefix}${check.diagnosis}`
+  if (check.severity === "OK") console.log(line)
+  else {
+    console.error(line)
+    if (check.remedy) console.error(`  REMEDY — ${check.remedy}`)
+  }
+}
+
+async function cmdDoctor(
+  opts: { fix?: boolean; json?: boolean },
+  doctorSections?: () => Promise<readonly DoctorSection[]>,
+): Promise<void> {
+  let sections: readonly DoctorSection[] | undefined
+  if (doctorSections !== undefined) {
+    try {
+      sections = await doctorSections()
+    } catch (error) {
+      sections = [
+        {
+          name: "extensions",
+          checks: {
+            collection: {
+              severity: "UNKNOWN",
+              diagnosis: `doctor section collection failed: ${inspect(error, { depth: 3 })}`,
+            },
+          },
+        },
+      ]
+    }
+  }
   let status: {
     sessions?: DoctorVersionRow[]
     daemon?: {
@@ -1646,14 +1705,14 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
     }
   } = {}
   try {
-    status = (await callDaemon("cli_status")) as typeof status
+    status = (await callDaemon("cli_status", undefined, "throw")) as typeof status
   } catch {
     // silent-fallback-allow: older daemons omit cli_status; doctor marks UNKNOWN
   }
   let daemonProtocol = status.daemon?.protocol_version
   if (daemonProtocol === undefined) {
     try {
-      const protocol = (await callDaemon("cli_protocol")) as { protocol_version?: unknown }
+      const protocol = (await callDaemon("cli_protocol", undefined, "throw")) as { protocol_version?: unknown }
       if (typeof protocol.protocol_version === "number") daemonProtocol = protocol.protocol_version
     } catch {
       // silent-fallback-allow: cli_protocol unresolved → doctor UNKNOWN, not a fake version
@@ -1688,7 +1747,7 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
 
   let membership: DoctorDiagnosticCheck
   try {
-    const members = mcpJsonContent(await callDaemon("tribe.members")) as {
+    const members = mcpJsonContent(await callDaemon("tribe.members", undefined, "throw")) as {
       sessions?: DoctorMembershipRow[]
       membership_discrepancy?: DoctorMembershipDiscrepancy
     }
@@ -1705,7 +1764,10 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
   let bridgeLost: DoctorDiagnosticCheck
   let healthSample: DoctorDiagnosticCheck
   try {
-    const health = (await callDaemon("cli_health")) as { bridge_lost?: unknown; health_sample?: unknown }
+    const health = (await callDaemon("cli_health", undefined, "throw")) as {
+      bridge_lost?: unknown
+      health_sample?: unknown
+    }
     bridgeLost = evaluateDoctorBridgeLost(health.bridge_lost)
     healthSample = evaluateDoctorHealthSample(health.health_sample)
   } catch (error) {
@@ -1725,6 +1787,7 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
     bridgeLost.severity,
     healthSample.severity,
     rail.severity,
+    ...(sections ?? []).flatMap((section) => Object.values(section.checks).map((check) => check.severity)),
   ])
 
   if (opts.json) {
@@ -1738,6 +1801,7 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
         health_sample: healthSample,
         rail,
         daemon_stderr_log: daemonStderrLog,
+        ...(sections === undefined ? {} : { sections }),
       },
       2,
     )
@@ -1746,36 +1810,11 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
   }
 
   console.log("TRIBE DOCTOR — coordination rail + daemon code identity\n")
-  if (identity.severity === "OK") {
-    console.log(`  OK — code identity ${identity.diagnosis}`)
-  } else {
-    console.error(`  ${identity.severity} — code identity: ${identity.diagnosis}`)
-    if (identity.remedy) console.error(`  REMEDY — ${identity.remedy}`)
-  }
-  if (versions.severity === "OK") {
-    console.log(`  OK — wire versions ${versions.diagnosis}`)
-  } else {
-    console.error(`  ${versions.severity} — wire versions: ${versions.diagnosis}`)
-    if (versions.remedy) console.error(`  REMEDY — ${versions.remedy}`)
-  }
-  if (membership.severity === "OK") {
-    console.log(`  OK — membership ${membership.diagnosis}`)
-  } else {
-    console.error(`  ${membership.severity} — ${membership.diagnosis}`)
-    if (membership.remedy) console.error(`  REMEDY — ${membership.remedy}`)
-  }
-  if (bridgeLost.severity === "OK") {
-    console.log(`  OK — ${bridgeLost.diagnosis}`)
-  } else {
-    console.error(`  ${bridgeLost.severity} — ${bridgeLost.diagnosis}`)
-    if (bridgeLost.remedy) console.error(`  REMEDY — ${bridgeLost.remedy}`)
-  }
-  if (healthSample.severity === "OK") {
-    console.log(`  OK — ${healthSample.diagnosis}`)
-  } else {
-    console.error(`  ${healthSample.severity} — ${healthSample.diagnosis}`)
-    if (healthSample.remedy) console.error(`  REMEDY — ${healthSample.remedy}`)
-  }
+  printDoctorCheck(identity, "code identity ", "code identity: ")
+  printDoctorCheck(versions, "wire versions ", "wire versions: ")
+  printDoctorCheck(membership, "membership ")
+  printDoctorCheck(bridgeLost)
+  printDoctorCheck(healthSample)
 
   if (rail.severity === "OK") {
     console.log(`  OK — rail canary message=${rail.evidence.messageId} waited_ms=${rail.evidence.waitedMs}`)
@@ -1789,6 +1828,13 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
       daemonStderrLog.exists ? `${daemonStderrLog.sizeBytes} bytes` : "not yet created"
     })`,
   )
+
+  for (const section of sections ?? []) {
+    console.log(`\n  ${section.name}`)
+    for (const [name, check] of Object.entries(section.checks)) {
+      printDoctorCheck(check, `${name}: `, `${name}: `)
+    }
+  }
 
   if (outcome.verdict === "OK") {
     return
@@ -2373,6 +2419,11 @@ async function cmdRestart(opts: { reason?: string; json?: boolean }): Promise<vo
  * rule: this CLI refuses locally without --force outside the hab supervisor
  * context, and the daemon independently refuses the RPC without `force: true`
  * so a raw socket caller cannot stop the rail casually either.
+ *
+ * The connect does NOT take the 28674 restart-retry window (connectRetryWindowMs 0, the same PROBE classification as
+ * cmdHealth, for a different reason): stop's answer on an absent socket is a PRESENCE decision — "nothing to stop",
+ * exit 1 — and hab's supervisor calls it, so waiting ~6 s to describe a socket that was never there is not a bridge
+ * across a restart but a delay on the one verb whose whole job is to report presence.
  */
 async function cmdStop(opts: { force?: boolean; reason?: string; json?: boolean }): Promise<void> {
   if (!opts.force && !isHabSupervisorContext({ [HAB_SERVICE_NAME_ENV]: process.env[HAB_SERVICE_NAME_ENV] })) {
@@ -2380,7 +2431,9 @@ async function cmdStop(opts: { force?: boolean; reason?: string; json?: boolean 
     process.exit(2)
   }
   const params: Record<string, unknown> = { force: true, ...(opts.reason ? { reason: opts.reason } : {}) }
-  const result = mcpJsonContent(await callDaemon("tribe.stop", params)) as StopResult
+  const result = mcpJsonContent(
+    await callDaemon("tribe.stop", params, "exit", { connectRetryWindowMs: 0 }),
+  ) as StopResult
 
   if (opts.json) {
     await writeJsonStdout(result)
@@ -2399,7 +2452,7 @@ async function cmdStop(opts: { force?: boolean; reason?: string; json?: boolean 
 // ---------------------------------------------------------------------------
 
 /** Register the CLI's read and inspect verbs. */
-export function registerReadCommands(program: Command): void {
+export function registerReadCommands(program: Command, doctorSections?: () => Promise<readonly DoctorSection[]>): void {
   program
     .command("status")
     .description("Show active sessions with uptime and last-seen")
@@ -2460,6 +2513,7 @@ export function registerReadCommands(program: Command): void {
   const pendingOwed = cliOption(PENDING_CLI, "owed")
   const pendingStale = cliOption(PENDING_CLI, "stale")
   const pendingClose = cliOption(PENDING_CLI, "close")
+  const pendingEvidence = cliOption(PENDING_CLI, "evidence")
   program
     .command(PENDING_CLI.name)
     .description(PENDING_CLI.description)
@@ -2480,6 +2534,7 @@ export function registerReadCommands(program: Command): void {
     .option(pendingEmitter.flags, pendingEmitter.description)
     .option(pendingStale.flags, pendingStale.description)
     .option(pendingClose.flags, pendingClose.description)
+    .option(pendingEvidence.flags, pendingEvidence.description)
     .action(
       async (opts: {
         all?: boolean
@@ -2490,7 +2545,23 @@ export function registerReadCommands(program: Command): void {
         emitter?: string
         stale?: string
         close?: string
+        evidence?: string
       }) => {
+        if (
+          opts.evidence !== undefined &&
+          (!opts.close ||
+            opts.emitter !== undefined ||
+            opts.all ||
+            opts.expired ||
+            opts.owed ||
+            opts.stale !== undefined)
+        ) {
+          console.error(
+            "tribe pending: --evidence requires one incident --close; read operations do not accept evidence",
+          )
+          process.exitCode = 2
+          return
+        }
         if (
           opts.emitter !== undefined &&
           (opts.owner !== undefined ||
@@ -2542,6 +2613,7 @@ export function registerReadCommands(program: Command): void {
           stale,
           opts.close,
           opts.emitter,
+          opts.evidence,
         )
       },
     )
@@ -2574,10 +2646,11 @@ export function registerReadCommands(program: Command): void {
 
   program
     .command("doctor")
-    .description("Check whether the running daemon is serving stale code (@km/tribe/20033)")
+    .description("Check coordination integrity and contributed diagnostics")
     .option("--fix", "Print the operator-gated remedy for a stale daemon (does not auto-restart)")
     .option("--json", "Emit machine-readable JSON")
-    .action((opts: { fix?: boolean; json?: boolean }) => void cmdDoctor(opts))
+    .addHelpText("after", "\nExit codes: 0 OK; 3 WARNING only; 1 FAIL (critical); 2 UNKNOWN (takes precedence).\n")
+    .action((opts: { fix?: boolean; json?: boolean }) => cmdDoctor(opts, doctorSections))
 
   program
     .command("inbox")

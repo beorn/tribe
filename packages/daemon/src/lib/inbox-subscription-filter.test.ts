@@ -265,4 +265,34 @@ describe("stored subscription governs the pull drain", () => {
     const events = drain(ctx, opts).events ?? []
     expect(events.map((e) => e.content)).toEqual([])
   })
+
+  // @failure Topic snapshots silently omit retained matches behind unrelated
+  // rows because their result limit is applied before filtering (28539).
+  // @level l2
+  // @consumer tribe.fetch history/topic snapshots
+  // @testonly none
+  it.each([{ since: 0 }, { since: 0, from: "@daemon" }, { since: 0, to: NAME }, { since: 0, with: "@daemon" }, {}])(
+    "limits matching snapshot rows rather than the scanned window: %j",
+    (selector) => {
+      const ctx = makeContext(db, stmts)
+      const opts = makeOpts()
+      registerSession(ctx, PROJECT_ID, () => true, null, 1234, "pull", "/repo", null, "codex")
+
+      const noise = () => insert(stmts, { content: "unrelated", topic: "ops:cpu", recipient: NAME })
+      for (let i = 0; i < 501; i++) noise()
+      insert(stmts, { content: "first retained match", topic: "ops:reaper:unknown", recipient: NAME })
+      for (let i = 0; i < 501; i++) noise()
+      insert(stmts, { content: "second retained match", topic: "ops:reaper:recovered", recipient: NAME })
+      for (let i = 0; i < 501; i++) noise()
+
+      const result = parse(
+        handleToolCall(ctx, "tribe.fetch", { ...selector, topics: ["ops:reaper:*"], limit: 2 }, opts),
+      ) as FetchJson
+      expect(result.events?.map((event) => event.content)).toEqual(["first retained match", "second retained match"])
+      const cursor = db.prepare("SELECT last_inbox_pull_seq AS seq FROM sessions WHERE id = ?").get(SESSION_ID) as {
+        seq: number
+      }
+      expect(cursor.seq).toBe(0)
+    },
+  )
 })

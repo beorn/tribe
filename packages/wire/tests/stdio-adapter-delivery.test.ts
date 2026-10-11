@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -8,9 +8,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeError, makeNotification, makeResponse } from "../src/rpc.ts"
 import { MAX_REPLAY_EVENTS } from "../src/lib/replay-cap.ts"
+import { loadDeliveryLedger } from "../src/lib/delivery-ledger.ts"
+import { buildFleetDeliveryReport } from "../src/lib/delivery-report.ts"
 import { launchEnvironment } from "./launch-token.ts"
 
 const ADAPTER = resolve(dirname(fileURLToPath(import.meta.url)), "../src/stdio-adapter.ts")
+// #28378 — the same adapter entered through a transport fault seam that rejects
+// the first FAULT-ROW channel notification (see notification-fault-entry.ts).
+const FAULT_ENTRY = resolve(dirname(fileURLToPath(import.meta.url)), "./notification-fault-entry.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
 
 type FakeDaemon = {
@@ -1872,7 +1877,7 @@ describe("stdio adapter delivery modes", () => {
     await handshake()
     await drain("gap-7 first drain")
     expect(countOf(summaryText)).toBe(1)
-    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
     await waitForCondition(() => existsSync(ledgerPath), "gap-7 delivery ledger")
 
     child!.kill("SIGTERM")
@@ -2022,7 +2027,7 @@ describe("stdio adapter delivery modes", () => {
     await drain("first counted drain")
     await drain("second counted drain")
 
-    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
     await waitForCondition(() => existsSync(ledgerPath), "delivery ledger written")
     const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
       ids: string[]
@@ -2038,6 +2043,226 @@ describe("stdio adapter delivery modes", () => {
     expect([...ledger.ids].sort()).toEqual(["count-row-a", "count-row-b"])
   })
 
+  // #28283 — a save that FAILS must not leave a window that later reads as a
+  // complete total. Driven through the real adapter: the ledger file's directory
+  // is made read-only to fail the write, then restored, and the write that finally
+  // lands must carry the gap, so the report reads the window unmeasured rather
+  // than as a silent complete total. The failure must also be logged, not
+  // swallowed — the "loud" half of the acceptance.
+  it("marks the window a gap when a ledger save fails, so it never reads as a complete total (#28283)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const recentTs = new Date().toISOString()
+    const fetchAttention = {
+      actionable_unread: [{ id: "gap-row-a", type: "request", from: "@chief", content: "GAP-A", ts: recentTs }],
+      pending_balls: [],
+    }
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
+    const ledgerDir = join(tmpDir, "ledger")
+    mkdirSync(ledgerDir)
+    const ledgerPath = join(ledgerDir, "pane.json")
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_DELIVERY_LEDGER: ledgerPath,
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    collectStdoutJson(child)
+    const drain = async (label: string) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients[0]?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 250))
+    }
+    const loadedState = () => loadDeliveryLedger(ledgerPath).state
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    await drain("first counted drain")
+    await waitForCondition(() => existsSync(ledgerPath), "first delivery ledger written")
+    expect(loadedState()?.coverage.gap).toBe(false)
+
+    try {
+      // Refuse the next write: a directory we cannot create a file in fails the save.
+      chmodSync(ledgerDir, 0o500)
+      await drain("drain with an unwritable ledger directory")
+      await waitForCondition(
+        () => readFileSync(join(tmpDir, "adapter.log"), "utf8").includes("Failed to persist tribe delivery ledger"),
+        "the failed save must be logged, not swallowed",
+      )
+      // The failed write left only the last window that landed — still clean on disk.
+      expect(loadedState()?.coverage.gap).toBe(false)
+    } finally {
+      chmodSync(ledgerDir, 0o700)
+    }
+
+    await drain("drain after the ledger directory is writable again")
+    await waitForCondition(() => loadedState()?.coverage.gap === true, "the gap carried by the next landed save")
+    const landed = loadedState()
+    expect(landed?.coverage.gapReason).toBe("write")
+    // The report reads the window unmeasured, never a clean total, and never fires the alert.
+    const row = buildFleetDeliveryReport({ states: landed ? [landed] : [], now: Date.now() }).seats.find(
+      (seat) => seat.pane === "@agent/test",
+    )
+    expect(row?.complete).toBe(false)
+    expect(row?.alertInconclusive).toBe(true)
+    expect(row?.alert).toBe(false)
+  })
+
+  // #28378 — a channel notification the host transport REJECTED is not a
+  // completed handoff. The failed row must not enter the forwarded-id record,
+  // the delivery counter or the durable ledger; the next healthy drain must be
+  // able to forward the same row again; and the transport's cause must reach
+  // the adapter log rather than being swallowed. The reviewed reproduction
+  // injected exactly this rejection at the SDK transport boundary, so the
+  // fixture patches that one seam and imports the real adapter unchanged.
+  it("does not record a rejected channel notification as delivered, retries it, and surfaces the cause (#28378)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const ledgerPath = join(tmpDir, "fault-ledger.json")
+    const faultLog = join(tmpDir, "fault-attempts.jsonl")
+    const adapterLog = join(tmpDir, "adapter.log")
+    const recentTs = new Date().toISOString()
+    const faultRow = { id: "fault-row-28378", type: "request", from: "@chief", content: "FAULT-ROW", ts: recentTs }
+    const controlRow = {
+      id: "control-row-28378",
+      type: "request",
+      from: "@chief",
+      content: "CONTROL-ROW",
+      ts: recentTs,
+    }
+    const fetchAttention: {
+      actionable_unread: Array<Record<string, unknown>>
+      pending_balls: Array<Record<string, unknown>>
+    } = {
+      actionable_unread: [],
+      pending_balls: [],
+    }
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
+    child = spawn(BUN_BIN, [FAULT_ENTRY, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_DELIVERY_LEDGER: ledgerPath,
+        PROBE_FAULT_LOG: faultLog,
+        DEBUG_LOG: adapterLog,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const channelText = () =>
+      stdout.filter((line) => line.method === "notifications/claude/channel").map((line) => JSON.stringify(line))
+    const attempts = (): string[] =>
+      existsSync(faultLog)
+        ? readFileSync(faultLog, "utf8")
+            .split("\n")
+            .filter((row) => row.length > 0)
+        : []
+    const readLedger = () =>
+      JSON.parse(readFileSync(ledgerPath, "utf8")) as { ids: string[]; counters: Record<string, number> }
+    const drain = async (label: string) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients.at(-1)?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 250))
+    }
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    // First drain: the only row's notification is rejected by the transport.
+    fetchAttention.actionable_unread = [faultRow]
+    await drain("first faulted drain")
+    await waitForCondition(() => attempts().length === 1, "one rejected send attempt")
+    expect(channelText().some((line) => line.includes("FAULT-ROW"))).toBe(false)
+    await waitForCondition(() => existsSync(ledgerPath), "the per-pane ledger written")
+    const afterFailure = readLedger()
+    expect(afterFailure.ids).not.toContain(faultRow.id)
+    expect(afterFailure.counters.deliveries).toBe(0)
+    expect(afterFailure.counters.newDeliveries).toBe(0)
+    await waitForCondition(
+      () => existsSync(adapterLog) && readFileSync(adapterLog, "utf8").includes("TEST_FAULT_SEND_REJECTED"),
+      "the transport cause surfaced on the adapter log",
+    )
+
+    // Second drain: the same row is offered again and now its send succeeds.
+    fetchAttention.actionable_unread = [faultRow, controlRow]
+    await drain("second healthy drain")
+    await waitForCondition(() => attempts().length === 2, "the rejected row retried")
+    await waitForCondition(
+      () => channelText().some((line) => line.includes("FAULT-ROW")),
+      "the retried row forwarded to the host",
+    )
+    await waitForCondition(() => readLedger().ids.includes(faultRow.id), "the retried row recorded as delivered")
+    expect(channelText().filter((line) => line.includes("CONTROL-ROW"))).toHaveLength(1)
+    const afterRetry = readLedger()
+    expect([...afterRetry.ids].sort()).toEqual([faultRow.id, controlRow.id].sort())
+    expect(afterRetry.counters.deliveries).toBe(2)
+  })
+
+  // #28378 REVIEW (@dev/6) — the LIVE channel-push path. A push with no message
+  // id fails open (nothing to record), but its rejection must still be consumed
+  // and surfaced: an unhandled rejection here exited the adapter. The next
+  // healthy ID-less push must reach the host on the same running adapter.
+  it("survives a rejected ID-less channel push and still forwards the next one (#28378)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const adapterLog = join(tmpDir, "adapter.log")
+    const faultLog = join(tmpDir, "fault-attempts.jsonl")
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention: { actionable_unread: [], pending_balls: [] } })
+    child = spawn(BUN_BIN, [FAULT_ENTRY, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_DELIVERY_LEDGER: join(tmpDir, "push-ledger.json"),
+        PROBE_FAULT_LOG: faultLog,
+        DEBUG_LOG: adapterLog,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const channelText = () =>
+      stdout.filter((line) => line.method === "notifications/claude/channel").map((line) => JSON.stringify(line))
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    daemon.clients
+      .at(-1)
+      ?.write(makeNotification("channel", { from: "chief", type: "request", content: "FAULT-ROW id-less push" }))
+    await waitForCondition(() => existsSync(faultLog), "the ID-less push attempted")
+    await waitForCondition(
+      () => existsSync(adapterLog) && readFileSync(adapterLog, "utf8").includes("TEST_FAULT_SEND_REJECTED"),
+      "the ID-less push cause surfaced on the adapter log",
+    )
+    expect(child.exitCode).toBeNull()
+
+    daemon.clients
+      .at(-1)
+      ?.write(makeNotification("channel", { from: "chief", type: "request", content: "HEALTHY-IDLESS-PUSH" }))
+    await waitForCondition(
+      () => channelText().some((line) => line.includes("HEALTHY-IDLESS-PUSH")),
+      "the next healthy ID-less push forwarded",
+    )
+    expect(child.exitCode).toBeNull()
+  })
+
   // #27459 REVISE (@dev/11): a restart RESUMES the in-flight 4h window, so the
   // first persist after it must carry the ledger cumulative same-window totals
   // forward — not overwrite them from the fresh in-memory counter. Before the
@@ -2046,7 +2271,9 @@ describe("stdio adapter delivery modes", () => {
   // render as a clean 0 with gap:false.
   it("keeps the resumed same-window counter totals across an adapter restart (#27459 REVISE)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
-    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    // Resume the current filename, retaining schema-v1 counter conversion.
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
+    const v2Path = ledgerPath
     const windowStartMs = Date.now() - 60_000
     writeFileSync(
       ledgerPath,
@@ -2101,11 +2328,11 @@ describe("stdio adapter delivery modes", () => {
     // The fetch request is not a completed drain: wait for the adapter's first
     // persist rather than reading the seed ledger while the child is delayed.
     await waitForCondition(
-      () => (JSON.parse(readFileSync(ledgerPath, "utf8")) as { updatedAtMs: number }).updatedAtMs > windowStartMs,
+      () => (JSON.parse(readFileSync(v2Path, "utf8")) as { updatedAtMs: number }).updatedAtMs > windowStartMs,
       "REVISE resumed window persisted",
     )
 
-    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
+    const ledger = JSON.parse(readFileSync(v2Path, "utf8")) as {
       windowStartMs: number
       ids: string[]
       counters: Record<string, number>
@@ -2122,6 +2349,175 @@ describe("stdio adapter delivery modes", () => {
     expect([...ledger.ids].sort()).toEqual(["seed-row-a", "seed-row-b"])
     expect(ledger.coverage.restarts).toBe(2)
     expect(ledger.coverage.gap).toBe(false)
+  })
+
+  // @failure A foreign owner at the current filename suppresses unseen handoffs.
+  // @level l3 @consumer adapter delivery and four-hour report
+  // The first persona rejects a foreign v2 window with a named gap; the second
+  // resumes its own v2 window and suppresses an already delivered row.
+  it("keeps two colliding personas on separate delivery windows through the real adapter (#28376)", async () => {
+    type FakeAttention = {
+      actionable_unread?: Array<Record<string, unknown>>
+      pending_balls?: Array<Record<string, unknown>>
+    }
+    const foreignPath = join(tmpDir, "tribe-delivery-v2-@dev_6.json")
+    const v2Dev6 = join(tmpDir, "tribe-delivery-v2-@dev_6.json")
+    const v2DevSlash6 = join(tmpDir, "tribe-delivery-v2-@dev%2F6.json")
+    const windowStartMs = Date.now() - 60_000
+    // A foreign window at the underscore persona's current path; the slash
+    // persona also has its own v2 file. The row was handed only to @dev/6.
+    const dev6Row = "broadcast-row-first-handed-only-to-dev-6"
+    writeFileSync(
+      foreignPath,
+      JSON.stringify({
+        version: 2,
+        pane: "@dev/6",
+        windowStartMs,
+        updatedAtMs: windowStartMs,
+        ids: [dev6Row],
+        counters: {
+          presentations: 1,
+          newPresentations: 1,
+          duplicatePresentations: 0,
+          deliveries: 1,
+          newDeliveries: 1,
+          duplicateDeliveries: 0,
+          duplicateBytes: 0,
+          suppressed: 0,
+          cost: {
+            deliveredBytes: 0,
+            handoffs: 0,
+            readRepeatBodies: 0,
+            readRepeatBytes: 0,
+            readPulls: 0,
+            readPullBytes: 0,
+          },
+        },
+        pendingBallSummary: null,
+        coverage: { restarts: 1, gap: false, gapReason: "none" },
+      }),
+      "utf8",
+    )
+    const originalBody = readFileSync(foreignPath, "utf8")
+    writeFileSync(v2DevSlash6, originalBody, "utf8")
+
+    const ledgerOf = (path: string) =>
+      JSON.parse(readFileSync(path, "utf8")) as {
+        pane: string
+        ids: string[]
+        counters: Record<string, number>
+        coverage: { restarts: number; gap: boolean; gapReason: string }
+      }
+    // One adapter process for one persona: spawn its own daemon (the fake daemon
+    // pins the name), join, drain once, and return the channel lines it forwarded.
+    const runAdapter = async (opts: {
+      socket: string
+      ackName: string
+      log: string
+      fetchAttention: FakeAttention
+    }): Promise<string[]> => {
+      daemon = await spawnFakeDaemon(opts.socket, {
+        fetchAttention: opts.fetchAttention,
+        registerAck: { name: opts.ackName },
+        joinAck: { name: opts.ackName },
+      })
+      child = spawn(BUN_BIN, [ADAPTER, "--socket", opts.socket, "--name", opts.ackName], {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          TRIBE_DELIVERY: "push",
+          TRIBE_NO_AUTOSTART: "1",
+          TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+          DEBUG_LOG: join(tmpDir, opts.log),
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      })
+      const stdout = collectStdoutJson(child)
+      await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+      writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+      await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: opts.ackName }), (line) => line.id === 2)
+      const before = daemon.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon.clients[0]?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        `${opts.ackName} drain`,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 300))
+      return stdout
+        .filter((line) => line.method === "notifications/claude/channel")
+        .map((line) => JSON.stringify(line) as string)
+    }
+    const stopAdapter = async () => {
+      child?.kill("SIGTERM")
+      if (child) await waitForExit(child)
+      for (const socket of daemon?.clients ?? []) socket.destroy()
+      if (daemon) await new Promise<void>((resolveClose) => daemon!.server.close(() => resolveClose()))
+      daemon = undefined
+      child = undefined
+    }
+
+    // ---- @dev_6 first: the colliding persona must NOT inherit @dev/6's id. ----
+    // The row served to @dev_6 is the same ID the foreign v2 file records for @dev/6,
+    // so pre-fix (when @dev_6 restored that id set) this exact row read as already
+    // handed off and the assertion below fails: genuine RED.
+    const underscoreText = await runAdapter({
+      socket: join(tmpDir, "tribe-underscore.sock"),
+      ackName: "@dev_6",
+      log: "adapter-underscore.log",
+      fetchAttention: {
+        actionable_unread: [
+          {
+            id: dev6Row,
+            type: "verdict",
+            from: "@chief",
+            content: "UNDERSCORE-ROW",
+            ts: new Date().toISOString(),
+          },
+        ],
+        pending_balls: [],
+      },
+    })
+    expect(underscoreText.some((line) => line.includes("UNDERSCORE-ROW"))).toBe(true)
+    await waitForCondition(() => existsSync(v2Dev6), "@dev_6 persisted its own v2 ledger")
+    const underscoreLedger = ledgerOf(v2Dev6)
+    expect(underscoreLedger.pane).toBe("@dev_6")
+    expect(underscoreLedger.coverage.gap).toBe(true)
+    expect(underscoreLedger.coverage.gapReason).toBe("schema")
+    // PRE-EXISTING foreign counters are not inherited: this window counts only
+    // the one row it was actually handed.
+    expect(underscoreLedger.counters.presentations).toBe(1)
+    // The refusal is loud on the adapter's own log.
+    const underscoreLog = readFileSync(join(tmpDir, "adapter-underscore.log"), "utf8")
+    expect(underscoreLog).toContain("records owner @dev/6, not @dev_6")
+    expect(underscoreLog).toContain("ignoring it (28376)")
+    // Rejection leaves the slash persona's own v2 window unchanged.
+    expect(readFileSync(v2DevSlash6, "utf8")).toBe(originalBody)
+    await stopAdapter()
+
+    // @dev/6 next: it resumes its own v2 window, so its row stays suppressed.
+    const dev6Text = await runAdapter({
+      socket: join(tmpDir, "tribe-slash.sock"),
+      ackName: "@dev/6",
+      log: "adapter-slash.log",
+      fetchAttention: {
+        actionable_unread: [
+          { id: dev6Row, type: "verdict", from: "@chief", content: "DEV-6-OWN-ROW", ts: new Date().toISOString() },
+        ],
+        pending_balls: [],
+      },
+    })
+    // A changed timestamp proves the seeded file was actually re-persisted.
+    await waitForCondition(
+      () => (JSON.parse(readFileSync(v2DevSlash6, "utf8")) as { updatedAtMs: number }).updatedAtMs > windowStartMs,
+      "@dev/6 re-persisted its current v2 window",
+    )
+    expect(dev6Text.some((line) => line.includes("DEV-6-OWN-ROW"))).toBe(false)
+    const dev6LedgerV2 = ledgerOf(v2DevSlash6)
+    expect(dev6LedgerV2.pane).toBe("@dev/6")
+    expect(dev6LedgerV2.ids).toEqual([dev6Row])
+    expect(dev6LedgerV2.coverage.gap).toBe(false)
+    // Each persona now has its own current file.
+    expect(ledgerOf(v2Dev6).pane).toBe("@dev_6")
   })
 
   // #27459 - the ambient `events` path is the same pane inbox as attention: a
@@ -2176,7 +2572,7 @@ describe("stdio adapter delivery modes", () => {
     expect(channelText().filter((line) => line.includes("AMBIENT-FRESH"))).toHaveLength(1)
     expect(channelText().filter((line) => line.includes("AMBIENT-COUNTED"))).toHaveLength(1)
 
-    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
     await waitForCondition(() => existsSync(ledgerPath), "ambient delivery ledger written")
     const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
       ids: string[]
@@ -2188,6 +2584,85 @@ describe("stdio adapter delivery modes", () => {
     expect(ledger.counters.duplicateDeliveries).toBe(0)
     expect(ledger.counters.presentations).toBe(4)
     expect(ledger.counters.duplicatePresentations).toBe(2)
+  })
+
+  // #28282 - @cto 11:19 PDT: the counter is not broken, the two units are
+  // deliberate. `duplicateDeliveries` is the RESIDUAL - a handoff that reached
+  // the pane twice after the once-per-row record - and `duplicatePresentations`
+  // is the daemon's re-offer the record absorbed. This drives a real residual
+  // path through the real adapter: two rows carrying the SAME id in ONE drained
+  // batch. The admission filter (:1670-1672) is evaluated for the whole batch
+  // before the first handoff resolves, so both are admitted, both forward, and
+  // `deliver()` counts the second one. A future path that reaches the pane
+  // while skipping the record is what the >20% / >=100-deliveries alert is for.
+  it("counts a second handoff of one id when both rows arrive in the same batch (#28282)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const recentTs = new Date().toISOString()
+    const fetchEvents: Array<Record<string, unknown>> = [
+      { id: "dup-notify-a", type: "notify", from: "@chief", content: "DUP-COUNTED", ts: recentTs },
+      { id: "dup-notify-a", type: "notify", from: "@chief", content: "DUP-COUNTED", ts: recentTs },
+    ]
+    daemon = await spawnFakeDaemon(socketPath, {
+      fetchAttention: { actionable_unread: [], pending_balls: [] },
+      fetchEvents,
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const channelText = () =>
+      stdout
+        .filter((line) => line.method === "notifications/claude/channel")
+        .map((line) => JSON.stringify(line) as string)
+    // #28282 follow-up (@dev/6): the drain is complete when the adapter has
+    // EMITTED, not when a fixed settle elapses. Waiting on the observed channel
+    // notification count is what makes this witness independent of host timing —
+    // with a slow child the assertion below read 0 notifications while the
+    // forwards were still in flight, so the test could fail on load alone.
+    const drain = async (label: string, expected: { marker: string; count: number }) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients[0]?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await waitForCondition(
+        () => channelText().filter((line) => line.includes(expected.marker)).length >= expected.count,
+        `${label}: ${expected.count} channel notification(s) carrying ${expected.marker}`,
+        { timeoutMs: 10_000 },
+      )
+    }
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    await drain("the batch is drained", { marker: "DUP-COUNTED", count: 2 })
+
+    // The pane really received it twice: this is the residual, not a re-offer.
+    expect(channelText().filter((line) => line.includes("DUP-COUNTED"))).toHaveLength(2)
+
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
+    // Poll rather than read once: the drain persists asynchronously.
+    await waitForCondition(() => {
+      if (!existsSync(ledgerPath)) return false
+      const counters = (JSON.parse(readFileSync(ledgerPath, "utf8")) as { counters?: Record<string, number> }).counters
+      return (counters?.deliveries ?? 0) >= 2
+    }, "both handoffs persisted")
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
+      ids: string[]
+      counters: Record<string, number>
+    }
+    expect(ledger.counters.deliveries).toBe(2)
+    expect(ledger.counters.duplicateDeliveries).toBe(1)
   })
 
   // #27459 - restart behavior is explicit against the durable ledger: the
@@ -2242,7 +2717,7 @@ describe("stdio adapter delivery modes", () => {
     await drain("pre-restart drain")
     expect(firstText().filter((line) => line.includes("AMBIENT-RESTART"))).toHaveLength(1)
 
-    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
     await waitForCondition(() => existsSync(ledgerPath), "delivery ledger before restart")
 
     child!.kill("SIGTERM")
@@ -2388,7 +2863,7 @@ describe("stdio adapter delivery modes", () => {
     expect(count("GAP1-RECONNECT-C")).toBe(0)
     expect(count("GAP1-RECONNECT-NEW")).toBe(1)
 
-    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
     await waitForCondition(() => existsSync(ledgerPath), "gap-1 delivery ledger written")
     const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
       ids: string[]
@@ -2516,7 +2991,7 @@ describe("stdio adapter delivery modes", () => {
         Buffer.byteLength(replyText(pendingReply), "utf8") +
         Buffer.byteLength(replyText(waitReply), "utf8")
 
-      const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+      const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
       await waitForCondition(() => existsSync(ledgerPath), "cost ledger written")
       const cost = (
         JSON.parse(readFileSync(ledgerPath, "utf8")) as {

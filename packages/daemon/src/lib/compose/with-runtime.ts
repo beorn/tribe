@@ -263,17 +263,28 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     // archive-then-prune mechanism, its config surface (env-var only, no
     // TribeConfig changes), and why the delete half ships default-off.
     const retentionConfig = resolveRetentionConfig()
+    // 27889 — the sweep's cold export is a safety gate, not a detail: when it
+    // fails the batch is kept, and the tick says so at error level here rather
+    // than letting a silently-not-deleted backlog look like a no-op.
+    const runRetention = (): void => {
+      const sweep = runRetentionSweep(t.db, t.stmts, retentionConfig)
+      if (sweep.export.status === "failed") {
+        log.error?.(
+          `journal retention: cold export FAILED; this tick deleted ${sweep.archiveDelete.deleted} row(s) and kept the refused batch — every row stays readable in messages_archive. reason: ${sweep.export.error ?? "unnamed"}`,
+        )
+      }
+    }
     const cleanupInterval = setInterval(() => {
       cleanupOldData(t.daemonCtx, { liveWindowMs: retentionConfig.liveWindowMs })
       reapStaleTransports()
-      runRetentionSweep(t.db, t.stmts, retentionConfig)
+      runRetention()
     }, cleanupIntervalMs) as unknown as {
       unref?: () => void
     }
     cleanupInterval.unref?.()
     t.scope.defer(() => clearInterval(cleanupInterval as unknown as ReturnType<typeof setInterval>))
     cleanupOldData(t.daemonCtx, { liveWindowMs: retentionConfig.liveWindowMs })
-    runRetentionSweep(t.db, t.stmts, retentionConfig)
+    runRetention()
     const startupReapDelayMs = t.registry.startupReconnectGraceRemainingMs(Date.now())
     const startupReapTimer = setTimeout(reapStaleTransports, startupReapDelayMs) as unknown as {
       unref?: () => void

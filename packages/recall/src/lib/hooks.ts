@@ -450,15 +450,28 @@ export async function cmdRemember(opts: { json?: boolean }): Promise<void> {
     const elapsed = Date.now() - startTime
 
     const summarized = results.filter((r) => !r.skipped)
-    if (summarized.length > 0) {
-      rememberLog.info?.("summarized", {
-        days_count: summarized.length,
-        days: summarized.map((r) => r.date),
-        elapsed_ms: elapsed,
-        session: sessionId,
-      })
-    } else {
+    const skipped = results.filter((r) => r.skipped)
+    if (results.length === 0) {
+      // An empty result set is the ONE signal that no day was eligible.
       rememberLog.info?.("no unprocessed days", { elapsed_ms: elapsed, session: sessionId })
+    } else {
+      if (summarized.length > 0) {
+        rememberLog.info?.("summarized", {
+          days_count: summarized.length,
+          days: summarized.map((r) => r.date),
+          elapsed_ms: elapsed,
+          session: sessionId,
+        })
+      }
+      if (skipped.length > 0) {
+        // Name the eligible days and their existing reasons: a skip is work the
+        // day selector chose, never "no unprocessed days" (27702 §5).
+        const detail = skipped.map((r) => `${r.date} (${r.reason ?? "skipped"})`).join(", ")
+        rememberLog.info?.(`skipped ${skipped.length} eligible day(s): ${detail}`, {
+          elapsed_ms: elapsed,
+          session: sessionId,
+        })
+      }
     }
 
     if (opts.json) {

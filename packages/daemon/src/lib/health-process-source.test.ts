@@ -1,14 +1,25 @@
 /**
  * @failure Managed Tribe monitoring silently falls back to ps, imports a Hab
  *          codec, or accepts a malformed neutral process-observation payload.
+ *          Or it spawns the `hab` of the landing it STARTED on, by name and
+ *          outside its import-graph digest, so a promotion that changed hab's
+ *          code never forces its relaunch and the reader stays on an abandoned
+ *          journal until someone notices by hand (28657, @cto ed3c07a4).
  * @level   l2
  * @consumer @hab/21960-hab-sysmon S2 routing and reaper cutover
+ * @testonly resolveHabCli: exported from module-private so this file can diff
+ *           the announcement text it feeds the one startup line
  */
 
-import { describe, expect, it, vi } from "vitest"
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync, realpathSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { fileURLToPath } from "node:url"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { BoundedProcessCommandError, runBoundedProcessCommand } from "../../../recall/src/lib/bounded-process.ts"
 import {
   createHealthProcessSource,
+  resolveHabCli,
   SYSMON_CIRCUIT_FAILURES,
   SYSMON_CIRCUIT_OPEN_MS,
   SYSMON_COMMAND_TIMEOUT_MAX_MS,
@@ -16,6 +27,12 @@ import {
   SYSMON_MAX_OUTPUT_BYTES,
   sysmonCommandTimeoutMs,
 } from "./health-process-source.ts"
+
+/** Temp trees holding a fixture landing's `current` pointer; removed after every test. */
+const cleanup: string[] = []
+afterEach(() => {
+  for (const path of cleanup.splice(0)) rmSync(path, { force: true, recursive: true })
+})
 
 const availablePayload = {
   diagnostic: {
@@ -282,7 +299,16 @@ describe("neutral health process source", () => {
     expect(source.kind).toBe("managed")
     if (source.kind !== "managed") throw new Error("expected managed source")
 
-    await expect(source.read()).resolves.toEqual(availablePayload)
+    // The fixture's location is the ECHOED shape: hab sysmon invoked with
+    // `--state-root /hab` resolves the journal at `/hab/habmod` and reports
+    // THAT as diagnostic.location. The source pins it back to the root it
+    // invoked, so the later `--state-root ${location}` reprint is runnable
+    // instead of one `habmod` too deep (@i/4-supervision/28186).
+    const pinnedAvailablePayload = {
+      ...availablePayload,
+      diagnostic: { ...availablePayload.diagnostic, location: "/hab" },
+    }
+    await expect(source.read()).resolves.toEqual(pinnedAvailablePayload)
     await expect(source.readScalars()).resolves.toEqual(scalarPayload)
     expect(runCommand).toHaveBeenCalledWith(
       ["hab", "sysmon", "snapshot", "--state-root", "/hab", "--max-age-ms", "90000", "--json"],
@@ -433,6 +459,8 @@ describe("neutral health process source", () => {
   })
 
   it.each([
+    ["invalid owner liveness", (payload: any) => (payload.processes[0].attribution.ownerLiveness = "guess")],
+    ["null owner liveness", (payload: any) => (payload.processes[0].attribution.ownerLiveness = null)],
     ["empty query", (payload: any) => (payload.diagnostic.query = "")],
     ["empty location", (payload: any) => (payload.diagnostic.location = "")],
     ["wrong excluded fallbacks", (payload: any) => (payload.diagnostic.excluded = [])],
@@ -852,6 +880,124 @@ describe("neutral health process source", () => {
       // That second consecutive failure opens it — third spawn skipped:
       await expect(source.read()).resolves.toMatchObject({ reason: "source-circuit-open" })
       expect(runCommand.mock.calls.length).toBe(4)
+    })
+  })
+})
+
+/**
+ * 28657: the hab this source SPAWNS. The injected value names the promotion POINTER, so the spawn follows promotion
+ * on every call; a set-but-missing pointer is a typed unavailable that names it, never a fallback to PATH's hab; and
+ * an unset one keeps PATH's hab and SAYS so, because an unannounced spawn is what cost hours to find.
+ */
+describe("the hab a managed source spawns (28657)", () => {
+  const managedEnv = (extra: Record<string, string> = {}): NodeJS.ProcessEnv => ({
+    HAB_SERVICE_NAME: "wire",
+    HAB_SESSION_DIR: "/hab/tribe",
+    ...extra,
+  })
+
+  it("spawns through the injected pointer, so a promotion moves it with no restart", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hab-cli-bin-"))
+    cleanup.push(root)
+    const generation = (name: string): void => {
+      mkdirSync(join(root, name, "node_modules", ".bin"), { recursive: true })
+      writeFileSync(join(root, name, "node_modules", ".bin", "hab"), `#!/bin/sh\necho ${name}\n`)
+    }
+    generation("gen1")
+    generation("gen2")
+    symlinkSync("gen1", join(root, "current"))
+    const pointer = join(root, "current", "node_modules", ".bin", "hab")
+
+    const runCommand = vi.fn(async (_argv: readonly string[]) => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: `${JSON.stringify(availablePayload)}\n`,
+    }))
+    const source = createHealthProcessSource({ env: managedEnv({ HAB_CLI_BIN: pointer }), runCommand })
+    if (source.kind !== "managed") throw new Error("expected managed source")
+
+    await source.read()
+    expect(runCommand.mock.calls[0]?.[0][0]).toBe(pointer)
+    expect(realpathSync(pointer)).toBe(realpathSync(join(root, "gen1", "node_modules", ".bin", "hab")))
+
+    // The promotion: `current` now names the next landing. The SAME source, with no restart and no new
+    // construction, spawns the next generation -- the value IS the pointer, so the OS resolves it per call.
+    unlinkSync(join(root, "current"))
+    symlinkSync("gen2", join(root, "current"))
+    await source.read()
+    expect(runCommand.mock.calls[1]?.[0][0]).toBe(pointer)
+    expect(realpathSync(pointer)).toBe(realpathSync(join(root, "gen2", "node_modules", ".bin", "hab")))
+  })
+
+  it("a set-but-missing HAB_CLI_BIN is a typed unavailable NAMING the path, never PATH's hab", async () => {
+    const absent = join(tmpdir(), "no-such-landing", "current", "node_modules", ".bin", "hab")
+    const runCommand = vi.fn()
+    const source = createHealthProcessSource({ env: managedEnv({ HAB_CLI_BIN: absent }), runCommand })
+    if (source.kind !== "managed") throw new Error("expected managed source")
+
+    await expect(source.read()).resolves.toMatchObject({
+      diagnostic: { detail: expect.stringContaining(absent) },
+      kind: "unavailable",
+      reason: "source-cli-missing",
+    })
+    await expect(source.readScalars()).resolves.toMatchObject({
+      detail: expect.stringContaining(absent),
+      kind: "unavailable",
+      reason: "source-cli-missing",
+    })
+    expect(runCommand, "a named-but-absent hab must not fall back to PATH's hab").not.toHaveBeenCalled()
+  })
+
+  /**
+   * N1 (@cto 28657): existence is a per-SPAWN fact. A pointer briefly absent as the daemon starts -- a landing
+   * being rebuilt under a promotion, the very moment this source is built -- must not become a permanent outage
+   * for that daemon's whole life.
+   */
+  it("re-checks existence at every SPAWN: absent at construction, present at the next read, it spawns", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hab-cli-bin-late-"))
+    cleanup.push(root)
+    const pointer = join(root, "current", "node_modules", ".bin", "hab")
+    const runCommand = vi.fn(async (_argv: readonly string[]) => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: `${JSON.stringify(availablePayload)}\n`,
+    }))
+    const source = createHealthProcessSource({ env: managedEnv({ HAB_CLI_BIN: pointer }), runCommand })
+    if (source.kind !== "managed") throw new Error("expected managed source")
+
+    await expect(source.read()).resolves.toMatchObject({ kind: "unavailable", reason: "source-cli-missing" })
+    expect(runCommand).not.toHaveBeenCalled()
+
+    // The landing lands: the SAME source, with no restart and no new construction, spawns on its next read.
+    mkdirSync(join(root, "current", "node_modules", ".bin"), { recursive: true })
+    writeFileSync(pointer, "#!/bin/sh\nexit 0\n")
+    await expect(source.read()).resolves.toMatchObject({ kind: "available" })
+    expect(runCommand.mock.calls[0]?.[0][0]).toBe(pointer)
+  })
+
+  it("an unset HAB_CLI_BIN keeps PATH's hab, and the announcement says THAT is what it spawns", () => {
+    expect(resolveHabCli(managedEnv())).toEqual({
+      announcement: "PATH hab (HAB_CLI_BIN unset)",
+      argv0: "hab",
+      injected: false,
+    })
+    expect(resolveHabCli(managedEnv({ HAB_CLI_BIN: "   " })), "a whitespace value is not a value").toEqual({
+      announcement: "PATH hab (HAB_CLI_BIN unset)",
+      argv0: "hab",
+      injected: false,
+    })
+    const present = fileURLToPath(import.meta.url)
+    expect(resolveHabCli(managedEnv({ HAB_CLI_BIN: present }))).toEqual({
+      announcement: `HAB_CLI_BIN ${present}`,
+      argv0: present,
+      injected: true,
+    })
+    const absent = join(tmpdir(), "no-such-landing", "current", "node_modules", ".bin", "hab")
+    // The RESOLUTION says nothing about existence: it names what was injected, and existence is checked per spawn.
+    expect(resolveHabCli(managedEnv({ HAB_CLI_BIN: absent }))).toEqual({
+      announcement: `HAB_CLI_BIN ${absent}`,
+      argv0: absent,
+      injected: true,
     })
   })
 })

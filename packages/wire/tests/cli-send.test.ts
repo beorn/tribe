@@ -1031,6 +1031,8 @@ describe("registerSendCommands", () => {
         child.on("close", (code) => resolveProc({ code, stdout, stderr }))
       })
 
+    const startedAt = Date.now()
+
     const reply = await runSend("  reply=req-123 answered")
     expect(reply).toMatchObject({ code: 2, stdout: "" })
     expect(reply.stderr).toContain("message content begins with reply=req-123")
@@ -1048,17 +1050,53 @@ describe("registerSendCommands", () => {
     expect(prose.stderr).toContain("no daemon-validated launch identity")
     expect(prose.stderr).not.toContain("message content begins with")
 
-    const structured = await runSend("answered", ["--type", "response", "--reply", "req-123"])
-    expect(structured.code).toBe(1)
-    expect(structured.stderr).toContain("No daemon running")
-    expect(structured.stderr).not.toContain("message content begins with")
-
     const mismatched = await runSend("reply=req-A answered", ["--type", "response", "--reply", "req-B"])
     expect(mismatched).toMatchObject({ code: 2, stdout: "" })
     expect(mismatched.stderr).toContain("message content begins with reply=req-A")
     expect(mismatched.stderr).toContain("remove reply=req-A from the message content")
     expect(mismatched.stderr).not.toContain("No daemon running")
+    // 28683 (@cto): the intent guard runs at the TOP of cmdSend — before resolveSendCaller and therefore before any
+    // connectToDaemon — so every run above answers from the message text alone and NONE of them touches the socket,
+    // absent by construction here. This bound is the contract made visible: it goes red (>2.5 s, and red against
+    // vitest's 5 s default) if the guard is ever moved after the connect. The one run that does reach the daemon
+    // carries its own test below, because that one crosses the 28674 retry window by construction.
+    expect(
+      Date.now() - startedAt,
+      "the intent guard answers from the message alone, before any daemon I/O",
+    ).toBeLessThan(2_500)
   })
+
+  // 28683: the CONTRAST case for the guard above, kept separate so the guard test needs no timeout override. A
+  // clean `--reply` send must NOT be caught by the prose-intent guard, which is only observable by letting it
+  // proceed to daemon I/O — and the socket here is deliberately ABSENT, so connectToDaemon retries it for the full
+  // CONNECT_RETRY_WINDOW_MS (6 s) before writing "No daemon running". That wait is the feature 28674 exists for
+  // (a wire restart, not a dead wire), so it cannot be shortened to fit vitest's 5 s default; this is the one run
+  // in this file that must carry its own timeout, and the reason is here.
+  test("a structured --reply send passes the prose-intent guard and reaches daemon I/O (absent daemon)", async () => {
+    const socketPath = join(tmpdir(), `tribe-wire-intent-guard-daemon-${process.pid}.sock`)
+    const runSend = (message: string, flags: string[] = []) =>
+      new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
+        const child = spawn(BUN_BIN, [CLI, "send", "@agent/3", message, ...flags], {
+          env: {
+            ...process.env,
+            TRIBE_SOCKET: socketPath,
+            TRIBE_NAME: "@chief",
+            ...launchEnvironment(""),
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProc({ code, stdout, stderr }))
+      })
+
+    const structured = await runSend("answered", ["--type", "response", "--reply", "req-123"])
+    expect(structured.code).toBe(1)
+    expect(structured.stderr).toContain("No daemon running")
+    expect(structured.stderr).not.toContain("message content begins with")
+  }, 20_000)
 
   // @ag/tribe/21921 originally kept seats from going mute by degrading an
   // unresolvable launch to an anonymous send. That preserved delivery but
@@ -1588,6 +1626,79 @@ describe("a second recipient must never be absorbed into the message body", () =
     const res = await runSend(["send", "@mock-target", "@mock-swallowed"])
 
     expect(res.stderr).not.toMatch(/second recipient|absorbed into the message/iu)
+  })
+})
+
+describe("a bare --request/--reply must never swallow the recipient", () => {
+  /**
+   * `--request` takes an OPTIONAL value, so Commander binds whatever token
+   * follows the bare flag: `tribe send --request @chief @dev/9 "text"` made
+   * `@chief` the request id and delivered the ball under it — the ball opens
+   * against the wrong owner (or none) while the command still reports success.
+   * The reporter's exact form was `tribe send --request @chief ...`; the only
+   * workaround was to put `--request` last.
+   *
+   * A request id is a UUID (or an author-supplied id) and never begins with
+   * `@`, so an `@`-leading value is always the swallowed recipient. The
+   * refusal runs in the option parser, which beats Commander's own argument
+   * check — that is what makes the shortest form refuse too, instead of
+   * reporting the misleading "missing required argument 'message'".
+   */
+  function runSend(args: string[]): Promise<{ code: number | null; stderr: string }> {
+    return new Promise((resolveProcess) => {
+      const child = spawn(BUN_BIN, [CLI, ...args], {
+        cwd: TEST_ROOT,
+        env: {
+          ...process.env,
+          TRIBE_SOCKET: join(TEST_ROOT, "isolated-test-tribe.sock"),
+          ...launchEnvironment(""),
+          TRIBE_SESSION_NAME: "",
+          TRIBE_NAME: "",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+      let stderr = ""
+      child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+      child.on("close", (code) => resolveProcess({ code, stderr }))
+    })
+  }
+
+  test("refuses `--request @recipient` when another positional follows it", async () => {
+    const res = await runSend(["send", "--request", "@mock-target", "@mock-recipient", "the", "actual", "message"])
+
+    expect(res.code).toBe(2)
+    // Names the value, so the reader sees exactly what would have been swallowed.
+    expect(res.stderr).toContain("tribe.send: invalid --request '@mock-target'")
+    expect(res.stderr).toMatch(/recipient|swallow/iu)
+  })
+
+  test('refuses the shortest `--request @recipient "body"` shape, not Commander\'s missing-argument error', async () => {
+    const res = await runSend(["send", "--request", "@mock-target", "the message"])
+
+    expect(res.code).toBe(2)
+    expect(res.stderr).toContain("tribe.send: invalid --request '@mock-target'")
+    expect(res.stderr).not.toContain("missing required argument")
+  })
+
+  test("refuses `--reply @recipient` for the same reason", async () => {
+    const res = await runSend(["send", "--reply", "@mock-target", "@mock-recipient", "body"])
+
+    expect(res.code).toBe(2)
+    expect(res.stderr).toContain("tribe.send: invalid --reply '@mock-target'")
+    expect(res.stderr).toMatch(/recipient|swallow/iu)
+    // `--reply` has no bare form, so the remedy must carry the id it settles —
+    // the bare-last advice would itself fail ("option '--reply <request_id>'
+    // argument missing").
+    expect(res.stderr).toContain("--reply=<request_id>")
+    expect(res.stderr).not.toContain('"<message>" --reply')
+  })
+
+  test("still accepts the bare flag last, and an explicit id", async () => {
+    const bare = await runSend(["send", "@mock-target", "body", "--request"])
+    expect(bare.stderr).not.toMatch(/invalid --request/iu)
+
+    const explicit = await runSend(["send", "@mock-target", "body", "--request=mock-request-id"])
+    expect(explicit.stderr).not.toMatch(/invalid --request/iu)
   })
 })
 

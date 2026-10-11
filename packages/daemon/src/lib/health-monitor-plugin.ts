@@ -1111,46 +1111,6 @@ export function formatStaleLockMessage(lock: GitLockInfo, sessionName: string | 
   return `git lock WARNING: ${lockTarget} held >${Math.floor(durationSec)}s by ${holder} -- may be stale`
 }
 
-/**
- * Chief-authority watchdog: fail loud immediately when actionable messages have no
- * live @chief recipient. Online inbox staleness is deliberately absent here:
- * the generic Tribe cadence facts + Hab policy + WATCH reducer own it for
- * every managed seat, including @chief.
- *
- * Returns null when no alert should fire. Side-effects on `state.firedAlerts`
- * so each absence episode only emits once: the key is cleared when the unread
- * count drops to 0 or a live chief returns.
- *
- * Generic staleness owner: @ag/tribe/21626-per-seat-inbox-staleness-alarm.
- */
-export function checkChiefAbsent(
-  unread: { count: number; oldestTs: number },
-  chiefOnline: boolean,
-  state: AlertState,
-): HealthAlert | null {
-  const absentKey = "chief-absent:critical"
-  if (unread.count === 0) {
-    state.firedAlerts.delete(absentKey)
-    return null
-  }
-  if (!chiefOnline) {
-    if (state.firedAlerts.has(absentKey)) return null
-    state.firedAlerts.add(absentKey)
-    return {
-      type: "chief-absent",
-      severity: "critical",
-      message:
-        `STOP-THE-LINE: @chief is absent with ${unread.count} actionable message${unread.count === 1 ? "" : "s"} ` +
-        `waiting. Delivery has no live authority; a live @cto must assume authority, ` +
-        `or notify the user, then reconcile @chief attention before work continues.`,
-      metrics: {},
-      topOffenders: [],
-    }
-  }
-  state.firedAlerts.delete(absentKey)
-  return null
-}
-
 // ---------------------------------------------------------------------------
 // Bridge-lost paging (25662, @cto 430ba377)
 // ---------------------------------------------------------------------------
@@ -2607,14 +2567,81 @@ export async function collectFullMetrics(
 }
 
 // ---------------------------------------------------------------------------
-// On-demand health snapshot (for tribe_health_check requests)
+// Last completed monitor sample (for on-demand readers)
 // ---------------------------------------------------------------------------
 
-export async function getHealthSnapshot(
-  processSource: HealthProcessSource = createHealthProcessSource(),
-): Promise<HealthMetrics> {
-  const { metrics } = await collectFullMetrics(processSource)
-  return metrics
+/**
+ * A sample older than this many poll intervals is STALE: the monitor is not
+ * completing ticks, so its last sample is a healthy-looking snapshot of a
+ * wedged process. The reader still serves it — a fresh census on the request
+ * path is what wedged the loop in 28196 — but reports `stale: true` past the
+ * bound instead of hiding the age.
+ */
+export const HEALTH_SAMPLE_STALE_INTERVALS = 3
+
+export interface CompletedHealthSample {
+  readonly metrics: HealthMetrics
+  readonly observedAt: number
+}
+
+let lastCompletedHealthSample: CompletedHealthSample | undefined
+
+/** Record the monitor's just-completed sample. Called once per successful tick. */
+function recordCompletedHealthSample(metrics: HealthMetrics, at: number): void {
+  lastCompletedHealthSample = { metrics, observedAt: at }
+}
+
+export interface HealthMachineResolution {
+  /** The monitor's last completed sample, or null when none has landed yet. */
+  readonly metrics: HealthMetrics | null
+  /** Age (ms) of the monitor sample backing this answer; null when none has landed yet. */
+  readonly ageMs: number | null
+  /** True when the sample is past the stale bound or absent, so a wedged monitor reads as stale. */
+  readonly stale: boolean
+  /** Where the served metrics came from — the monitor's sample, or nothing at all. */
+  readonly source: "monitor-sample" | "none"
+  /** The bound `ageMs` is compared against, carried so a reader can see what "stale" meant. */
+  readonly staleAfterMs: number
+}
+
+/**
+ * Serve the monitor's last completed sample, synchronously and without ever
+ * running a census (28196). The daemon is single-threaded, and the per-request
+ * `collectFullMetrics()` this replaced (a `hab sysmon snapshot` walk measured at
+ * 0.62–0.70 s, and past 5 s under host load — the fault that timed out
+ * `cli_health` itself) occupied the loop so 5 s-deadline readers queued behind
+ * it. This resolver is deliberately synchronous: it cannot await a probe, so the
+ * reply is bounded by CPU work, not by a census walk.
+ *
+ * A sample past `staleAfterMs` (3 poll intervals) is STILL served — with
+ * `stale: true` and its `ageMs` — because collecting fresh instead is exactly
+ * the stall being fixed; a wedged monitor must read as stale, never as a silent
+ * fresh-looking snapshot. With no sample landed yet (the first ticks after
+ * start), `metrics` is null and the source is `none`.
+ */
+export function resolveHealthMachine(
+  opts: {
+    readonly now?: () => number
+    readonly pollIntervalMs?: number
+    /** An explicit sample to consider in place of the module cache. */
+    readonly sample?: CompletedHealthSample | undefined
+  } = {},
+): HealthMachineResolution {
+  const now = opts.now ?? Date.now
+  const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_HEALTH_POLL_INTERVAL_SEC * 1000
+  const staleAfterMs = pollIntervalMs * HEALTH_SAMPLE_STALE_INTERVALS
+  const cached = opts.sample === undefined ? lastCompletedHealthSample : opts.sample
+  if (cached === undefined) {
+    return { metrics: null, ageMs: null, stale: true, source: "none", staleAfterMs }
+  }
+  const ageMs = now() - cached.observedAt
+  return {
+    metrics: cached.metrics,
+    ageMs,
+    stale: ageMs > staleAfterMs,
+    source: "monitor-sample",
+    staleAfterMs,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2676,6 +2703,9 @@ export const healthMonitorPlugin: TribePluginApi = {
     async function sample(): Promise<void> {
       try {
         const { metrics, pidToParent, processObservation } = await collectFullMetrics(processSource)
+        // Publish this tick for on-demand readers (cli_health) so they serve it
+        // instead of re-running the census per request (28196).
+        recordCompletedHealthSample(metrics, Date.now())
         const sessions = api.getActiveSessions()
         // Pass active-agent count so process-count threshold scales with the
         // number of connected sessions; alarms tuned for solo dev shouldn't
@@ -2699,25 +2729,8 @@ export const healthMonitorPlugin: TribePluginApi = {
           )
         }
 
-        // --- Chief-authority watchdog (every 3rd sample — ~30s) ---
-        // Only the no-live-authority stop-line remains here. Generic online
-        // inbox staleness is projected by health cadence and consumed by WATCH.
         chiefPresenceSampleCount++
         if (chiefPresenceSampleCount % 3 === 0) {
-          try {
-            const unread = api.getUnreadDms("@chief")
-            const chiefOnline = sessions.some((s) => s.name === "@chief")
-            const chiefAlert = checkChiefAbsent(unread, chiefOnline, alertState)
-            if (chiefAlert) {
-              log.info?.(`alert: ${chiefAlert.message}`)
-              api.broadcast(chiefAlert.message, `health:${chiefAlert.type}:${chiefAlert.severity}`, undefined, {
-                delivery: "push",
-                topic: `health:${chiefAlert.type}:${chiefAlert.severity}`,
-              })
-            }
-          } catch (err) {
-            log.error?.(`chief-absence check failed: ${err instanceof Error ? err.message : String(err)}`)
-          }
           try {
             runBridgeLostTick(api, currentBridgeLostArming, bridgeLostMemory, Date.now())
           } catch (err) {

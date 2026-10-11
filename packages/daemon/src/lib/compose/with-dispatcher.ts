@@ -75,6 +75,7 @@ import {
   type HandlerOpts,
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
+import { emptyFetchReadSelectorRefusal, hasEffectiveFetchReadSelector } from "../fetch-read-selector.ts"
 import type { TribePluginHandle } from "../plugin-api.ts"
 import { createInboxWaitManager, readInboxWaitWokenBy } from "../inbox-wait.ts"
 import {
@@ -436,7 +437,7 @@ export function withDispatcher<
     type AuthenticatedSessionCapability =
       | { kind: "inbox-ack"; limit: unknown; peek: boolean }
       | { kind: "pending-read"; expired: boolean; owed: boolean; staleMs?: number }
-      | { kind: "pending-close"; owner: string; close: string | string[] }
+      | { kind: "pending-close"; owner: string; close: string | string[]; closeEvidence?: string }
       | { kind: "pending-prune"; owner: string; staleMs: number }
       | { kind: "fetch-read"; args: FetchReadArgs }
 
@@ -445,6 +446,9 @@ export function withDispatcher<
       | { errorCode: number; errorMessage: string; errorData: Record<string, unknown> }
 
     function invalidPendingReadFilter(params: Record<string, unknown>): string | undefined {
+      if (params.close_evidence !== undefined) {
+        return "Authenticated pending read does not accept close evidence"
+      }
       if (params.expired !== undefined && typeof params.expired !== "boolean") {
         return "Authenticated pending read filter 'expired' must be boolean"
       }
@@ -470,8 +474,6 @@ export function withDispatcher<
      * advancing branch. The canonical handleFetch then owns the semantics and
      * returns the same `{error}` the MCP tool does, so the two cannot drift.
      */
-    const FETCH_READ_SELECTOR_KEYS = ["ids", "topics", "since", "with", "from", "to"] as const
-
     function invalidFetchReadFilter(params: Record<string, unknown>): string | undefined {
       const isStringArray = (value: unknown): value is string[] =>
         Array.isArray(value) && value.every((entry) => typeof entry === "string")
@@ -503,7 +505,18 @@ export function withDispatcher<
           return `Authenticated fetch read is snapshot-only; '${key}' is not accepted`
         }
       }
-      if (!FETCH_READ_SELECTOR_KEYS.some((key) => Object.prototype.hasOwnProperty.call(params, key))) {
+      // 28402 — an EFFECTIVE selector, not merely a present key. `topics: []`,
+      // `ids: []`, `from: ''`, `to: ''` and `with: ''` are present selectors
+      // that select nothing, and accepting one here let the read fall through
+      // to the acknowledging default drain, so a fresh unread verdict vanished
+      // from the caller's unread view (the 21757 hazard). A present non-empty
+      // sibling — `since: 0` counts — makes the read a snapshot on its own, so
+      // the empty field beside it stays inert. The refusal lives only at this
+      // snapshot-only boundary; the canonical handleFetch keeps its existing
+      // MCP semantics for a registered seat's own read (review 2026-10-09).
+      const emptySelector = emptyFetchReadSelectorRefusal(params)
+      if (emptySelector !== undefined) return emptySelector
+      if (!hasEffectiveFetchReadSelector(params)) {
         return "Authenticated fetch read requires a snapshot selector (ids, topics, since, with, from, to); the live read is tribe inbox"
       }
       return undefined
@@ -777,7 +790,7 @@ export function withDispatcher<
             result: await handleToolCall(
               resolution.context,
               TRIBE_COORD_METHODS.pending,
-              { owner: capability.owner, close: capability.close },
+              { owner: capability.owner, close: capability.close, close_evidence: capability.closeEvidence },
               DAEMON_HANDLER_OPTS,
               connId,
             ),
@@ -2445,7 +2458,7 @@ export function withDispatcher<
           case TRIBE_COORD_METHODS.lifecycle:
           case TRIBE_COORD_METHODS.pending: {
             const client = clients.get(connId)
-            const ctx = client?.ctx ?? daemonCtx
+            let ctx = client?.ctx ?? daemonCtx
             const incident = p.incident as { emitter?: unknown; active?: unknown } | undefined
             const rawEmitter =
               method === TRIBE_COORD_METHODS.pending
@@ -2458,7 +2471,103 @@ export function withDispatcher<
             let incidentAuthorization: HandlerOpts["incidentAuthorization"]
             const managedWrite =
               typeof emitter === "string" && (t.config.requiredIncidentEmitters ?? []).includes(emitter)
-            if (emitterRead || managedWrite) {
+            const sessionlessAuth = Object.hasOwn(p, "idToken")
+            const sessionlessToken = typeof p.idToken === "string" && p.idToken.length > 0 ? p.idToken : undefined
+            const sessionlessSend = sessionlessAuth && method === TRIBE_COORD_METHODS.send
+            let toolParams: Record<string, unknown> = p
+            if (sessionlessAuth) {
+              const overrideKeys = ["session", "name", "launch_id", "launch_parent_pid", "pid"] as const
+              const override = overrideKeys.find((key) => Object.prototype.hasOwnProperty.call(p, key))
+              if (override !== undefined) {
+                return makeError(
+                  id,
+                  -32003,
+                  `sessionless ${method} refuses ${override}: identity comes from the token only`,
+                  { kind: "unauthenticated", reason: "sessionless-identity-override" },
+                )
+              }
+              if (sessionlessSend) {
+                const sendType = typeof p.type === "string" ? p.type : "notify"
+                const typeRefusalApplies =
+                  incident === undefined
+                    ? sendType !== "notify" && sendType !== "status"
+                    : !["request", "notify", "status"].includes(sendType)
+                if (typeRefusalApplies) {
+                  return makeError(
+                    id,
+                    -32003,
+                    `sessionless principal cannot send type ${JSON.stringify(sendType)}: request, query, assign, verdict and response refuse by name`,
+                    { kind: "unauthenticated", reason: "sessionless-type-refused" },
+                  )
+                }
+              }
+              const { idToken: _strippedToken, ...restParams } = p
+              toolParams = restParams
+              if (sessionlessToken === undefined) {
+                return makeError(id, -32003, "sessionless call carries no identity token", {
+                  kind: "unauthenticated",
+                  reason: "sessionless-token-missing",
+                })
+              }
+              const current = await verifyOneShotToken(undefined, sessionlessToken)
+              if (!("verdict" in current)) {
+                return makeError(id, -32003, current.errorMessage, current.errorData)
+              }
+              const gen = current.verdict.gen
+              if (typeof gen !== "number" || !Number.isSafeInteger(gen)) {
+                return makeError(
+                  id,
+                  -32003,
+                  "sessionless send requires the token's generation so the row can carry sid@gen",
+                  { kind: "unauthenticated", reason: "sessionless-gen-missing" },
+                )
+              }
+              ctx = createTribeContext({
+                db,
+                stmts,
+                sessionId: ctx.sessionId,
+                sessionRole: "pending",
+                initialName: current.verdict.actor,
+                domains: ["service"],
+                claudeSessionId: null,
+                claudeSessionName: null,
+                onMessageInserted,
+                sessionlessLaunch: { sid: current.verdict.sid, gen },
+              })
+              if (emitterRead || managedWrite) {
+                const verifier = hooks.identityVerifier
+                const policyPath = verifier?.path ?? "(no --identity-verifier configured)"
+                const refuseIncident = (reason: string) =>
+                  makeError(
+                    id,
+                    -32003,
+                    `managed incident ${JSON.stringify(emitter)} refused by incident policy ${policyPath}: ${reason}`,
+                  )
+                if (typeof emitter !== "string" || emitter.length === 0) {
+                  return refuseIncident("emitter must be a nonempty string")
+                }
+                if (!verifier?.readIncidentPolicy) {
+                  return refuseIncident("required INCIDENT_POLICY export is unavailable")
+                }
+                let policy: ReturnType<NonNullable<LoadedIdentityVerifier["readIncidentPolicy"]>>
+                try {
+                  policy = verifier.readIncidentPolicy()
+                } catch (error) {
+                  return refuseIncident(error instanceof Error ? error.message : String(error))
+                }
+                if (!policy.emitters.includes(emitter)) {
+                  return refuseIncident("emitter is not managed by this host policy")
+                }
+                const operation = emitterRead ? "read" : incident?.active === false ? "clear" : "raise"
+                try {
+                  const allowed = policy.authorize(current.verdict, emitter, operation)
+                  if (allowed !== true) return refuseIncident("verified identity is not authorized for this emitter")
+                  incidentAuthorization = { emitter, operation }
+                } catch (error) {
+                  return refuseIncident(error instanceof Error ? error.message : String(error))
+                }
+              }
+            } else if (emitterRead || managedWrite) {
               const verifier = hooks.identityVerifier
               const policyPath = verifier?.path ?? "(no --identity-verifier configured)"
               const refuseIncident = (reason: string) =>
@@ -2533,8 +2642,11 @@ export function withDispatcher<
                       return { transportDelivery, delivery: registry.getSessionDelivery(ctx.sessionId) }
                     },
                   }
-                : DAEMON_HANDLER_OPTS
-            const result = await handleToolCall(ctx, method, p, opts, connId)
+                : {
+                    ...DAEMON_HANDLER_OPTS,
+                    ...(incidentAuthorization === undefined ? {} : { incidentAuthorization }),
+                  }
+            const result = await handleToolCall(ctx, method, toolParams, opts, connId)
             const current = clients.get(connId)
             if ((method === TRIBE_COORD_METHODS.join || method === TRIBE_COORD_METHODS.rename) && current) {
               current.name = ctx.getName()
@@ -2578,14 +2690,28 @@ export function withDispatcher<
           }
 
           case "cli_health": {
-            const health = await handleToolCall(daemonCtx, TRIBE_COORD_METHODS.health, {}, DAEMON_HANDLER_OPTS)
-            const { getBridgeLostArming, getHealthSampleStats, getHealthSnapshot } =
+            const health = await handleToolCall(daemonCtx, TRIBE_COORD_METHODS.health, p, DAEMON_HANDLER_OPTS)
+            const { getBridgeLostArming, getHealthSampleStats, resolveHealthMachine } =
               await import("../health-monitor-plugin.ts")
-            let machine: unknown = null
-            try {
-              machine = await getHealthSnapshot()
-            } catch {
-              /* health snapshot unavailable */
+            // 28196: serve the monitor's last completed sample rather than
+            // re-running the census (`hab sysmon snapshot`, measured 0.62-0.70 s,
+            // >5 s under load) on the single-threaded request path. The resolver
+            // is synchronous and never collects, so this reply cannot queue
+            // behind a census walk; `machine_sample` always carries the age and a
+            // stale flag, so a wedged monitor shows instead of hiding behind an
+            // old snapshot.
+            const resolved = resolveHealthMachine()
+            const machine: unknown = resolved.metrics
+            const machineSample: {
+              age_ms: number | null
+              stale: boolean
+              source: "monitor-sample" | "none"
+              stale_after_ms: number
+            } = {
+              age_ms: resolved.ageMs,
+              stale: resolved.stale,
+              source: resolved.source,
+              stale_after_ms: resolved.staleAfterMs,
             }
             // 15588: fold the live roster into the health response so chief
             // can answer "who is connected / who is idle >15min" with one
@@ -2607,6 +2733,7 @@ export function withDispatcher<
             return makeResponse(id, {
               ...health,
               machine,
+              machine_sample: machineSample,
               // 25662: doctor prints "bridge-lost paging disarmed: <reason>" from this; never a silent default.
               bridge_lost: getBridgeLostArming(),
               // 24248: skipped health-sample ticks ride the rail; null means the monitor has not started.
@@ -2905,9 +3032,20 @@ export function withDispatcher<
             if (owner === null || close === null) {
               return makeError(id, -32602, "Authenticated pending close requires owner and close")
             }
+            if (p.close_evidence !== undefined && typeof p.close_evidence !== "string") {
+              return makeError(id, -32602, "Authenticated pending close evidence must be a string")
+            }
+            if (p.close_evidence !== undefined && (p.owed !== undefined || p.emitter !== undefined)) {
+              return makeError(id, -32602, "Authenticated pending close evidence cannot accompany a read filter")
+            }
             const outcome = await dispatchAuthenticatedSessionCapability(
               { authority: p.authority, idToken: p.idToken },
-              { kind: "pending-close", owner, close },
+              {
+                kind: "pending-close",
+                owner,
+                close,
+                ...(typeof p.close_evidence === "string" ? { closeEvidence: p.close_evidence } : {}),
+              },
               connId,
             )
             if (!("result" in outcome)) {

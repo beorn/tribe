@@ -60,10 +60,10 @@
     "./lib/session-identity-env": "./src/lib/session-identity-env.ts",
     "./lib/ag-host-env": "./src/lib/ag-host-env.ts",
     "./lib/daemon-environment": "./src/lib/daemon-environment.ts",
-  "./lib/inbox-wait-errors": "./src/lib/inbox-wait-errors.ts",
-  "./lib/inbox-wait-gap": "./src/lib/inbox-wait-gap.ts",
-  "./lib/delivery-report": "./src/lib/delivery-report.ts",
-  "./http": "./src/http-adapter.ts"
+    "./lib/inbox-wait-errors": "./src/lib/inbox-wait-errors.ts",
+    "./lib/inbox-wait-gap": "./src/lib/inbox-wait-gap.ts",
+    "./lib/delivery-report": "./src/lib/delivery-report.ts",
+    "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {
     "bin": {
@@ -208,7 +208,7 @@
   "dependencies": {
     "@bearly/flock": "^0.1.0",
     "@bearly/pacing": "0.2.0",
-    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@silvery/commander": "^0.24.0",
     "loggily": "^0.11.0",
     "removely": "^0.4.0"

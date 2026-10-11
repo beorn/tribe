@@ -129,7 +129,7 @@ describe("canonical managed reaper", () => {
     for (let index = 0; index < 4; index++) {
       checkCanonicalReaper(
         observation(
-          { kind: "owned", ownerId: "@dev/luna6", via: "env" },
+          { kind: "owned", ownerId: "@dev/luna6", via: "env", ownerLiveness: "down" },
           {
             command: "bun arm-bound-probe.ts",
             cpuPercent: 0,
@@ -172,6 +172,101 @@ describe("canonical managed reaper", () => {
 
     expect(sink.broadcasts).toEqual([])
     expect(sink.sends).toEqual([])
+  })
+
+  // 28276: custody paths do not prove owner liveness; the canonical producer supplies it independently.
+  it("never pages a parked process whose service owner is alive in the census (hh 28276)", () => {
+    const state = createCanonicalReaperState()
+    const sink = api()
+    const atRest = observation(
+      { kind: "owned", ownerId: "habmod", via: "root", ownerLiveness: "live" },
+      { command: "bun habmod.ts", cpuPercent: 0, pid: 913_768, startTime: "linux:boot:913768" },
+    )
+    for (let index = 0; index < 4; index++) {
+      checkCanonicalReaper(
+        {
+          ...atRest,
+          observedAt: 1_000 + index * 30_000,
+          processes: [
+            ...atRest.processes,
+            {
+              attribution: { kind: "owned", ownerId: "habmod", via: "tree", ownerLiveness: "live" },
+              process: {
+                ...atRest.processes[0]!.process,
+                command: "bun habmod-worker.ts",
+                cpuPercent: 0,
+                pid: 919_689,
+                startTime: "linux:boot:919689",
+              },
+            },
+          ],
+          source: { epoch: "host-a", sequence: 60 + index },
+        },
+        thresholds,
+        state,
+        sink.client,
+        sessions,
+      )
+    }
+
+    expect(sink.broadcasts).toEqual([])
+    expect(sink.sends).toEqual([])
+  })
+
+  // #28276: three fresh down censuses are required; a changed lifecycle breaks the run.
+  // Other aging tests change custody or source availability, not an owned row's lifecycle.
+  it.each(["live", "unknown"] as const)("%s between down observations resets owner-down aging", (middle) => {
+    const state = createCanonicalReaperState()
+    const sink = api()
+    const lifecycle = ["down", "down", middle, "down", "down", "down"] as const
+    lifecycle.forEach((ownerLiveness, index) => {
+      checkCanonicalReaper(
+        observation(
+          { kind: "owned", ownerId: "km-daemon", via: "env", ownerLiveness },
+          {
+            cpuPercent: 0,
+            observedAt: 1_000 + index * 30_000,
+            sequence: 70 + index,
+          },
+        ),
+        thresholds,
+        state,
+        sink.client,
+        [],
+      )
+      expect(sink.broadcasts.filter(({ type }) => type === "health:reaper:owner-down")).toHaveLength(
+        index === 5 ? 1 : 0,
+      )
+    })
+  })
+
+  it("still names a service-owned process once its unit is gone from the census (hh 28276)", () => {
+    const state = createCanonicalReaperState()
+    const sink = api()
+    for (let index = 0; index < 4; index++) {
+      checkCanonicalReaper(
+        observation(
+          { kind: "owned", ownerId: "km-daemon", via: "env", ownerLiveness: "down" },
+          {
+            command: "bun km-daemon.ts",
+            cpuPercent: 0,
+            observedAt: 1_000 + index * 30_000,
+            pid: 700_001,
+            sequence: 70 + index,
+            startTime: "linux:boot:700001",
+          },
+        ),
+        thresholds,
+        state,
+        sink.client,
+        sessions,
+      )
+    }
+
+    const pages = sink.broadcasts.filter(({ type }) => type === "health:reaper:owner-down")
+    expect(pages).toHaveLength(1)
+    expect(pages[0]!.message).toContain("km-daemon")
+    expect(pages[0]!.message).toContain("700001")
   })
 
   it("says once that a suspect left the watch when its census row turned malformed; an exited one leaves silently (hh 25917)", () => {

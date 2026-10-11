@@ -53,7 +53,7 @@ function runCli(args: string[], opts: { timeoutMs?: number } = {}): { stdout: st
 function runCliAsync(
   args: string[],
   env: NodeJS.ProcessEnv,
-  opts: { operatorCapability?: string; timeoutMs?: number } = {},
+  opts: { operatorCapability?: string; timeoutMs?: number; doctorSectionsSource?: string } = {},
 ): Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null }> {
   return new Promise((resolveRun) => {
     const stdio: Array<"ignore" | "pipe" | number> = ["ignore", "pipe", "pipe"]
@@ -68,7 +68,14 @@ function runCliAsync(
       stdio.push(capabilityFd)
       childEnv.TRIBE_OPERATOR_CAPABILITY_FD = String(stdio.length - 1)
     }
-    const child = spawn(BUN_BIN, [CLI, ...args], { env: childEnv, stdio, timeout: opts.timeoutMs })
+    const childArgs =
+      opts.doctorSectionsSource === undefined
+        ? [CLI, ...args]
+        : [
+            "--eval",
+            `const { main } = await import(${JSON.stringify(CLI)}); process.exitCode = await main(${JSON.stringify(["bun", CLI, ...args])}, { doctorSections: ${opts.doctorSectionsSource} });`,
+          ]
+    const child = spawn(BUN_BIN, childArgs, { env: childEnv, stdio, timeout: opts.timeoutMs })
     if (capabilityFd !== undefined) closeSync(capabilityFd)
     let stdout = ""
     let stderr = ""
@@ -299,6 +306,43 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       expect(result.stdout).toContain(
         `OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=${EXPECTED_HOST_PIN}`,
       )
+
+      // The public host boundary must await contributed facts and use the
+      // same verdict table; the standalone canary above has no host section.
+      const extended = await runCliAsync(["doctor", "--json"], env, {
+        timeoutMs: 10_000,
+        doctorSectionsSource: `async () => {
+          await new Promise(resolve => setTimeout(resolve, 20));
+          return [{ name: "fixture-host", checks: { install: { severity: "WARNING", diagnosis: "optional fixture config absent" } } }];
+        }`,
+      })
+      expect(extended.code, extended.stderr).toBe(3)
+      expect(JSON.parse(extended.stdout)).toMatchObject({
+        verdict: "WARNING",
+        identity: { severity: "OK" },
+        rail: { severity: "OK" },
+        sections: [{ name: "fixture-host", checks: { install: { severity: "WARNING" } } }],
+      })
+
+      const failedCollection = await runCliAsync(["doctor", "--json"], env, {
+        timeoutMs: 10_000,
+        doctorSectionsSource: `async () => { throw new Error("unreadable fixture config /fixture/settings.json") }`,
+      })
+      expect(failedCollection.code, failedCollection.stderr).toBe(2)
+      expect(JSON.parse(failedCollection.stdout)).toMatchObject({
+        verdict: "UNKNOWN",
+        sections: [
+          {
+            name: "extensions",
+            checks: {
+              collection: {
+                severity: "UNKNOWN",
+                diagnosis: expect.stringContaining("/fixture/settings.json"),
+              },
+            },
+          },
+        ],
+      })
     } finally {
       daemon.kill("SIGTERM")
       await new Promise<void>((resolveClose) => daemon.once("close", () => resolveClose()))
@@ -467,6 +511,37 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       rmSync(dir, { recursive: true, force: true })
     }
   }, 40_000)
+
+  it("health --json measures an ABSENT socket now, not after the 28674 restart-retry window", () => {
+    // 28674 gave connectToDaemon a bounded retry (CONNECT_RETRY_WINDOW_MS, 6000 ms) so a CLIENT call rides out a
+    // wire restart. The health probe is the opposite kind of caller: its `absent + stopped` on ENOENT is a
+    // MEASUREMENT of the socket, so it must describe the socket NOW. With the window left on, an absent socket that
+    // had answered in ~50 ms took ~5.8 s — outrunning hab's own reader and ceasing to be a measurement at all.
+    // cmdHealth passes connectRetryWindowMs: 0; this test goes red (>2.5 s) if that is ever dropped.
+    // No temp tree: the socket is absent by construction (nothing ever listens), so the test writes nothing and
+    // has nothing to clean up — a mkdtemp here would only add a raw delete to the tree (no-raw-deletes guard).
+    const startedAt = Date.now()
+    const res = spawnSync(BUN_BIN, [CLI, "health", "--json"], {
+      encoding: "utf8",
+      timeout: 30_000,
+      env: {
+        ...process.env,
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_SOCKET: join(tmpdir(), `tribe-health-absent-${process.pid}.sock`),
+      },
+    })
+    const elapsedMs = Date.now() - startedAt
+    expect(res.status, res.stderr ?? "").toBe(1)
+    expect(JSON.parse(res.stdout ?? "{}")).toMatchObject({
+      schema: "hab-service-health/2",
+      service: "wire",
+      state: "absent",
+      verdict: { kind: "stopped" },
+    })
+    expect(elapsedMs, "an absent socket is answered immediately, never after the restart-retry window").toBeLessThan(
+      2_500,
+    )
+  }, 30_000)
 
   it("--help prints the Commands list + MCP-adapter hint and exits 0", () => {
     const { stdout, code } = runCli(["--help"])
@@ -681,6 +756,46 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           from: "@dev/1",
           to: "@dev/2",
         },
+      },
+    ])
+  })
+
+  // 28402 — an explicitly EMPTY selector flag is not an effective selector:
+  // `--topics ''` parses to `[]` and `--with ''` stays `''`, both select
+  // nothing, and reading either as a selector sent the call to the daemon's
+  // acknowledging default drain, marking rows read that no model saw (the 21757
+  // hazard). An empty-only call is refused HERE, before any socket is opened,
+  // naming the verb that owns the live read.
+  it("fetch refuses an explicitly empty selector before connecting (#28402)", async () => {
+    const empty = { events: [], cursor: 0 }
+    const { result, calls } = await runManagedFetchCliAgainst(["fetch", "--json", "--topics", ""], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify(empty) }], structuredContent: empty },
+    }))
+
+    expect(result).toMatchObject({
+      code: 2,
+      stderr:
+        "tribe fetch: snapshot lookups require at least one selector (--ids, --topics, --since, --with, --from, --to). " +
+        "The live read is `tribe inbox`; `tribe log` is the daemon log.\n",
+    })
+    expect(calls).toEqual([])
+  })
+
+  // 28402 — an empty field beside an effective selector is inert, not a reason
+  // to refuse: the daemon treats the read as a snapshot on the strength of the
+  // effective sibling. The CLI still forwards exactly what the caller wrote.
+  it("fetch forwards an empty field alongside an effective selector (#28402)", async () => {
+    const empty = { events: [], cursor: 0 }
+    const { result, calls } = await runManagedFetchCliAgainst(
+      ["fetch", "--json", "--since", "0", "--topics", "", "--with", "", "--from", ""],
+      () => ({ result: { content: [{ type: "text", text: JSON.stringify(empty) }], structuredContent: empty } }),
+    )
+
+    expect(result).toMatchObject({ code: 0, stderr: "" })
+    expect(calls).toEqual([
+      {
+        method: "cli_session_fetch_read_v1",
+        params: { idToken: MANAGED_PENDING_TOKEN, since: 0, topics: [], with: "", from: "" },
       },
     ])
   })
@@ -1939,11 +2054,21 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         TRIBE_SOCKET: join(dir, "absent.sock"),
         HAB_SERVICE_NAME: "wire",
       }
+      const startedAt = Date.now()
       const result = await runCliAsync(["stop"], env)
       // Guard passed; the failure is the absent daemon, not a refusal.
       expect(result.stderr).not.toMatch(/refusing to stop/)
       expect(result.stderr).toMatch(/No daemon running/)
       expect(result.code).toBe(1)
+      // 28683 (@cto): stop's answer on an absent socket is a PRESENCE decision ("nothing to stop", exit 1), not a
+      // call to bridge across a restart, so cmdStop takes connectRetryWindowMs 0 — the cmdHealth PROBE
+      // classification for a different reason. Left on the default 28674 window this verb would retry the absent
+      // socket for ~6 s first, so this assertion goes red (>2.5 s, and red against vitest's 5 s default) if that
+      // opt-out is ever dropped.
+      expect(
+        Date.now() - startedAt,
+        "an absent socket is answered now, never after the restart-retry window",
+      ).toBeLessThan(2_500)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

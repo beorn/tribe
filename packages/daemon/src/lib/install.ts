@@ -19,9 +19,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, relative, resolve } from "node:path"
-import { resolveSocketPath, probeDaemonPid } from "tribe-wire/lib/socket"
 import {
   DEFAULT_AUTOSTART,
+  VALID_AUTOSTART_MODES,
   readTribeConfig,
   resolveConfigPath,
   writeTribeConfig,
@@ -475,6 +475,7 @@ export interface DoctorReport {
   hasFailures: boolean
 }
 
+// oxlint-disable-next-line typescript/require-await -- Preserve the existing Promise/error contract after removing socket I/O.
 export async function doctorReport(env: InstallEnv): Promise<DoctorReport> {
   const checks: DoctorCheck[] = []
 
@@ -586,69 +587,26 @@ export async function doctorReport(env: InstallEnv): Promise<DoctorReport> {
     }
   }
 
-  // 3. Daemon — liveness = "can we connect to the socket and get a PID back"
-  const socketPath = resolveSocketPath()
-  const pid = await probeDaemonPid(socketPath)
-  if (pid) {
-    checks.push({ name: "daemon", level: "pass", message: `running (pid=${pid}, socket=${socketPath})` })
-  } else if (existsSync(socketPath)) {
-    checks.push({
-      name: "daemon",
-      level: "warn",
-      message: `not running but stale socket present (${socketPath})`,
-      hint: "run `tribe start` to start (or delete the stale socket)",
-    })
-  } else {
-    checks.push({
-      name: "daemon",
-      level: "warn",
-      message: `not running`,
-      hint: "run `tribe start` if you want coordination live",
-    })
-  }
-
-  // 4. Autostart mode
+  // Autostart is a declared configuration fact. Wire owns daemon liveness.
   const configExists = existsSync(env.autostartConfigPath)
-  const mode = configExists ? readTribeConfig(env.autostartConfigPath).autostart : DEFAULT_AUTOSTART
-  const envOverride = process.env.TRIBE_NO_DAEMON === "1"
-  if (envOverride) {
-    checks.push({
-      name: "autostart",
-      level: "pass",
-      message: `library (TRIBE_NO_DAEMON=1 overrides ${mode}${configExists ? "" : " default"})`,
-    })
-  } else if (mode === "daemon") {
-    const daemonSocket = resolveSocketPath()
-    const daemonAlive = existsSync(daemonSocket)
-    if (daemonAlive) {
-      checks.push({
-        name: "autostart",
-        level: "pass",
-        message: `daemon (tribe daemon alive at ${daemonSocket})`,
-      })
-    } else {
-      checks.push({
-        name: "autostart",
-        level: "pass",
-        message: `daemon (tribe daemon not running — will spawn on next hook)`,
-      })
+  let mode: TribeAutostart = DEFAULT_AUTOSTART
+  if (configExists) {
+    const configured = readJsonOrEmpty(env.autostartConfigPath).autostart
+    if (typeof configured !== "string" || !VALID_AUTOSTART_MODES.includes(configured as TribeAutostart)) {
+      throw new Error(
+        `invalid autostart in ${env.autostartConfigPath}: expected ${VALID_AUTOSTART_MODES.join("|")}, got ${JSON.stringify(configured)}`,
+      )
     }
-  } else {
-    checks.push({ name: "autostart", level: "pass", message: `${mode}` })
+    mode = configured as TribeAutostart
   }
+  const source = `${configExists ? "" : "default; "}config=${env.autostartConfigPath}`
+  const envOverride = process.env.TRIBE_NO_DAEMON === "1"
+  checks.push({
+    name: "autostart",
+    level: "pass",
+    message: envOverride ? `library (TRIBE_NO_DAEMON=1 overrides ${mode}; ${source})` : `${mode} (${source})`,
+  })
 
   const hasFailures = checks.some((c) => c.level === "fail")
   return { env, checks, hasFailures }
-}
-
-export function formatDoctorReport(r: DoctorReport): string {
-  const lines: string[] = ["tribe doctor"]
-  for (const c of r.checks) {
-    const tag = c.level === "pass" ? "PASS" : c.level === "warn" ? "WARN" : "FAIL"
-    lines.push(`  [${tag}] ${c.name}: ${c.message}`)
-    if (c.hint && c.level !== "pass") lines.push(`         hint: ${c.hint}`)
-  }
-  const summary = `  ${r.checks.filter((c) => c.level === "pass").length} pass, ${r.checks.filter((c) => c.level === "warn").length} warn, ${r.checks.filter((c) => c.level === "fail").length} fail`
-  lines.push(summary)
-  return lines.join("\n")
 }
