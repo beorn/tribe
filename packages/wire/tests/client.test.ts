@@ -465,6 +465,45 @@ describe("connectToDaemon", () => {
     }
   })
 
+  it("a delayed retry wake fails with the absent error, never attempts past the deadline (#28674 peer review)", async () => {
+    // @dev/1's finding. The loop checked its ceiling BEFORE the sleep and never after it, so a wake that overran
+    // the caller's deadline started a fresh connect anyway: with callTimeoutMs 150 and the 17 ms retry sleep
+    // delayed to 500 ms, an attempt began at 504 ms and SUCCEEDED at 512 ms — 362 ms past the budget asked for.
+    // Reproduced with the peer review's own instrumentation: only the retry sleep is slowed, the socket is real.
+    const sock = join(tmpDir, "late-wake.sock")
+    let attempts = 0
+    let daemon: { server: Server } | undefined
+    const patchedConnect = Socket.prototype.connect
+    const realSetTimeout = globalThis.setTimeout
+    Socket.prototype.connect = function (this: Socket, ...args: unknown[]) {
+      attempts++
+      return patchedConnect.apply(this, args as never)
+    } as typeof Socket.prototype.connect
+    globalThis.setTimeout = ((callback: () => void, ms?: number) =>
+      realSetTimeout(callback, ms === 17 ? 500 : ms)) as typeof setTimeout
+    // The daemon appears at 200 ms, INSIDE the delayed wake: with the old loop the late attempt finds it and
+    // connects, which is the violation. With the fix the call has already failed with its absent error.
+    const appeared = new Promise<void>((resolveListen) => {
+      realSetTimeout(() => void spawnFakeDaemon(sock).then((spawned) => {
+        daemon = spawned
+        resolveListen()
+      }), 200)
+    })
+    try {
+      const error = await connectToDaemon(sock, { callTimeoutMs: 150, connectRetryIntervalMs: 17 }).then(
+        () => undefined,
+        (e: unknown) => e,
+      )
+      expect(error, "the call must fail, never connect past its deadline").toMatchObject({ code: "ENOENT" })
+      expect(attempts, "no connect attempt may start after the caller's deadline").toBe(1)
+    } finally {
+      globalThis.setTimeout = realSetTimeout
+      Socket.prototype.connect = patchedConnect
+      await appeared
+      if (daemon) await new Promise<void>((r) => daemon?.server.close(() => r()))
+    }
+  })
+
   it("rejects when unix connect has not completed before callTimeoutMs", async () => {
     // #27100: WATCH pid 2307485 sat State S on ep_poll for 5h with one socket.
     // callTimeoutMs armed only after 'connect'; a peer that never accepts

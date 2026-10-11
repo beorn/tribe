@@ -145,7 +145,14 @@ export async function connectToDaemon(socketPath: string, opts?: ConnectToDaemon
   const deadlineAt = startedAt + Math.max(0, callTimeoutMs)
   const retryUntil = Math.min(deadlineAt, startedAt + windowMs)
   let attempts = 0
+  let lastAbsentError: Error | undefined
   for (;;) {
+    // The ceiling is checked AGAIN on the way OUT of the sleep, not only before it. A sleep can wake far later
+    // than it asked (a loaded event loop, a paused process), and an attempt started after that wake is an attempt
+    // started after the caller's deadline: with callTimeoutMs 150 and the retry sleep delayed 25 ms -> 500 ms, the
+    // old loop began a fresh connect at 504 ms and CONNECTED at 512 ms, 362 ms past the budget asked for. A wake
+    // that overran therefore fails with the absent error it already held (@dev/1, 28674 peer review).
+    if (lastAbsentError !== undefined && Date.now() + intervalMs > retryUntil) throw lastAbsentError
     attempts++
     try {
       const client = await connectToDaemonOnce(socketPath, opts, deadlineAt)
@@ -159,6 +166,7 @@ export async function connectToDaemon(socketPath: string, opts?: ConnectToDaemon
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error))
       if (!isDaemonAbsent(err)) throw err
+      lastAbsentError = err
       const now = Date.now()
       if (now + intervalMs > retryUntil) {
         // No log here: the error is already loud (it propagates, and every caller reports it), and a per-caller
