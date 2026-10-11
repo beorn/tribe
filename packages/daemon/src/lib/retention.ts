@@ -400,10 +400,26 @@ function readExportManifest(path: string, day: string): ExportManifest | null {
   if (String(parsed.day ?? "") !== day) {
     throw new Error(`archive-export: ${path} names day ${String(parsed.day ?? "")} but was read for ${day}`)
   }
-  const rows = Number(parsed.rows ?? parsed.ids.length)
-  if (rows !== parsed.ids.length) {
+  // `rows` is a REQUIRED count, never defaulted from ids.length and never
+  // coerced: a missing or string row count is a manifest that never proved how
+  // many rows it recorded, and silently supplying one is accepting an invalid
+  // proof. Same for duplicates — a Set would collapse them, so a manifest whose
+  // ids repeat must fail loud rather than normalize to a shorter id list.
+  if (typeof parsed.rows !== "number" || !Number.isInteger(parsed.rows) || parsed.rows < 0) {
+    throw new Error(`archive-export: ${path} is not a readable manifest (needs a non-negative integer rows)`)
+  }
+  const ids = parsed.ids.map((id) => {
+    if (typeof id !== "string" || id.length === 0) {
+      throw new Error(`archive-export: ${path} holds a non-string or empty id in its manifest`)
+    }
+    return id
+  })
+  if (new Set(ids).size !== ids.length) {
+    throw new Error(`archive-export: ${path} holds duplicate ids in its manifest; refusing to trust it`)
+  }
+  if (parsed.rows !== ids.length) {
     throw new Error(
-      `archive-export: ${path} records ${rows} rows against ${parsed.ids.length} ids; refusing to trust it`,
+      `archive-export: ${path} records ${parsed.rows} rows against ${ids.length} ids; refusing to trust it`,
     )
   }
   if (typeof parsed.sha256 !== "string" || !SHA256_HEX.test(parsed.sha256)) {
@@ -411,15 +427,10 @@ function readExportManifest(path: string, day: string): ExportManifest | null {
   }
   return {
     day,
-    rows,
+    rows: parsed.rows,
     bytes: parsed.bytes,
     sha256: parsed.sha256,
-    ids: parsed.ids.map((id) => {
-      if (typeof id !== "string" || id.length === 0) {
-        throw new Error(`archive-export: ${path} holds a non-string or empty id in its manifest`)
-      }
-      return id
-    }),
+    ids,
   }
 }
 
@@ -525,6 +536,28 @@ function appendExportRows(
         throw new Error(
           `archive-export: ${file} committed prefix (${recordedBytes} bytes) hashes to ${committed}, not the manifest's ${manifest.sha256}; refusing to append to or rewrite a corrupted day file`,
         )
+      }
+      // The manifest's own recorded count and ids must agree with the bytes its
+      // checksum proves. A manifest that states a different row count or different
+      // ids than the committed prefix decodes to is an invalid proof — a default
+      // or coerced count, or duplicate ids — and must never be re-blessed with a
+      // fresh manifest over the same bytes.
+      if (recordedBytes > 0) {
+        const committedRows = parseExportRows(file, raw.subarray(0, recordedBytes))
+        const committedIds = committedRows.map((row) => String(row.id))
+        if (committedRows.length !== manifest.rows) {
+          throw new Error(
+            `archive-export: ${file} committed prefix decodes to ${committedRows.length} row(s), not the ${manifest.rows} its manifest records; refusing to append`,
+          )
+        }
+        if (
+          committedIds.length !== manifest.ids.length ||
+          committedIds.some((id, index) => id !== manifest.ids[index])
+        ) {
+          throw new Error(
+            `archive-export: ${file} committed prefix ids do not match its manifest's recorded ids; refusing to append`,
+          )
+        }
       }
     }
     if (size > recordedBytes) {

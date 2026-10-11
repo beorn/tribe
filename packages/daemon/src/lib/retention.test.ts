@@ -912,6 +912,51 @@ describe("journal retention sweep", () => {
       }
     })
 
+    it("keeps the row and refuses the delete when the manifest's own count or ids are invalid", () => {
+      type Manifest = ReturnType<typeof readManifest>
+      const cases: Array<{ name: string; manifest: (base: Manifest, id: string) => Record<string, unknown> }> = [
+        {
+          name: "rows omitted",
+          manifest: (base) => ({ day: base.day, bytes: base.bytes, sha256: base.sha256, ids: base.ids }),
+        },
+        { name: "rows coerced from a string", manifest: (base) => ({ ...base, rows: "1" }) },
+        { name: "duplicate ids", manifest: (base, id) => ({ ...base, rows: 2, ids: [id, id] }) },
+        { name: "count disagrees with the file", manifest: (base, id) => ({ ...base, rows: 2, ids: [id, "ghost"] }) },
+        { name: "ids disagree with the file", manifest: (base) => ({ ...base, ids: ["ghost"] }) },
+      ]
+      for (const scenario of cases) {
+        // A fresh tmpDir per scenario: the shared one would otherwise carry the
+        // previous scenario's restored row and day file into the next iteration.
+        rmSync(tmpDir, { recursive: true, force: true })
+        tmpDir = mkdtempSync(join(tmpdir(), "retention-"))
+        const { db, stmts } = setup()
+        try {
+          const oldTs = Date.now() - 200 * DAY
+          const day = dayKey(oldTs)
+          insertArchived(db, { id: "malformed-1", seq: 1, ts: oldTs })
+          expect(runRetentionSweep(db, stmts, enabledConfig()).archiveDelete.deleted).toBe(1)
+
+          const before = firstLine(day)
+          writeFileSync(manifestFile(day), JSON.stringify(scenario.manifest(readManifest(day), "malformed-1")))
+
+          // The delete never committed: the original row is back.
+          insertArchived(db, { id: "malformed-1", seq: 1, ts: oldTs, archivedAt: before.archived_at as number })
+
+          const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+          try {
+            const next = runRetentionSweep(db, stmts, enabledConfig())
+            expect(next.export.status, scenario.name).toBe("failed")
+            expect(next.archiveDelete.deleted, scenario.name).toBe(0)
+            expect(archivedIds(db), scenario.name).toEqual(["malformed-1"])
+          } finally {
+            errorSpy.mockRestore()
+          }
+        } finally {
+          db.close()
+        }
+      }
+    })
+
     it("refuses the delete and names the failure when the export cannot be written", () => {
       const { db, stmts } = setup()
       try {
