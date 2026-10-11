@@ -42,9 +42,12 @@ export function parseThreshold(s: string): number {
  * drift onto a second hand-kept number.
  */
 export const RECALL_INDEX_CADENCE = "1h"
-/** `timeout -k 10 600` on the recall-index command: 10m plus 5m slack. */
+/** `timeout -k 10 600` on the recall-index command. */
 export const RECALL_INDEX_RUN_TIMEOUT_SEC = 600
-export const RECALL_INDEX_RUN_ALLOWANCE = "15m"
+/** Extra window beyond the command timeout so a full-length run still counts as on-cadence. */
+export const RECALL_INDEX_RUN_SLACK = "5m"
+/** Timeout plus slack. Derived: a longer timeout widens the reader window. */
+export const RECALL_INDEX_RUN_ALLOWANCE = `${(RECALL_INDEX_RUN_TIMEOUT_SEC * 1000 + parseThreshold(RECALL_INDEX_RUN_SLACK)) / 60_000}m`
 /**
  * Cadence plus run time. Derived, not a second literal: a slower cadence
  * widens the window; a faster one shrinks it.

@@ -18,6 +18,7 @@
  * verdicts about one index. These tests pin the single verdict both now read,
  * and that a stale answer names the root and the window it judged.
  */
+import { readFileSync } from "node:fs"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
 
 process.env.RECALL_DB_PATH = ":memory:"
@@ -27,6 +28,8 @@ const {
   INDEX_FRESHNESS_ROOT,
   RECALL_INDEX_CADENCE,
   RECALL_INDEX_RUN_ALLOWANCE,
+  RECALL_INDEX_RUN_SLACK,
+  RECALL_INDEX_RUN_TIMEOUT_SEC,
   RECALL_STALE_THRESHOLD_DEFAULT,
   describeFreshness,
   getStaleThresholdMs,
@@ -37,6 +40,32 @@ const { readIndexFreshness, readIndexProvenance } = await import("../src/lib/sea
 const { reviewMemorySystem } = await import("../src/history/scanner")
 
 const originalThreshold = process.env.RECALL_STALE_THRESHOLD
+
+/** Evaluate cadence+allowance from staleness.ts source, so a timeout mutation is visible. */
+function evaluateStaleDefaultMs(source: string): number {
+  const timeout = Number(/export const RECALL_INDEX_RUN_TIMEOUT_SEC = (\d+)/.exec(source)?.[1])
+  const cadence = /export const RECALL_INDEX_CADENCE = "([^"]+)"/.exec(source)?.[1]
+  if (!Number.isFinite(timeout) || cadence === undefined) {
+    throw new Error("could not read cadence/timeout from staleness.ts")
+  }
+  const slack = /export const RECALL_INDEX_RUN_SLACK = "([^"]+)"/.exec(source)?.[1]
+  const allowanceQuoted = /export const RECALL_INDEX_RUN_ALLOWANCE = "([^"]+)"/.exec(source)?.[1]
+  const allowanceTemplate = /export const RECALL_INDEX_RUN_ALLOWANCE = `([^`]+)`/.exec(source)?.[1]
+  let allowance: string
+  if (allowanceTemplate !== undefined) {
+    allowance = new Function(
+      "RECALL_INDEX_RUN_TIMEOUT_SEC",
+      "parseThreshold",
+      "RECALL_INDEX_RUN_SLACK",
+      `return \`${allowanceTemplate}\``,
+    )(timeout, parseThreshold, slack) as string
+  } else if (allowanceQuoted !== undefined) {
+    allowance = allowanceQuoted
+  } else {
+    throw new Error("could not read RECALL_INDEX_RUN_ALLOWANCE initializer")
+  }
+  return parseThreshold(cadence) + parseThreshold(allowance)
+}
 
 /** A `last_rebuild` stamp as it is stored, aged by `ms`. */
 function stampAgedBy(ms: number): string {
@@ -68,6 +97,27 @@ describe("the one freshness verdict", () => {
     expect(fresh.windowSource).toBe("default")
     expect(fresh.root).toBe(INDEX_FRESHNESS_ROOT)
     expect(fresh.provenance).toBe("complete")
+  })
+
+  /**
+   * @failure The reader window stays 75m when the recall-index timeout doubles,
+   *          because allowance is a second literal instead of timeout plus slack.
+   * @level l1
+   * @consumer @i/1-instruments/28594/28600/28613 AC3 — window derived from cadence plus run time
+   * @testonly none
+   */
+  test("allowance is timeout plus slack, so a timeout mutation changes the window", () => {
+    const src = readFileSync(new URL("../src/lib/staleness.ts", import.meta.url), "utf8")
+    expect(evaluateStaleDefaultMs(src)).toBe(75 * 60 * 1000)
+    const mutated = src.replace(
+      /export const RECALL_INDEX_RUN_TIMEOUT_SEC = 600/,
+      "export const RECALL_INDEX_RUN_TIMEOUT_SEC = 1200",
+    )
+    expect(evaluateStaleDefaultMs(mutated)).toBe(85 * 60 * 1000)
+    expect(RECALL_INDEX_RUN_TIMEOUT_SEC).toBe(600)
+    expect(parseThreshold(RECALL_INDEX_RUN_ALLOWANCE)).toBe(
+      parseThreshold(`${RECALL_INDEX_RUN_TIMEOUT_SEC}s`) + parseThreshold(RECALL_INDEX_RUN_SLACK),
+    )
   })
 
   test("a stamp past the window is stale, and the verdict carries the age it judged", () => {
