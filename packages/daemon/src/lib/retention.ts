@@ -32,6 +32,20 @@
  *      whether to enable delete in production are a POLICY decision left to
  *      a follow-up bead, not this change.
  *
+ *   3. archive-export (27889) runs INSIDE the archive-delete phase, before any
+ *      row is removed: every eligible batch is copied to a per-day,
+ *      append-only gzip file beside tribe.db (`archive-export/`, or
+ *      TRIBE_RETENTION_EXPORT_DIR) with a manifest recording the day's
+ *      ids/rows/bytes/sha256. A batch whose export did not verify is NOT
+ *      deleted and the refusal is named at error level. The export exists so a
+ *      cited tribe id (e.g. "…@cto 68b1ca87") never becomes dangling evidence
+ *      after its row is gone: read one back with
+ *      `zcat <exportDir>/messages-archive-YYYY-MM-DD.jsonl.gz | grep -F '"id":"<id>"'`
+ *      — the day file is a MULTI-MEMBER gzip (one member per appended batch),
+ *      and zcat concatenates the members, so the single grep reads them all.
+ *      `cat <exportDir>/messages-archive-YYYY-MM-DD.manifest.json` gives the
+ *      day's row count and the sha256 of the whole file.
+ *
  * Safety rules for archive-delete (never break the ball-tracker or
  * attention semantics):
  *
@@ -78,6 +92,21 @@
  * to be a CLI flag). See resolveRetentionConfig for names/defaults.
  */
 
+import { createHash } from "node:crypto"
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  truncateSync,
+  writeSync,
+} from "node:fs"
+import { dirname, join } from "node:path"
+import { gunzipSync, gzipSync } from "node:zlib"
 import { assertSingleStatement } from "@bearly/sqlite"
 import type { Database } from "bun:sqlite"
 import { createLogger } from "loggily"
@@ -116,6 +145,11 @@ export interface RetentionConfig {
    *  keeps. Must be at least CURSOR_WARNING_MS (asserted at resolve).
    *  Default 7d. */
   readonly liveWindowMs: number
+  /** 27889 — where the cold export writes. Undefined means the default,
+   *  `archive-export/` beside the live tribe.db (resolved from the open
+   *  connection, never a temp dir — the export IS the durable copy of
+   *  everything the delete removes). TRIBE_RETENTION_EXPORT_DIR overrides. */
+  readonly exportDir?: string
 }
 
 const DEFAULT_ARCHIVE_WINDOW_MS = 14 * DAY_MS
@@ -146,6 +180,13 @@ function boolEnv(raw: string | undefined, fallback: boolean): boolean {
   )
 }
 
+/** Parse an optional path env var: unset or blank means "use the default".
+ *  A declared path is taken verbatim — never silently relocated. */
+function optionalPathEnv(raw: string | undefined): string | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined
+  return raw
+}
+
 /**
  * Resolve the retention sweep's config from the environment. Every knob has
  * a safe default; the whole mechanism is inert with zero env vars set except
@@ -167,6 +208,7 @@ export function resolveRetentionConfig(env: NodeJS.ProcessEnv = process.env): Re
     ),
     deleteEnabled: boolEnv(env.TRIBE_RETENTION_DELETE_ENABLED, false),
     batchSize: positiveIntEnv(env.TRIBE_RETENTION_BATCH_SIZE, DEFAULT_BATCH_SIZE, "TRIBE_RETENTION_BATCH_SIZE"),
+    exportDir: optionalPathEnv(env.TRIBE_RETENTION_EXPORT_DIR),
     liveWindowMs: liveWindowEnv(env.TRIBE_RETENTION_LIVE_WINDOW_MS),
   }
 }
@@ -197,6 +239,8 @@ export type RetentionStatements = Pick<
   | "selectSessionInboxCursorFloor"
   | "selectArchiveDeleteBatch"
   | "selectArchiveDeleteDiagnostics"
+  | "selectArchiveRowsForExport"
+  | "selectArchiveRowsByIdsSql"
   | "selectArchiveMoveAttentionLossSql"
   | "upsertMailboxPrune"
 >
@@ -218,6 +262,25 @@ export interface ArchiveMovePhaseResult {
   readonly attentionLoss: ReadonlyArray<{ recipient: string; lost: number; before_ts: number }>
 }
 
+/** 27889 — outcome of the cold export that gates the delete. Carried on the
+ *  sweep result so a caller can log it (with-runtime does, at error) and a
+ *  test can assert it without scraping log output. */
+export interface ArchiveExportResult {
+  /** "skipped" — delete disabled, or nothing eligible this tick; "ok" —
+   *  every eligible row's bytes are verified in its day file; "failed" —
+   *  export refused, so the batch was NOT deleted. */
+  readonly status: "skipped" | "ok" | "failed"
+  /** UTC day keys (YYYY-MM-DD) written or verified this tick. */
+  readonly days: ReadonlyArray<string>
+  /** Rows appended this tick. An id already in the day's manifest appends
+   *  nothing and counts 0 (a crash between export and delete). */
+  readonly rows: number
+  /** Gzip bytes appended this tick. */
+  readonly bytes: number
+  /** Set only when status is "failed": the named reason the batch was kept. */
+  readonly error: string | null
+}
+
 export interface ArchiveDeletePhaseResult {
   readonly enabled: boolean
   readonly cutoff: number
@@ -228,12 +291,17 @@ export interface ArchiveDeletePhaseResult {
   readonly excludedByCursor: number
   readonly excludedByPending: number
   readonly deleted: number
+  /** 27889 — the export that ran (or was skipped) before this batch's delete. */
+  readonly export: ArchiveExportResult
 }
 
 export interface RetentionSweepResult {
   readonly now: number
   readonly archiveMove: ArchiveMovePhaseResult
   readonly archiveDelete: ArchiveDeletePhaseResult
+  /** 27889 — same value as archiveDelete.export, surfaced here because the
+   *  export is the sweep's safety gate, not merely a delete-phase detail. */
+  readonly export: ArchiveExportResult
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +337,204 @@ function archiveDeleteBatch(db: Database, ids: readonly string[]): number {
       .run(...ids)
     return res.changes ?? 0
   })()
+}
+
+// ---------------------------------------------------------------------------
+// Cold export (27889) — the durable copy that gates the delete
+// ---------------------------------------------------------------------------
+
+const SKIPPED_EXPORT: ArchiveExportResult = { status: "skipped", days: [], rows: 0, bytes: 0, error: null }
+
+/** Resolve the export directory: the declared env path, else `archive-export/`
+ *  beside the live tribe.db. The db path is read from the open connection
+ *  itself (PRAGMA database_list, `main`) — the same file with-database opened —
+ *  so retention needs no new plumbing and cannot disagree with the daemon
+ *  about where the store lives. An in-memory database with no declared dir has
+ *  nowhere durable to write: refuse loudly, because deleting a row that could
+ *  not be exported is exactly the dangling-evidence failure this gate exists
+ *  to prevent. */
+export function resolveArchiveExportDir(db: Database, config: RetentionConfig): string {
+  if (config.exportDir !== undefined) return config.exportDir
+  const main = (db.prepare("PRAGMA database_list").all() as Array<{ name: string; file: string }>).find(
+    (row) => row.name === "main",
+  )
+  const file = main?.file ?? ""
+  if (file === "" || file.startsWith(":")) {
+    throw new Error(
+      "archive-export: no export directory — the main database is in-memory and TRIBE_RETENTION_EXPORT_DIR is unset; refusing to delete rows that cannot be exported",
+    )
+  }
+  return join(dirname(file), "archive-export")
+}
+
+/** The UTC day a row belongs to — the day bucket @cto's Q2 accepted. */
+function exportDayKey(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 10)
+}
+
+interface ExportManifest {
+  readonly day: string
+  readonly rows: number
+  readonly bytes: number
+  readonly sha256: string
+  readonly ids: ReadonlyArray<string>
+}
+
+/** The manifest is the durable proof of what the day file holds, and therefore
+ *  of what may be deleted. A malformed one fails loud rather than degrading to
+ *  "no ids recorded" (which would re-append and double-export). */
+function readExportManifest(path: string): ExportManifest | null {
+  if (!existsSync(path)) return null
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<ExportManifest>
+  if (typeof parsed.bytes !== "number" || !Array.isArray(parsed.ids)) {
+    throw new Error(`archive-export: ${path} is not a readable manifest (needs number bytes + array ids)`)
+  }
+  return {
+    day: String(parsed.day ?? ""),
+    rows: Number(parsed.rows ?? parsed.ids.length),
+    bytes: parsed.bytes,
+    sha256: String(parsed.sha256 ?? ""),
+    ids: parsed.ids.map(String),
+  }
+}
+
+function fsyncPath(path: string): void {
+  const fd = openSync(path, "r")
+  try {
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+function writeExportManifest(dir: string, path: string, manifest: ExportManifest): void {
+  const tmp = `${path}.tmp`
+  const fd = openSync(tmp, "w")
+  try {
+    writeSync(fd, JSON.stringify(manifest))
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+  renameSync(tmp, path)
+  fsyncPath(dir)
+}
+
+/**
+ * Append one gzip member (one JSON row per line) for `day` and commit the
+ * manifest. Ordering is the whole point:
+ *
+ *   1. truncate any tail past the manifest's recorded byte length — that
+ *      length IS the commit point (@cto Q3), so a crash between append and
+ *      manifest leaves an unrecorded tail the next tick discards and rewrites;
+ *   2. append only ids the manifest does not already cover, fsync the file;
+ *   3. read the file BACK, decompress it, and verify it holds exactly the
+ *      known ids plus the appended ids with no duplicates — on any mismatch,
+ *      throw, so the caller deletes nothing;
+ *   4. write the manifest atomically (tmp + fsync + rename + dir fsync).
+ *
+ * A row's bytes are therefore on disk, verified, and recorded before the
+ * caller is allowed to delete it.
+ */
+function appendExportRows(
+  dir: string,
+  day: string,
+  rows: ReadonlyArray<Record<string, unknown>>,
+): { rows: number; bytes: number } {
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, `messages-archive-${day}.jsonl.gz`)
+  const manifestPath = join(dir, `messages-archive-${day}.manifest.json`)
+
+  const manifest = readExportManifest(manifestPath)
+  const recordedBytes = manifest?.bytes ?? 0
+  const known = new Set(manifest?.ids ?? [])
+
+  if (existsSync(file)) {
+    const size = statSync(file).size
+    if (size < recordedBytes) {
+      throw new Error(
+        `archive-export: ${file} is ${size} bytes, shorter than its manifest's recorded ${recordedBytes}; refusing to append to a truncated day file`,
+      )
+    }
+    if (size > recordedBytes) truncateSync(file, recordedBytes)
+  } else if (recordedBytes > 0) {
+    throw new Error(
+      `archive-export: ${file} is missing but its manifest records ${recordedBytes} bytes; refusing to proceed`,
+    )
+  }
+
+  const fresh = rows.filter((row) => !known.has(String(row.id)))
+  if (fresh.length > 0) {
+    const payload = Buffer.from(fresh.map((row) => `${JSON.stringify(row)}\n`).join(""), "utf8")
+    const fd = openSync(file, "a")
+    try {
+      writeSync(fd, gzipSync(payload))
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
+  }
+
+  const bytes = existsSync(file) ? statSync(file).size : 0
+  const raw = bytes > 0 ? readFileSync(file) : Buffer.alloc(0)
+  const parsedIds =
+    bytes > 0
+      ? gunzipSync(raw)
+          .toString("utf8")
+          .split("\n")
+          .filter((line) => line.length > 0)
+          .map((line) => String((JSON.parse(line) as { id: unknown }).id))
+      : []
+  const unique = new Set(parsedIds)
+  const expected = new Set([...known, ...fresh.map((row) => String(row.id))])
+  if (unique.size !== parsedIds.length) {
+    throw new Error(
+      `archive-export: ${file} holds duplicate ids after append (${parsedIds.length} lines, ${unique.size} unique)`,
+    )
+  }
+  for (const id of expected) {
+    if (!unique.has(id)) {
+      throw new Error(`archive-export: ${file} is missing id ${id} after append; refusing to delete it`)
+    }
+  }
+  for (const id of unique) {
+    if (!expected.has(id)) throw new Error(`archive-export: ${file} holds an unrecorded id ${id}; refusing to proceed`)
+  }
+
+  writeExportManifest(dir, manifestPath, {
+    day,
+    rows: parsedIds.length,
+    bytes,
+    sha256: createHash("sha256").update(raw).digest("hex"),
+    ids: [...unique],
+  })
+  return { rows: fresh.length, bytes: bytes - recordedBytes }
+}
+
+/** Export a candidate batch: bucket by UTC day, write one day file per bucket,
+ *  and return the verified outcome. Throws on any failure — the caller keeps
+ *  the batch. */
+function exportArchiveRows(dir: string, rows: ReadonlyArray<Record<string, unknown>>): ArchiveExportResult {
+  const byDay = new Map<string, Array<Record<string, unknown>>>()
+  for (const row of rows) {
+    const day = exportDayKey(Number(row.ts))
+    const bucket = byDay.get(day)
+    if (bucket) bucket.push(row)
+    else byDay.set(day, [row])
+  }
+  const days: string[] = []
+  let appendedRows = 0
+  let appendedBytes = 0
+  for (const day of [...byDay.keys()].sort()) {
+    const written = appendExportRows(dir, day, byDay.get(day) ?? [])
+    days.push(day)
+    appendedRows += written.rows
+    appendedBytes += written.bytes
+  }
+  log.info?.(
+    `archive-export: verified ${rows.length} row(s) across ${days.length} day file(s) at ${dir} (${appendedRows} appended, ${appendedBytes} gzip bytes)`,
+  )
+  return { status: "ok", days, rows: appendedRows, bytes: appendedBytes, error: null }
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +638,7 @@ function runArchiveDeletePhase(
       excludedByCursor: 0,
       excludedByPending: 0,
       deleted: 0,
+      export: SKIPPED_EXPORT,
     }
   }
 
@@ -385,28 +652,87 @@ function runArchiveDeletePhase(
   const excludedByCursor = diag?.excluded_by_cursor ?? 0
   const excludedByPending = diag?.excluded_by_pending ?? 0
 
-  const candidates = stmts.selectArchiveDeleteBatch.all({
+  const candidates = stmts.selectArchiveRowsForExport.all({
     $cutoff: cutoff,
     $cursor_floor: cursorFloor,
     $limit: config.batchSize,
-  }) as Array<{ id: string; seq: number }>
+  }) as Array<Record<string, unknown> & { id: string; seq: number }>
+
+  if (candidates.length === 0) {
+    log.debug?.(
+      `archive-delete: nothing eligible (eligible_by_age=${eligibleByAge}, excluded_by_cursor=${excludedByCursor}, excluded_by_pending=${excludedByPending}, cursor_floor=${cursorFloor})`,
+    )
+    return {
+      enabled: true,
+      cutoff,
+      cursorFloor,
+      eligibleByAge,
+      excludedByCursor,
+      excludedByPending,
+      deleted: 0,
+      export: SKIPPED_EXPORT,
+    }
+  }
+
+  // Cold export BEFORE any delete (27889). A batch whose bytes are not on
+  // disk and verified is not deleted: the archive IS the durable copy, so an
+  // unexported delete turns a cited id into dangling evidence.
+  let exportDir = config.exportDir ?? "(beside tribe.db)"
+  let exportResult: ArchiveExportResult
+  try {
+    exportDir = resolveArchiveExportDir(db, config)
+    exportResult = exportArchiveRows(exportDir, candidates)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    log.error?.(
+      `archive-delete: cold export FAILED for ${candidates.length} row(s) past the ${config.deleteWindowMs}ms window; ` +
+        `REFUSING to delete them. exportDir=${exportDir} batchSize=${config.batchSize} error=${message}`,
+    )
+    return {
+      enabled: true,
+      cutoff,
+      cursorFloor,
+      eligibleByAge,
+      excludedByCursor,
+      excludedByPending,
+      deleted: 0,
+      export: { status: "failed", days: [], rows: candidates.length, bytes: 0, error: message },
+    }
+  }
+
+  // Re-verify at the delete moment: between the export select and here a row
+  // can gain a pending_request or a TAKING receipt. Delete only what is STILL
+  // eligible; an over-exported row is harmless (the file is a superset).
+  const placeholders = candidates.map(() => "?").join(",")
+  const stillEligible = db
+    .prepare(assertSingleStatement(stmts.selectArchiveRowsByIdsSql(placeholders)))
+    .all(...candidates.map((c) => c.id), cutoff, cursorFloor) as Array<{ id: string }>
   const deleted = archiveDeleteBatch(
     db,
-    candidates.map((c) => c.id),
+    stillEligible.map((c) => c.id),
   )
 
   if (deleted > 0) {
     log.info?.(
       `archive-delete: deleted ${deleted} archived message(s) older than ${config.deleteWindowMs}ms ` +
-        `(cursor_floor=${cursorFloor}, eligible_by_age=${eligibleByAge}, excluded_by_cursor=${excludedByCursor}, excluded_by_pending=${excludedByPending}, batch cap ${config.batchSize})`,
+        `(cursor_floor=${cursorFloor}, eligible_by_age=${eligibleByAge}, excluded_by_cursor=${excludedByCursor}, excluded_by_pending=${excludedByPending}, batch cap ${config.batchSize}, exported=${exportResult.rows} rows across ${exportResult.days.length} day file(s) at ${exportDir})`,
     )
   } else {
     log.debug?.(
-      `archive-delete: nothing deleted (eligible_by_age=${eligibleByAge}, excluded_by_cursor=${excludedByCursor}, excluded_by_pending=${excludedByPending}, cursor_floor=${cursorFloor})`,
+      `archive-delete: nothing deleted (exported ${candidates.length} row(s) but the re-verify found ${stillEligible.length} still eligible; cursor_floor=${cursorFloor})`,
     )
   }
 
-  return { enabled: true, cutoff, cursorFloor, eligibleByAge, excludedByCursor, excludedByPending, deleted }
+  return {
+    enabled: true,
+    cutoff,
+    cursorFloor,
+    eligibleByAge,
+    excludedByCursor,
+    excludedByPending,
+    deleted,
+    export: exportResult,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -429,5 +755,5 @@ export function runRetentionSweep(
 ): RetentionSweepResult {
   const archiveMove = runArchiveMovePhase(db, stmts, config, now)
   const archiveDelete = runArchiveDeletePhase(db, stmts, config, now)
-  return { now, archiveMove, archiveDelete }
+  return { now, archiveMove, archiveDelete, export: archiveDelete.export }
 }

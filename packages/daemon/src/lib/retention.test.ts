@@ -12,10 +12,12 @@
  *   - every phase is LIMIT-bounded per tick, never a full-table pass
  */
 
-import { mkdtempSync, rmSync } from "node:fs"
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { gunzipSync, gzipSync } from "node:zlib"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
@@ -34,6 +36,7 @@ describe("resolveRetentionConfig", () => {
       deleteWindowMs: 90 * DAY,
       deleteEnabled: false,
       batchSize: 500,
+      exportDir: undefined,
       liveWindowMs: 7 * DAY,
     })
   })
@@ -44,6 +47,7 @@ describe("resolveRetentionConfig", () => {
       TRIBE_RETENTION_DELETE_WINDOW_MS: String(30 * DAY),
       TRIBE_RETENTION_DELETE_ENABLED: "1",
       TRIBE_RETENTION_BATCH_SIZE: "50",
+      TRIBE_RETENTION_EXPORT_DIR: "/var/exports/tribe",
       TRIBE_RETENTION_LIVE_WINDOW_MS: String(2 * DAY),
     })
     expect(config).toEqual({
@@ -51,6 +55,7 @@ describe("resolveRetentionConfig", () => {
       deleteWindowMs: 30 * DAY,
       deleteEnabled: true,
       batchSize: 50,
+      exportDir: "/var/exports/tribe",
       liveWindowMs: 2 * DAY,
     })
   })
@@ -695,6 +700,217 @@ describe("journal retention sweep", () => {
           ["cursor-protected", "pending-protected", "taking-protected", "too-fresh"].sort(),
         )
         expect(stmts.selectUntakenPendingForRecipient.all({ $recipient: "@chief" })).toEqual([])
+      } finally {
+        db.close()
+      }
+    })
+  })
+
+  // -------------------------------------------------------------------
+  // Archive-delete phase — cold export before delete (27889)
+  // -------------------------------------------------------------------
+
+  describe("archive-delete phase — cold export", () => {
+    const exportDir = () => join(tmpDir, "archive-export")
+    const dayKey = (ts: number) => new Date(ts).toISOString().slice(0, 10)
+    const dayFile = (day: string) => join(exportDir(), `messages-archive-${day}.jsonl.gz`)
+    const manifestFile = (day: string) => join(exportDir(), `messages-archive-${day}.manifest.json`)
+
+    function readLines(day: string): Array<Record<string, unknown>> {
+      return gunzipSync(readFileSync(dayFile(day)))
+        .toString("utf8")
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+    }
+
+    function readManifest(day: string): {
+      day: string
+      rows: number
+      bytes: number
+      sha256: string
+      ids: string[]
+    } {
+      return JSON.parse(readFileSync(manifestFile(day), "utf8")) as {
+        day: string
+        rows: number
+        bytes: number
+        sha256: string
+        ids: string[]
+      }
+    }
+
+    it("writes the FULL row and a matching manifest, and only then deletes it", () => {
+      const { db, stmts } = setup()
+      try {
+        const oldTs = Date.now() - 200 * DAY
+        insertArchived(db, { id: "cited-1", seq: 7, ts: oldTs, recipient: "@chief", ref: "req-9" })
+
+        const result = runRetentionSweep(db, stmts, enabledConfig())
+
+        expect(result.export.status).toBe("ok")
+        expect(result.archiveDelete.deleted).toBe(1)
+        expect(archivedIds(db)).toEqual([])
+
+        const day = dayKey(oldTs)
+        const lines = readLines(day)
+        expect(lines).toHaveLength(1)
+        expect(lines[0]).toMatchObject({
+          id: "cited-1",
+          seq: 7,
+          ts: oldTs,
+          recipient: "@chief",
+          ref: "req-9",
+          content: "body",
+          archived_at: expect.any(Number),
+        })
+
+        const manifest = readManifest(day)
+        const raw = readFileSync(dayFile(day))
+        expect(manifest).toMatchObject({ day, rows: 1, ids: ["cited-1"] })
+        expect(manifest.bytes).toBe(raw.length)
+        expect(manifest.sha256).toBe(createHash("sha256").update(raw).digest("hex"))
+      } finally {
+        db.close()
+      }
+    })
+
+    it("a tick after a crash between export and delete appends nothing and deletes the id exactly once", () => {
+      const { db, stmts } = setup()
+      try {
+        const oldTs = Date.now() - 200 * DAY
+        insertArchived(db, { id: "cited-2", seq: 3, ts: oldTs })
+        const first = runRetentionSweep(db, stmts, enabledConfig())
+        expect(first.export).toMatchObject({ status: "ok", rows: 1 })
+        expect(first.archiveDelete.deleted).toBe(1)
+
+        // The delete transaction never committed: put the row back, exactly as
+        // a crash before it would have left it.
+        insertArchived(db, { id: "cited-2", seq: 3, ts: oldTs })
+        const second = runRetentionSweep(db, stmts, enabledConfig())
+
+        expect(second.export).toMatchObject({ status: "ok", rows: 0 })
+        expect(second.archiveDelete.deleted).toBe(1)
+        expect(archivedIds(db)).toEqual([])
+        expect(readLines(dayKey(oldTs)).map((row) => row.id)).toEqual(["cited-2"])
+      } finally {
+        db.close()
+      }
+    })
+
+    it("truncates an unrecorded tail past the manifest's commit point instead of double-counting it", () => {
+      const { db, stmts } = setup()
+      try {
+        const oldTs = Date.now() - 200 * DAY
+        const day = dayKey(oldTs)
+        insertArchived(db, { id: "committed", seq: 1, ts: oldTs })
+        expect(runRetentionSweep(db, stmts, enabledConfig()).archiveDelete.deleted).toBe(1)
+
+        // A crash between append and manifest: the file gained a member the
+        // manifest never recorded (and the rows were never deleted).
+        const recorded = readManifest(day).bytes
+        appendFileSync(dayFile(day), gzipSync(Buffer.from(`${JSON.stringify({ id: "unrecorded" })}\n`)))
+        expect(readManifest(day).bytes).toBe(recorded)
+
+        insertArchived(db, { id: "committed", seq: 1, ts: oldTs })
+        const next = runRetentionSweep(db, stmts, enabledConfig())
+
+        expect(next.export.status).toBe("ok")
+        expect(next.archiveDelete.deleted).toBe(1)
+        expect(readLines(day).map((row) => row.id)).toEqual(["committed"])
+      } finally {
+        db.close()
+      }
+    })
+
+    it("refuses the delete and names the failure when the export cannot be written", () => {
+      const { db, stmts } = setup()
+      try {
+        const blocked = join(tmpDir, "blocked")
+        writeFileSync(blocked, "a file where the export directory should be")
+        insertArchived(db, { id: "survivor", seq: 1, ts: Date.now() - 200 * DAY })
+
+        // The failure is loud by design; capture the error line (the vitest
+        // harness fails a test that leaks unexpected console output) and
+        // assert it names the path and the cause.
+        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+        try {
+          const result = runRetentionSweep(db, stmts, enabledConfig({ exportDir: blocked }))
+
+          expect(result.export.status).toBe("failed")
+          expect(result.export.error).toBeTruthy()
+          expect(result.archiveDelete.deleted).toBe(0)
+          expect(archivedIds(db)).toEqual(["survivor"])
+          expect(errorSpy).toHaveBeenCalledWith(expect.any(String), expect.stringContaining(`exportDir=${blocked}`))
+          expect(errorSpy).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("REFUSING to delete"))
+        } finally {
+          errorSpy.mockRestore()
+        }
+      } finally {
+        db.close()
+      }
+    })
+
+    it("exports nothing and deletes nothing when deleteEnabled is false", () => {
+      const { db, stmts } = setup()
+      try {
+        insertArchived(db, { id: "ancient-3", seq: 1, ts: Date.now() - 200 * DAY })
+        const result = runRetentionSweep(db, stmts, enabledConfig({ deleteEnabled: false }))
+        expect(result.export.status).toBe("skipped")
+        expect(archivedIds(db)).toEqual(["ancient-3"])
+        expect(existsSync(exportDir())).toBe(false)
+      } finally {
+        db.close()
+      }
+    })
+
+    it("neither exports nor deletes a pending-ball row or a row above the cursor floor", () => {
+      const { db, stmts } = setup()
+      try {
+        const oldTs = Date.now() - 200 * DAY
+        insertArchived(db, { id: "pending-protected-2", seq: 20, ts: oldTs, recipient: "@chief" })
+        stmts.openPendingRequest.run({
+          $request_id: "req-export",
+          $recipient: "@chief",
+          $sender: "@fable/1",
+          $opened_at: oldTs,
+          $expires_at: null,
+          $message_id: "pending-protected-2",
+          $fanout: "first",
+        })
+        insertArchived(db, { id: "cursor-protected-2", seq: 30, ts: oldTs, recipient: "@chief" })
+        db.prepare(
+          `INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at) VALUES ('@chief', 25, ?)`,
+        ).run(Date.now())
+        insertArchived(db, { id: "exportable", seq: 10, ts: oldTs, recipient: "@chief" })
+
+        const result = runRetentionSweep(db, stmts, enabledConfig())
+
+        expect(result.archiveDelete.deleted).toBe(1)
+        expect(archivedIds(db).sort()).toEqual(["cursor-protected-2", "pending-protected-2"])
+        expect(readLines(dayKey(oldTs)).map((row) => row.id)).toEqual(["exportable"])
+        expect(readManifest(dayKey(oldTs)).ids).toEqual(["exportable"])
+      } finally {
+        db.close()
+      }
+    })
+
+    it("bounds one tick's export and delete to batchSize", () => {
+      const { db, stmts } = setup()
+      try {
+        const oldTs = Date.now() - 200 * DAY
+        for (let i = 0; i < 5; i += 1) insertArchived(db, { id: `bulk-export-${i}`, seq: i + 1, ts: oldTs })
+
+        const first = runRetentionSweep(db, stmts, enabledConfig({ batchSize: 2 }))
+        expect(first.export.rows).toBe(2)
+        expect(first.archiveDelete.deleted).toBe(2)
+        expect(readLines(dayKey(oldTs))).toHaveLength(2)
+        expect(archivedIds(db)).toHaveLength(3)
+
+        runRetentionSweep(db, stmts, enabledConfig({ batchSize: 2 }))
+        runRetentionSweep(db, stmts, enabledConfig({ batchSize: 2 }))
+        expect(archivedIds(db)).toEqual([])
+        expect(readLines(dayKey(oldTs))).toHaveLength(5)
       } finally {
         db.close()
       }

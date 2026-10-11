@@ -1826,6 +1826,27 @@ function takingStatusProtectsOpenBallPredicateSql(receipt: string, receiptSequen
     )`
 }
 
+/** 27889 — the single "an archived row may be deleted" predicate, shared by
+ *  the delete selection, the full-row export that MUST precede it, and the
+ *  by-id re-verify read that guards the delete. One definition, so the export
+ *  and the delete can never disagree about which rows are eligible. */
+function archiveDeleteEligiblePredicateSql(
+  archive: string,
+  cutoffParam = "$cutoff",
+  cursorFloorParam = "$cursor_floor",
+): string {
+  return `${archive}.ts < ${cutoffParam}
+      AND ${archive}.seq <= ${cursorFloorParam}
+      AND NOT EXISTS (SELECT 1 FROM pending_request p WHERE p.message_id = ${archive}.id)
+      AND NOT (${takingStatusProtectsOpenBallPredicateSql(archive, "seq")})`
+}
+
+/** 27889 — the full archive row (the export file's unit), alias-qualified so
+ *  every archive statement can share it. */
+const MESSAGE_ARCHIVE_COLUMNS_ALIASED = MESSAGE_ARCHIVE_COLUMNS.split(", ")
+  .map((column) => `a.${column}`)
+  .join(", ")
+
 export type TribeStatements = ReturnType<typeof createStatements>
 
 export function createStatements(db: Database) {
@@ -2356,6 +2377,19 @@ export function createStatements(db: Database) {
 		GROUP BY m.recipient
 	`,
 
+    /** 27889 — re-verify read for the cold-export delete: of the ids just
+     *  exported and verified on disk, which are STILL eligible right now.
+     *  A row can gain a pending_request or a TAKING receipt between the
+     *  export select and the delete, so the delete removes the intersection,
+     *  never the stale selection. Built per batch because the id list varies;
+     *  see retention.ts. */
+    selectArchiveRowsByIdsSql: (placeholders: string): string => `
+		SELECT a.id
+		FROM messages_archive a
+		WHERE a.id IN (${placeholders})
+			AND ${archiveDeleteEligiblePredicateSql("a", "?", "?")}
+	`,
+
     upsertMailboxPrune: db.prepare(`
 		INSERT INTO mailbox_prunes (recipient, pruned_count, pruned_before, recorded_at)
 		VALUES ($recipient, $count, $before, $now)
@@ -2406,10 +2440,23 @@ export function createStatements(db: Database) {
       assertSingleStatement(`
 		SELECT a.id, a.seq
 		FROM messages_archive a
-		WHERE a.ts < $cutoff
-			AND a.seq <= $cursor_floor
-			AND NOT EXISTS (SELECT 1 FROM pending_request p WHERE p.message_id = a.id)
-			AND NOT (${takingStatusProtectsOpenBallPredicateSql("a", "seq")})
+		WHERE ${archiveDeleteEligiblePredicateSql("a")}
+		ORDER BY a.seq ASC
+		LIMIT $limit
+	`),
+    ),
+
+    /** 27889 — the cold export that MUST run before any delete: the SAME
+     *  eligible rows as selectArchiveDeleteBatch, projected in full so the
+     *  export file is a durable copy of exactly the bytes the delete is about
+     *  to remove. A cited tribe id whose row is deleted without this copy
+     *  becomes dangling evidence, so the two statements share one predicate
+     *  and can never disagree. Oldest-first, LIMIT-bounded. */
+    selectArchiveRowsForExport: db.prepare(
+      assertSingleStatement(`
+		SELECT a.seq, ${MESSAGE_ARCHIVE_COLUMNS_ALIASED}, a.archived_at
+		FROM messages_archive a
+		WHERE ${archiveDeleteEligiblePredicateSql("a")}
 		ORDER BY a.seq ASC
 		LIMIT $limit
 	`),
