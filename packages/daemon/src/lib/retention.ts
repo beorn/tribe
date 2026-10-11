@@ -106,6 +106,7 @@ import {
   writeSync,
 } from "node:fs"
 import { dirname, join } from "node:path"
+import { isDeepStrictEqual } from "node:util"
 import { gunzipSync, gzipSync } from "node:zlib"
 import { assertSingleStatement } from "@bearly/sqlite"
 import type { Database } from "bun:sqlite"
@@ -380,22 +381,70 @@ interface ExportManifest {
   readonly ids: ReadonlyArray<string>
 }
 
+const SHA256_HEX = /^[0-9a-f]{64}$/
+
 /** The manifest is the durable proof of what the day file holds, and therefore
- *  of what may be deleted. A malformed one fails loud rather than degrading to
- *  "no ids recorded" (which would re-append and double-export). */
-function readExportManifest(path: string): ExportManifest | null {
+ *  of what may be deleted. EVERY field is validated — its day, its byte length,
+ *  its row count against its id list, its id element types and its checksum.
+ *  A malformed manifest fails loud rather than degrading to "no ids recorded"
+ *  (which would re-append and double-export) or to an unusable checksum. */
+function readExportManifest(path: string, day: string): ExportManifest | null {
   if (!existsSync(path)) return null
   const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<ExportManifest>
-  if (typeof parsed.bytes !== "number" || !Array.isArray(parsed.ids)) {
-    throw new Error(`archive-export: ${path} is not a readable manifest (needs number bytes + array ids)`)
+  if (typeof parsed.bytes !== "number" || !Number.isInteger(parsed.bytes) || parsed.bytes < 0) {
+    throw new Error(`archive-export: ${path} is not a readable manifest (needs a non-negative integer bytes)`)
+  }
+  if (!Array.isArray(parsed.ids)) {
+    throw new Error(`archive-export: ${path} is not a readable manifest (needs an array ids)`)
+  }
+  if (String(parsed.day ?? "") !== day) {
+    throw new Error(`archive-export: ${path} names day ${String(parsed.day ?? "")} but was read for ${day}`)
+  }
+  const rows = Number(parsed.rows ?? parsed.ids.length)
+  if (rows !== parsed.ids.length) {
+    throw new Error(
+      `archive-export: ${path} records ${rows} rows against ${parsed.ids.length} ids; refusing to trust it`,
+    )
+  }
+  if (typeof parsed.sha256 !== "string" || !SHA256_HEX.test(parsed.sha256)) {
+    throw new Error(`archive-export: ${path} has no valid sha256 (${String(parsed.sha256 ?? "")})`)
   }
   return {
-    day: String(parsed.day ?? ""),
-    rows: Number(parsed.rows ?? parsed.ids.length),
+    day,
+    rows,
     bytes: parsed.bytes,
-    sha256: String(parsed.sha256 ?? ""),
-    ids: parsed.ids.map(String),
+    sha256: parsed.sha256,
+    ids: parsed.ids.map((id) => {
+      if (typeof id !== "string" || id.length === 0) {
+        throw new Error(`archive-export: ${path} holds a non-string or empty id in its manifest`)
+      }
+      return id
+    }),
   }
+}
+
+/** Parse the decompressed day file into its row objects. A gunzip failure or a
+ *  line that is not a JSON object is a corrupt day file, and corrupt proof must
+ *  fail loud: this file is the evidence that its rows may be deleted. */
+function parseExportRows(file: string, raw: Buffer): Array<Record<string, unknown>> {
+  let text: string
+  try {
+    text = gunzipSync(raw).toString("utf8")
+  } catch (error) {
+    throw new Error(
+      `archive-export: ${file} could not be decompressed (${error instanceof Error ? error.message : String(error)}); refusing to trust it`,
+    )
+  }
+  const rows: Array<Record<string, unknown>> = []
+  for (const line of text.split("\n")) {
+    if (line.length === 0) continue
+    const parsed = JSON.parse(line) as unknown
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error(`archive-export: ${file} holds a non-object row line: ${line.slice(0, 80)}`)
+    }
+    rows.push(parsed as Record<string, unknown>)
+  }
+  return rows
 }
 
 function fsyncPath(path: string): void {
@@ -424,14 +473,20 @@ function writeExportManifest(dir: string, path: string, manifest: ExportManifest
  * Append one gzip member (one JSON row per line) for `day` and commit the
  * manifest. Ordering is the whole point:
  *
- *   1. truncate any tail past the manifest's recorded byte length — that
- *      length IS the commit point (@cto Q3), so a crash between append and
+ *   1. verify the COMMITTED prefix — the manifest's recorded byte length IS
+ *      the commit point (@cto Q3) and its sha256 is the integrity proof of
+ *      exactly those bytes; a prefix that no longer hashes to it is corrupt and
+ *      fails loud, and the checksum is never recomputed over bad bytes;
+ *   2. truncate any tail past the commit point — a crash between append and
  *      manifest leaves an unrecorded tail the next tick discards and rewrites;
- *   2. append only ids the manifest does not already cover, fsync the file;
- *   3. read the file BACK, decompress it, and verify it holds exactly the
+ *   3. for every candidate id the manifest already records, verify the file
+ *      holds that id's COMPLETE row, equal to the row being deleted (an id-only
+ *      or content-changed member proves nothing about the bytes surviving);
+ *   4. append only ids the manifest does not already cover, fsync the file;
+ *   5. read the file BACK, decompress it, and verify it holds exactly the
  *      known ids plus the appended ids with no duplicates — on any mismatch,
  *      throw, so the caller deletes nothing;
- *   4. write the manifest atomically (tmp + fsync + rename + dir fsync).
+ *   6. write the manifest atomically (tmp + fsync + rename + dir fsync).
  *
  * A row's bytes are therefore on disk, verified, and recorded before the
  * caller is allowed to delete it.
@@ -445,10 +500,11 @@ function appendExportRows(
   const file = join(dir, `messages-archive-${day}.jsonl.gz`)
   const manifestPath = join(dir, `messages-archive-${day}.manifest.json`)
 
-  const manifest = readExportManifest(manifestPath)
+  const manifest = readExportManifest(manifestPath, day)
   const recordedBytes = manifest?.bytes ?? 0
   const known = new Set(manifest?.ids ?? [])
 
+  let raw = Buffer.alloc(0)
   if (existsSync(file)) {
     const size = statSync(file).size
     if (size < recordedBytes) {
@@ -456,11 +512,56 @@ function appendExportRows(
         `archive-export: ${file} is ${size} bytes, shorter than its manifest's recorded ${recordedBytes}; refusing to append to a truncated day file`,
       )
     }
-    if (size > recordedBytes) truncateSync(file, recordedBytes)
+    raw = readFileSync(file)
+    if (manifest !== null) {
+      // Verify the committed prefix BEFORE any append or manifest rewrite. A
+      // changed-but-still-valid gzip under the commit point (same ids, altered
+      // contents, an incomplete row) must not be silently re-blessed: rewriting
+      // the manifest with the checksum of whatever was read would make the
+      // manifest prove the corruption instead of catching it, and the delete
+      // would then discard the only good copy of the row.
+      const committed = createHash("sha256").update(raw.subarray(0, recordedBytes)).digest("hex")
+      if (committed !== manifest.sha256) {
+        throw new Error(
+          `archive-export: ${file} committed prefix (${recordedBytes} bytes) hashes to ${committed}, not the manifest's ${manifest.sha256}; refusing to append to or rewrite a corrupted day file`,
+        )
+      }
+    }
+    if (size > recordedBytes) {
+      truncateSync(file, recordedBytes)
+      raw = raw.subarray(0, recordedBytes)
+    }
   } else if (recordedBytes > 0) {
     throw new Error(
       `archive-export: ${file} is missing but its manifest records ${recordedBytes} bytes; refusing to proceed`,
     )
+  }
+
+  // Every candidate the manifest already records must be backed on disk by the
+  // COMPLETE row, matching the row we are about to delete. An id-only gzip
+  // member, or one whose contents changed under a matching manifest, proves an
+  // id was seen and never that the row's bytes survived.
+  if (raw.length > 0) {
+    const stored = new Map<string, Record<string, unknown>>()
+    for (const row of parseExportRows(file, raw)) {
+      if (typeof row.id !== "string") {
+        throw new Error(`archive-export: ${file} holds a row with no string id; refusing to trust it`)
+      }
+      stored.set(row.id, row)
+    }
+    for (const row of rows) {
+      const id = String(row.id)
+      if (!known.has(id)) continue
+      const existing = stored.get(id)
+      if (existing === undefined) {
+        throw new Error(`archive-export: ${file} records id ${id} but holds no row for it; refusing to delete it`)
+      }
+      if (!isDeepStrictEqual(existing, JSON.parse(JSON.stringify(row)))) {
+        throw new Error(
+          `archive-export: ${file} holds id ${id} whose exported row does not match the row being deleted; refusing to delete it`,
+        )
+      }
+    }
   }
 
   const fresh = rows.filter((row) => !known.has(String(row.id)))
@@ -476,15 +577,8 @@ function appendExportRows(
   }
 
   const bytes = existsSync(file) ? statSync(file).size : 0
-  const raw = bytes > 0 ? readFileSync(file) : Buffer.alloc(0)
-  const parsedIds =
-    bytes > 0
-      ? gunzipSync(raw)
-          .toString("utf8")
-          .split("\n")
-          .filter((line) => line.length > 0)
-          .map((line) => String((JSON.parse(line) as { id: unknown }).id))
-      : []
+  const finalRaw = bytes > 0 ? readFileSync(file) : Buffer.alloc(0)
+  const parsedIds = (finalRaw.length > 0 ? parseExportRows(file, finalRaw) : []).map((row) => String(row.id))
   const unique = new Set(parsedIds)
   const expected = new Set([...known, ...fresh.map((row) => String(row.id))])
   if (unique.size !== parsedIds.length) {
@@ -505,7 +599,7 @@ function appendExportRows(
     day,
     rows: parsedIds.length,
     bytes,
-    sha256: createHash("sha256").update(raw).digest("hex"),
+    sha256: createHash("sha256").update(finalRaw).digest("hex"),
     ids: [...unique],
   })
   return { rows: fresh.length, bytes: bytes - recordedBytes }

@@ -144,6 +144,7 @@ describe("journal retention sweep", () => {
       sender?: string
       type?: string
       ref?: string
+      archivedAt?: number
     },
   ): void {
     db.prepare(
@@ -158,7 +159,7 @@ describe("journal retention sweep", () => {
       o.recipient ?? "@chief",
       o.ref ?? null,
       o.ts,
-      Date.now(),
+      o.archivedAt ?? Date.now(),
     )
   }
 
@@ -724,6 +725,13 @@ describe("journal retention sweep", () => {
         .map((line) => JSON.parse(line) as Record<string, unknown>)
     }
 
+    /** The single exported row for `day` — these tests write exactly one. */
+    function firstLine(day: string): Record<string, unknown> {
+      const [row] = readLines(day)
+      if (row === undefined) throw new Error(`no exported row for ${day}`)
+      return row
+    }
+
     function readManifest(day: string): {
       day: string
       rows: number
@@ -785,8 +793,10 @@ describe("journal retention sweep", () => {
         expect(first.archiveDelete.deleted).toBe(1)
 
         // The delete transaction never committed: put the row back, exactly as
-        // a crash before it would have left it.
-        insertArchived(db, { id: "cited-2", seq: 3, ts: oldTs })
+        // a crash before it would have left it — same archived_at the export
+        // recorded, which is what the completeness check compares against.
+        const exported = firstLine(dayKey(oldTs))
+        insertArchived(db, { id: "cited-2", seq: 3, ts: oldTs, archivedAt: exported.archived_at as number })
         const second = runRetentionSweep(db, stmts, enabledConfig())
 
         expect(second.export).toMatchObject({ status: "ok", rows: 0 })
@@ -812,12 +822,91 @@ describe("journal retention sweep", () => {
         appendFileSync(dayFile(day), gzipSync(Buffer.from(`${JSON.stringify({ id: "unrecorded" })}\n`)))
         expect(readManifest(day).bytes).toBe(recorded)
 
-        insertArchived(db, { id: "committed", seq: 1, ts: oldTs })
+        const exported = firstLine(day)
+        insertArchived(db, { id: "committed", seq: 1, ts: oldTs, archivedAt: exported.archived_at as number })
         const next = runRetentionSweep(db, stmts, enabledConfig())
 
         expect(next.export.status).toBe("ok")
         expect(next.archiveDelete.deleted).toBe(1)
         expect(readLines(day).map((row) => row.id)).toEqual(["committed"])
+      } finally {
+        db.close()
+      }
+    })
+
+    it("keeps the row and refuses the delete when the committed day file was altered under the recorded length", () => {
+      const { db, stmts } = setup()
+      try {
+        const oldTs = Date.now() - 200 * DAY
+        const day = dayKey(oldTs)
+        insertArchived(db, { id: "corrupt-1", seq: 1, ts: oldTs })
+        expect(runRetentionSweep(db, stmts, enabledConfig()).archiveDelete.deleted).toBe(1)
+
+        // A still-valid gzip with the same id but changed contents: the commit
+        // point's bytes no longer hash to the manifest, so the manifest must not
+        // be rewritten over them — that would bless the corruption and let the
+        // delete drop the only good copy of the row.
+        const before = firstLine(day)
+        const manifestBefore = readManifest(day)
+        writeFileSync(dayFile(day), gzipSync(Buffer.from(`${JSON.stringify({ ...before, content: "TAMPERED" })}\n`)))
+
+        // The delete never committed: the original row is back.
+        insertArchived(db, { id: "corrupt-1", seq: 1, ts: oldTs, archivedAt: before.archived_at as number })
+        expect(archivedIds(db)).toEqual(["corrupt-1"])
+
+        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+        try {
+          const next = runRetentionSweep(db, stmts, enabledConfig())
+          expect(next.export.status).toBe("failed")
+          expect(next.archiveDelete.deleted).toBe(0)
+          expect(archivedIds(db)).toEqual(["corrupt-1"])
+          expect(errorSpy).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("REFUSING to delete"))
+        } finally {
+          errorSpy.mockRestore()
+        }
+
+        // The integrity proof was NOT replaced with the corruption's checksum.
+        expect(readManifest(day)).toEqual(manifestBefore)
+      } finally {
+        db.close()
+      }
+    })
+
+    it("keeps the row and refuses the delete when a matching-checksum manifest backs only an id-only row", () => {
+      const { db, stmts } = setup()
+      try {
+        const oldTs = Date.now() - 200 * DAY
+        const day = dayKey(oldTs)
+        insertArchived(db, { id: "idonly-1", seq: 1, ts: oldTs })
+        expect(runRetentionSweep(db, stmts, enabledConfig()).archiveDelete.deleted).toBe(1)
+
+        // An id-only member with a manifest rewritten to match it: the prefix
+        // checksum agrees, so only the row-completeness check can catch that the
+        // row's bytes were never really exported.
+        const before = firstLine(day)
+        const idOnly = gzipSync(Buffer.from(`${JSON.stringify({ id: "idonly-1" })}\n`))
+        writeFileSync(dayFile(day), idOnly)
+        writeFileSync(
+          manifestFile(day),
+          JSON.stringify({
+            ...readManifest(day),
+            bytes: idOnly.length,
+            sha256: createHash("sha256").update(idOnly).digest("hex"),
+          }),
+        )
+
+        // The delete never committed: the original full row is back.
+        insertArchived(db, { id: "idonly-1", seq: 1, ts: oldTs, archivedAt: before.archived_at as number })
+
+        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+        try {
+          const next = runRetentionSweep(db, stmts, enabledConfig())
+          expect(next.export.status).toBe("failed")
+          expect(next.archiveDelete.deleted).toBe(0)
+          expect(archivedIds(db)).toEqual(["idonly-1"])
+        } finally {
+          errorSpy.mockRestore()
+        }
       } finally {
         db.close()
       }
