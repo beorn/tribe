@@ -68,10 +68,14 @@ export interface IndexFreshness {
   provenance: IndexProvenance
 }
 
-/** ms → "45s" / "14m" / "3.0h", for a verdict's own label. */
+/**
+ * ms → "45s" / "62m" / "3.0h", for a verdict's own label. Minutes hold to two hours: the default window is 61m, and
+ * in tenths of an hour a 62m-old index against it read "1.0h old vs 1.0h window", a stale verdict naming two equal
+ * numbers.
+ */
 export function describeMs(ms: number): string {
   if (ms < 60_000) return `${Math.round(ms / 1000)}s`
-  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`
+  if (ms < 7_200_000) return `${Math.round(ms / 60_000)}m`
   return `${(ms / 3_600_000).toFixed(1)}h`
 }
 

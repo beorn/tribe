@@ -89,7 +89,7 @@ describe("the one freshness verdict", () => {
     expect(named).toContain(INDEX_FRESHNESS_ROOT)
     expect(named).toContain("window")
     expect(named).toContain("old")
-    expect(named).toContain("1.0h old vs 1.0h window (default)")
+    expect(named).toContain("62m old vs 61m window (default)")
   })
 
   /**
