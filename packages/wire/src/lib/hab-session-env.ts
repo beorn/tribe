@@ -20,6 +20,16 @@ export const HAB_SESSION_INSTRUCTION_ANCHOR_ENV = "HAB_SESSION_INSTRUCTION_ANCHO
 export const HAB_SESSION_DIR_ENV = "HAB_SESSION_DIR"
 /** The name of the hab service a supervised process is. */
 export const HAB_SERVICE_NAME_ENV = "HAB_SERVICE_NAME"
+/**
+ * Absolute path of the hab CLI a supervised process should SPAWN for a per-call tool lookup (28657).
+ *
+ * The value names the CURRENT promoted landing (`<landingHome>/current/node_modules/.bin/hab`), not a resolved
+ * generation, so a process that spawns it per call follows every promotion WITHOUT restarting — the spawned reader
+ * moves with the writers, which restart at promotion. This is deliberately DISTINCT from in-process code, which is
+ * pinned to the process's own landing and covered by its digest. Absent when the habitat declares no landings; a
+ * consumer may then fall back to PATH's `hab`, but must SAY which hab it spawned (@cto ed3c07a4, 28657).
+ */
+export const HAB_CLI_BIN_ENV = "HAB_CLI_BIN"
 /** The launch's signed identity token (25074 3b); hab sets it per launch, so it is one of this family. */
 export const HAB_ID_TOKEN_ENV = "HAB_ID_TOKEN"
 /**

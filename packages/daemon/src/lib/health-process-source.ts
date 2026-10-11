@@ -1,11 +1,52 @@
+import { existsSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { createLogger } from "loggily"
 import { HAB_SESSION_MARKERS } from "../../../wire/src/daemon-environment.ts"
 import {
   BoundedProcessCommandError,
   runBoundedProcessCommand,
   type BoundedProcessCommandResult,
 } from "../../../recall/src/lib/bounded-process.ts"
-import { HAB_SERVICE_NAME_ENV, HAB_SESSION_DIR_ENV } from "tribe-wire/lib/hab-session-env"
+import { HAB_CLI_BIN_ENV, HAB_SERVICE_NAME_ENV, HAB_SESSION_DIR_ENV } from "tribe-wire/lib/hab-session-env"
+
+const log = createLogger("tribe:health:process-source")
+
+/**
+ * Which hab CLI this source SPAWNS per call, resolved at SPAWN time (28657).
+ *
+ * A per-call tool must come from the CURRENT promoted landing, not a PATH baked at the daemon's launch: the wire
+ * daemon spawned a launch-baked `hab` by NAME, outside its import-graph digest, so a promotion that changed hab's
+ * code was invisible to the controller, its restart was correctly skipped as `measured-equivalent`, and the reader
+ * stayed on an abandoned journal for hours (@cto ed3c07a4). `HAB_CLI_BIN` names the promotion pointer
+ * (`<landingHome>/current/node_modules/.bin/hab`), so the spawn follows promotion without a restart.
+ *
+ * Set-but-missing is a typed unavailable that NAMES the path, never a PATH fallback (the `HAB_INHAB_BIN` rule). Unset
+ * keeps the standalone `hab` fallback, still ANNOUNCED: this incident took hours to find because nothing said which
+ * hab the source spawned.
+ */
+export interface HabCliResolution {
+  /** argv[0] for every `hab sysmon snapshot` this source spawns. */
+  readonly argv0: string
+  /** What an operator is told: the injected pointer, or PATH's hab when unset. */
+  readonly announcement: string
+  /** Set but absent on disk: the exact path, for a typed unavailable naming it. */
+  readonly missing?: string
+}
+
+/** Exported from module-private so its contract test can diff the announcement text (@testonly). */
+export function resolveHabCli(env: NodeJS.ProcessEnv): HabCliResolution {
+  const injected = env[HAB_CLI_BIN_ENV]?.trim()
+  if (injected === undefined || injected === "") {
+    return { announcement: "PATH hab (HAB_CLI_BIN unset)", argv0: "hab" }
+  }
+  if (!existsSync(injected)) {
+    return { announcement: `HAB_CLI_BIN ${injected} (missing)`, argv0: injected, missing: injected }
+  }
+  return { announcement: `HAB_CLI_BIN ${injected}`, argv0: injected }
+}
+
+/** One startup line naming the hab this source spawns, so a promotion skew is visible without an incident (28657). */
+let habCliAnnounced = false
 
 const PROCESS_OBSERVATION_SCHEMA = "process-observation/1" as const
 const HOST_SCALAR_OBSERVATION_SCHEMA = "host-scalar-observation/1" as const
@@ -696,9 +737,14 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
 function managedProcessSource(
   controllerSessionDir: string,
   options: HealthProcessSourceOptions,
-  _env: NodeJS.ProcessEnv,
+  env: NodeJS.ProcessEnv,
 ): HealthProcessSource {
   const stateRoot = dirname(controllerSessionDir)
+  const habCli = resolveHabCli(env)
+  if (!habCliAnnounced) {
+    habCliAnnounced = true
+    log.info?.("health process source: the hab it spawns per call", { hab: habCli.announcement })
+  }
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS
   const now = options.now ?? Date.now
   // The load hab last reported: a poll's snapshots take their ceiling from the scalars the previous poll read. The
@@ -745,6 +791,22 @@ function managedProcessSource(
     }
   }
 
+  // ONE argv builder for both spawn sites (28657): `read` and `readScalars` differ only by `--kind scalars`. The head
+  // is the resolved hab CLI, never a second literal "hab".
+  function sysmonArgv(extra: readonly string[]): string[] {
+    return [
+      habCli.argv0,
+      "sysmon",
+      "snapshot",
+      "--state-root",
+      stateRoot,
+      ...extra,
+      "--max-age-ms",
+      String(maxAgeMs),
+      "--json",
+    ]
+  }
+
   async function invoke(
     argv: readonly string[],
   ): Promise<{ ok: true; result: BoundedProcessCommandResult } | { ok: false; reason: string; detail: string }> {
@@ -764,7 +826,14 @@ function managedProcessSource(
   return {
     kind: "managed",
     async read() {
-      const argv = ["hab", "sysmon", "snapshot", "--state-root", stateRoot, "--max-age-ms", String(maxAgeMs), "--json"]
+      if (habCli.missing !== undefined) {
+        return unavailable(
+          stateRoot,
+          "source-cli-missing",
+          `HAB_CLI_BIN names ${habCli.missing}, which does not exist; the promoted landing's hab was expected there (28657)`,
+        )
+      }
+      const argv = sysmonArgv([])
       const invoked = await invoke(argv)
       // diagnostic.location is the --state-root the census used (stateRoot),
       // not the controller session dir. The formatter reprints it as the
@@ -813,18 +882,14 @@ function managedProcessSource(
       )
     },
     async readScalars() {
-      const argv = [
-        "hab",
-        "sysmon",
-        "snapshot",
-        "--state-root",
-        stateRoot,
-        "--kind",
-        "scalars",
-        "--max-age-ms",
-        String(maxAgeMs),
-        "--json",
-      ]
+      if (habCli.missing !== undefined) {
+        return scalarUnavailable(
+          controllerSessionDir,
+          "source-cli-missing",
+          `HAB_CLI_BIN names ${habCli.missing}, which does not exist; the promoted landing's hab was expected there, and no PATH fallback was taken (28657)`,
+        )
+      }
+      const argv = sysmonArgv(["--kind", "scalars"])
       const invoked = await invoke(argv)
       if (!invoked.ok) return scalarUnavailable(controllerSessionDir, invoked.reason, invoked.detail)
       const result = invoked.result
