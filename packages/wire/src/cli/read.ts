@@ -1064,7 +1064,13 @@ async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
     const socketPath = resolveSocketPath()
     let client: DaemonClient
     try {
-      client = await connectToDaemon(socketPath)
+      // 28674: the restart-retry window bridges a CLIENT call across a wire restart. The health probe is the
+      // opposite: it MEASURES the socket, and its whole answer — `absent + stopped` on ENOENT/ECONNREFUSED — must
+      // describe the socket NOW, not after a 6 s wait. Without this, an absent socket answered in ~50 ms before the
+      // retry existed took ~5.8 s after it, and a probe that outran its reader's patience stopped being a
+      // measurement at all. 0 disables the restart wait for a caller that owns the timing (client.ts
+      // connectRetryWindowMs).
+      client = await connectToDaemon(socketPath, { connectRetryWindowMs: 0 })
     } catch (error) {
       const { exitCode, document } = evaluateWireHealthDocument(null, error, socketPath)
       await writeHealthDocument(document, exitCode)

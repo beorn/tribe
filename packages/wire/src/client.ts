@@ -105,7 +105,10 @@ export type ConnectToDaemonOpts = {
   stallSample?: () => StallSample | Promise<StallSample>
   /** @internal test seam — retry cadence for an absent/refused socket. Default 250 ms. */
   connectRetryIntervalMs?: number
-  /** @internal test seam — retry ceiling for an absent/refused socket. Default 6000 ms. */
+  /**
+   * Retry ceiling for an absent/refused socket. Default 6000 ms. 0 disables the restart wait, for a caller
+   * that owns its own connect retry.
+   */
   connectRetryWindowMs?: number
 }
 

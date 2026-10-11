@@ -512,6 +512,37 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   }, 40_000)
 
+  it("health --json measures an ABSENT socket now, not after the 28674 restart-retry window", () => {
+    // 28674 gave connectToDaemon a bounded retry (CONNECT_RETRY_WINDOW_MS, 6000 ms) so a CLIENT call rides out a
+    // wire restart. The health probe is the opposite kind of caller: its `absent + stopped` on ENOENT is a
+    // MEASUREMENT of the socket, so it must describe the socket NOW. With the window left on, an absent socket that
+    // had answered in ~50 ms took ~5.8 s — outrunning hab's own reader and ceasing to be a measurement at all.
+    // cmdHealth passes connectRetryWindowMs: 0; this test goes red (>2.5 s) if that is ever dropped.
+    // No temp tree: the socket is absent by construction (nothing ever listens), so the test writes nothing and
+    // has nothing to clean up — a mkdtemp here would only add a raw delete to the tree (no-raw-deletes guard).
+    const startedAt = Date.now()
+    const res = spawnSync(BUN_BIN, [CLI, "health", "--json"], {
+      encoding: "utf8",
+      timeout: 30_000,
+      env: {
+        ...process.env,
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_SOCKET: join(tmpdir(), `tribe-health-absent-${process.pid}.sock`),
+      },
+    })
+    const elapsedMs = Date.now() - startedAt
+    expect(res.status, res.stderr ?? "").toBe(1)
+    expect(JSON.parse(res.stdout ?? "{}")).toMatchObject({
+      schema: "hab-service-health/2",
+      service: "wire",
+      state: "absent",
+      verdict: { kind: "stopped" },
+    })
+    expect(elapsedMs, "an absent socket is answered immediately, never after the restart-retry window").toBeLessThan(
+      2_500,
+    )
+  }, 30_000)
+
   it("--help prints the Commands list + MCP-adapter hint and exits 0", () => {
     const { stdout, code } = runCli(["--help"])
     expect(code).toBe(0)
