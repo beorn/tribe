@@ -217,9 +217,12 @@ function connectToDaemonOnce(
     }
     // Bound by the caller's ABSOLUTE deadline, not a fresh callTimeoutMs per attempt, so a retry can never extend
     // the budget past what was asked for (28674).
-    const connectTimer = timers.setTimeout(() => {
-      failConnect(new DaemonConnectTimeoutError(socketPath, callTimeoutMs))
-    }, Math.max(1, deadlineAt - Date.now()))
+    const connectTimer = timers.setTimeout(
+      () => {
+        failConnect(new DaemonConnectTimeoutError(socketPath, callTimeoutMs))
+      },
+      Math.max(1, deadlineAt - Date.now()),
+    )
     const onConnectError = (err: Error) => {
       failConnect(err)
     }
