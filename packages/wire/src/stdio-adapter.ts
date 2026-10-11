@@ -197,6 +197,41 @@ function acceptDeliveryAcknowledgement(reply: unknown, requested: "push" | "pull
     log.warn?.(`tribe delivery acknowledgement ${deliveryAcknowledgementSummary()}`)
   }
 }
+
+/**
+ * 28743 — the startup banner is a session's FIRST-connect signal, not a
+ * per-reconnect one. Since 28691 the wire daemon restarts on every promotion;
+ * re-emitting the banner on each reconnect woke every idle Claude seat as a user
+ * turn (~60 extra model turns an hour while quota pacing). A reconnect whose
+ * acknowledged delivery mode is unchanged is a non-event for the seat and emits
+ * nothing; the first connect, and any reconnect that actually changed the
+ * acknowledged mode, still emit.
+ */
+function bannerDeliverySignature(): string {
+  return deliveryAcknowledgement.acknowledged
+    ? `${deliveryAcknowledgement.transportDelivery}/${deliveryAcknowledgement.delivery}`
+    : "unacknowledged"
+}
+
+let lastBannerDeliverySignature: string | null = null
+
+/**
+ * 28743 — remember the delivery state this session has already ANNOUNCED to the
+ * model. BOTH the startup banner and the `tribe.join` acknowledgement announce
+ * it, so a join that confirms push after a pull first connect must update this;
+ * otherwise the next unchanged-mode reconnect re-announces a mode the seat was
+ * already told about (peer review, 2026-10-11).
+ */
+function rememberAnnouncedDelivery(): void {
+  lastBannerDeliverySignature = bannerDeliverySignature()
+}
+
+function shouldEmitStartupBanner(isFirstConnect: boolean): boolean {
+  if (!isFirstConnect && bannerDeliverySignature() === lastBannerDeliverySignature) return false
+  rememberAnnouncedDelivery()
+  return true
+}
+
 // 20703 — managed spawns set TRIBE_TAKEOVER=1 so an explicit-persona
 // respawn can supersede a stale live holder once. The capability is consumed
 // after the first successful registration; replaying it on reconnect lets two
@@ -768,7 +803,8 @@ function startDaemonConnection(): Promise<DaemonClient> {
     // Lifecycle belongs to an explicit daemon install or Hab supervision.
     noSpawn: true,
     async onConnect(client) {
-      if (hasAttemptedRegistration) {
+      const isFirstConnect = !hasAttemptedRegistration
+      if (!isFirstConnect) {
         await timers.delay(reconnectRegistrationJitterMs())
       }
       hasAttemptedRegistration = true
@@ -860,7 +896,16 @@ function startDaemonConnection(): Promise<DaemonClient> {
       }
       void client.call("subscribe").catch(() => {})
 
-      // Startup banner — emit tribe state to the channel so the agent (and user) sees the setup
+      // Startup banner — emit tribe state to the channel so the agent (and user)
+      // sees the setup. 28743: on the FIRST connect only, or when the acknowledged
+      // delivery mode actually changed. Since 28691 the wire daemon restarts on
+      // every promotion; re-sending the banner on each reconnect woke every idle
+      // Claude seat as a user turn. An unchanged mode makes a restart a non-event.
+      // This is the last thing onConnect does, so the early return is exact.
+      if (!shouldEmitStartupBanner(isFirstConnect)) {
+        log.debug?.("startup banner suppressed on reconnect; acknowledged delivery mode unchanged")
+        return
+      }
       try {
         const membersResult = (await client.call("tribe.members", {})) as { content: Array<{ text: string }> }
         const membersData = JSON.parse(membersResult.content?.[0]?.text ?? "{}") as {
@@ -1234,6 +1279,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
         log.warn?.(`tribe delivery acknowledgement ${deliveryAcknowledgementSummary()}`)
       }
+      // The join acknowledgement is an announcement too: record it so a later
+      // reconnect under this same mode is silent (28743).
+      rememberAnnouncedDelivery()
       sendChannelDetached(`**tribe** ${myName} · ${deliveryAcknowledgementSummary()}`, {
         from: "tribe-startup",
         type: "system",

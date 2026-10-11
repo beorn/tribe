@@ -47,6 +47,7 @@ function spawnFakeDaemon(
     registerErrorAfter?: number
     registerErrorUntil?: number
     registerAck?: Record<string, unknown>
+    registerAckOnReconnect?: Record<string, unknown>
     joinAck?: Record<string, unknown>
     wakeupDuringRegister?: boolean
     toolError?: { code: number; message: string; method?: string }
@@ -87,6 +88,9 @@ function spawnFakeDaemon(
               transportDelivery: delivery,
               delivery,
               ...opts.registerAck,
+              // 28743 — a reconnect can acknowledge a different delivery mode than
+              // the first connect; let a test drive that change.
+              ...(registerCount > 1 ? opts.registerAckOnReconnect : {}),
             }),
           )
           return
@@ -891,6 +895,170 @@ describe("stdio adapter delivery modes", () => {
     expect(registrations[0]?.params).toMatchObject({ name: "@chief", takeover: true })
     expect(registrations[1]?.params?.name).toBe("@chief")
     expect(registrations[1]?.params && "takeover" in registrations[1].params).toBe(false)
+  })
+
+  // @failure 28743: since 28691 the wire daemon restarts on every promotion; a
+  //          startup banner re-sent on each reconnect woke every idle Claude seat
+  //          as a user turn (~60 extra model turns an hour while quota pacing).
+  // @level l2 @consumer native MCP delivery capability and startup confirmation
+  it("28743: a reconnect with an unchanged acknowledged delivery mode re-emits no startup banner", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_REQUIRE_JOIN: "0",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const startupBanners = () =>
+      stdout.filter(
+        (line) =>
+          line.method === "notifications/claude/channel" &&
+          (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
+          JSON.stringify(line).includes("**tribe**"),
+      )
+    const membersProbes = () => daemon!.requests.filter((msg) => msg.method === "tribe.members").length
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+
+    // First connect emits the banner exactly once (the members probe is the banner path).
+    await waitForCondition(() => startupBanners().length === 1, "first-connect startup banner")
+    expect(membersProbes()).toBe(1)
+
+    // Drop the socket; the adapter reconnects to the same daemon with the same ack.
+    daemon.clients.at(-1)?.destroy()
+    await waitForCondition(
+      () => daemon!.requests.filter((msg) => msg.method === "register").length >= 2,
+      "adapter reconnect registration",
+      { timeoutMs: 10_000 },
+    )
+    // A tool round trip after the reconnect proves onConnect finished — so the
+    // banner decision has been made.
+    await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2, { timeoutMs: 10_000 })
+    await new Promise((resolveTick) => setTimeout(resolveTick, 200))
+
+    expect(child.exitCode).toBeNull()
+    // Unchanged mode → the second connect is silent: no banner, and the banner
+    // path did not run (its only `tribe.members` caller fired once).
+    expect(startupBanners()).toHaveLength(1)
+    expect(membersProbes()).toBe(1)
+  })
+
+  // @failure 28743: suppression must not hide a real delivery-mode change.
+  // @level l2 @consumer native MCP delivery capability and startup confirmation
+  it("28743: a reconnect whose acknowledged delivery mode changed still emits the startup banner", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, {
+      // First connect: malformed ack → unacknowledged (pull).
+      registerAck: { transportDelivery: "sometimes" },
+      // Reconnect: a well-formed push ack → acknowledged push.
+      registerAckOnReconnect: { transportDelivery: "push", delivery: "push" },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_REQUIRE_JOIN: "0",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const startupBanners = () =>
+      stdout.filter(
+        (line) =>
+          line.method === "notifications/claude/channel" &&
+          (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
+          JSON.stringify(line).includes("**tribe**"),
+      )
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await waitForCondition(() => startupBanners().length === 1, "first-connect startup banner")
+    expect(JSON.stringify(startupBanners()[0])).toContain("unacknowledged")
+
+    daemon.clients.at(-1)?.destroy()
+    await waitForCondition(
+      () => daemon!.requests.filter((msg) => msg.method === "register").length >= 2,
+      "adapter reconnect registration",
+      { timeoutMs: 10_000 },
+    )
+    await waitForCondition(() => startupBanners().length === 2, "changed-mode reconnect banner", {
+      timeoutMs: 10_000,
+    })
+    expect(JSON.stringify(startupBanners()[1])).toContain("acknowledged transportDelivery=push")
+    expect(child.exitCode).toBeNull()
+  })
+
+  // @failure 28743: an explicit join announces push after a pull first connect;
+  //          if the cache does not learn it, the next unchanged reconnect
+  //          re-announces a mode the seat was already told about.
+  // @level l2 @consumer native MCP delivery capability and startup confirmation
+  it("28743: an explicit join then an unchanged reconnect emits no extra startup banner", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        // Require an explicit join (the production default) so the first connect
+        // registers pull and the join afterwards announces push.
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const startupBanners = () =>
+      stdout.filter(
+        (line) =>
+          line.method === "notifications/claude/channel" &&
+          (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
+          JSON.stringify(line).includes("**tribe**"),
+      )
+    const membersProbes = () => daemon!.requests.filter((msg) => msg.method === "tribe.members").length
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+
+    // First connect: the pre-join pull banner.
+    await waitForCondition(() => startupBanners().length === 1, "first-connect startup banner")
+    expect(JSON.stringify(startupBanners()[0])).toContain("delivery=pull")
+
+    // The model joins: push is acknowledged and the join emits its own banner.
+    await writeJsonAndWaitForLine(
+      child,
+      callToolPayload(2, "join", { name: "@agent/test", delivery: "push" }),
+      (line) => line.id === 2,
+      { timeoutMs: 10_000 },
+    )
+    await waitForCondition(() => startupBanners().length === 2, "join acknowledgement banner")
+    expect(JSON.stringify(startupBanners()[1])).toContain("acknowledged transportDelivery=push")
+
+    daemon.clients.at(-1)?.destroy()
+    await waitForCondition(
+      () => daemon!.requests.filter((msg) => msg.method === "register").length >= 2,
+      "adapter reconnect registration",
+      { timeoutMs: 10_000 },
+    )
+    await writeJsonAndWaitForLine(child, toolsListPayload(3), (line) => line.id === 3, { timeoutMs: 10_000 })
+    await new Promise((resolveTick) => setTimeout(resolveTick, 200))
+
+    expect(child.exitCode).toBeNull()
+    // The reconnect acknowledges the SAME push mode the join already announced:
+    // no third banner and no second members probe.
+    expect(startupBanners()).toHaveLength(2)
+    expect(membersProbes()).toBe(1)
   })
 
   // @failure 26564: a disconnected push adapter must withdraw its acknowledged push capability.
