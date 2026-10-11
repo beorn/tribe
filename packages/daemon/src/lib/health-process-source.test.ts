@@ -948,22 +948,56 @@ describe("the hab a managed source spawns (28657)", () => {
     expect(runCommand, "a named-but-absent hab must not fall back to PATH's hab").not.toHaveBeenCalled()
   })
 
+  /**
+   * N1 (@cto 28657): existence is a per-SPAWN fact. A pointer briefly absent as the daemon starts -- a landing
+   * being rebuilt under a promotion, the very moment this source is built -- must not become a permanent outage
+   * for that daemon's whole life.
+   */
+  it("re-checks existence at every SPAWN: absent at construction, present at the next read, it spawns", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hab-cli-bin-late-"))
+    cleanup.push(root)
+    const pointer = join(root, "current", "node_modules", ".bin", "hab")
+    const runCommand = vi.fn(async (_argv: readonly string[]) => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: `${JSON.stringify(availablePayload)}\n`,
+    }))
+    const source = createHealthProcessSource({ env: managedEnv({ HAB_CLI_BIN: pointer }), runCommand })
+    if (source.kind !== "managed") throw new Error("expected managed source")
+
+    await expect(source.read()).resolves.toMatchObject({ kind: "unavailable", reason: "source-cli-missing" })
+    expect(runCommand).not.toHaveBeenCalled()
+
+    // The landing lands: the SAME source, with no restart and no new construction, spawns on its next read.
+    mkdirSync(join(root, "current", "node_modules", ".bin"), { recursive: true })
+    writeFileSync(pointer, "#!/bin/sh\nexit 0\n")
+    await expect(source.read()).resolves.toMatchObject({ kind: "available" })
+    expect(runCommand.mock.calls[0]?.[0][0]).toBe(pointer)
+  })
+
   it("an unset HAB_CLI_BIN keeps PATH's hab, and the announcement says THAT is what it spawns", () => {
-    expect(resolveHabCli(managedEnv())).toEqual({ announcement: "PATH hab (HAB_CLI_BIN unset)", argv0: "hab" })
+    expect(resolveHabCli(managedEnv())).toEqual({
+      announcement: "PATH hab (HAB_CLI_BIN unset)",
+      argv0: "hab",
+      injected: false,
+    })
     expect(resolveHabCli(managedEnv({ HAB_CLI_BIN: "   " })), "a whitespace value is not a value").toEqual({
       announcement: "PATH hab (HAB_CLI_BIN unset)",
       argv0: "hab",
+      injected: false,
     })
     const present = fileURLToPath(import.meta.url)
     expect(resolveHabCli(managedEnv({ HAB_CLI_BIN: present }))).toEqual({
       announcement: `HAB_CLI_BIN ${present}`,
       argv0: present,
+      injected: true,
     })
     const absent = join(tmpdir(), "no-such-landing", "current", "node_modules", ".bin", "hab")
+    // The RESOLUTION says nothing about existence: it names what was injected, and existence is checked per spawn.
     expect(resolveHabCli(managedEnv({ HAB_CLI_BIN: absent }))).toEqual({
-      announcement: `HAB_CLI_BIN ${absent} (missing)`,
+      announcement: `HAB_CLI_BIN ${absent}`,
       argv0: absent,
-      missing: absent,
+      injected: true,
     })
   })
 })

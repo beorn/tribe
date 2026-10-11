@@ -21,28 +21,36 @@ const log = createLogger("tribe:health:process-source")
  * (`<landingHome>/current/node_modules/.bin/hab`), so the spawn follows promotion without a restart.
  *
  * Set-but-missing is a typed unavailable that NAMES the path, never a PATH fallback (the `HAB_INHAB_BIN` rule). Unset
- * keeps the standalone `hab` fallback, still ANNOUNCED: this incident took hours to find because nothing said which
- * hab the source spawned.
+ * keeps the standalone `hab` fallback, still ANNOUNCED -- at WARN, because in a landings habitat "unset" IS this
+ * incident's signature and an info line can be filtered away (@cto 28657, N2).
  */
 export interface HabCliResolution {
   /** argv[0] for every `hab sysmon snapshot` this source spawns. */
   readonly argv0: string
   /** What an operator is told: the injected pointer, or PATH's hab when unset. */
   readonly announcement: string
-  /** Set but absent on disk: the exact path, for a typed unavailable naming it. */
-  readonly missing?: string
+  /** True when `argv0` came from `HAB_CLI_BIN`, whose existence is re-checked per SPAWN, never cached. */
+  readonly injected: boolean
 }
 
 /** Exported from module-private so its contract test can diff the announcement text (@testonly). */
 export function resolveHabCli(env: NodeJS.ProcessEnv): HabCliResolution {
   const injected = env[HAB_CLI_BIN_ENV]?.trim()
   if (injected === undefined || injected === "") {
-    return { announcement: "PATH hab (HAB_CLI_BIN unset)", argv0: "hab" }
+    return { announcement: "PATH hab (HAB_CLI_BIN unset)", argv0: "hab", injected: false }
   }
-  if (!existsSync(injected)) {
-    return { announcement: `HAB_CLI_BIN ${injected} (missing)`, argv0: injected, missing: injected }
-  }
-  return { announcement: `HAB_CLI_BIN ${injected}`, argv0: injected }
+  return { announcement: `HAB_CLI_BIN ${injected}`, argv0: injected, injected: true }
+}
+
+/**
+ * The injected hab CLI, absent RIGHT NOW — a per-SPAWN fact, never a cached verdict (@cto 28657, N1). Resolving
+ * existence once when the source was built made a pointer that is briefly absent as the daemon starts a PERMANENT
+ * outage for that daemon's whole life: a transient must not become the standing answer. Nothing injected is left to
+ * the spawn's own failure, because there is no path to name.
+ */
+function missingInjectedHabCli(habCli: HabCliResolution): string | undefined {
+  if (!habCli.injected) return undefined
+  return existsSync(habCli.argv0) ? undefined : habCli.argv0
 }
 
 /** One startup line naming the hab this source spawns, so a promotion skew is visible without an incident (28657). */
@@ -743,7 +751,11 @@ function managedProcessSource(
   const habCli = resolveHabCli(env)
   if (!habCliAnnounced) {
     habCliAnnounced = true
-    log.info?.("health process source: the hab it spawns per call", { hab: habCli.announcement })
+    const line = { hab: habCli.announcement }
+    // N2 (@cto 28657): in a landings habitat, an unset HAB_CLI_BIN IS this incident's signature, and an info line
+    // can be filtered out of the wire's log. The injected case stays info: it is the expected, healthy reading.
+    if (habCli.injected) log.info?.("health process source: the hab it spawns per call", line)
+    else log.warn?.("health process source: the hab it spawns per call", line)
   }
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS
   const now = options.now ?? Date.now
@@ -826,11 +838,12 @@ function managedProcessSource(
   return {
     kind: "managed",
     async read() {
-      if (habCli.missing !== undefined) {
+      const missingCli = missingInjectedHabCli(habCli)
+      if (missingCli !== undefined) {
         return unavailable(
           stateRoot,
           "source-cli-missing",
-          `HAB_CLI_BIN names ${habCli.missing}, which does not exist; the promoted landing's hab was expected there (28657)`,
+          `HAB_CLI_BIN names ${missingCli}, which does not exist; the promoted landing's hab was expected there, and no PATH fallback was taken (28657)`,
         )
       }
       const argv = sysmonArgv([])
@@ -882,11 +895,12 @@ function managedProcessSource(
       )
     },
     async readScalars() {
-      if (habCli.missing !== undefined) {
+      const missingCli = missingInjectedHabCli(habCli)
+      if (missingCli !== undefined) {
         return scalarUnavailable(
           controllerSessionDir,
           "source-cli-missing",
-          `HAB_CLI_BIN names ${habCli.missing}, which does not exist; the promoted landing's hab was expected there, and no PATH fallback was taken (28657)`,
+          `HAB_CLI_BIN names ${missingCli}, which does not exist; the promoted landing's hab was expected there, and no PATH fallback was taken (28657)`,
         )
       }
       const argv = sysmonArgv(["--kind", "scalars"])
