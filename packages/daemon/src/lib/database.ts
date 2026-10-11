@@ -2411,11 +2411,29 @@ export function createStatements(db: Database) {
      *  age with a prune notice (mailbox_prunes) instead. Before 21757 this
      *  was a bare MIN over every row, and retention.ts's own header named
      *  the cost: one dormant seat held the floor down for the whole fleet.
-     *  NULL (no live cursor rows, e.g. a fresh DB) contributes no
-     *  constraint; retention.ts treats that as "unbounded". */
+     *
+     *  F3 (@cto 2026-10-11): `last_actionable_seq > 0` — a cursor that has
+     *  NEVER advanced is not a position. `seq <= 0` admits no row, so one
+     *  live recipient that had acknowledged nothing (measured: @probe/28571)
+     *  held the fleet floor at 0 and voided retention fleet-wide for good.
+     *  A recipient whose actionable rows are still unread is protected by
+     *  the ARCHIVE-MOVE live rule, which keeps its unread direct actionables
+     *  out of messages_archive in the first place.
+     *
+     *  Returns the floor AND the recipient who sets it (retention.ts logs
+     *  that name when the floor excludes rows, so a reader stuck at a low
+     *  NONZERO position is visible rather than silently voiding the
+     *  promise); NO ROW (no live cursor has advanced, e.g. a fresh DB)
+     *  contributes no constraint, which retention.ts treats as "unbounded". */
     selectMailboxCursorFloor: db.prepare(`
-		SELECT MIN(last_actionable_seq) AS floor FROM mailbox_cursors
+		SELECT last_actionable_seq AS floor,
+		       recipient AS setter,
+		       COALESCE(last_attention_read_at, updated_at) AS setter_read_at
+		FROM mailbox_cursors
 		WHERE COALESCE(last_attention_read_at, updated_at) >= $live_cutoff
+		  AND last_actionable_seq > 0
+		ORDER BY last_actionable_seq ASC
+		LIMIT 1
 	`),
 
     /** Live-cursor floor, half 2: the oldest ambient inbox-pull position
@@ -2424,10 +2442,18 @@ export function createStatements(db: Database) {
      *  actionableLagQuery, scoped to kind='direct'); the ambient lag query
      *  there also counts broadcast rows (recipient = '*') against each
      *  session's own last_inbox_pull_seq, so retention takes the floor
-     *  across both cursor families rather than mailbox_cursors alone. */
+     *  across both cursor families rather than mailbox_cursors alone. F3:
+     *  same never-advanced rule as half 1 (`last_inbox_pull_seq > 0`), and
+     *  it also returns the session that sets the floor. */
     selectSessionInboxCursorFloor: db.prepare(`
-		SELECT MIN(last_inbox_pull_seq) AS floor FROM sessions
+		SELECT last_inbox_pull_seq AS floor,
+		       name AS setter,
+		       MAX(updated_at, COALESCE(last_delivered_ts, 0)) AS setter_read_at
+		FROM sessions
 		WHERE MAX(updated_at, COALESCE(last_delivered_ts, 0)) >= $live_cutoff
+		  AND last_inbox_pull_seq > 0
+		ORDER BY last_inbox_pull_seq ASC
+		LIMIT 1
 	`),
 
     /** Archive-delete batch candidates: archived rows old enough under the

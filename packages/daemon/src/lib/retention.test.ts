@@ -617,6 +617,121 @@ describe("journal retention sweep", () => {
         db.close()
       }
     })
+
+    // F3 (@cto 2026-10-11): a cursor that has NEVER advanced is not a
+    // position. 0 means the reader has acknowledged nothing, and `seq <= 0`
+    // admits no archived row, so one such LIVE reader used to pin the
+    // fleet-wide floor at 0 and void retention forever.
+
+    it("ignores a LIVE mailbox cursor that has never advanced (a 0 is not a position)", () => {
+      const { db, stmts } = setup()
+      try {
+        insertArchived(db, { id: "probe-row", seq: 100, ts: Date.now() - 200 * DAY, recipient: "@probe/28571" })
+        db.prepare(
+          `INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at, last_attention_read_at)
+           VALUES ('@probe/28571', 0, ?, ?)`,
+        ).run(Date.now(), Date.now())
+
+        const result = runRetentionSweep(db, stmts, enabledConfig({ deleteWindowMs: 90 * DAY }))
+
+        expect(result.archiveDelete.cursorFloor).toBe(Number.MAX_SAFE_INTEGER)
+        expect(result.archiveDelete.excludedByCursor).toBe(0)
+        expect(result.archiveDelete.deleted).toBe(1)
+        expect(archivedIds(db)).toEqual([])
+      } finally {
+        db.close()
+      }
+    })
+
+    it("still pins rows at or above a LIVE reader stuck at a low NONZERO cursor, and names it once", () => {
+      const { db, stmts } = setup()
+      try {
+        // seq 5 is at the floor (deletable); seq 6 is above it (protected).
+        insertArchived(db, { id: "at-floor", seq: 5, ts: Date.now() - 200 * DAY, recipient: "@chief" })
+        insertArchived(db, { id: "above-floor", seq: 6, ts: Date.now() - 200 * DAY, recipient: "@chief" })
+        db.prepare(
+          `INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at, last_attention_read_at)
+           VALUES ('@dev/stuck', 5, ?, ?)`,
+        ).run(Date.now(), Date.now())
+
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+        const floorLines = () =>
+          warnSpy.mock.calls
+            .map((call) => call.map((arg) => String(arg)).join(" "))
+            .filter((line) => line.includes("cursor floor"))
+        try {
+          const result = runRetentionSweep(db, stmts, enabledConfig({ deleteWindowMs: 90 * DAY }))
+          expect(result.archiveDelete.cursorFloor).toBe(5)
+          expect(result.archiveDelete.excludedByCursor).toBe(1)
+          expect(result.archiveDelete.deleted).toBe(1)
+          expect(archivedIds(db)).toEqual(["above-floor"])
+
+          // The setter is named, with its cursor value and last read.
+          expect(floorLines()).toHaveLength(1)
+          expect(floorLines()[0]).toContain("@dev/stuck")
+          expect(floorLines()[0]).toContain("5")
+
+          // Rate-limited: the same stuck setter does not log again next tick.
+          runRetentionSweep(db, stmts, enabledConfig({ deleteWindowMs: 90 * DAY }))
+          expect(floorLines()).toHaveLength(1)
+        } finally {
+          warnSpy.mockRestore()
+        }
+      } finally {
+        db.close()
+      }
+    })
+
+    it("leaves DORMANT readers unchanged: an old cursor holds nothing, zero or not", () => {
+      const { db, stmts } = setup()
+      try {
+        insertArchived(db, { id: "dormant-protected", seq: 100, ts: Date.now() - 200 * DAY, recipient: "@chief" })
+        const longAgo = Date.now() - 30 * DAY
+        db.prepare(
+          `INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at, last_attention_read_at)
+           VALUES ('@dormant/zero', 0, ?, ?), ('@dormant/low', 5, ?, ?)`,
+        ).run(longAgo, longAgo, longAgo, longAgo)
+
+        const result = runRetentionSweep(db, stmts, enabledConfig({ deleteWindowMs: 90 * DAY }))
+
+        expect(result.archiveDelete.cursorFloor).toBe(Number.MAX_SAFE_INTEGER)
+        expect(result.archiveDelete.deleted).toBe(1)
+        expect(archivedIds(db)).toEqual([])
+      } finally {
+        db.close()
+      }
+    })
+
+    it("applies the never-advanced rule to the sessions inbox-pull family too", () => {
+      const { db, stmts } = setup()
+      try {
+        insertArchived(db, { id: "broadcast-6", seq: 6, ts: Date.now() - 200 * DAY, recipient: "*" })
+        const now = Date.now()
+        db.prepare(
+          `INSERT INTO sessions (id, name, role, domains, pid, started_at, updated_at, last_inbox_pull_seq)
+           VALUES ('sess-zero', '@agent/zero', 'member', '[]', 1, ?, ?, 0),
+                  ('sess-stuck', '@agent/stuck', 'member', '[]', 1, ?, ?, 5)`,
+        ).run(now, now, now, now)
+
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+        try {
+          const result = runRetentionSweep(db, stmts, enabledConfig({ deleteWindowMs: 90 * DAY }))
+
+          // The 0 session does not pin; the one stuck at 5 does, and is named.
+          expect(result.archiveDelete.cursorFloor).toBe(5)
+          expect(result.archiveDelete.deleted).toBe(0)
+          expect(archivedIds(db)).toEqual(["broadcast-6"])
+          const floorLines = warnSpy.mock.calls
+            .map((call) => call.map((arg) => String(arg)).join(" "))
+            .filter((line) => line.includes("cursor floor"))
+          expect(floorLines.some((line) => line.includes("@agent/stuck"))).toBe(true)
+        } finally {
+          warnSpy.mockRestore()
+        }
+      } finally {
+        db.close()
+      }
+    })
   })
 
   // -------------------------------------------------------------------
@@ -872,48 +987,29 @@ describe("journal retention sweep", () => {
       }
     })
 
-    it("keeps the row and refuses the delete when a matching-checksum manifest backs only an id-only row", () => {
-      const { db, stmts } = setup()
-      try {
-        const oldTs = Date.now() - 200 * DAY
-        const day = dayKey(oldTs)
-        insertArchived(db, { id: "idonly-1", seq: 1, ts: oldTs })
-        expect(runRetentionSweep(db, stmts, enabledConfig()).archiveDelete.deleted).toBe(1)
-
-        // An id-only member with a manifest rewritten to match it: the prefix
-        // checksum agrees, so only the row-completeness check can catch that the
-        // row's bytes were never really exported.
-        const before = firstLine(day)
-        const idOnly = gzipSync(Buffer.from(`${JSON.stringify({ id: "idonly-1" })}\n`))
-        writeFileSync(dayFile(day), idOnly)
-        writeFileSync(
-          manifestFile(day),
-          JSON.stringify({
-            ...readManifest(day),
-            bytes: idOnly.length,
-            sha256: createHash("sha256").update(idOnly).digest("hex"),
-          }),
-        )
-
-        // The delete never committed: the original full row is back.
-        insertArchived(db, { id: "idonly-1", seq: 1, ts: oldTs, archivedAt: before.archived_at as number })
-
-        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
-        try {
-          const next = runRetentionSweep(db, stmts, enabledConfig())
-          expect(next.export.status).toBe("failed")
-          expect(next.archiveDelete.deleted).toBe(0)
-          expect(archivedIds(db)).toEqual(["idonly-1"])
-        } finally {
-          errorSpy.mockRestore()
-        }
-      } finally {
-        db.close()
-      }
-    })
+    // F3 (2026-10-11, @cto): the test that lived here
+    // ("a matching-checksum manifest backs only an id-only row") is RETIRED by
+    // ruling, not by oversight. It rewrote an already-committed day file to an
+    // id-only member AND rewrote the manifest to describe it consistently, then
+    // expected the next tick to catch it by re-decoding the committed prefix.
+    // That whole-day re-decode is exactly what F3 removes: the prefix is now
+    // proven by its sha256 and never re-decoded, and the read-back that catches
+    // an id-only / truncated / content-changed member runs against the APPENDED
+    // member only, so it is bounded by the batch. Stated residual: a CONSISTENT
+    // rewrite of BOTH the day file and its manifest is not detected — neither
+    // design has a trusted anchor for it, because the old re-decode trusted the
+    // same manifest. A change to the committed bytes alone is still refused
+    // (see "refuses the delete when the committed day file was altered under the
+    // recorded length", which is kept). Do not re-add the whole-file decode.
 
     it("keeps the row and refuses the delete when the manifest's own count or ids are invalid", () => {
       type Manifest = ReturnType<typeof readManifest>
+      // F3 (2026-10-11, @cto): the old "count disagrees with the file" and
+      // "ids disagree with the file" scenarios are dropped with the committed
+      // prefix decode they relied on. They were never a delete-safety failure —
+      // the row they named was backed on disk and the delete is correct — only
+      // a mis-indexed manifest; what remains here is the manifest's OWN
+      // structural validity, which readExportManifest still refuses in full.
       const cases: Array<{ name: string; manifest: (base: Manifest, id: string) => Record<string, unknown> }> = [
         {
           name: "rows omitted",
@@ -921,8 +1017,6 @@ describe("journal retention sweep", () => {
         },
         { name: "rows coerced from a string", manifest: (base) => ({ ...base, rows: "1" }) },
         { name: "duplicate ids", manifest: (base, id) => ({ ...base, rows: 2, ids: [id, id] }) },
-        { name: "count disagrees with the file", manifest: (base, id) => ({ ...base, rows: 2, ids: [id, "ghost"] }) },
-        { name: "ids disagree with the file", manifest: (base) => ({ ...base, ids: ["ghost"] }) },
       ]
       for (const scenario of cases) {
         // A fresh tmpDir per scenario: the shared one would otherwise carry the
