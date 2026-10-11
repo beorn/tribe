@@ -38,8 +38,8 @@ export default {
       // nothing at all) instead of wire's own answer. 25 s covers the CLI's worst case with headroom; a bound at or
       // above `intervalMs` is refused, and wire declares no interval.
       health: { command: "tribe health --json", timeoutMs: 25_000 },
-      // It runs from an immutable landing; when a promoted landing carries a new vendor/tribe, the hab
-      // controller restarts it onto that landing (26774, @cto 9e7a89d2). A km-only landing leaves it running.
+      // It runs from an immutable landing; the hab controller restarts it onto the promoted landing (26774,
+      // @cto 9e7a89d2).
       // 28691 (one-version plan slice 1.1, @cto Q5): the closure-digest skip is RETIRED — wire restarts on EVERY
       // promotion, unconditionally. The digest and the declared-pin comparison are both COMPONENT checks, and the
       // week's two misses were undeclared dependencies (wire's spawned hab, its argv-named verifier), so "the
