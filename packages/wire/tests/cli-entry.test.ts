@@ -11,11 +11,12 @@
  */
 
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
+import { safeRemoveSync } from "removely"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = resolve(HERE, "../src/cli.ts")
@@ -97,7 +98,7 @@ describe("the CLI and daemon modules act only when called", () => {
       expect(result.stderr).toContain("tribe-wire doctor")
       expect(existsSync(socketPath)).toBe(false)
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      safeRemoveSync(dir, { within: realpathSync(tmpdir()), allowMissing: true })
     }
   })
 })
