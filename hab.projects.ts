@@ -40,8 +40,10 @@ export default {
       health: { command: "tribe health --json", timeoutMs: 25_000 },
       // It runs from an immutable landing; when a promoted landing carries a new vendor/tribe, the hab
       // controller restarts it onto that landing (26774, @cto 9e7a89d2). A km-only landing leaves it running.
-      // With sourceDigest it does so only when the daemon's closure changed: a tribe move touching nothing it
-      // loads keeps it, and every connected seat's call, running (27085, @cto 5d9ac8bc).
+      // 28691 (one-version plan slice 1.1, @cto Q5): the closure-digest skip is RETIRED — wire restarts on EVERY
+      // promotion, unconditionally. The digest and the declared-pin comparison are both COMPONENT checks, and the
+      // week's two misses were undeclared dependencies (wire's spawned hab, its argv-named verifier), so "the
+      // release is the unit" means restart whenever the running release differs from current.
       // 27422 (@cto 198c1ee0): the daemon loads bearly and loggily in process from the landing root, so both sibling
       // gitlinks are declared; the @modelcontextprotocol/sdk escapes are hoisted install bytes the /3 install scope
       // covers instead.
@@ -49,7 +51,6 @@ export default {
         mechanism: "restart-at-promotion" as const,
         additionalComponents: ["vendor/bearly", "vendor/loggily"] as const,
       },
-      sourceDigest: "bun-closure" as const,
     },
   },
 }
