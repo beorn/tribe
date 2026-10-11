@@ -2054,18 +2054,25 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         TRIBE_SOCKET: join(dir, "absent.sock"),
         HAB_SERVICE_NAME: "wire",
       }
+      const startedAt = Date.now()
       const result = await runCliAsync(["stop"], env)
       // Guard passed; the failure is the absent daemon, not a refusal.
       expect(result.stderr).not.toMatch(/refusing to stop/)
       expect(result.stderr).toMatch(/No daemon running/)
       expect(result.code).toBe(1)
+      // 28683 (@cto): stop's answer on an absent socket is a PRESENCE decision ("nothing to stop", exit 1), not a
+      // call to bridge across a restart, so cmdStop takes connectRetryWindowMs 0 — the cmdHealth PROBE
+      // classification for a different reason. Left on the default 28674 window this verb would retry the absent
+      // socket for ~6 s first, so this assertion goes red (>2.5 s, and red against vitest's 5 s default) if that
+      // opt-out is ever dropped.
+      expect(
+        Date.now() - startedAt,
+        "an absent socket is answered now, never after the restart-retry window",
+      ).toBeLessThan(2_500)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-    // 28674: connectToDaemon retries an ABSENT socket for up to its 6 s window, so this deliberately
-    // absent daemon now takes the full wait before it can report "No daemon running" — above vitest's
-    // 5 s default. No assertion changed.
-  }, 20_000)
+  })
 
   it("stop --force cleanly stops a real daemon: RPC acknowledged, then daemon exit 0", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-stop-e2e-"))

@@ -1031,6 +1031,8 @@ describe("registerSendCommands", () => {
         child.on("close", (code) => resolveProc({ code, stdout, stderr }))
       })
 
+    const startedAt = Date.now()
+
     const reply = await runSend("  reply=req-123 answered")
     expect(reply).toMatchObject({ code: 2, stdout: "" })
     expect(reply.stderr).toContain("message content begins with reply=req-123")
@@ -1048,19 +1050,52 @@ describe("registerSendCommands", () => {
     expect(prose.stderr).toContain("no daemon-validated launch identity")
     expect(prose.stderr).not.toContain("message content begins with")
 
-    const structured = await runSend("answered", ["--type", "response", "--reply", "req-123"])
-    expect(structured.code).toBe(1)
-    expect(structured.stderr).toContain("No daemon running")
-    expect(structured.stderr).not.toContain("message content begins with")
-
     const mismatched = await runSend("reply=req-A answered", ["--type", "response", "--reply", "req-B"])
     expect(mismatched).toMatchObject({ code: 2, stdout: "" })
     expect(mismatched.stderr).toContain("message content begins with reply=req-A")
     expect(mismatched.stderr).toContain("remove reply=req-A from the message content")
     expect(mismatched.stderr).not.toContain("No daemon running")
-    // 28674: two of these five CLI runs take the absent-socket path, where connectToDaemon now retries
-    // for up to its 6 s window before the "No daemon running" diagnostic; above vitest's 5 s default.
-    // No assertion changed.
+    // 28683 (@cto): the intent guard runs at the TOP of cmdSend — before resolveSendCaller and therefore before any
+    // connectToDaemon — so every run above answers from the message text alone and NONE of them touches the socket,
+    // absent by construction here. This bound is the contract made visible: it goes red (>2.5 s, and red against
+    // vitest's 5 s default) if the guard is ever moved after the connect. The one run that does reach the daemon
+    // carries its own test below, because that one crosses the 28674 retry window by construction.
+    expect(
+      Date.now() - startedAt,
+      "the intent guard answers from the message alone, before any daemon I/O",
+    ).toBeLessThan(2_500)
+  })
+
+  // 28683: the CONTRAST case for the guard above, kept separate so the guard test needs no timeout override. A
+  // clean `--reply` send must NOT be caught by the prose-intent guard, which is only observable by letting it
+  // proceed to daemon I/O — and the socket here is deliberately ABSENT, so connectToDaemon retries it for the full
+  // CONNECT_RETRY_WINDOW_MS (6 s) before writing "No daemon running". That wait is the feature 28674 exists for
+  // (a wire restart, not a dead wire), so it cannot be shortened to fit vitest's 5 s default; this is the one run
+  // in this file that must carry its own timeout, and the reason is here.
+  test("a structured --reply send passes the prose-intent guard and reaches daemon I/O (absent daemon)", async () => {
+    const socketPath = join(tmpdir(), `tribe-wire-intent-guard-daemon-${process.pid}.sock`)
+    const runSend = (message: string, flags: string[] = []) =>
+      new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
+        const child = spawn(BUN_BIN, [CLI, "send", "@agent/3", message, ...flags], {
+          env: {
+            ...process.env,
+            TRIBE_SOCKET: socketPath,
+            TRIBE_NAME: "@chief",
+            ...launchEnvironment(""),
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProc({ code, stdout, stderr }))
+      })
+
+    const structured = await runSend("answered", ["--type", "response", "--reply", "req-123"])
+    expect(structured.code).toBe(1)
+    expect(structured.stderr).toContain("No daemon running")
+    expect(structured.stderr).not.toContain("message content begins with")
   }, 20_000)
 
   // @ag/tribe/21921 originally kept seats from going mute by degrading an

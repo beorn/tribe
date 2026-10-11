@@ -24,6 +24,7 @@ import {
   isSupportedProtocolVersion,
   TRIBE_PROTOCOL_VERSION,
   TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
+  type ConnectToDaemonOpts,
   type DaemonClient,
 } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
@@ -115,21 +116,26 @@ async function callDaemon(
   method: string,
   params?: Record<string, unknown>,
   missingDaemon: "exit" | "throw" = "exit",
+  connectOpts?: ConnectToDaemonOpts,
 ): Promise<unknown> {
-  return withCliDaemonClient(async (client) => {
-    try {
-      return await client.call(method, params)
-    } catch (error) {
-      const code = (error as { code?: string | number }).code
-      if (code === -32601 && method.endsWith("_by_launch_v1")) {
-        throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
+  return withCliDaemonClient(
+    async (client) => {
+      try {
+        return await client.call(method, params)
+      } catch (error) {
+        const code = (error as { code?: string | number }).code
+        if (code === -32601 && method.endsWith("_by_launch_v1")) {
+          throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
+        }
+        if (code === -32601 && method === "cli_session_pending_read_v1") {
+          throw new Error(STALE_MANAGED_PENDING_DAEMON_ERROR)
+        }
+        throw error
       }
-      if (code === -32601 && method === "cli_session_pending_read_v1") {
-        throw new Error(STALE_MANAGED_PENDING_DAEMON_ERROR)
-      }
-      throw error
-    }
-  }, missingDaemon)
+    },
+    missingDaemon,
+    connectOpts,
+  )
 }
 
 function cliInboxTargetParams(verb: string, session: string | undefined): Record<string, unknown> {
@@ -2413,6 +2419,11 @@ async function cmdRestart(opts: { reason?: string; json?: boolean }): Promise<vo
  * rule: this CLI refuses locally without --force outside the hab supervisor
  * context, and the daemon independently refuses the RPC without `force: true`
  * so a raw socket caller cannot stop the rail casually either.
+ *
+ * The connect does NOT take the 28674 restart-retry window (connectRetryWindowMs 0, the same PROBE classification as
+ * cmdHealth, for a different reason): stop's answer on an absent socket is a PRESENCE decision — "nothing to stop",
+ * exit 1 — and hab's supervisor calls it, so waiting ~6 s to describe a socket that was never there is not a bridge
+ * across a restart but a delay on the one verb whose whole job is to report presence.
  */
 async function cmdStop(opts: { force?: boolean; reason?: string; json?: boolean }): Promise<void> {
   if (!opts.force && !isHabSupervisorContext({ [HAB_SERVICE_NAME_ENV]: process.env[HAB_SERVICE_NAME_ENV] })) {
@@ -2420,7 +2431,9 @@ async function cmdStop(opts: { force?: boolean; reason?: string; json?: boolean 
     process.exit(2)
   }
   const params: Record<string, unknown> = { force: true, ...(opts.reason ? { reason: opts.reason } : {}) }
-  const result = mcpJsonContent(await callDaemon("tribe.stop", params)) as StopResult
+  const result = mcpJsonContent(
+    await callDaemon("tribe.stop", params, "exit", { connectRetryWindowMs: 0 }),
+  ) as StopResult
 
   if (opts.json) {
     await writeJsonStdout(result)
