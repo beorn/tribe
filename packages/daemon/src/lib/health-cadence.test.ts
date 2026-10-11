@@ -178,6 +178,31 @@ describe("20876 Tribe health cadence", () => {
     `).run({ $ts: now - 8 * DAY, $archived_at: now - DAY })
   })
 
+  it("28277 named read retains disconnected attention and reports unknown names without changing default bytes", () => {
+    insertMessage(db, {
+      id: "retained-attention",
+      type: "request",
+      sender: "@agent/5",
+      recipient: "@chief",
+      ts: now - MINUTE,
+    })
+    const baseline = projectHealthCadence(db, { now, connectedSessionNames: ["@agent/5"] })
+    const named = projectHealthCadence(db, {
+      now,
+      connectedSessionNames: ["@agent/5"],
+      requestedSessionNames: ["@chief", "@missing"],
+    })
+    expect(named.inbox_lag.find((row) => row.session === "@chief")).toMatchObject({
+      transport_state: "disconnected",
+      actionable_rows: 1,
+    })
+    expect(named.unknown_sessions).toEqual(["@missing"])
+    expect(named.inbox_lag.find((row) => row.session === "@agent/5")).toMatchObject({ transport_state: "connected" })
+    expect(projectHealthCadence(db, { now, connectedSessionNames: ["@agent/5"] })).toEqual(baseline)
+    expect(baseline).not.toHaveProperty("unknown_sessions")
+    expect(baseline.inbox_lag[0]).not.toHaveProperty("transport_state")
+  })
+
   afterEach(() => {
     db.close()
     safeRemoveSync(tmpDir, { within: tmpdir(), allowMissing: true })
@@ -597,6 +622,12 @@ describe("20876 Tribe health cadence", () => {
       issues?: string[]
     }
 
+    // 28277: the existing health handler carries optional named observations through.
+    const namedHealth = parseToolResult(
+      handleToolCall(ctx, "tribe.health", { sessions: ["@chief", "@missing"] }, opts),
+    ) as { cadence: { unknown_sessions: string[]; inbox_lag: Array<{ session: string; transport_state: string }> } }
+    expect(namedHealth.cadence.unknown_sessions).toEqual(["@missing"])
+    expect(namedHealth.cadence.inbox_lag.find((row) => row.session === "@chief")?.transport_state).toBe("disconnected")
     expect(health.cadence?.as_of_ms).toBeTypeOf("number")
     expect(health.pending_balls.requests.count).toBe(2)
     expect(health.pending_balls.requests.owners.find((row) => row.owner === "@chief")?.pending).toEqual([

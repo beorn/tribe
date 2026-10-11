@@ -642,7 +642,7 @@ export function handleToolCall(
     case TRIBE_COORD_METHODS.join:
       return handleJoin(ctx, a, opts)
     case TRIBE_COORD_METHODS.health:
-      return handleHealth(ctx, opts)
+      return handleHealth(ctx, a, opts)
     case TRIBE_COORD_METHODS.restart:
       return handleRestart(ctx, a, opts.cleanup)
     case TRIBE_COORD_METHODS.stop:
@@ -3853,7 +3853,13 @@ export function readSeatTransportFacts(
   return { missing, exited, unreachable, connected: new Set(liveSessions.map((session) => session.name)) }
 }
 
-function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
+function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
+  if (
+    a.sessions !== undefined &&
+    (!Array.isArray(a.sessions) || a.sessions.some((name) => typeof name !== "string" || name.trim().length === 0))
+  ) {
+    throw new Error("tribe.health sessions must be an array of nonempty exact session names")
+  }
   const now = Date.now()
   const silentThreshold = now - 300_000 // 5 minutes
 
@@ -4003,6 +4009,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   const cadence = projectHealthCadence(ctx.db, {
     now,
     connectedSessionNames: liveSessions.map((session) => session.name),
+    ...(a.sessions === undefined ? {} : { requestedSessionNames: a.sessions as string[] }),
     dbGrowthWarningBytes: parseDbGrowthWarningBytes(process.env.TRIBE_HEALTH_DB_GROWTH_WARN_BYTES),
   })
   const mailboxReadIssues = liveSessions.flatMap((session) => {

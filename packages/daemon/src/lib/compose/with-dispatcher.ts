@@ -2690,7 +2690,7 @@ export function withDispatcher<
           }
 
           case "cli_health": {
-            const health = await handleToolCall(daemonCtx, TRIBE_COORD_METHODS.health, {}, DAEMON_HANDLER_OPTS)
+            const health = await handleToolCall(daemonCtx, TRIBE_COORD_METHODS.health, p, DAEMON_HANDLER_OPTS)
             const { getBridgeLostArming, getHealthSampleStats, resolveHealthMachine } =
               await import("../health-monitor-plugin.ts")
             // 28196: serve the monitor's last completed sample rather than
