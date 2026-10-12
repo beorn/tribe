@@ -14,7 +14,6 @@
  *   HEALTH_WORKTREE_WARNING — open worktree count for warning (default: 5)
  *   HEALTH_GH_RATELIMIT_WARNING — GitHub API remaining % for warning (default: 20)
  *   HEALTH_FD_WARNING      — fd usage % for warning (default: 70)
- *   HEALTH_DISK_IO_WARNING — combined read+write MB/s for warning (default: 500)
  *   HEALTH_REAPER_ENABLED     — enable process reaper (default: "1")
  *   HEALTH_REAPER_CPU_THRESHOLD — CPU % threshold for suspect (default: 80)
  *   HEALTH_REAPER_AGE_MINUTES  — minimum process age in minutes (default: 30)
@@ -125,7 +124,6 @@ export interface HealthAlert {
     | "process-count"
     | "git-lock"
     | "disk"
-    | "disk-io"
     | "worktree"
     | "fd-count"
     | "gh-rate-limit"
@@ -172,8 +170,6 @@ export interface HealthThresholds {
   diskCriticalPercent: number
   worktreeWarning: number
   fdWarningPercent: number
-  /** Alert when combined read+write exceeds this MB/s sustained */
-  diskIoWarningMBps: number
   /** Alert when GitHub API remaining % drops below this (default: 20) */
   ghRateLimitWarning: number
   /** How many consecutive samples above threshold before alerting */
@@ -199,7 +195,6 @@ export function defaultThresholds(): HealthThresholds {
     diskCriticalPercent: parseInt(process.env.HEALTH_DISK_CRITICAL ?? "95", 10),
     worktreeWarning: parseInt(process.env.HEALTH_WORKTREE_WARNING ?? "5", 10),
     fdWarningPercent: parseInt(process.env.HEALTH_FD_WARNING ?? "70", 10),
-    diskIoWarningMBps: parseInt(process.env.HEALTH_DISK_IO_WARNING ?? "500", 10),
     ghRateLimitWarning: parseInt(process.env.HEALTH_GH_RATELIMIT_WARNING ?? "20", 10),
     // At 10s interval, 3 samples = 30s sustained
     sustainedSamples: 3,
@@ -831,39 +826,6 @@ export function resolveFdReading(sources: {
 }
 
 // ---------------------------------------------------------------------------
-// Disk I/O monitoring
-// ---------------------------------------------------------------------------
-
-/** Parse macOS `iostat -d -c 2 -w 1` output to extract current disk throughput */
-export function parseIostatOutput(output: string): { readWriteMBps: number } | null {
-  const lines = output.trim().split("\n")
-  // iostat -d -c 2 -w 1 output:
-  //               disk0
-  //     KB/t  tps  MB/s
-  //    52.57   95  4.88    <- historical average (ignore)
-  //    64.00  150  9.38    <- current sample (use this)
-  //
-  // We want the LAST data line (second sample = current rate).
-  // Data lines have numeric values; skip headers.
-  let lastMBps: number | null = null
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (trimmed === "") continue
-    // Match lines that look like data: numbers separated by whitespace
-    const parts = trimmed.split(/\s+/)
-    if (parts.length < 3) continue
-    const mbps = parseFloat(parts.at(-1) ?? "")
-    if (isNaN(mbps)) continue
-    // Verify it's a data line by checking the first column is also numeric
-    const first = parseFloat(parts[0] ?? "")
-    if (isNaN(first)) continue
-    lastMBps = mbps
-  }
-  if (lastMBps === null) return null
-  return { readWriteMBps: lastMBps }
-}
-
-// ---------------------------------------------------------------------------
 // Git lock detection
 // ---------------------------------------------------------------------------
 
@@ -1031,8 +993,6 @@ export interface AlertState {
   cpuAboveWarning: number
   memAboveCritical: number
   memAboveWarning: number
-  /** Consecutive high disk I/O readings */
-  ioAboveWarning: number
   /**
    * Consecutive samples where the scalar lane produced no disk capacity.
    *
@@ -1079,7 +1039,6 @@ export function createAlertState(): AlertState {
     cpuAboveWarning: 0,
     memAboveCritical: 0,
     memAboveWarning: 0,
-    ioAboveWarning: 0,
     scalarBlindSamples: 0,
     attributionBlindSamples: 0,
     firedAlerts: new Set(),
@@ -2375,38 +2334,6 @@ function canonicalScalarMetrics(
   }
 }
 
-async function readDiskIoMetric(
-  processSource: HealthProcessSource,
-  metrics: HealthMetrics,
-): Promise<HealthMetrics["diskIo"]> {
-  if (processSource.kind === "managed") return metrics.diskIo
-  const ioProc = Bun.spawn(["iostat", "-d", "-c", "2", "-w", "1"], { stdout: "pipe", stderr: "ignore" })
-  return parseIostatOutput(await new Response(ioProc.stdout).text()) ?? undefined
-}
-
-function updateDiskIoAlert(
-  io: HealthMetrics["diskIo"],
-  thresholds: HealthThresholds,
-  state: AlertState,
-  api: TribeClientApi,
-): void {
-  if (io && io.readWriteMBps > thresholds.diskIoWarningMBps) {
-    state.ioAboveWarning++
-    if (state.ioAboveWarning >= 2 && !state.firedAlerts.has("disk-io:warning")) {
-      state.firedAlerts.add("disk-io:warning")
-      const message = `Disk I/O warning: ${io.readWriteMBps.toFixed(0)} MB/s sustained (threshold: ${thresholds.diskIoWarningMBps} MB/s). Multiple agents may be running tests simultaneously.`
-      log.info?.(`alert: ${message}`)
-      api.broadcast(message, "health:disk-io:warning", undefined, {
-        delivery: "pull",
-        topic: "health:disk-io:warning",
-      })
-    }
-    return
-  }
-  state.ioAboveWarning = 0
-  state.firedAlerts.delete("disk-io:warning")
-}
-
 export async function collectFullMetrics(
   processSource: HealthProcessSource = createHealthProcessSource(),
   deps: CollectFullMetricsDeps = {},
@@ -2641,7 +2568,6 @@ export const healthMonitorPlugin: TribePluginApi = {
     const timers = createTimers(ac.signal)
 
     let ghRateSampleCount = 0
-    let ioSampleCount = 0
     let chiefPresenceSampleCount = 0
     const bridgeLostMemory = createBridgeLostMemory()
     const procReadPinnedTold = new Map<string, string>()
@@ -2667,8 +2593,6 @@ export const healthMonitorPlugin: TribePluginApi = {
     } else {
       log.error?.(`bridge-lost paging disarmed: ${currentBridgeLostArming.reason}`)
     }
-    let lastIoScalarFact: string | undefined
-
     log.info?.(
       `starting: poll=${pollIntervalSec}s, cpu warn=${thresholds.cpuWarningMultiplier}x crit=${thresholds.cpuCriticalMultiplier}x, mem warn=${thresholds.memWarningPercent}% crit=${thresholds.memCriticalPercent}%`,
     )
@@ -2681,7 +2605,6 @@ export const healthMonitorPlugin: TribePluginApi = {
         // number of connected sessions; alarms tuned for solo dev shouldn't
         // fire on a healthy 4-agent baseline.
         const activeAgentCount = new Set(sessions.map((session) => session.name)).size
-        const scalarFact = scalarFactIdentity(metrics.scalarObservation)
         const alerts = evaluateAlerts(metrics, thresholds, alertState, activeAgentCount)
 
         const blindRun = alertState.attributionBlindSamples
@@ -2838,20 +2761,6 @@ export const healthMonitorPlugin: TribePluginApi = {
         }
         if (locks.length === 0 && alertState.gitLockDetected) {
           alertState.gitLockDetected = false
-        }
-
-        // --- Disk I/O saturation (every 3rd sample — ~30s) ---
-        ioSampleCount++
-        if (ioSampleCount % 3 === 0) {
-          try {
-            const evaluateIo = scalarFact === undefined || scalarFact !== lastIoScalarFact
-            if (scalarFact !== undefined && evaluateIo) lastIoScalarFact = scalarFact
-            if (evaluateIo) {
-              updateDiskIoAlert(await readDiskIoMetric(processSource, metrics), thresholds, alertState, api)
-            }
-          } catch {
-            // iostat not available — skip silently
-          }
         }
 
         // --- GitHub API rate limit (every 5th sample — ~50s) ---
