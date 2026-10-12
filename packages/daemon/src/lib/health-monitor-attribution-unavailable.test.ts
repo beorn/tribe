@@ -73,14 +73,27 @@ describe("an unattributable incident carries its own explanation", () => {
         settlementFailures: [],
       })
     })
-    const source = createHealthProcessSource({
-      env: {
-        HAB_SCALAR_JOURNAL_DIR: controllerSessionDir,
-        HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
-        HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
-      },
-      runCommand,
-    })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    let source: ReturnType<typeof createHealthProcessSource>
+    try {
+      source = createHealthProcessSource({
+        env: {
+          HAB_SCALAR_JOURNAL_DIR: controllerSessionDir,
+          HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+          HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+        },
+        runCommand,
+      })
+      expect(warn.mock.calls).toEqual([
+        [
+          expect.stringMatching(/WARN tribe:health:process-source$/),
+          "health process source: the hab it spawns per call",
+          { hab: "PATH hab (HAB_CLI_BIN unset)" },
+        ],
+      ])
+    } finally {
+      warn.mockRestore()
+    }
     expect(source.kind).toBe("managed")
     if (source.kind !== "managed") throw new Error("expected managed source")
     const observation = await source.read()

@@ -6,7 +6,7 @@
  * @testonly none
  */
 
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { incidentKey } from "../../../wire/src/lib/incident.ts"
 import {
   checkPinnedProcReads,
@@ -49,10 +49,22 @@ describe("the snapshot's pending /proc reads reach the monitor (24248)", () => {
   }
 
   it("keeps the additive field on an unavailable observation", async () => {
-    await expect(readPayload(incomplete([read]))).resolves.toMatchObject({
-      pendingProcReads: { budget: 16, reads: [read] },
-      reason: "process-census-incomplete",
-    })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      await expect(readPayload(incomplete([read]))).resolves.toMatchObject({
+        pendingProcReads: { budget: 16, reads: [read] },
+        reason: "process-census-incomplete",
+      })
+      expect(warn.mock.calls).toEqual([
+        [
+          expect.stringMatching(/WARN tribe:health:process-source$/),
+          "health process source: the hab it spawns per call",
+          { hab: "PATH hab (HAB_CLI_BIN unset)" },
+        ],
+      ])
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it("refuses a malformed pending read rather than aging a fabricated one", async () => {
