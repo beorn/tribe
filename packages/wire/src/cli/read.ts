@@ -2001,7 +2001,12 @@ interface SelfInboxResult {
     /** 21757 — retention archived unread actionables while this seat was dormant. */
     pruned?: { count?: number; before?: string; recorded_at?: string }
     actionable_unread?: SelfInboxEvent[]
-    pending_balls?: Array<{ request_id?: string; sender?: string; summary?: string }>
+    pending_balls?: Array<{
+      request_id?: string
+      sender?: string
+      summary?: string
+      request_kind?: "request" | "incident"
+    }>
     pending_balls_summary?: { total?: number }
     sent_offline_balls?: Array<{
       request_id: string
@@ -2018,6 +2023,19 @@ interface SelfInboxResult {
 function printSelfInboxEvent(event: SelfInboxEvent): void {
   console.log(`${event.from ?? "unknown"} [${event.type ?? "message"}]`)
   console.log(event.content ?? "")
+}
+
+/** One attention pending-ball line. A watcher incident is labelled so a CLI
+ *  seat can tell it apart from an ordinary peer request; ordinary requests
+ *  keep the bare `pending from …` form. A row with no `request_kind` is a
+ *  historical journal outcome and renders as an ordinary request. */
+export function formatPendingBallLine(ball: {
+  request_id?: string
+  sender?: string
+  request_kind?: "request" | "incident"
+}): string {
+  const kind = ball.request_kind === "incident" ? " incident" : ""
+  return `pending${kind} from ${ball.sender ?? "unknown"} [${ball.request_id ?? "unidentified"}]`
 }
 
 async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean }): Promise<void> {
@@ -2058,7 +2076,7 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean }
   }
   const pending = result.attention?.pending_balls ?? []
   for (const ball of pending) {
-    console.log(`pending from ${ball.sender ?? "unknown"} [${ball.request_id ?? "unidentified"}]`)
+    console.log(formatPendingBallLine(ball))
     console.log(ball.summary ?? "")
   }
   const pendingTotal = result.attention?.pending_balls_summary?.total ?? pending.length

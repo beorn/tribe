@@ -13,6 +13,7 @@ import { describe, expect, test, vi } from "vitest"
 import { Command } from "@silvery/commander"
 import {
   evaluateWireHealthDocument,
+  formatPendingBallLine,
   formatRestartResult,
   formatInboxStatus,
   registerReadCommands,
@@ -361,6 +362,19 @@ describe("formatRestartResult", () => {
     expect(formatRestartResult({ restarting: true, reason: "manual restart" })).toBe(
       "Restarting tribe daemon: manual restart.",
     )
+  })
+})
+
+describe("formatPendingBallLine", () => {
+  test("labels an incident ball so a CLI seat can tell it from an ordinary request", () => {
+    expect(
+      formatPendingBallLine({ request_id: "dark-work:Rule:28794", sender: "@fleet", request_kind: "incident" }),
+    ).toBe("pending incident from @fleet [dark-work:Rule:28794]")
+    expect(formatPendingBallLine({ request_id: "req-1", sender: "@dev/4", request_kind: "request" })).toBe(
+      "pending from @dev/4 [req-1]",
+    )
+    // A historical row with no kind renders as an ordinary request, not a crash.
+    expect(formatPendingBallLine({ request_id: "req-legacy" })).toBe("pending from unknown [req-legacy]")
   })
 })
 
