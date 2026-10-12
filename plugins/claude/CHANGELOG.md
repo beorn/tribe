@@ -13,6 +13,15 @@ and this package adheres to [Semantic Versioning](https://semver.org/).
   supervising up to five current-disk adapter replacements with exponential
   backoff and resetting the budget after a stable runtime.
 
+### Removed
+
+- **The `health:disk-io:warning` throughput alarm** — a read+write MB/s
+  threshold that fired on routine full-suite runs while missing real device
+  stalls. `HEALTH_DISK_IO_WARNING`, the `disk-io` alert kind, the topic, and
+  the now-unread `HealthMetrics.diskIo` projection are gone; sustained device
+  stalls are signaled by PSI `io full avg60`
+  (`longproc-reading --io-full-avg60-percent`).
+
 ## 0.15.0 — 2026-05-25 — Bundle removed; stdio adapter ships via npm
 
 ### Changed

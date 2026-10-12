@@ -243,7 +243,6 @@ describe("health monitor managed process source", () => {
         totalBytes: 10 * 1024 ** 3,
         usedBytes: 4 * 1024 ** 3,
       },
-      diskIo: { readWriteMBps: 2 },
       memory: { availableMB: 6_144, pressurePercent: 40, swapUsedMB: 100, totalMB: 10_240, usedMB: 4_096 },
       scalarObservation: {
         kind: "canonical-available",
@@ -341,7 +340,7 @@ describe("health monitor managed process source", () => {
     // threshold could not fire while a 61G tmpfs filled.
     //
     // The guard this arm exists for is UNCHANGED and still asserted below: the
-    // standalone OS sampler must not run, and memory, diskIo and cpu must stay
+    // standalone OS sampler must not run, and memory and cpu must stay
     // absent rather than be resampled. What is now permitted is exactly one
     // direct filesystem read for capacity, seamed here, and it dies when the
     // journal starts carrying facts — see `readDiskCapacityDirect`.
@@ -376,7 +375,6 @@ describe("health monitor managed process source", () => {
     expect(result.metrics.memory).toBeUndefined()
     // The narrow exception, and it is narrow: disk only, from the seam only.
     expect(result.metrics.disk).toEqual(directDisk)
-    expect(result.metrics.diskIo).toBeUndefined()
     expect(result.metrics.scalarObservation).toEqual({
       detail: "scalar journal stale",
       kind: "canonical-unavailable",
