@@ -12,16 +12,16 @@ describe("persona launch identity", () => {
     expect(deriveTribePersonaLaunchIdentity("@chief", "provider-launch")).toEqual({
       persona: "@chief",
       providerLaunchId: "provider-launch",
-      launchId: "provider-launch::%40chief",
+      providerLaunchKey: "provider-launch::%40chief",
       writer: "@chief#provider-launch::%40chief",
     })
-    expect(deriveTribePersonaLaunchIdentity("@cto", "provider-launch").launchId).toBe("provider-launch::%40cto")
+    expect(deriveTribePersonaLaunchIdentity("@cto", "provider-launch").providerLaunchKey).toBe("provider-launch::%40cto")
   })
 
   // A daemon restarted with no identity verifier refused every verified seat as "another seat's identity": its
   // authority row was keyed "<sid>@<gen>", which this read as a different provider launch (2026-09-24 08:06 PDT).
   test("a persona launch id and a verified session key name the same provider launch", () => {
-    const persona = deriveTribePersonaLaunchIdentity("@dev/3", "e8b19c27").launchId
+    const persona = deriveTribePersonaLaunchIdentity("@dev/3", "e8b19c27").providerLaunchKey
     expect(providerLaunchIdOf(persona)).toBe("e8b19c27")
     expect(providerLaunchIdOf("e8b19c27@467")).toBe("e8b19c27")
     expect(providerLaunchIdOf("e8b19c27")).toBe("e8b19c27")

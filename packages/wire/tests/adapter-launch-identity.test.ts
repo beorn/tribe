@@ -33,7 +33,7 @@ describe("adapterLaunchIdentity (25074 3d-1, 3d-2)", () => {
         resolveParentPid,
       }),
     ).toEqual({
-      identity: { id: deriveTribePersonaLaunchIdentity(SEAT, TOKEN_SID).launchId, parentPid: PARENT },
+      identity: { id: deriveTribePersonaLaunchIdentity(SEAT, TOKEN_SID).providerLaunchKey, parentPid: PARENT },
       malformedToken: null,
     })
   })

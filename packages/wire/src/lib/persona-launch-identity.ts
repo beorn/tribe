@@ -5,11 +5,15 @@
  * remains the unguessable launch authority; the persona makes that authority
  * routable per seat. Every consumer that needs a durable writer or wire key
  * must use this derivation instead of composing the tuple independently.
+ *
+ * `providerLaunchKey` is a provider fact, NOT an instance id: a unit instance id
+ * is `session@generation` alone (CONTEXT.md § Unit instance id). Consumers that
+ * mean one live process must use {@link formatInstanceId}, never this.
  */
 export interface TribePersonaLaunchIdentity {
   readonly persona: string
   readonly providerLaunchId: string
-  readonly launchId: string
+  readonly providerLaunchKey: string
   readonly writer: string
 }
 
@@ -32,19 +36,21 @@ export function deriveTribePersonaLaunchIdentity(
   if (normalizedProviderLaunchId.includes("@")) {
     throw new TypeError(`Tribe provider launch id ${normalizedProviderLaunchId} must not contain @`)
   }
-  const launchId = `${normalizedProviderLaunchId}::${encodeURIComponent(normalizedPersona)}`
+  const providerLaunchKey = `${normalizedProviderLaunchId}::${encodeURIComponent(normalizedPersona)}`
   return {
     persona: normalizedPersona,
     providerLaunchId: normalizedProviderLaunchId,
-    launchId,
-    writer: `${normalizedPersona}#${launchId}`,
+    providerLaunchKey,
+    writer: `${normalizedPersona}#${providerLaunchKey}`,
   }
 }
 
 /**
- * The provider launch a stored launch id belongs to, whether it carries a persona (`<launch>::<persona>`) or is a
- * verified session's key (`<sid>@<gen>`, whose sid IS the provider launch id). A persona is URI-encoded, so a raw `@`
- * only ever opens a generation.
+ * The provider launch a stored wire `launch_id` belongs to — the legacy wire/storage spelling of instanceId — whether it
+ * carries a persona (`<launch>::<persona>`, a {@link TribePersonaLaunchIdentity.providerLaunchKey}) or is a verified
+ * session's key (`<sid>@<gen>`, an {@link formatInstanceId} value whose sid IS the provider launch id). A persona is
+ * URI-encoded, so a raw `@` only ever opens a generation. This and {@link parseInstanceId} are the only readers of the
+ * legacy spelling.
  */
 export function providerLaunchIdOf(launchId: string): string {
   const persona = launchId.indexOf("::")

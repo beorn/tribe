@@ -1140,7 +1140,7 @@ describe("dispatcher bounded mailbox drain", () => {
         name,
         pid,
         project,
-        launchId: deriveTribePersonaLaunchIdentity(name, "shared-inherited-launch").launchId,
+        launchId: deriveTribePersonaLaunchIdentity(name, "shared-inherited-launch").providerLaunchKey,
         launchParentPid: process.pid,
         idToken: managedToken(name, "shared-inherited-launch"),
       })
@@ -1182,7 +1182,7 @@ describe("dispatcher bounded mailbox drain", () => {
       )
       expect(scoped).toMatchObject({
         session: persona,
-        launch_id: deriveTribePersonaLaunchIdentity(persona, "shared-inherited-launch").launchId,
+        launch_id: deriveTribePersonaLaunchIdentity(persona, "shared-inherited-launch").providerLaunchKey,
         launch_parent_pid: process.pid,
       })
     }

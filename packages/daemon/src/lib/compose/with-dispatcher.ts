@@ -920,8 +920,9 @@ export function withDispatcher<
           errorMessage: "Managed inbox request requires a non-empty launch_id",
         }
       }
-      const personaLaunchId = deriveTribePersonaLaunchIdentity(verified.verdict.actor, verifiedSid).launchId
-      if (launchId !== verifiedSid && launchId !== personaLaunchId) {
+      // legacy wire/storage spelling of instanceId
+      const personaLaunchKey = deriveTribePersonaLaunchIdentity(verified.verdict.actor, verifiedSid).providerLaunchKey
+      if (launchId !== verifiedSid && launchId !== personaLaunchKey) {
         const claimedSid = providerLaunchIdOf(launchId)
         const claimedDerivedPrefix = `${claimedSid}::`
         const claimedVerifiedPrefix = `${claimedSid}@`

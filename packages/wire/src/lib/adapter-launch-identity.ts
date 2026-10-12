@@ -35,7 +35,7 @@ export function adapterLaunchIdentity(input: {
       id:
         input.launchName === undefined
           ? providerLaunchId
-          : deriveTribePersonaLaunchIdentity(input.launchName, providerLaunchId).launchId,
+          : deriveTribePersonaLaunchIdentity(input.launchName, providerLaunchId).providerLaunchKey,
       parentPid: input.resolveParentPid(),
     },
     malformedToken,

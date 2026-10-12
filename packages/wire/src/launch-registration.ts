@@ -207,7 +207,8 @@ async function registerLaunch(
         // window was only ever wired into the three inside it.
         protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
         supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
-        launchId: identity.launchId,
+        // legacy wire/storage spelling of instanceId
+        launchId: identity.providerLaunchKey,
         launchParentPid: processId,
         delivery: "pull",
         ...(request.provider === undefined ? {} : { provider: request.provider }),
@@ -233,7 +234,7 @@ async function registerLaunch(
           `Tribe did not certify service lifetime for ${request.name}; the daemon must support service principals`,
         )
       }
-      const launchId = keyedLaunchId(registration, identity.launchId, byToken, processId)
+      const launchId = keyedLaunchId(registration, identity.providerLaunchKey, byToken, processId)
       // Transitional v10 daemons have no transport ACK. Only their existing strict
       // stored-pull certification is safe; remove this arm when 10 leaves the window.
       const legacyStoredPull =
