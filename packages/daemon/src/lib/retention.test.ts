@@ -548,6 +548,7 @@ describe("journal retention sweep", () => {
   describe("archive-delete phase — live-cursor exclusion", () => {
     it("protects a row a recipient's actionable mailbox cursor has not passed yet", () => {
       const { db, stmts } = setup()
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
       try {
         insertArchived(db, { id: "unread-msg", seq: 100, ts: Date.now() - 200 * DAY, recipient: "@chief" })
         db.prepare(
@@ -562,7 +563,13 @@ describe("journal retention sweep", () => {
         expect(result.archiveDelete.excludedByCursor).toBe(1)
         expect(result.archiveDelete.cursorFloor).toBe(50)
         expect(archivedIds(db)).toEqual(["unread-msg"])
+        expect(warnSpy).toHaveBeenCalledTimes(1)
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.stringContaining("cursor floor 50 is set by the mailbox cursor of @chief"),
+        )
       } finally {
+        warnSpy.mockRestore()
         db.close()
       }
     })
@@ -586,6 +593,7 @@ describe("journal retention sweep", () => {
 
     it("protects a row via the ambient sessions.last_inbox_pull_seq floor", () => {
       const { db, stmts } = setup()
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
       try {
         insertArchived(db, { id: "broadcast-msg", seq: 100, ts: Date.now() - 200 * DAY, recipient: "*" })
         db.prepare(
@@ -599,7 +607,13 @@ describe("journal retention sweep", () => {
         expect(result.archiveDelete.excludedByCursor).toBe(1)
         expect(result.archiveDelete.cursorFloor).toBe(10)
         expect(archivedIds(db)).toEqual(["broadcast-msg"])
+        expect(warnSpy).toHaveBeenCalledTimes(1)
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.stringContaining("cursor floor 10 is set by the session cursor of @agent/lagging"),
+        )
       } finally {
+        warnSpy.mockRestore()
         db.close()
       }
     })
@@ -625,6 +639,7 @@ describe("journal retention sweep", () => {
 
     it("ignores a LIVE mailbox cursor that has never advanced (a 0 is not a position)", () => {
       const { db, stmts } = setup()
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
       try {
         insertArchived(db, { id: "probe-row", seq: 100, ts: Date.now() - 200 * DAY, recipient: "@probe/28571" })
         db.prepare(
@@ -638,7 +653,13 @@ describe("journal retention sweep", () => {
         expect(result.archiveDelete.excludedByCursor).toBe(0)
         expect(result.archiveDelete.deleted).toBe(1)
         expect(archivedIds(db)).toEqual([])
+        expect(warnSpy).toHaveBeenCalledTimes(1)
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.stringContaining("ignored 1 never-advanced (0) cursor(s): mailbox:@probe/28571"),
+        )
       } finally {
+        warnSpy.mockRestore()
         db.close()
       }
     })
@@ -814,6 +835,7 @@ describe("journal retention sweep", () => {
   describe("archive-delete phase — diagnostics accounting", () => {
     it("counts eligible/excluded/deleted correctly across a mixed batch", () => {
       const { db, stmts } = setup()
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
       try {
         // Deletable: old, unreferenced, below the cursor floor.
         insertArchived(db, { id: "deletable", seq: 10, ts: Date.now() - 200 * DAY, recipient: "@chief" })
@@ -858,7 +880,13 @@ describe("journal retention sweep", () => {
           ["cursor-protected", "pending-protected", "taking-protected", "too-fresh"].sort(),
         )
         expect(stmts.selectUntakenPendingForRecipient.all({ $recipient: "@chief" })).toEqual([])
+        expect(warnSpy).toHaveBeenCalledTimes(1)
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.stringContaining("cursor floor 25 is set by the mailbox cursor of @chief"),
+        )
       } finally {
+        warnSpy.mockRestore()
         db.close()
       }
     })
@@ -1272,6 +1300,7 @@ describe("journal retention sweep", () => {
 
     it("neither exports nor deletes a pending-ball row or a row above the cursor floor", () => {
       const { db, stmts } = setup()
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
       try {
         const oldTs = Date.now() - 200 * DAY
         insertArchived(db, { id: "pending-protected-2", seq: 20, ts: oldTs, recipient: "@chief" })
@@ -1296,7 +1325,13 @@ describe("journal retention sweep", () => {
         expect(archivedIds(db).sort()).toEqual(["cursor-protected-2", "pending-protected-2"])
         expect(readLines(dayKey(oldTs)).map((row) => row.id)).toEqual(["exportable"])
         expect(readManifest(dayKey(oldTs)).ids).toEqual(["exportable"])
+        expect(warnSpy).toHaveBeenCalledTimes(1)
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.stringContaining("cursor floor 25 is set by the mailbox cursor of @chief"),
+        )
       } finally {
+        warnSpy.mockRestore()
         db.close()
       }
     })
