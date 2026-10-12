@@ -68,6 +68,18 @@ export interface TribeInstanceId {
 const GENERATION_TEXT = /^(?:0|[1-9][0-9]*)$/u
 
 /**
+ * One generation rule for both helpers (peer review 423bf323): a non-negative SAFE integer. A larger value would
+ * collapse two distinct texts onto one number, or stringify as an exponent that the parser rejects, so the fence could
+ * not name one generation exactly.
+ */
+function requireGeneration(generation: number, context: string): number {
+  if (!Number.isSafeInteger(generation) || generation < 0) {
+    throw new TypeError(`${context} ${generation} must be a non-negative safe integer`)
+  }
+  return generation
+}
+
+/**
  * The one name for a unit instance, `session@generation` (CONTEXT.md § Unit instance id). This is the only place that
  * joins the two; nothing else may compose an `@`.
  */
@@ -76,9 +88,7 @@ export function formatInstanceId(sessionId: string, generation: number): string 
   if (session.includes("@")) {
     throw new TypeError(`Tribe instance session id ${session} must not contain @`)
   }
-  if (!Number.isInteger(generation) || generation < 0) {
-    throw new TypeError(`Tribe instance generation ${generation} must be a non-negative integer`)
-  }
+  requireGeneration(generation, "Tribe instance generation")
   return `${session}@${generation}`
 }
 
@@ -94,13 +104,16 @@ export function parseInstanceId(value: string): TribeInstanceId | null {
   if (value.indexOf("@", at + 1) !== -1) {
     throw new TypeError(`Tribe instance id ${value} carries more than one @`)
   }
-  const sessionId = value.slice(0, at)
+  // The same canonical session rule the formatter applies, so the two never disagree about a well-formed id.
+  const sessionId = requireIdentityPart("Tribe instance session id", value.slice(0, at))
   const generationText = value.slice(at + 1)
-  if (sessionId.length === 0) {
-    throw new TypeError(`Tribe instance id ${value} has no session id before @`)
-  }
   if (!GENERATION_TEXT.test(generationText)) {
     throw new TypeError(`Tribe instance id ${value} has a non-numeric generation ${JSON.stringify(generationText)}`)
   }
-  return { sessionId, generation: Number(generationText) }
+  const generation = Number(generationText)
+  requireGeneration(generation, `Tribe instance id ${value} generation`)
+  if (String(generation) !== generationText) {
+    throw new TypeError(`Tribe instance id ${value} has a generation that does not round-trip (${String(generation)})`)
+  }
+  return { sessionId, generation }
 }

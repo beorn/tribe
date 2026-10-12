@@ -51,8 +51,8 @@ describe("unit instance id (session@generation)", () => {
 
   test("formatInstanceId refuses an ambiguous join", () => {
     expect(() => formatInstanceId("user@host", 1)).toThrow(/must not contain @/u)
-    expect(() => formatInstanceId("session", -1)).toThrow(/non-negative integer/u)
-    expect(() => formatInstanceId("session", 1.5)).toThrow(/non-negative integer/u)
+    expect(() => formatInstanceId("session", -1)).toThrow(/non-negative safe integer/u)
+    expect(() => formatInstanceId("session", 1.5)).toThrow(/non-negative safe integer/u)
     expect(() => formatInstanceId("", 1)).toThrow(/Tribe instance session id/u)
   })
 
@@ -73,6 +73,30 @@ describe("unit instance id (session@generation)", () => {
     expect(() => parseInstanceId("e8b19c27@")).toThrow(/non-numeric generation/u)
     expect(() => parseInstanceId("e8b19c27@x")).toThrow(/non-numeric generation/u)
     expect(() => parseInstanceId("e8b19c27@467@1")).toThrow(/more than one @/u)
-    expect(() => parseInstanceId("@467")).toThrow(/no session id/u)
+    expect(() => parseInstanceId("@467")).toThrow(/Tribe instance session id/u)
+  })
+
+  // Peer review 423bf323: the two helpers must agree on generations, and a generation that cannot name one exact
+  // number must be refused rather than collapsed or exponent-stringified.
+  test("both helpers accept the safe-integer range and refuse anything past it", () => {
+    const max = Number.MAX_SAFE_INTEGER
+    expect(parseInstanceId(formatInstanceId("session", max))).toEqual({ sessionId: "session", generation: max })
+    for (const generation of [2 ** 53, 1e21, Number.POSITIVE_INFINITY, Number.NaN, 1.5, -1]) {
+      expect(() => formatInstanceId("session", generation)).toThrow(/non-negative safe integer/u)
+    }
+  })
+
+  test("parseInstanceId refuses a generation text that does not name one safe integer exactly", () => {
+    // 9007199254740993 rounds to 9007199254740992; two distinct texts must never share one generation.
+    expect(() => parseInstanceId("session@9007199254740993")).toThrow(/safe integer|round-trip/u)
+    expect(() => parseInstanceId("session@9007199254740992")).toThrow(/safe integer|round-trip/u)
+    expect(() => parseInstanceId("session@" + "9".repeat(400))).toThrow(/safe integer|round-trip/u)
+  })
+
+  test("parseInstanceId applies the same session rule as formatInstanceId", () => {
+    for (const value of ["bad session@1", "bad#session@1"]) {
+      expect(() => parseInstanceId(value)).toThrow(/Tribe instance session id/u)
+      expect(() => formatInstanceId(value.slice(0, value.indexOf("@")), 1)).toThrow(/Tribe instance session id/u)
+    }
   })
 })
