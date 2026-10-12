@@ -5,11 +5,15 @@
  * remains the unguessable launch authority; the persona makes that authority
  * routable per seat. Every consumer that needs a durable writer or wire key
  * must use this derivation instead of composing the tuple independently.
+ *
+ * `providerLaunchKey` is a provider fact, NOT an instance id: a unit instance id
+ * is `session@generation` alone (CONTEXT.md § Unit instance id). Consumers that
+ * mean one live process must use {@link formatInstanceId}, never this.
  */
 export interface TribePersonaLaunchIdentity {
   readonly persona: string
   readonly providerLaunchId: string
-  readonly launchId: string
+  readonly providerLaunchKey: string
   readonly writer: string
 }
 
@@ -32,23 +36,84 @@ export function deriveTribePersonaLaunchIdentity(
   if (normalizedProviderLaunchId.includes("@")) {
     throw new TypeError(`Tribe provider launch id ${normalizedProviderLaunchId} must not contain @`)
   }
-  const launchId = `${normalizedProviderLaunchId}::${encodeURIComponent(normalizedPersona)}`
+  const providerLaunchKey = `${normalizedProviderLaunchId}::${encodeURIComponent(normalizedPersona)}`
   return {
     persona: normalizedPersona,
     providerLaunchId: normalizedProviderLaunchId,
-    launchId,
-    writer: `${normalizedPersona}#${launchId}`,
+    providerLaunchKey,
+    writer: `${normalizedPersona}#${providerLaunchKey}`,
   }
 }
 
 /**
- * The provider launch a stored launch id belongs to, whether it carries a persona (`<launch>::<persona>`) or is a
- * verified session's key (`<sid>@<gen>`, whose sid IS the provider launch id). A persona is URI-encoded, so a raw `@`
- * only ever opens a generation.
+ * The provider launch a stored wire `launch_id` belongs to — the legacy wire/storage spelling of instanceId — whether it
+ * carries a persona (`<launch>::<persona>`, a {@link TribePersonaLaunchIdentity.providerLaunchKey}) or is a verified
+ * session's key (`<sid>@<gen>`, an {@link formatInstanceId} value whose sid IS the provider launch id). A persona is
+ * URI-encoded, so a raw `@` only ever opens a generation. This and {@link parseInstanceId} are the only readers of the
+ * legacy spelling.
  */
 export function providerLaunchIdOf(launchId: string): string {
   const persona = launchId.indexOf("::")
   const generation = launchId.indexOf("@")
   const cut = [persona, generation].filter((index) => index !== -1)
   return cut.length === 0 ? launchId : launchId.slice(0, Math.min(...cut))
+}
+
+/** A unit instance id: its unit session id plus the generation that fences it. */
+export interface TribeInstanceId {
+  readonly sessionId: string
+  readonly generation: number
+}
+
+const GENERATION_TEXT = /^(?:0|[1-9][0-9]*)$/u
+
+/**
+ * One generation rule for both helpers (peer review 423bf323): a non-negative SAFE integer. A larger value would
+ * collapse two distinct texts onto one number, or stringify as an exponent that the parser rejects, so the fence could
+ * not name one generation exactly.
+ */
+function requireGeneration(generation: number, context: string): number {
+  if (!Number.isSafeInteger(generation) || generation < 0) {
+    throw new TypeError(`${context} ${generation} must be a non-negative safe integer`)
+  }
+  return generation
+}
+
+/**
+ * The one name for a unit instance, `session@generation` (CONTEXT.md § Unit instance id). This is the only place that
+ * joins the two; nothing else may compose an `@`.
+ */
+export function formatInstanceId(sessionId: string, generation: number): string {
+  const session = requireIdentityPart("Tribe instance session id", sessionId)
+  if (session.includes("@")) {
+    throw new TypeError(`Tribe instance session id ${session} must not contain @`)
+  }
+  requireGeneration(generation, "Tribe instance generation")
+  return `${session}@${generation}`
+}
+
+/**
+ * The reverse of formatInstanceId, and the only place that splits one. Returns null when the value is not
+ * instance-shaped at all — a bare provider launch, or the launch-keyed `<launch>::<persona>` form, whose persona is
+ * URI-encoded and so carries no raw `@`. Throws when the value IS instance-shaped but malformed, so a bad generation is
+ * never silently read as absent.
+ */
+export function parseInstanceId(value: string): TribeInstanceId | null {
+  const at = value.indexOf("@")
+  if (at === -1) return null
+  if (value.indexOf("@", at + 1) !== -1) {
+    throw new TypeError(`Tribe instance id ${value} carries more than one @`)
+  }
+  // The same canonical session rule the formatter applies, so the two never disagree about a well-formed id.
+  const sessionId = requireIdentityPart("Tribe instance session id", value.slice(0, at))
+  const generationText = value.slice(at + 1)
+  if (!GENERATION_TEXT.test(generationText)) {
+    throw new TypeError(`Tribe instance id ${value} has a non-numeric generation ${JSON.stringify(generationText)}`)
+  }
+  const generation = Number(generationText)
+  requireGeneration(generation, `Tribe instance id ${value} generation`)
+  if (String(generation) !== generationText) {
+    throw new TypeError(`Tribe instance id ${value} has a generation that does not round-trip (${String(generation)})`)
+  }
+  return { sessionId, generation }
 }

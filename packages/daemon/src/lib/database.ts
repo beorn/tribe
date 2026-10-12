@@ -30,6 +30,7 @@ export function openDatabase(path: string): Database {
   }
 
   try {
+    // legacy wire/storage spelling of instanceId
     db.run(`CREATE TABLE IF NOT EXISTS sessions (
 		id         TEXT PRIMARY KEY,
 		name       TEXT NOT NULL UNIQUE,

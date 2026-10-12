@@ -38,7 +38,7 @@ const PERSONA = "@agent/restart-test"
 // string here) is what persona-launch-identity.ts's own docstring asks every
 // consumer to do.
 const personaLaunchId = (providerLaunchId: string, persona: string = PERSONA) =>
-  deriveTribePersonaLaunchIdentity(persona, providerLaunchId).launchId
+  deriveTribePersonaLaunchIdentity(persona, providerLaunchId).providerLaunchKey
 
 type JsonObject = Record<string, unknown>
 type Member = {
