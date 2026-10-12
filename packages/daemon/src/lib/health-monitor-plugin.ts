@@ -75,9 +75,6 @@ export interface HealthMetrics {
     swapUsedMB?: number
   }
   disk?: CanonicalDiskCapacity
-  diskIo?: {
-    readWriteMBps: number
-  }
   fdCount?: {
     total: number
     perSession: Array<{ name: string; count: number }>
@@ -2174,7 +2171,7 @@ interface CollectFullMetricsDeps {
 }
 
 function metricUnavailableNames(observation: Extract<CanonicalHostScalarObservation, { kind: "available" }>): string[] {
-  const unavailable: string[] = (["cpu", "disk", "diskIo", "memory", "swap"] as const).filter(
+  const unavailable: string[] = (["cpu", "disk", "memory", "swap"] as const).filter(
     (name) => observation.values[name].kind === "unavailable",
   )
   if (observation.values.disk.kind === "supported" && observation.values.disk.value.inodes?.kind !== "supported") {
@@ -2279,7 +2276,7 @@ export function readDiskCapacityDirect(
 
 function canonicalScalarMetrics(
   observation: CanonicalHostScalarObservation,
-): Pick<HealthMetrics, "cpu" | "disk" | "diskIo" | "memory" | "scalarObservation" | "timestamp"> {
+): Pick<HealthMetrics, "cpu" | "disk" | "memory" | "scalarObservation" | "timestamp"> {
   if (observation.kind === "unavailable") {
     return {
       cpu: { topProcesses: [] },
@@ -2315,14 +2312,9 @@ function canonicalScalarMetrics(
         }
       : undefined
   const disk = values.disk.kind === "supported" ? values.disk.value : undefined
-  const diskIo =
-    values.diskIo.kind === "supported"
-      ? { readWriteMBps: values.diskIo.value.readWriteBytesPerSecond / bytesPerMB }
-      : undefined
   return {
     cpu,
     ...(disk === undefined ? {} : { disk }),
-    ...(diskIo === undefined ? {} : { diskIo }),
     ...(memory === undefined ? {} : { memory }),
     scalarObservation: {
       kind: "canonical-available",
@@ -2362,10 +2354,7 @@ export async function collectFullMetrics(
             },
           ] as const)
         : ([{ kind: "standalone-os" }, { kind: "standalone-os" }] as const)
-  const sampledHostMetrics: Pick<
-    HealthMetrics,
-    "cpu" | "disk" | "diskIo" | "memory" | "scalarObservation" | "timestamp"
-  > =
+  const sampledHostMetrics: Pick<HealthMetrics, "cpu" | "disk" | "memory" | "scalarObservation" | "timestamp"> =
     scalarObservation.kind === "standalone-os"
       ? (() => {
           const sampled = (deps.collectOsMetrics ?? collectOsMetrics)()
@@ -2507,7 +2496,6 @@ export async function collectFullMetrics(
             },
           }),
       disk: hostMetrics.disk,
-      diskIo: hostMetrics.diskIo,
       fdCount,
       ...(bunProcesses === undefined ? {} : { bunProcesses }),
       processObservation:
