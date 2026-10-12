@@ -196,7 +196,13 @@ export {
 // Runtime identity — `<version>+<sha>` for `tribe-wire --version` + daemon startup
 // (@km/infra/20359, vendor-local; mirrors code-pin's running-code visibility).
 export { formatRuntimeId, gitShortHead, tribeWireRuntimeId, wireVersion } from "./barrels/records.ts"
-export { deriveTribePersonaLaunchIdentity, type TribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
+export {
+  deriveTribePersonaLaunchIdentity,
+  formatInstanceId,
+  parseInstanceId,
+  type TribeInstanceId,
+  type TribePersonaLaunchIdentity,
+} from "./lib/persona-launch-identity.ts"
 
 export { connectTribeLaunch } from "./barrels/client.ts"
 export {

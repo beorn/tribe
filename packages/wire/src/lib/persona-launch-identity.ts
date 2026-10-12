@@ -52,3 +52,49 @@ export function providerLaunchIdOf(launchId: string): string {
   const cut = [persona, generation].filter((index) => index !== -1)
   return cut.length === 0 ? launchId : launchId.slice(0, Math.min(...cut))
 }
+
+/** A unit instance id: its unit session id plus the generation that fences it. */
+export interface TribeInstanceId {
+  readonly sessionId: string
+  readonly generation: number
+}
+
+const GENERATION_TEXT = /^(?:0|[1-9][0-9]*)$/u
+
+/**
+ * The one name for a unit instance, `session@generation` (CONTEXT.md § Unit instance id). This is the only place that
+ * joins the two; nothing else may compose an `@`.
+ */
+export function formatInstanceId(sessionId: string, generation: number): string {
+  const session = requireIdentityPart("Tribe instance session id", sessionId)
+  if (session.includes("@")) {
+    throw new TypeError(`Tribe instance session id ${session} must not contain @`)
+  }
+  if (!Number.isInteger(generation) || generation < 0) {
+    throw new TypeError(`Tribe instance generation ${generation} must be a non-negative integer`)
+  }
+  return `${session}@${generation}`
+}
+
+/**
+ * The reverse of formatInstanceId, and the only place that splits one. Returns null when the value is not
+ * instance-shaped at all — a bare provider launch, or the launch-keyed `<launch>::<persona>` form, whose persona is
+ * URI-encoded and so carries no raw `@`. Throws when the value IS instance-shaped but malformed, so a bad generation is
+ * never silently read as absent.
+ */
+export function parseInstanceId(value: string): TribeInstanceId | null {
+  const at = value.indexOf("@")
+  if (at === -1) return null
+  if (value.indexOf("@", at + 1) !== -1) {
+    throw new TypeError(`Tribe instance id ${value} carries more than one @`)
+  }
+  const sessionId = value.slice(0, at)
+  const generationText = value.slice(at + 1)
+  if (sessionId.length === 0) {
+    throw new TypeError(`Tribe instance id ${value} has no session id before @`)
+  }
+  if (!GENERATION_TEXT.test(generationText)) {
+    throw new TypeError(`Tribe instance id ${value} has a non-numeric generation ${JSON.stringify(generationText)}`)
+  }
+  return { sessionId, generation: Number(generationText) }
+}
