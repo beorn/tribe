@@ -1675,6 +1675,26 @@ function printDoctorCheck(check: DoctorDiagnosticCheck, okPrefix = "", problemPr
   }
 }
 
+/** 28770 — the text a daemon-backed doctor row carries when the ONE connection never opened. */
+function unavailableDoctorRow(name: string): DoctorDiagnosticCheck {
+  return { severity: "UNKNOWN", diagnosis: `${name} query failed: no daemon connection` }
+}
+
+/**
+ * 28770 — when doctor's single connection already failed as ABSENT or REFUSED, the rail canary must
+ * report that same error instead of opening a fresh connection and paying the 28674 restart-retry
+ * window a second time for a socket already known gone (probeDoctorRail's `connect` seam).
+ */
+function doctorRailConnect(failure: unknown): DoctorConnect | undefined {
+  if (failure === undefined) return undefined
+  const direct = (failure as { code?: unknown }).code
+  const cause = (failure as { cause?: unknown }).cause
+  const code = direct ?? (cause as { code?: unknown } | undefined)?.code
+  if (code !== "ENOENT" && code !== "ECONNREFUSED") return undefined
+  const stored = Object.assign(new Error(failure instanceof Error ? failure.message : String(failure)), { code })
+  return () => Promise.reject(stored)
+}
+
 async function cmdDoctor(
   opts: { fix?: boolean; json?: boolean },
   doctorSections?: () => Promise<readonly DoctorSection[]>,
@@ -1704,19 +1724,67 @@ async function cmdDoctor(
       code_identity?: { cert: string | null; root: string }
     }
   } = {}
+  let daemonProtocol: number | undefined
+  let membership: DoctorDiagnosticCheck = unavailableDoctorRow("membership")
+  let bridgeLost: DoctorDiagnosticCheck = unavailableDoctorRow("bridge-lost paging")
+  let healthSample: DoctorDiagnosticCheck = unavailableDoctorRow("health sample")
+  const socketPath = resolveSocketPath()
+  // 28770 — doctor is ONE read, not four. A single connection serves every row below, so an absent
+  // socket pays the 28674 restart-retry window once instead of once per call: four connections made
+  // that window 4 × 6 s (~24 s) against the 10 s a caller — or its test row — is willing to wait.
+  let connectFailure: unknown
   try {
-    status = (await callDaemon("cli_status", undefined, "throw")) as typeof status
-  } catch {
-    // silent-fallback-allow: older daemons omit cli_status; doctor marks UNKNOWN
-  }
-  let daemonProtocol = status.daemon?.protocol_version
-  if (daemonProtocol === undefined) {
-    try {
-      const protocol = (await callDaemon("cli_protocol", undefined, "throw")) as { protocol_version?: unknown }
-      if (typeof protocol.protocol_version === "number") daemonProtocol = protocol.protocol_version
-    } catch {
-      // silent-fallback-allow: cli_protocol unresolved → doctor UNKNOWN, not a fake version
-    }
+    await withCliDaemonClient(async (client) => {
+      try {
+        status = (await client.call("cli_status")) as typeof status
+      } catch {
+        // silent-fallback-allow: older daemons omit cli_status; doctor marks UNKNOWN
+      }
+      daemonProtocol = status.daemon?.protocol_version
+      if (daemonProtocol === undefined) {
+        try {
+          const protocol = (await client.call("cli_protocol")) as { protocol_version?: unknown }
+          if (typeof protocol.protocol_version === "number") daemonProtocol = protocol.protocol_version
+        } catch {
+          // silent-fallback-allow: cli_protocol unresolved → doctor UNKNOWN, not a fake version
+        }
+      }
+      try {
+        const members = mcpJsonContent(await client.call("tribe.members")) as {
+          sessions?: DoctorMembershipRow[]
+          membership_discrepancy?: DoctorMembershipDiscrepancy
+        }
+        if (members === null || typeof members !== "object" || !Array.isArray(members.sessions)) {
+          throw new Error(`daemon returned an unexpected members shape: ${JSON.stringify(members)}`)
+        }
+        membership = evaluateDoctorMembership(members.sessions, members.membership_discrepancy)
+      } catch (error) {
+        membership = {
+          severity: "UNKNOWN",
+          diagnosis: `membership query failed: ${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+      try {
+        const health = (await client.call("cli_health")) as {
+          bridge_lost?: unknown
+          health_sample?: unknown
+        }
+        bridgeLost = evaluateDoctorBridgeLost(health.bridge_lost)
+        healthSample = evaluateDoctorHealthSample(health.health_sample)
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        bridgeLost = { severity: "UNKNOWN", diagnosis: `bridge-lost paging query failed: ${reason}` }
+        healthSample = { severity: "UNKNOWN", diagnosis: `health sample query failed: ${reason}` }
+      }
+    }, "throw")
+  } catch (error) {
+    // silent-fallback-allow: the connection never opened, so every daemon-backed row takes this one
+    // error (loud: the reason is on all three rows) with the text the four separate connections printed.
+    connectFailure = error
+    const reason = error instanceof Error ? error.message : String(error)
+    membership = { severity: "UNKNOWN", diagnosis: `membership query failed: ${reason}` }
+    bridgeLost = { severity: "UNKNOWN", diagnosis: `bridge-lost paging query failed: ${reason}` }
+    healthSample = { severity: "UNKNOWN", diagnosis: `health sample query failed: ${reason}` }
   }
   const rawReportedIdentity = status.daemon?.code_identity
   const reportedIdentity =
@@ -1744,38 +1812,7 @@ async function cmdDoctor(
       : null
   const identity = evaluateDoctorIdentity(reportedIdentity, resolvedIdentity, identityPinDirection)
   const versions = evaluateDoctorVersions(daemonProtocol, status.sessions ?? [])
-
-  let membership: DoctorDiagnosticCheck
-  try {
-    const members = mcpJsonContent(await callDaemon("tribe.members", undefined, "throw")) as {
-      sessions?: DoctorMembershipRow[]
-      membership_discrepancy?: DoctorMembershipDiscrepancy
-    }
-    if (members === null || typeof members !== "object" || !Array.isArray(members.sessions)) {
-      throw new Error(`daemon returned an unexpected members shape: ${JSON.stringify(members)}`)
-    }
-    membership = evaluateDoctorMembership(members.sessions, members.membership_discrepancy)
-  } catch (error) {
-    membership = {
-      severity: "UNKNOWN",
-      diagnosis: `membership query failed: ${error instanceof Error ? error.message : String(error)}`,
-    }
-  }
-  let bridgeLost: DoctorDiagnosticCheck
-  let healthSample: DoctorDiagnosticCheck
-  try {
-    const health = (await callDaemon("cli_health", undefined, "throw")) as {
-      bridge_lost?: unknown
-      health_sample?: unknown
-    }
-    bridgeLost = evaluateDoctorBridgeLost(health.bridge_lost)
-    healthSample = evaluateDoctorHealthSample(health.health_sample)
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error)
-    bridgeLost = { severity: "UNKNOWN", diagnosis: `bridge-lost paging query failed: ${reason}` }
-    healthSample = { severity: "UNKNOWN", diagnosis: `health sample query failed: ${reason}` }
-  }
-  const rail = await probeDoctorRail()
+  const rail = await probeDoctorRail(socketPath, doctorRailConnect(connectFailure))
   // @ag/tribe/24159 — informational only, never folded into `outcome`: a
   // missing tee file just means no daemon has logged since the file was
   // last rotated/pruned, not a doctor failure.
