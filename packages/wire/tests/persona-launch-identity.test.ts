@@ -15,7 +15,9 @@ describe("persona launch identity", () => {
       providerLaunchKey: "provider-launch::%40chief",
       writer: "@chief#provider-launch::%40chief",
     })
-    expect(deriveTribePersonaLaunchIdentity("@cto", "provider-launch").providerLaunchKey).toBe("provider-launch::%40cto")
+    expect(deriveTribePersonaLaunchIdentity("@cto", "provider-launch").providerLaunchKey).toBe(
+      "provider-launch::%40cto",
+    )
   })
 
   // A daemon restarted with no identity verifier refused every verified seat as "another seat's identity": its
