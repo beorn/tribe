@@ -28,7 +28,11 @@ import {
 } from "../../src/history/codex-indexer.ts"
 // indexer.ts memoizes the parsed .recall-ignore list, so a fresh module graph
 // per test is what the removed resetIgnoreCache export used to give. Rebinding
-// these names in beforeEach keeps every call site unchanged.
+// these names in beforeEach keeps every call site unchanged. Only the rebound
+// names come from the fresh graph; cmdIndex and closeDb stay on the static
+// graph (through sessions.ts and db.ts), which keeps closeDb paired with
+// cmdIndex's connection. No cmdIndex test writes a .recall-ignore, and the memo
+// re-reads on mtime change.
 import type * as Indexer from "../../src/history/indexer.ts"
 let rebuildIndex: typeof Indexer.rebuildIndex
 let INDEX_WINDOW_DAYS: typeof Indexer.INDEX_WINDOW_DAYS

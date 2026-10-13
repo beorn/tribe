@@ -76,19 +76,11 @@ export function getVaultDbPath(): string | null {
 }
 
 /**
- * Test-only: clear the module-level vault-DB resolution cache.
- *
- * `getVaultDb()` memoizes both the opened handle and the "already tried and
- * failed" state, so a single process can only ever resolve one vault. The
- * fail-closed guards need to re-run resolution against different fixtures
- * (a real read-only db, then no db at all), so they reset the cache between
- * cases. Additive hook — not part of the recall/injection API surface.
+ * Drop the memoized vault handle and resolution state. `bindVaultDb` calls this
+ * whenever the bound path changes, because `getVaultDb()` memoizes both the
+ * opened handle and the "already tried and failed" state — without it one
+ * process could only ever resolve one vault.
  */
-export function resetVaultDbCacheForTests(): void {
-  resetVaultDbCache()
-  boundVaultDb = null
-}
-
 function resetVaultDbCache(): void {
   if (cachedDb) {
     try {
