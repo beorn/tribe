@@ -1450,7 +1450,7 @@ describe("stdio adapter delivery modes", () => {
     const instructions = initInstructions(init)
     expect(instructions).toContain("delivery=pull")
     expect(instructions).toContain("This session is pull-delivery")
-    expect(instructions).toContain("until this session calls tribe.join")
+    expect(instructions).toContain("push stays unavailable until tribe.join is acknowledged")
     expect(instructions).not.toContain("you do not need to fetch to receive them")
     expect(instructions).not.toContain("auto-identify")
 
