@@ -24,7 +24,6 @@ export {
   looksLikeExplicitWriteAuth,
   readTurnManifest,
   writeTurnManifest,
-  clearTurnManifest,
   turnManifestPathForSession,
   sessionsDir,
 } from "./manifest.ts"

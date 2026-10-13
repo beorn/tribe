@@ -149,15 +149,6 @@ export function readTurnManifest(sessionId: string): TurnManifestReadResult {
   return { kind: "ok", manifest: parsed }
 }
 
-/** Remove the manifest for a session. No-op if absent. */
-export function clearTurnManifest(sessionId: string): void {
-  try {
-    rmSync(turnManifestPathForSession(sessionId), { force: true })
-  } catch {
-    /* best effort */
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Entity + shingle extraction — shared between emit + gate
 // ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@
  * keeps its process alive meanwhile. So only a caller that EXITS may use this: the prompt hook (cmdHook), where every
  * path ends in process.exit. A long-lived caller (the daemon, the plugin server) would stack abandoned queries, so
  * runInjectDelta stays in-thread by default. process.exit ends such a process on bun 1.4.2 (the fleet's runtime and
- * tribe's .bun-version) but not on 1.3.14 (measured by review2). Hook-mode recall aims for RECALL_TARGET_MS; the wall
+ * tribe's .bun-version) but not on 1.3.14 (measured by review2). Hook-mode recall aims for 1 s; the wall
  * only bounds the failure.
  */
 import { IndexWriterBusyError } from "../history/db.ts"
