@@ -1247,28 +1247,6 @@ async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
 // Doctor — daemon code-staleness check (@km/tribe/20033 prevention)
 // ---------------------------------------------------------------------------
 
-/**
- * @km/tribe/20033 prevention — daemon code-staleness doctor.
- *
- * The in-daemon `code_pin` detector (handleHealth) can only report staleness
- * when the running daemon is new enough to CONTAIN it. A daemon that predates
- * the detector serves old handlers AND cannot self-report — its `tribe.health()`
- * comes back with no `code_pin` field at all. `evaluateDoctor` treats that
- * absence as a positive staleness signal: a missing known-current field on a
- * method that fresh daemons always populate IS the stale signal. This is
- * bootstrap-proof, closing the gap the in-daemon detector left open — the
- * detector lives inside the daemon, so it cannot catch a daemon too old to
- * contain it; the probe must live outside (here).
- */
-export interface DoctorVerdict {
-  outcome: DoctorOutcome
-  severity: DoctorCheckVerdict
-  /** Operator-facing remedy, or null when fresh. */
-  reason: string | null
-  /** running/on-disk/pin SHAs when the daemon could self-report, else null. */
-  detail: { running: string | null; on_disk: string | null; superproject_pin: string | null } | null
-}
-
 export type DoctorCheckVerdict = "OK" | "WARNING" | "CRITICAL" | "UNKNOWN"
 export type DoctorFinalVerdict = "OK" | "WARNING" | "FAIL" | "UNKNOWN"
 
@@ -1297,53 +1275,11 @@ interface DoctorHealthShape {
     superproject_pin: string | null
     /**
      * Ancestry direction of an on_disk-vs-pin mismatch (additive field; older
-     * daemons omit it). evaluateDoctor doesn't branch on it today — the
-     * daemon's own `reason` text is already direction-aware and is what's
-     * surfaced — but the shape is declared here so it isn't silently dropped
-     * by callers that log or forward the full payload.
+     * daemons omit it). The shape is declared so it isn't silently dropped by
+     * callers that log or forward the full payload.
      */
     pin_direction?: PinDirection | null
   }
-}
-
-/** Pure staleness decision — no IO, so all three classes unit-test cleanly. */
-export function evaluateDoctor(health: DoctorHealthShape): DoctorVerdict {
-  const cp = health.code_pin
-  if (cp === undefined) {
-    return {
-      outcome: deriveDoctorOutcome(["UNKNOWN"]),
-      severity: "UNKNOWN",
-      reason:
-        "running daemon predates the code_pin detector (@km/tribe/20033): its tribe.health() has no `code_pin` field, so it is too old to self-report. Stop it so the next autostart respawns from current source.",
-      detail: null,
-    }
-  }
-  const detail = { running: cp.running, on_disk: cp.on_disk, superproject_pin: cp.superproject_pin }
-  const unresolved = (Object.entries(detail) as Array<[keyof typeof detail, string | null]>)
-    .filter(([, value]) => value === null)
-    .map(([field]) => field)
-  if (unresolved.length > 0) {
-    return {
-      outcome: deriveDoctorOutcome(["UNKNOWN"]),
-      severity: "UNKNOWN",
-      reason: `cannot compare daemon code identity: unresolved ${unresolved.join(", ")}`,
-      detail,
-    }
-  }
-  if (cp.stale || cp.running !== cp.on_disk || cp.on_disk !== cp.superproject_pin) {
-    const severity = cp.running !== cp.on_disk ? "CRITICAL" : "WARNING"
-    return {
-      outcome: deriveDoctorOutcome([severity]),
-      severity,
-      reason:
-        cp.reason ??
-        (cp.running !== cp.on_disk
-          ? `running ${cp.running} != on_disk ${cp.on_disk} — restart the daemon from the on-disk source`
-          : `on_disk ${cp.on_disk} != superproject_pin ${cp.superproject_pin} — materialize the pinned Tribe checkout`),
-      detail,
-    }
-  }
-  return { outcome: deriveDoctorOutcome(["OK"]), severity: "OK", reason: null, detail }
 }
 
 export type DoctorRailCheck =
@@ -1363,6 +1299,13 @@ function probeFailure(probe: Exclude<GitProbe, { ok: true }>): string {
 }
 
 /**
+ * @km/tribe/20033 prevention — the daemon code-staleness probe. It lives here,
+ * outside the daemon, because the in-daemon `code_pin` detector (handleHealth)
+ * can only report staleness when the running daemon is new enough to CONTAIN
+ * it: a daemon that predates the detector serves old handlers AND cannot
+ * self-report. This probe needs no self-verdict — it takes the daemon's startup
+ * cert and probes on-disk and pin itself at the daemon's root.
+ *
  * `pinDirection` is an INPUT, not derived here: resolving ancestry needs
  * `git merge-base --is-ancestor` (IO), and this check is tested with
  * fabricated GitProbe values, no live git — mirrors the same pure/impure

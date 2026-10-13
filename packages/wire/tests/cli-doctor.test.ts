@@ -2,17 +2,15 @@
  * @km/tribe/20033 prevention — `tribe doctor` staleness probe.
  *
  * The in-daemon code_pin detector cannot catch a daemon too old to contain it
- * (it lives inside the daemon). `evaluateDoctor` is the outside probe: it reads
- * a daemon's `tribe.health()` and treats a MISSING `code_pin` field as a
- * positive staleness signal — a known-current field absent from a method fresh
- * daemons always populate proves the daemon predates the detector. Pure, so the
- * three staleness classes unit-test without a live socket.
+ * (it lives inside the daemon), so the probe lives in the CLI:
+ * `evaluateDoctorIdentity` takes the daemon's startup cert and probes on-disk
+ * and pin itself at the daemon's root, with no self-verdict from the daemon.
+ * The classes below unit-test it without a live socket.
  */
 
 import { describe, expect, test } from "vitest"
 import {
   deriveDoctorOutcome,
-  evaluateDoctor,
   evaluateDoctorIdentity,
   evaluateDoctorBridgeLost,
   evaluateDoctorHealthSample,
@@ -43,80 +41,6 @@ describe("mcpJsonContent (MCP tool-result unwrap, shared by health + doctor)", (
   })
 })
 
-describe("evaluateDoctor (@km/tribe/20033 daemon staleness probe)", () => {
-  test("missing code_pin field → UNKNOWN (bootstrap gap: daemon too old to self-report)", () => {
-    const v = evaluateDoctor({})
-    expect(v.outcome).toEqual({ verdict: "UNKNOWN", exitCode: 2 })
-    expect(v.reason).toMatch(/predates the code_pin detector/)
-    // No SHAs available — the daemon could not self-report.
-    expect(v.detail).toBeNull()
-  })
-
-  test("code_pin present and stale → stale; surfaces the daemon's own reason + SHAs", () => {
-    const v = evaluateDoctor({
-      code_pin: {
-        stale: true,
-        reason: "running abc123 != on_disk def456 — restart the daemon",
-        running: "abc123",
-        on_disk: "def456",
-        superproject_pin: "def456",
-      },
-    })
-    expect(v.outcome).toEqual({ verdict: "FAIL", exitCode: 1 })
-    expect(v.reason).toBe("running abc123 != on_disk def456 — restart the daemon")
-    expect(v.detail).toEqual({ running: "abc123", on_disk: "def456", superproject_pin: "def456" })
-  })
-
-  test("code_pin present and fresh → not stale", () => {
-    const v = evaluateDoctor({
-      code_pin: { stale: false, reason: null, running: "abc123", on_disk: "abc123", superproject_pin: "abc123" },
-    })
-    expect(v.outcome).toEqual({ verdict: "OK", exitCode: 0 })
-    expect(v.reason).toBeNull()
-    expect(v.detail).toEqual({ running: "abc123", on_disk: "abc123", superproject_pin: "abc123" })
-  })
-
-  test.each(["running", "on_disk", "superproject_pin"] as const)(
-    "an unresolved %s operand makes equality UNKNOWN and never OK",
-    (field) => {
-      const codePin = {
-        stale: false,
-        reason: null,
-        running: "abc123" as string | null,
-        on_disk: "abc123" as string | null,
-        superproject_pin: "abc123" as string | null,
-      }
-      codePin[field] = null
-      const v = evaluateDoctor({ code_pin: codePin })
-
-      expect(v.outcome).toEqual({ verdict: "UNKNOWN", exitCode: 2 })
-      expect(v.reason).toContain(field)
-      expect(v.detail).toEqual({
-        running: codePin.running,
-        on_disk: codePin.on_disk,
-        superproject_pin: codePin.superproject_pin,
-      })
-    },
-  )
-
-  test("all unresolved code_pin operands cannot certify a standalone / no-git daemon", () => {
-    const v = evaluateDoctor({
-      code_pin: {
-        stale: null,
-        reason: "cannot compare daemon code identity: unresolved running, on_disk, superproject_pin",
-        running: null,
-        on_disk: null,
-        superproject_pin: null,
-      },
-    })
-    expect(v.outcome).toEqual({ verdict: "UNKNOWN", exitCode: 2 })
-    expect(v.reason).toContain("running")
-    expect(v.reason).toContain("on_disk")
-    expect(v.reason).toContain("superproject_pin")
-    expect(v.detail).toEqual({ running: null, on_disk: null, superproject_pin: null })
-  })
-})
-
 describe("deriveDoctorOutcome (worst-of verdict algebra)", () => {
   test.each([
     { checks: ["OK", "OK"], expected: { verdict: "OK", exitCode: 0 } },
@@ -132,6 +56,17 @@ describe("deriveDoctorOutcome (worst-of verdict algebra)", () => {
 
 describe("status-backed doctor checks", () => {
   const success = (value: string) => ({ ok: true as const, value })
+
+  test("a daemon whose cli_status reports no code_identity is UNKNOWN with the reload remedy (20033 bootstrap)", () => {
+    // cmdDoctor passes reportedIdentity === undefined here: status.daemon?.code_identity
+    // is absent on a daemon too old to self-report — the class the deleted
+    // evaluateDoctor used to pin on the daemon's *health* shape.
+    const check = evaluateDoctorIdentity(undefined, undefined, null)
+    expect(check.severity).toBe("UNKNOWN")
+    expect(check.diagnosis).toContain("UNSUPPORTED_CODE_IDENTITY")
+    expect(check.remedy).toMatch(/reload the daemon/)
+    expect(check.remedy).toContain("tribe doctor")
+  })
 
   test("three equal certs are the only green identity result", () => {
     const check = evaluateDoctorIdentity(
