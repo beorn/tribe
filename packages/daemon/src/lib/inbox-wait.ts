@@ -155,6 +155,28 @@ export function createInboxWaitManager(
       : snapshot.latestQualifyingSeq
   }
 
+  /**
+   * 28911: the baseline a settled chunk HANDS BACK must cover every row that
+   * chunk delivered — the row it woke on and the newest rows in its snapshot
+   * (qualifying tail + actionable_unread). Returning the chunk's STARTING
+   * baseline made both resumers re-derive latest > baseline and wake again
+   * on the same row, even after the seat read it and the mailbox cursor
+   * advanced past it: tent await's watch factory (seat-await.ts, resuming
+   * after a WOKEN reply with after_seq = the returned baseline) and the
+   * wire CLI loop (cli/read.ts, resuming after a TIMED-OUT chunk). An aborted chunk keeps its
+   * starting baseline: nothing it carried was reliably delivered. Fresh
+   * waits are unaffected (they key on the cursor-aware tail), and a resumed
+   * chunk with an explicit older baseline still names a past-cursor row a
+   * replay (27407) — it just cannot loop on it.
+   */
+  function deliveredBaselineSeq(snapshot: InboxWaitSnapshot, baselineSeq: number, wakeSeq: number): number {
+    let delivered = Math.max(baselineSeq, wakeSeq, snapshot.latestQualifyingSeq)
+    for (const row of snapshot.attention.actionable_unread) {
+      if (typeof row.rowid === "number" && row.rowid > delivered) delivered = row.rowid
+    }
+    return delivered
+  }
+
   function settle(
     waiter: Waiter,
     flags: { timedOut: boolean; aborted: boolean },
@@ -170,7 +192,7 @@ export function createInboxWaitManager(
         snapshot,
         Date.now() - waiter.startedAt,
         waiter.effectiveTimeoutMs,
-        waiter.baselineSeq,
+        flags.aborted ? waiter.baselineSeq : deliveredBaselineSeq(snapshot, waiter.baselineSeq, wakeSeq),
         flags,
         wokenBy(waiter.session, waiter.wakeOnCorrelatedReply, wakeSeq, flags),
       ),
@@ -270,20 +292,24 @@ export function createInboxWaitManager(
     const shouldWake = freshLogicalWait ? snapshot.currentQualifyingSeq > 0 : snapshot.latestQualifyingSeq > baselineSeq
     if (shouldWake) {
       const flags = { timedOut: false, aborted: false }
+      const wakeSeq = snapshotWakeSeq(snapshot, freshLogicalWait)
       return Promise.resolve(
         assembleResult(
           snapshot,
           0,
           effectiveTimeoutMs,
-          baselineSeq,
+          deliveredBaselineSeq(snapshot, baselineSeq, wakeSeq),
           flags,
-          wokenBy(session, wakeOnCorrelatedReply, snapshotWakeSeq(snapshot, freshLogicalWait), flags),
+          wokenBy(session, wakeOnCorrelatedReply, wakeSeq, flags),
         ),
       )
     }
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       return Promise.resolve(
-        assembleResult(snapshot, 0, effectiveTimeoutMs, baselineSeq, { timedOut: true, aborted: false }),
+        assembleResult(snapshot, 0, effectiveTimeoutMs, deliveredBaselineSeq(snapshot, baselineSeq, 0), {
+          timedOut: true,
+          aborted: false,
+        }),
       )
     }
     return new Promise((resolve) => {
