@@ -108,7 +108,10 @@ describe("tribe.fetch ids — an abbreviated id is refused by name", () => {
 
   it("refuses an abbreviated message id instead of answering an empty list", () => {
     const fullId = send()
-    const shortId = fullId.slice(0, 8)
+    // A 7-char abbreviation is below the 8-char prefix floor 28909 added, so it
+    // is still refused outright (the 27425 rule). An 8-char UNIQUE prefix now
+    // RESOLVES instead — pinned in 28909-message-id-prefix-resolution.test.ts.
+    const shortId = fullId.slice(0, 7)
 
     const res = fetchIds([shortId])
 
@@ -136,7 +139,7 @@ describe("tribe.fetch ids — an abbreviated id is refused by name", () => {
 
   it("marks the abbreviated-id refusal as a tool error, not a normal empty read", () => {
     const fullId = send()
-    const shortId = fullId.slice(0, 8)
+    const shortId = fullId.slice(0, 7)
 
     const refusal = fetchRaw([shortId])
     expect(refusal.isError).toBe(true)

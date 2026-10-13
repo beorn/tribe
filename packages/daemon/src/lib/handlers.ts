@@ -23,6 +23,11 @@ import {
 import type { TribeContext } from "./context.ts"
 import type { TribeRole } from "tribe-wire/lib/config"
 import { TRIBE_PROTOCOL_VERSION } from "tribe-wire/lib/socket"
+import {
+  TRIBE_FETCH_DEFAULT_LIMIT,
+  TRIBE_FETCH_TOPICS_WINDOW,
+  fetchLimitOutOfRangeMessage,
+} from "tribe-wire/lib/fetch-limits"
 
 const log = createLogger("tribe:handlers")
 import { validateName, sanitizeMessageWithReport, MESSAGE_MAX_LENGTH, type SanitizedMessage } from "./validation.ts"
@@ -4625,7 +4630,9 @@ export function readAttentionProjection(
 
 function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRow[] {
   const conditions = ["kind != 'event'"]
-  const params: Record<string, number | string> = { $limit: filters.topics.length > 0 ? 500 : filters.limit }
+  const params: Record<string, number | string> = {
+    $limit: filters.topics.length > 0 ? TRIBE_FETCH_TOPICS_WINDOW : filters.limit,
+  }
 
   if (filters.since !== null) {
     conditions.push("rowid > $since")
@@ -4729,7 +4736,14 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
   // 24284 — acknowledgement rides delivery. Read once here; the socket can die
   // between now and the write, which is exactly the case this gate covers.
   const deliveryAlive = (): boolean => opts?.callerDeliveryAlive?.() ?? true
-  const limit = typeof a.limit === "number" && a.limit > 0 && a.limit <= 500 ? a.limit : 50
+  // 28909 — the bound lives in ONE place (tribe-wire/lib/fetch-limits, shared
+  // with the CLI's pre-connect check) and an out-of-range limit is REFUSED by
+  // name, never silently clamped to the default: `limit: 1000` used to return
+  // exactly the 50 rows of `limit: 50` with no word said, for every MCP caller
+  // (the measured complaint of this bead).
+  const limitRefusal = fetchLimitOutOfRangeMessage(a.limit)
+  if (limitRefusal !== undefined) return jsonResult({ error: limitRefusal })
+  const limit = typeof a.limit === "number" ? a.limit : TRIBE_FETCH_DEFAULT_LIMIT
   const topics = normalizeStringArray(a.topics)
   if (a.topics !== undefined && topics === null) {
     return jsonResult({ error: "topics must be an array of strings." })
@@ -4801,44 +4815,44 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
           .all(...ids) as Array<{ id: string }>
       ).map((r) => r.id),
     )
-    // 27425 — an id that matched nothing and is not a canonical uuid was
-    // ABBREVIATED: refuse it BY NAME as a transport error, never answer an
-    // empty list the caller reads as "no such message" (NO SILENT ERRORS).
-    // The exact-match lookup above runs FIRST, so a persisted id that is not
-    // a uuid (tribe.send accepts any non-empty client id) still resolves —
-    // the refusal is only for ids that matched nothing and cannot be one.
-    const abbreviated = ids.filter((id) => !persistedIds.has(id) && !isFullMessageId(id))
-    if (abbreviated.length > 0) {
-      const shown = abbreviated.slice(0, MISS_WARNING_EXAMPLES)
-      const elided = abbreviated.length - shown.length
-      const more = elided > 0 ? `, and ${elided} more` : ""
-      const count = abbreviated.length
-      const noun = count === 1 ? "id is" : "ids are"
-      const pronoun = count === 1 ? "it" : "they"
-      return jsonResult(
-        {
-          error:
-            `not a full message id: ${shown.join(", ")}${more} — ${count} ${noun} abbreviated, so ${pronoun} matched no message. ` +
-            `A message id is a full uuid (for example 44ea2480-2763-46a9-a08c-82566a1b5637); full-id lookups are unchanged.`,
-        },
-        { isError: true },
-      )
+    // 28909 — a requested id that is neither persisted nor a canonical uuid is
+    // a PREFIX, not a typo: resolve it when it names exactly one persisted id
+    // and refuse it BY NAME when it is too short, matches nothing, or matches
+    // several ids (listing the candidates). This preserves 27425 — an
+    // abbreviation is never answered as an empty list the caller reads as "no
+    // such message" (NO SILENT ERRORS). The exact-match set above runs FIRST, so
+    // a persisted id that is not a uuid (tribe.send accepts any non-empty client
+    // id) still resolves and is never treated as a prefix.
+    const lookupIds: string[] = []
+    const prefixRefusals: string[] = []
+    for (const id of ids) {
+      if (persistedIds.has(id) || isFullMessageId(id)) {
+        lookupIds.push(id)
+        continue
+      }
+      const outcome = resolveMessageIdPrefix(ctx, id)
+      if (outcome.kind === "resolved") lookupIds.push(outcome.id)
+      else prefixRefusals.push(outcome.message)
     }
+    if (prefixRefusals.length > 0) {
+      return jsonResult({ error: prefixRefusals.join(" ") }, { isError: true })
+    }
+    const lookupPlaceholders = lookupIds.map(() => "?").join(", ")
     rows = ctx.db
       .prepare(
         assertSingleStatement(`
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
                attention_required, wakes_owner, is_incident, sender_authority, session_id
         FROM messages
-        WHERE id IN (${placeholders})
+        WHERE id IN (${lookupPlaceholders})
           AND kind != 'event'
         ORDER BY rowid ASC
         LIMIT ?
       `),
       )
-      .all(...ids, limit) as FetchRow[]
+      .all(...lookupIds, limit) as FetchRow[]
     const byId = new Map(rows.map((r) => [r.id, r]))
-    rows = ids
+    rows = lookupIds
       .map((id) => byId.get(id))
       .filter((r): r is FetchRow => !!r)
       .filter((r) => rowMatchesSnapshotFilters(r, snapshotFilters))
@@ -4967,6 +4981,63 @@ function normalizeStringArray(value: unknown): string[] | null {
 const FULL_MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
 function isFullMessageId(value: string): boolean {
   return FULL_MESSAGE_ID_PATTERN.test(value)
+}
+
+/**
+ * 28909 — the shortest prefix a message-id lookup resolves. Eight hex
+ * characters already carry enough entropy to name one uuid; a shorter one reads
+ * as a typo and is refused outright.
+ */
+const MIN_MESSAGE_ID_PREFIX = 8
+
+type MessageIdPrefixOutcome = { kind: "resolved"; id: string } | { kind: "refused"; message: string }
+
+/**
+ * 28909 — resolve a non-uuid message id as a PREFIX against the persisted ids.
+ * Exactly one match resolves; a too-short, unmatched, or ambiguous prefix is
+ * refused by name (an ambiguity lists its candidates) so the caller can retry
+ * with a full id or a longer prefix. It NEVER answers an empty list — the 27425
+ * rule — because "not found" and "you abbreviated it" must not read alike.
+ */
+function resolveMessageIdPrefix(ctx: TribeContext, prefix: string): MessageIdPrefixOutcome {
+  const requirement = `pass a full message id, or a unique prefix of at least ${MIN_MESSAGE_ID_PREFIX} characters`
+  if (prefix.length < MIN_MESSAGE_ID_PREFIX) {
+    return { kind: "refused", message: `message id '${prefix}' is too short to resolve (${requirement}).` }
+  }
+  // `id` carries a UNIQUE index, so the half-open range is an indexed seek; the
+  // startsWith filter below keeps it exact, since a range upper bound can admit
+  // a neighbour that shares the lower bound without sharing the prefix.
+  const upper = `${prefix.slice(0, -1)}${String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1)}`
+  const matches = (
+    ctx.db
+      .prepare(
+        assertSingleStatement(`
+        SELECT id
+        FROM messages
+        WHERE id >= ?
+          AND id < ?
+          AND kind != 'event'
+        ORDER BY id ASC
+      `),
+      )
+      .all(prefix, upper) as Array<{ id: string }>
+  )
+    .map((row) => row.id)
+    .filter((id) => id.startsWith(prefix))
+  const only = matches.length === 1 ? matches[0] : undefined
+  if (only !== undefined) return { kind: "resolved", id: only }
+  if (matches.length === 0) {
+    return { kind: "refused", message: `no message id starts with '${prefix}' (${requirement}).` }
+  }
+  const shown = matches.slice(0, MISS_WARNING_EXAMPLES)
+  const elided = matches.length - shown.length
+  const more = elided > 0 ? `, and ${elided} more` : ""
+  return {
+    kind: "refused",
+    message:
+      `message id prefix '${prefix}' is ambiguous — it names ${matches.length} messages: ${shown.join(", ")}${more}. ` +
+      `Pass a full message id, or a longer prefix that names exactly one.`,
+  }
 }
 
 function matchesGlob(globs: string[], value: string | null): boolean {

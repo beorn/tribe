@@ -32,7 +32,13 @@ import { describeDaemonStderrLog } from "../lib/daemon-stderr-log.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
 import { readLaunchIdFromToken } from "../lib/identity-token.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
-import { writeJsonStdout } from "./json-output.ts"
+import { writeJsonStdout, writeJsonToFile } from "./json-output.ts"
+import {
+  TRIBE_FETCH_DEFAULT_LIMIT,
+  TRIBE_FETCH_MAX_LIMIT,
+  TRIBE_FETCH_TOPICS_WINDOW,
+  fetchLimitOutOfRangeMessage,
+} from "../lib/fetch-limits.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
 import { parseEmitterIncidentSnapshot } from "../lib/incident.ts"
 import { warnIfSelfTransportDown } from "./self-transport-warning.ts"
@@ -449,6 +455,53 @@ function parseCommaList(value: string | undefined): string[] | undefined {
 }
 
 /**
+ * 28909 — one shared definition for the file-output flag on the one-shot reads
+ * (fetch, pending, inbox), whose stdout the harness truncates at 69,632 bytes.
+ */
+const JSON_TO_FILE_FLAG = "--json-to-file <path>"
+const JSON_TO_FILE_DESCRIPTION =
+  "Write the full JSON result to PATH and print only a one-line summary (row count, cursor, path) instead of the payload"
+
+/** The rows a `tribe fetch` result carries (28909): its chronological event window. */
+function fetchRowCount(payload: object): number {
+  return (payload as { events?: unknown[] }).events?.length ?? 0
+}
+
+/** The rows a `tribe pending` payload reports (28909): the authoritative count, else the rows it carries. */
+function pendingRowCount(payload: { count?: number; pending?: unknown[]; owners?: Array<{ count?: number }> }): number {
+  if (typeof payload.count === "number") return payload.count
+  if (payload.owners !== undefined) return payload.owners.reduce((n, owner) => n + (owner.count ?? 0), 0)
+  return payload.pending?.length ?? 0
+}
+
+/**
+ * 28909 — the scope line for one BOUNDED `tribe fetch` read. A read that
+ * returned its whole bound must SAY SO, because the rows past the bound are
+ * invisible otherwise — the same hazard `tribeLogScope` names for `tribe log`
+ * (27537). It goes to stderr so a script's stdout stays parseable JSON.
+ *
+ * Two shapes return a line. A `--topics` read ALWAYS does: the daemon filters a
+ * fixed 500-row window after reading it (handlers.ts querySnapshotRows), so such
+ * a read can return fewer than `limit` rows while more matches exist — it is
+ * never exhaustive and must not read as if it were. Every other read returns a
+ * line only when it reached its bound; below the bound it is exhaustive, and
+ * returns null (silent).
+ */
+export function tribeFetchScope(returned: number, limit: number, opts: { topicsWindow?: boolean } = {}): string | null {
+  if (opts.topicsWindow === true) {
+    return (
+      `tribe fetch: ${returned} row(s) — a --topics read filters a ${TRIBE_FETCH_TOPICS_WINDOW}-row window, ` +
+      `so more matching rows may exist (narrow with --since or a more specific glob).`
+    )
+  }
+  if (returned < limit) return null
+  return (
+    `tribe fetch: ${returned} row(s) — at the --limit ${limit} bound; more rows may exist ` +
+    `(raise --limit, max ${TRIBE_FETCH_MAX_LIMIT}).`
+  )
+}
+
+/**
  * `tribe-wire fetch` — the MCP fetch handler's SNAPSHOT lookups over a
  * one-shot CLI, for scripts (27519, @cto ruling 1c688dbc).
  *
@@ -474,6 +527,7 @@ async function cmdFetch(opts: {
   to?: string
   limit?: number
   json?: boolean
+  jsonToFile?: string
 }): Promise<void> {
   const params: Record<string, unknown> = {}
   const ids = parseCommaList(opts.ids)
@@ -514,6 +568,16 @@ async function cmdFetch(opts: {
     process.exit(2)
   }
   if (opts.limit !== undefined) params.limit = opts.limit
+  // 28909 — the daemon SILENTLY clamped a limit above its max to the default 50
+  // (measured: `--limit 1000` returned exactly the 50 rows of `--limit 50`), so
+  // a caller read a truncated window as a complete one. The bound now has ONE
+  // definition (lib/fetch-limits.ts, shared with handleFetch) and both surfaces
+  // refuse an out-of-range value by name; the CLI refuses before any socket opens.
+  const limitRefusal = fetchLimitOutOfRangeMessage(opts.limit)
+  if (limitRefusal !== undefined) {
+    console.error(`tribe fetch: ${limitRefusal}`)
+    process.exit(2)
+  }
   const idToken = readIdentityTokenFromEnvironment(process.env)
   if (idToken !== null) params.idToken = idToken
 
@@ -541,7 +605,24 @@ async function cmdFetch(opts: {
     process.exitCode = 2
     return
   }
-  await writeJsonStdout(payload)
+  // 28909 — the bound line is a property of the READ, not of where the payload
+  // goes: print it in file mode too, so a file write at the limit still says the
+  // rows past it exist (stdout stays the single summary line).
+  const rows = fetchRowCount(payload)
+  const topicsWindow = (parseCommaList(opts.topics)?.length ?? 0) > 0
+  if (opts.jsonToFile !== undefined) {
+    const cursor = (payload as { cursor?: unknown }).cursor
+    const written = await writeJsonToFile(payload, opts.jsonToFile, {
+      verb: "fetch",
+      rows,
+      cursor: typeof cursor === "number" ? cursor : null,
+    })
+    if (!written) return
+  } else {
+    await writeJsonStdout(payload)
+  }
+  const scope = tribeFetchScope(rows, opts.limit ?? TRIBE_FETCH_DEFAULT_LIMIT, { topicsWindow })
+  if (scope !== null) console.error(scope)
 }
 
 function fmtMsg(m: Msg): void {
@@ -763,6 +844,7 @@ async function cmdPending(
   close: string | undefined,
   emitter?: string,
   evidence?: string,
+  jsonToFile?: string,
 ): Promise<void> {
   if (emitter !== undefined) {
     const outcome = await tribeDaemonCalls(`tribe pending emitter ${JSON.stringify(emitter)}`).pendingForEmitter(
@@ -783,6 +865,10 @@ async function cmdPending(
         `tribe pending emitter ${JSON.stringify(emitter)} at ${resolveSocketPath()}: invalid emitter snapshot (${error instanceof Error ? error.message : String(error)}); expected matching scope and emitter, count matching pending length, and complete canonical incident rows with observation metadata. Run 'tribe doctor' before retrying.`,
       )
       process.exitCode = 2
+      return
+    }
+    if (jsonToFile !== undefined) {
+      await writeJsonToFile(payload, jsonToFile, { verb: "pending", rows: payload.pending.length, cursor: null })
       return
     }
     if (json) await writeJsonStdout(payload, 2)
@@ -876,6 +962,10 @@ async function cmdPending(
       "tribe pending: daemon returned an invalid authenticated pending snapshot; expected non-empty owner, a pending array, and non-negative integer count matching its length. Run 'tribe doctor' to compare the running daemon with this checkout before retrying.",
     )
     process.exitCode = 2
+    return
+  }
+  if (jsonToFile !== undefined) {
+    await writeJsonToFile(payload, jsonToFile, { verb: "pending", rows: pendingRowCount(payload), cursor: null })
     return
   }
   if (json) {
@@ -2038,7 +2128,7 @@ export function formatPendingBallLine(ball: {
   return `pending${kind} from ${ball.sender ?? "unknown"} [${ball.request_id ?? "unidentified"}]`
 }
 
-async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean }): Promise<void> {
+async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean; jsonToFile?: string }): Promise<void> {
   const idToken = readIdentityTokenFromEnvironment(process.env)
   if (idToken === null) {
     throw new Error(
@@ -2048,6 +2138,25 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean }
   }
   const raw = await callDaemon("cli_self_inbox_v1", { idToken, limit: opts.limit ?? 50, peek: opts.peek })
   const result = mcpJsonContent(raw) as SelfInboxResult
+  if (opts.jsonToFile !== undefined) {
+    // 28909 — the rows a mailbox read produced: the actionable directs plus the
+    // chronological events window (the same rows the human view prints).
+    const rows = (result.attention?.actionable_unread?.length ?? 0) + (result.events?.length ?? 0)
+    const written = await writeJsonToFile(result, opts.jsonToFile, {
+      verb: "inbox",
+      rows,
+      cursor: result.cursor ?? null,
+    })
+    // NO SILENT ERRORS: the file mode consumes the mailbox exactly as --json
+    // does, so it carries the same destructive warning (on stderr; stdout stays
+    // the single summary line).
+    if (written && !opts.peek) {
+      console.error(
+        `tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.`,
+      )
+    }
+    return
+  }
   if (opts.json) {
     if (!opts.peek) {
       console.error(
@@ -2547,6 +2656,7 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     .option(fetchTo.flags, fetchTo.description)
     .option(fetchLimit.flags, fetchLimit.description, int)
     .option(fetchJson.flags, fetchJson.description)
+    .option(JSON_TO_FILE_FLAG, JSON_TO_FILE_DESCRIPTION)
     .action(
       async (opts: {
         ids?: string
@@ -2557,6 +2667,7 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
         to?: string
         limit?: number
         json?: boolean
+        jsonToFile?: string
       }) => cmdFetch(opts),
     )
 
@@ -2590,6 +2701,7 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     .option(pendingStale.flags, pendingStale.description)
     .option(pendingClose.flags, pendingClose.description)
     .option(pendingEvidence.flags, pendingEvidence.description)
+    .option(JSON_TO_FILE_FLAG, JSON_TO_FILE_DESCRIPTION)
     .action(
       async (opts: {
         all?: boolean
@@ -2601,6 +2713,7 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
         stale?: string
         close?: string
         evidence?: string
+        jsonToFile?: string
       }) => {
         if (
           opts.evidence !== undefined &&
@@ -2669,6 +2782,7 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
           opts.close,
           opts.emitter,
           opts.evidence,
+          opts.jsonToFile,
         )
       },
     )
@@ -2713,7 +2827,8 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     .option("--limit <n>", "Maximum events to return (max 500)", int, 50)
     .option("--json", "Emit the canonical machine-readable attention projection")
     .option("--peek", "Read the inbox without consuming messages or advancing the cursor")
-    .action(async (opts: { limit?: number; json?: boolean; peek?: boolean }) => {
+    .option(JSON_TO_FILE_FLAG, JSON_TO_FILE_DESCRIPTION)
+    .action(async (opts: { limit?: number; json?: boolean; peek?: boolean; jsonToFile?: string }) => {
       try {
         await cmdInbox(opts)
       } catch (error) {

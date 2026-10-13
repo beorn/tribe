@@ -16,6 +16,7 @@ import { tmpdir } from "node:os"
 import { resolve, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
+import { TRIBE_FETCH_TOPICS_WINDOW } from "../src/lib/fetch-limits.ts"
 import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
 import { launchEnvironment, launchToken } from "./launch-token.ts"
 
@@ -744,7 +745,10 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       () => ({ result: { content: [{ type: "text", text: JSON.stringify(empty) }], structuredContent: empty } }),
     )
 
-    expect(result).toMatchObject({ code: 0, stderr: "" })
+    // 28909/S2 — a --topics read filters a fixed window, so it is never
+    // exhaustive and always says so, even when it returns no rows.
+    expect(result).toMatchObject({ code: 0 })
+    expect(result.stderr).toContain(`filters a ${TRIBE_FETCH_TOPICS_WINDOW}-row window`)
     expect(calls).toEqual([
       {
         method: "cli_session_fetch_read_v1",
@@ -830,6 +834,143 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       stdout: "",
       stderr: "tribe fetch: topics must be an array of strings.\n",
     })
+  })
+
+  // 28909 — a bounded read must SAY SO when it returned its whole bound: the
+  // rows past the bound are invisible otherwise. Measured before the fix:
+  // `--limit 1000` returned exactly the 50 rows of `--limit 50` in silence.
+  it("fetch says so when --limit bounded the window and stays silent below it (28909)", async () => {
+    const two = { events: [{ id: "m1" }, { id: "m2" }], cursor: 7 }
+    const saturated = await runManagedFetchCliAgainst(["fetch", "--json", "--since", "0", "--limit", "2"], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify(two) }], structuredContent: two },
+    }))
+    expect(saturated.result.code).toBe(0)
+    expect(saturated.result.stdout).toBe(`${JSON.stringify(two)}\n`)
+    expect(saturated.result.stderr).toContain("at the --limit 2 bound")
+
+    const one = { events: [{ id: "m1" }], cursor: 7 }
+    const below = await runManagedFetchCliAgainst(["fetch", "--json", "--since", "0", "--limit", "2"], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify(one) }], structuredContent: one },
+    }))
+    expect(below.result.code).toBe(0)
+    expect(below.result.stderr).toBe("")
+  })
+
+  it("fetch refuses an out-of-range --limit before connecting, naming the range (28909)", async () => {
+    const { result, calls } = await runManagedFetchCliAgainst(
+      ["fetch", "--json", "--since", "0", "--limit", "1000"],
+      () => ({
+        result: { content: [{ type: "text", text: JSON.stringify({ events: [], cursor: 0 }) }] },
+      }),
+    )
+
+    expect(result.code).toBe(2)
+    expect(result.stdout).toBe("")
+    expect(result.stderr).toMatch(/between 1 and 500/)
+    expect(calls).toEqual([])
+  })
+
+  it("fetch --json-to-file writes the full JSON and prints one summary line (28909)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-json-to-file-"))
+    const path = join(dir, "fetch.json")
+    const payload = { events: [{ id: "m1" }, { id: "m2" }], cursor: 42 }
+    try {
+      const { result } = await runManagedFetchCliAgainst(["fetch", "--json-to-file", path, "--since", "0"], () => ({
+        result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+      }))
+
+      expect(result.code).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(result.stdout).toBe(`tribe fetch: 2 row(s), cursor 42, written to ${path}\n`)
+      expect(readFileSync(path, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("fetch --json-to-file still names the bound on stderr (28909/S1)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-json-to-file-"))
+    const path = join(dir, "fetch-bound.json")
+    const payload = { events: [{ id: "m1" }, { id: "m2" }], cursor: 7 }
+    try {
+      const { result } = await runManagedFetchCliAgainst(
+        ["fetch", "--json-to-file", path, "--since", "0", "--limit", "2"],
+        () => ({ result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload } }),
+      )
+
+      expect(result.code).toBe(0)
+      expect(result.stdout).toBe(`tribe fetch: 2 row(s), cursor 7, written to ${path}\n`)
+      expect(result.stderr).toContain("at the --limit 2 bound")
+      expect(readFileSync(path, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("fetch names the --topics window instead of claiming an exhaustive read (28909/S2)", async () => {
+    const payload = { events: [{ id: "m1" }], cursor: 0 }
+    const { result } = await runManagedFetchCliAgainst(["fetch", "--json", "--topics", "github:*"], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+    }))
+
+    expect(result.code).toBe(0)
+    expect(result.stderr).toContain(`filters a ${TRIBE_FETCH_TOPICS_WINDOW}-row window`)
+  })
+
+  it("pending --json-to-file writes the full JSON and prints one summary line (28909)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-json-to-file-"))
+    const path = join(dir, "pending.json")
+    const payload = {
+      owner: "@dev/2",
+      count: 2,
+      pending: [
+        { request_id: "r1", sender: "@chief", recipient: "@dev/2" },
+        { request_id: "r2", sender: "@chief", recipient: "@dev/2" },
+      ],
+    }
+    try {
+      const { result } = await runManagedPendingCliAgainst(
+        () => ({ result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload } }),
+        { args: ["pending", "--json-to-file", path] },
+      )
+
+      expect(result.code).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(result.stdout).toBe(`tribe pending: 2 row(s), cursor n/a, written to ${path}\n`)
+      expect(readFileSync(path, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("inbox --json-to-file writes the full JSON and prints one summary line (28909)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-json-to-file-"))
+    const path = join(dir, "inbox.json")
+    const payload = {
+      attention: {
+        actionable_unread: [{ id: "a1", from: "@chief", type: "request", content: "x" }],
+        pending_balls: [],
+        pending_balls_summary: { total: 0 },
+      },
+      events: [{ id: "e1", from: "@chief", type: "notify", content: "y" }],
+      cursor: 99,
+    }
+    try {
+      const { result } = await runManagedFetchCliAgainst(["inbox", "--json-to-file", path], () => ({
+        result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+      }))
+
+      expect(result.code).toBe(0)
+      // NO SILENT ERRORS: file mode consumes the mailbox exactly as --json does,
+      // so it carries the same destructive warning — on stderr, stdout stays one line.
+      expect(result.stderr).toBe(
+        "tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.\n",
+      )
+      expect(result.stdout).toBe(`tribe inbox: 2 row(s), cursor 99, written to ${path}\n`)
+      expect(readFileSync(path, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it("members accepts --json for scripts and still emits the JSON rows", async () => {

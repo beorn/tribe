@@ -45,6 +45,7 @@
     "./lib/config-light": "./src/lib/config-light.ts",
     "./lib/beads-path": "./src/lib/beads-path.ts",
     "./lib/db-path": "./src/lib/db-path.ts",
+    "./lib/fetch-limits": "./src/lib/fetch-limits.ts",
     "./lib/tools-list": "./src/lib/tools-list.ts",
     "./lib/cwd-guardrail": "./src/lib/cwd-guardrail.ts",
     "./lib/transcript": "./src/lib/transcript.ts",
@@ -121,6 +122,10 @@
       "./lib/db-path": {
         "types": "./dist/lib/db-path.d.mts",
         "import": "./dist/lib/db-path.mjs"
+      },
+      "./lib/fetch-limits": {
+        "types": "./dist/lib/fetch-limits.d.mts",
+        "import": "./dist/lib/fetch-limits.mjs"
       },
       "./lib/tools-list": {
         "types": "./dist/lib/tools-list.d.mts",
@@ -234,6 +239,7 @@
       "src/lib/config-light.ts",
       "src/lib/beads-path.ts",
       "src/lib/db-path.ts",
+      "src/lib/fetch-limits.ts",
       "src/lib/tools-list.ts",
       "src/lib/cwd-guardrail.ts",
       "src/lib/transcript.ts",

@@ -798,7 +798,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           ids: {
             type: "array",
             items: { type: "string" },
-            description: "Fetch specific message IDs without advancing the cursor.",
+            description:
+              "Fetch specific message IDs without advancing the cursor. Each entry is a full message id, or a unique prefix of at least 8 characters; an ambiguous or unknown prefix is refused by name.",
           },
           topics: {
             type: "array",
@@ -849,7 +850,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "ids",
           flags: "--ids <ids>",
-          description: "Comma-separated message IDs; returns exactly those rows without advancing the cursor",
+          description:
+            "Comma-separated message IDs (a full id, or a unique prefix of at least 8 characters); returns exactly those rows without advancing the cursor",
           transform: "csv-list",
         },
         {

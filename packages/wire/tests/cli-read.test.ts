@@ -18,6 +18,7 @@ import {
   formatInboxStatus,
   registerReadCommands,
   resolveRepairOptions,
+  tribeFetchScope,
   tribeLogScope,
   writeHealthDocument,
   waitForInboxWithReconnect,
@@ -29,6 +30,7 @@ import {
   resolveInboxWaitOptions,
   resolveWaitOptions,
 } from "../src/lib/inbox-wait-options.ts"
+import { TRIBE_FETCH_TOPICS_WINDOW } from "../src/lib/fetch-limits.ts"
 
 function buildProgram(): Command {
   const program = new Command("tribe-test")
@@ -274,7 +276,10 @@ describe("registerReadCommands", () => {
   test("inbox verb exposes no caller-selected mailbox target", () => {
     const cmd = findCmd(buildProgram(), "inbox")
     expect(cmd).toBeDefined()
-    expect(optionFlags(cmd!)).toEqual(["--limit", "--json", "--peek"])
+    // 28909 added --json-to-file (file output), never a mailbox target: the verb
+    // still cannot name a session or an owner.
+    expect(optionFlags(cmd!)).toEqual(["--limit", "--json", "--peek", "--json-to-file"])
+    expect(optionFlags(cmd!).some((flag) => flag === "--session" || flag === "--owner")).toBe(false)
   })
 
   test("inbox-drain verb accepts --session, --limit, and --json", () => {
@@ -289,6 +294,32 @@ describe("registerReadCommands", () => {
     expect(cmd).toBeDefined()
     const flags = optionFlags(cmd!)
     expect(flags).toEqual(expect.arrayContaining(["--session", "--timeout", "--json"]))
+  })
+
+  // 28909 — the one-shot reads whose stdout the harness truncates at 69,632
+  // bytes take a --json-to-file that writes the full document to a file and
+  // prints one summary line instead of the payload.
+  test("fetch, pending, and inbox accept --json-to-file (28909)", () => {
+    for (const name of ["fetch", "pending", "inbox"]) {
+      const cmd = findCmd(buildProgram(), name)
+      expect(cmd, `missing command ${name}`).toBeDefined()
+      expect(optionFlags(cmd!), `${name} missing --json-to-file`).toContain("--json-to-file")
+    }
+  })
+
+  test("tribeFetchScope names the bound only when the read reached it (28909)", () => {
+    expect(tribeFetchScope(3, 50)).toBeNull()
+    expect(tribeFetchScope(49, 50)).toBeNull()
+    const saturated = tribeFetchScope(50, 50)
+    expect(saturated).toContain("50 row(s)")
+    expect(saturated).toContain("--limit 50")
+    expect(saturated).toMatch(/max 500/)
+    // S2 — a --topics read filters a fixed window (one home: the shared
+    // constant), so it says so even when it returned fewer rows than its bound:
+    // it is never exhaustive.
+    expect(tribeFetchScope(3, 50, { topicsWindow: true })).toContain(
+      `filters a ${TRIBE_FETCH_TOPICS_WINDOW}-row window`,
+    )
   })
 
   test("wait verb is registered as idle wait alias with 5m default timeout and correlated reply wake", () => {
