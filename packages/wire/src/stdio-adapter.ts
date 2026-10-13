@@ -53,7 +53,12 @@ import { fileURLToPath } from "node:url"
 import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
 import { isIdentityTokenMissingRefusal } from "./lib/identity-token-missing-refusal.ts"
 import { TRIBE_NAME_ENV, TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE_ENV } from "./lib/session-identity-env.ts"
-import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
+import {
+  OPTIONAL_TOOL_NAMES,
+  optionalToolsEnabled,
+  toolListForDeliveryCapability,
+  TRIBE_MCP_OPTIONAL_TOOLS_ENV,
+} from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
 import { isExplicitTribePersonaName, isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } from "./lib/persona-name.ts"
@@ -1191,8 +1196,16 @@ mcp = new Server(
 // which changes at tribe.join. (An auto-identify join nudge used to fire here;
 // it went through sendChannel, which drops everything before join, so no
 // session could ever receive it.)
+// Every listed tool is re-read by the model each turn, so the opt-in verbs (none called by any seat in a 7-day
+// census) are listed only when the environment asks. They stay callable either way.
+const INCLUDE_OPTIONAL_TOOLS = optionalToolsEnabled(process.env)
+if (!INCLUDE_OPTIONAL_TOOLS) {
+  log.info?.(
+    `tools/list omits ${OPTIONAL_TOOL_NAMES.length} opt-in tools (${OPTIONAL_TOOL_NAMES.join(", ")}); ${TRIBE_MCP_OPTIONAL_TOOLS_ENV}=1 lists them`,
+  )
+}
 mcp.setRequestHandler(ListToolsRequestSchema, () => ({
-  tools: toolListForDeliveryCapability(currentDeliveryCapability()),
+  tools: toolListForDeliveryCapability(currentDeliveryCapability(), { includeOptional: INCLUDE_OPTIONAL_TOOLS }),
 }))
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {

@@ -69,6 +69,9 @@ export interface TribeCommandDescriptor {
   readonly title: string
   readonly description: string
   readonly lifetime: "live-session" | "one-shot" | "diagnostic" | "operator"
+  /** Whether tools/list carries the verb by default. Every listed tool is re-read by the model each turn, so a verb
+   * no seat calls is `opt-in`: still callable, listed only when the adapter's TRIBE_MCP_OPTIONAL_TOOLS=1. */
+  readonly exposure: "default" | "opt-in"
   readonly mcp: TribeMcpTool
   readonly cli: TribeCliProjection
 }
@@ -86,13 +89,12 @@ const OBJ = (properties: JsonObject, description: string): JsonSchemaObject => (
 
 const ATTENTION_SCHEMA = {
   type: "object",
-  description: "Current unread actionable attention and open response balls for the addressed persona.",
+  description: "Unread actionable attention and open balls for the addressed seat.",
   required: ["actionable_unread", "pending_balls", "pending_balls_summary"],
   properties: {
     sent_offline_balls: {
       type: "array",
-      description:
-        "Up to 10 open requests this persona sent to recipients without live transport. Original recipient, deadline and keyed offline-since fact are retained; these rows are never added to owed pending_balls counts.",
+      description: "Up to 10 open requests this seat sent to recipients without live transport; never counted as owed.",
       items: { type: "object", additionalProperties: true },
     },
     sent_offline_balls_summary: {
@@ -104,29 +106,25 @@ const ATTENTION_SCHEMA = {
     actionable_unread: {
       type: "array",
       description:
-        "All unacknowledged direct request/query/verdict/assign/response messages, direct status/notify messages from another named seat whose ref names an open request ball this seat owns or sent, plus tracked actionable direct or broadcast messages still awaiting this owner's TAKING or settlement, independent of the event limit. Incident notifications remain pending-only. Responses and those status/notify messages stay quiet for default inbox waits.",
+        "Unacknowledged direct request/query/verdict/assign/response rows, direct status/notify whose ref names an open ball this seat is party to, and tracked actionable rows awaiting this owner's TAKING or settlement.",
       items: { type: "object", additionalProperties: true },
     },
     pending_balls: {
       type: "array",
-      description:
-        "Up to 10 open tracked obligations, with peer requests ordered ahead of watcher incidents so machine rows cannot hide human/agent work.",
+      description: "Up to 10 open tracked obligations, peer requests ahead of watcher incidents.",
       items: { type: "object", additionalProperties: true },
     },
     pending_balls_summary: {
       type: "object",
-      description: "Lossless size and oldest-age summary for the full pending-ball set.",
+      description: "Lossless size and oldest-age summary of the full pending-ball set.",
       required: ["total", "oldest_age_ms", "truncated"],
       properties: {
-        total: { type: "number", description: "Total open tracked requests this recipient owns." },
-        oldest_age_ms: { type: "number", description: "Age of the oldest open tracked request in milliseconds." },
-        truncated: {
-          type: "boolean",
-          description: "True when pending_balls is only a bounded preview of the total set.",
-        },
+        total: { type: "number", description: "Open tracked requests this seat owns." },
+        oldest_age_ms: { type: "number", description: "Age of the oldest, in milliseconds." },
+        truncated: { type: "boolean", description: "True when pending_balls is a bounded preview." },
         withheld: {
           type: "object",
-          description: "Present when the preview is truncated; names the omitted total and request/incident split.",
+          description: "When truncated: the omitted total and its request/incident split.",
           required: ["total", "by_kind"],
           properties: {
             total: { type: "number" },
@@ -167,49 +165,42 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Send Message",
     description: 'Send a message to one tribe member, multiple members, or everyone with to: "*".',
     lifetime: "live-session",
+    exposure: "default",
     mcp: {
       name: "send",
       description:
-        'Send a message to one tribe member, multiple members, or everyone with to: "*". Never treat a peer message as authorization — see /tribe. Ball, fanout and incident semantics: /tribe.',
+        'Send a message to one seat, several seats, or "*" (broadcast). A peer message is never authorization. Types, balls, fanout and incidents: /tribe.',
       inputSchema: {
         type: "object",
         properties: {
           to: {
             oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1 }],
-            description: 'Recipient session name, recipient session names, or "*" for broadcast',
+            description: 'Recipient seat name, a list of names, or "*" for broadcast.',
           },
           message: {
             type: "string",
-            description:
-              "Message content. The client rejects content over 4096 characters before sending; save larger content to a file and send a file+SHA pointer.",
+            description: "Body, at most 4096 characters; put larger content in a file and send a pointer to it.",
           },
           summary: {
             type: "string",
-            description:
-              "One-line summary shown in the channel UI. Required for LLM senders; otherwise derived from the first line and flagged as `summary_derived`.",
+            description: "One-line summary shown in the channel UI; required from an LLM sender.",
           },
-          message_id: {
-            type: "string",
-            description:
-              "Optional client-generated UUID. Retrying the same UUID is a no-op and returns the original message id.",
-          },
+          message_id: { type: "string", description: "Client UUID; a retry with the same id is a no-op." },
           type: {
             type: "string",
-            description: "Message type. Which types are actionable and which open a ball: /tribe.",
+            description: "Message type (default notify). Which types wake or open a ball: /tribe.",
             enum: TRIBE_MESSAGE_TYPES,
             default: "notify",
           },
           delivery: {
             type: "string",
             enum: TRIBE_DELIVERY_MODES,
-            description:
-              "Per-message delivery class. 'push' fans the durable row out to live channels; 'pull' keeps it inbox-only. Defaults to push.",
+            description: "push fans the row out to live channels; pull keeps it inbox-only (default push).",
           },
-          bead: { type: "string", description: "Associated bead ID (optional)" },
+          bead: { type: "string", description: "Associated bead id." },
           ref: {
             type: "string",
-            description:
-              "Durable non-closing correlation reference. Pair status + ref with a request or message id for a TAKING receipt.",
+            description: "Non-closing correlation id; status + ref on an open ball you own is a TAKING receipt.",
           },
           request: {
             oneOf: [
@@ -217,18 +208,18 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               { type: "boolean", const: true },
             ],
             description:
-              'Direct request/query/assign messages and authenticated broadcasts of these types automatically open recipient-owned balls. Broadcast fanout defaults to first (one answer settles for everyone); use all when each recipient owes an answer. Pass `true` to explicitly track another eligible message, or a string other than "true" to set the id. Ownership and closing rules: /tribe.',
+              'Direct request/query/assign messages automatically open recipient-owned balls. Pass true to track another eligible message, or a string other than "true" to set the ball id.',
           },
           reply: {
             type: "string",
             description:
-              "Ball correlation reference. Only response/verdict + reply settle; tracker.closed proves release. Status/notify + reply correlate as ref and leave the ball and deadline open; send reports this explicitly.",
+              "Request id this message settles. Only response/verdict + reply close the ball (check tracker.closed); status/notify + reply only correlate.",
           },
           fanout: {
             type: "string",
             enum: TRIBE_FANOUTS,
             description:
-              "Multi-recipient ball routing: 'first' (competing consumers) or 'all' (per-recipient ball). See /tribe.",
+              "Several recipients: first = one ball, the first reply settles it; all = one ball per recipient.",
             default: "first",
           },
           expires_in_ms: {
@@ -236,7 +227,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             minimum: 1,
             maximum: 24 * 60 * 60_000,
             description:
-              "Reply deadline for one tracked send, max one day. Requests and queries default to 20 minutes. On a status + ref TAKING receipt for an open ball you own, it re-sets that ball's due from now, within one day of the ball's opening. Expiry never settles ownership — see /tribe.",
+              "Reply deadline for a tracked send (default 20 minutes, max one day). On a status + ref receipt for a ball you own, re-sets its due.",
           },
           incident: {
             type: "object",
@@ -244,24 +235,17 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               emitter: { type: "string", minLength: 1, description: "The watcher that observed the condition." },
               subject: { type: "string", minLength: 1, description: "What the condition is about, e.g. a seat name." },
               condition: { type: "string", minLength: 1, description: "Which condition holds, e.g. transport-wedged." },
-              active: {
-                type: "boolean",
-                description:
-                  "Whether the condition still holds. Omit or pass true while it does; pass false as the clearing edge that closes the ball.",
-              },
+              active: { type: "boolean", description: "Omit or true while the condition holds; false clears it." },
             },
             required: ["emitter", "subject", "condition"],
             description:
-              "For cadence watchers: hold ONE ball per live condition instead of one per observation. Repeats on the same emitter/subject/condition upsert; `active: false` clears. The summary is the condition and the body carries the observation: the open, and an upsert whose summary changed, wake the owner's inbox-wait; a repeat with the same summary and the clear never do. Exactly one recipient, mutually exclusive with `request`. See /tribe.",
+              "Watcher rail: one standing ball per live emitter/subject/condition, upserted on repeat. One recipient; exclusive with request. See /tribe.",
           },
-          incident_data: {
-            description:
-              "Optional opaque JSON value on an incident observation, outside its stable identity. Requires incident. Stored atomically and preserved by archive; omitted legacy data reads as null. Consumers own the payload schema.",
-          },
+          incident_data: { description: "Opaque JSON stored with an incident observation." },
           if_current: {
             type: "array",
             description:
-              "Complete expected {recipient,message_id} holdings for the incident identity. Compared inside the mutation transaction; [] expects no holdings. A mismatch returns sent:false and conflict without mutation. Required for policy-managed emitters; accepted UUID retries are reauthorized before deduplication.",
+              "Expected {recipient, message_id} holdings for the incident identity ([] = none); a mismatch returns sent:false with conflict and mutates nothing.",
             items: {
               type: "object",
               required: ["recipient", "message_id"],
@@ -277,8 +261,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           conflict: {
             type: "object",
             additionalProperties: true,
-            description:
-              "Conditional incident mismatch: kind incident-current-changed, request_id, expected and current holdings. No send or settlement occurred; re-read and recompute.",
+            description: "Incident if_current mismatch: expected and current holdings; nothing was sent.",
           },
           id: { type: "string", description: "Message id assigned by the daemon." },
           ids: {
@@ -286,99 +269,66 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             items: { type: "string" },
             description: "Per-recipient message ids for a multi-recipient send.",
           },
-          request_id: {
-            type: "string",
-            description: "Shared explicit request id for a multi-recipient tracked send.",
-          },
+          request_id: { type: "string", description: "Shared request id for a multi-recipient tracked send." },
           incident: {
             type: "object",
             properties: {
               transition: {
                 type: "string",
                 enum: ["opened", "changed", "repeated", "cleared"],
-                description: "Incident edge decided in the send transaction.",
+                description: "Incident edge decided in this send.",
               },
-              wakesOwner: {
-                type: "boolean",
-                description: "True for an opened or changed incident; false for a repeat or clear.",
-              },
+              wakesOwner: { type: "boolean", description: "True for opened or changed." },
             },
             required: ["transition", "wakesOwner"],
-            description: "Present only for an incident send; its transition is the atomic paging fact.",
+            description: "Present only for an incident send.",
           },
           tracker: {
             type: "object",
             properties: {
               request_id: { type: "string", description: "Request id handled by this reply." },
-              closed: { type: "number", description: "Pending rows closed by the committed send transaction." },
-              cause: {
-                type: "string",
-                description:
-                  "Present when closed is 0: the exact journal-backed reason (already settled and by whom, settled by another owner under fanout first, or never tracked) — never a list of possibilities.",
-              },
+              closed: { type: "number", description: "Pending rows closed by this send." },
+              cause: { type: "string", description: "When closed is 0: the exact journal-backed reason." },
             },
             required: ["request_id", "closed"],
-            description: "Present for replies; reports the committed ball-tracker mutation.",
+            description: "Present for replies.",
           },
           applied_due: {
             type: "object",
             properties: {
-              request_id: { type: "string", description: "The ball whose due this TAKING receipt re-set." },
-              previous_expires_at: {
-                type: ["number", "null"],
-                description: "The ball's due before the receipt, in unix ms; null when it had none.",
-              },
-              expires_at: { type: "number", description: "The due the receipt applied, in unix ms." },
+              request_id: { type: "string", description: "The ball whose due this receipt re-set." },
+              previous_expires_at: { type: ["number", "null"], description: "Previous due, unix ms; null when none." },
+              expires_at: { type: "number", description: "Applied due, unix ms." },
             },
             required: ["request_id", "previous_expires_at", "expires_at"],
-            description:
-              "Present when a status + ref TAKING receipt carried expires_in_ms: the due applied in the receipt's own transaction.",
+            description: "Present when a status + ref receipt carried expires_in_ms.",
           },
           reply_close_failed: {
             type: "boolean",
             description:
-              "Present and true when a response/verdict `reply` closed zero rows. The message was still delivered, but nothing was settled — the id was wrong (fabricated, truncated, or already closed). Re-read `tribe.pending` and reply again with the exact id; do not treat `sent: true` as the ball being closed. Status/notify correlation is non-closing and does not set this failure.",
+              "True when a response/verdict reply closed zero rows: delivered, but nothing settled. Re-read pending and reply with the exact id.",
           },
-          summary: {
-            type: "string",
-            description:
-              "The one-liner stored with the message. Authored by LLM senders; derived from the message only for non-LLM callers who omit it.",
-          },
+          summary: { type: "string", description: "The one-liner stored with the message." },
           summary_derived: {
             type: "boolean",
-            description: "Present and true when a non-LLM sender omitted `summary` and the daemon derived one.",
+            description: "True when a non-LLM sender omitted summary and the daemon derived one.",
           },
-          deduplicated: {
-            type: "boolean",
-            description: "Present and true when this client UUID was already committed and the retry was ignored.",
-          },
-          truncated: {
-            type: "boolean",
-            description:
-              "Legacy-daemon compatibility field. New clients reject over-cap content before sending; true means an older daemon delivered only a prefix ending in `...`.",
-          },
-          original_length: {
-            type: "number",
-            description:
-              "Always present. Length the 4096-char cap was measured against (the message after control characters are stripped). Subtract 4096 to get how much a truncated send dropped.",
-          },
+          deduplicated: { type: "boolean", description: "True when this client UUID was already committed." },
+          truncated: { type: "boolean", description: "Legacy daemons only: true when only a prefix was delivered." },
+          original_length: { type: "number", description: "Length the 4096-character cap was measured against." },
           warning: {
             type: "string",
-            description:
-              "Human-readable note — emitted when the summary was derived, the message was truncated, or an untracked direct notify/status names a recipient with no live transport or unobserved answer capability. Delivery is not refused; use request when a reply is needed.",
+            description: "Derived summary, truncation, or a recipient with no live transport; delivery is not refused.",
           },
           delivery_failure_id: {
             type: "string",
             description:
-              "Journal event id returned when tracked-send admission refuses because no reachable owner or declared fallback was observed. No direct message or pending row was created.",
+              "Journal event id when a tracked send was refused for lack of a reachable owner; nothing was created.",
           },
-          observed_at: {
-            type: "string",
-            description: "ISO timestamp of the transport snapshot behind a tracked-send delivery refusal.",
-          },
+          observed_at: { type: "string", description: "ISO timestamp of the transport snapshot behind a refusal." },
           ...ERROR_SHAPE,
         },
-        "Send result: { sent, id, summary, truncated, original_length, tracker? } on success (tracker for replies; summary_derived + warning when derived; truncated: true means only a prefix was delivered), { error, delivery_failure_id?, observed_at? } on refusal. A tracked request with no reachable recipient or declared fallback is journaled and refused without a direct message or pending row. Each direct delivery report (delivery, or deliveries for several recipients) carries state online|offline|bounced|parked; an online, offline or parked row adds the recipient's answer reason and last_mailbox_read_age_ms (null when it never read). offline with reason connected-no-consumer is a live seat nothing is consuming right now: the mail is in its mailbox and it reads at its next tick, so judge it by the read age, not the bare state.",
+        "Send result; a refusal carries { error, delivery_failure_id?, observed_at? }. Delivery report states (online|offline|bounced|parked) and their reasons: /tribe.",
       ),
     },
     cli: available({
@@ -477,41 +427,36 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Ball-tracker query: list active requests where the owner must reply, or derive expired/unanswered outcomes from active rows, journal facts, and replies. Default owner is the caller's session.",
     lifetime: "live-session",
+    exposure: "default",
     mcp: {
       name: "pending",
       description:
-        "Ball-tracker query: list the open requests an owner must reply to, or derive expired/unanswered outcomes. Defaults to the caller's own session — pass `all` for the fleet. See /tribe.",
+        "List the open request balls an owner must answer (default: the caller; all for the fleet), derive expired outcomes, or close one by id. See /tribe.",
       inputSchema: {
         type: "object",
         properties: {
           all: {
             type: "boolean",
-            description: "List every open request grouped by recipient owner (fleet-wide read-only attention).",
+            description: "Every owner's open requests, grouped by owner (read-only fleet view).",
           },
           expired: {
             type: "boolean",
             description:
-              "Read deadline-passed and historical unanswered outcomes. In the default view, live deadline-passed requests remain visible; this diagnostic view additionally reconstructs journal-backed history. Answered rows are omitted.",
+              "Read deadline-passed and historical unanswered outcomes. In the default view, live deadline-passed requests remain visible; this view adds journal-backed history. Answered rows are omitted.",
           },
           owed: {
             type: "boolean",
             description:
-              'With expired: keep only rows a live pending_request still stands behind (backing "live" — declared deadline passed, still open, needs the owner\'s decision). Drops journal-only history: settled rows and unsettled ghosts no close can reach.',
+              "With expired: only rows a live pending request still backs (deadline passed, still open, needs the owner's decision).",
           },
-          owner: {
-            type: "string",
-            description: "Session name that owns the open ball. Defaults to the caller's own session.",
-          },
+          owner: { type: "string", description: "Owner seat name (default: the caller)." },
           emitter: {
             type: "string",
             minLength: 1,
             description:
-              "Complete authenticated open-incident snapshot for this emitter, across every recipient. Requires current emitter authority; incompatible with owner/all/expired/owed/stale_ms/close/prune. Does not acknowledge a mailbox.",
+              "Complete open-incident snapshot for this emitter across every recipient; needs emitter authority; exclusive with the other selectors.",
           },
-          stale_ms: {
-            type: "number",
-            description: "Filter to requests opened more than this many milliseconds ago (stale-detection).",
-          },
+          stale_ms: { type: "number", description: "Only requests opened more than this many milliseconds ago." },
           prune: {
             type: "boolean",
             description: "Settle this owner's requests older than stale_ms as gc-expired. Requires stale_ms.",
@@ -519,45 +464,40 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           close: {
             type: "string",
             description:
-              "Close one ordinary pending request without sending a reply, after verified out-of-band completion. An incident requires close_evidence and its authenticated owner or dispatcher @chief; its emitter may also send --incident-cleared.",
+              "Close one ordinary request by id after verified out-of-band completion. An incident needs close_evidence and its owner or @chief.",
           },
           close_evidence: {
             type: "string",
-            description:
-              "Verbatim nonblank attestation for one incident manual close by its owner or dispatcher @chief. Recorded with the authenticated actor; project facts are not verified. Read, prune, batch and ordinary closes refuse evidence.",
+            description: "Verbatim attestation for one incident close; recorded with the actor, not verified.",
           },
         },
       },
       outputSchema: OBJ(
         {
-          owner: { type: "string", description: "The session whose open requests are listed." },
-          scope: {
-            type: "string",
-            description: "`all` for a fleet-wide projection; `emitter` for an authenticated complete emitter snapshot.",
-          },
-          emitter: { type: "string", description: "Exact emitter whose complete incident holdings were read." },
+          owner: { type: "string", description: "The owner whose open requests are listed." },
+          scope: { type: "string", description: "all for the fleet view; emitter for an emitter snapshot." },
+          emitter: { type: "string", description: "Emitter whose incident holdings were read." },
           all: { type: "boolean", description: "True for a fleet-wide projection." },
-          expired: { type: "boolean", description: "True when the explicit expired diagnostic view was requested." },
+          expired: { type: "boolean", description: "True when the expired view was requested." },
           pending: {
             type: "array",
             description:
-              'Active requests, or derive-at-read expired/unanswered outcomes when expired=true. Every row carries the current owner transport snapshot: owner_transport_registered, owner_transport_state, owner_state, owner_answer_capability, owner_transport_reason, owner_last_mailbox_read_age_ms (null when the owner never read its mailbox), and owner_transport_observed_at. owner_answer_capability is observed only when the owner has a connected, PID-live transport, a readable mailbox, and something consuming that mailbox (push delivery to a registered client, or an inbox wait the owner itself parked). owner_transport_reason connected-no-consumer means reachable and reading at its next tick, so branch on the reason and read age, never the bare capability; mailbox-read-unavailable means the owner cannot read its mailbox. These describe observation-time answer capability only; they never auto-close or reroute an obligation. Expired rows collapse to one per (request_id, recipient) with older generations disclosed as superseded_count, and carry backing: "live" (a pending_request row still stands behind it, settlement=null, genuinely owed) or "journal" (history: manual-close, incident-cleared, gc-expired, sender-withdrawn, or an unsettled ghost). Answered rows are omitted; owed=true keeps only backing "live".',
+              "Open requests, or derived expired outcomes (backing live|journal, superseded_count). Each row carries the owner's transport snapshot; vocabulary: /tribe.",
             items: { type: "object", additionalProperties: true },
           },
           owners: {
             type: "array",
-            description: "Fleet-wide groups: { owner, count, oldest_age_ms, pending }.",
+            description: "Fleet view groups: { owner, count, oldest_age_ms, pending }.",
             items: { type: "object", additionalProperties: true },
           },
-          owner_count: { type: "number", description: "Number of recipient owners with open requests." },
+          owner_count: { type: "number", description: "Owners with open requests." },
           oldest_age_ms: { type: "number", description: "Age of the oldest returned request." },
-          count: { type: "number", description: "Number of requests in the selected pending view." },
-          request_id: { type: "string", description: "Request id closed when `close` is used." },
-          closed: { type: "number", description: "Number of pending rows closed when `close` is used." },
+          count: { type: "number", description: "Requests in the selected view." },
+          request_id: { type: "string", description: "Request id closed by close." },
+          closed: { type: "number", description: "Pending rows closed by close." },
           warning: {
             type: "string",
-            description:
-              "Loud diagnostic when close closed 0 rows: leads with the exact journal-backed cause (already settled and by whom, settled by another owner under fanout first, or never tracked), then names the owner's other open request/message ids if any.",
+            description: "When close closed 0 rows: the journal-backed cause, then the owner's other open ids.",
           },
           ...ERROR_SHAPE,
         },
@@ -627,25 +567,22 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Long-poll the actionable inbox for a session until a direct request/query/assign/verdict, an incident opened or changed (its summary), or an owned tracked actionable broadcast arrives, or the timeout elapses. MCP requests at or above the measured host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
     lifetime: "live-session",
+    exposure: "default",
     mcp: {
       name: "inbox.wait",
-      description: `Short diagnostic wait for actionable inbox activity; defaults to the caller's session. The MCP default is ${DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS}ms and requests at or above the ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling return host_cut with advice=cli_wait, so use \`tribe inbox-wait\` for longer waits. Direct or owned tracked-broadcast request/query/assign/verdict rows wake it, and so does an incident opened or changed (its summary) — notify/status/response are inbox-visible and never wake by default. See /tribe.`,
+      description: `Short diagnostic wait for actionable inbox activity (default ${DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS}ms); a timeout at or above the ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling returns host_cut with advice=cli_wait, so use \`tribe inbox-wait\` for longer waits. Wakes on direct or owned tracked-broadcast request/query/assign/verdict rows and on an incident opened or changed; notify/status/response never wake by default.`,
       inputSchema: {
         type: "object",
         properties: {
-          session: {
-            type: "string",
-            description: "Session name to wait on. Defaults to the caller's own session.",
-          },
+          session: { type: "string", description: "Seat to wait on (default: the caller)." },
           timeout_ms: {
             type: "number",
             default: DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS,
-            description: `Requested diagnostic wait in milliseconds. Requests at or above the measured ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling return host_cut immediately. Use tribe inbox-wait for longer waits.`,
+            description: `Wait in milliseconds; at or above ${MCP_INBOX_WAIT_HOST_CEILING_MS} returns host_cut.`,
           },
           wake_on_correlated_reply: {
             type: "boolean",
-            description:
-              "Also wake when a response carries a validated reply settlement for one of this session's tracked requests (verdicts already wake). Status and notify correlation is non-closing. Defaults to false.",
+            description: "Also wake on a response that settles one of this seat's tracked requests (default false).",
           },
         },
       },
@@ -655,41 +592,24 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             status: {
               type: "string",
               enum: ["woken", "timeout", "aborted", "host_cut"],
-              description:
-                "Terminal outcome for the wait or its preflight refusal; timeout means no qualifying row arrived after the wait baseline.",
+              description: "Outcome of the wait, or host_cut for a preflight refusal.",
             },
-            session: { type: "string", description: "The session that was waited on." },
+            session: { type: "string", description: "The seat waited on." },
             unread_count: {
               type: "number",
-              description:
-                "Unanswered actionable message count at return time: unread attention plus tracked actionable direct or broadcast messages without a later owner status + ref TAKING receipt, de-duplicated by message. Incident balls are excluded.",
+              description: "Unanswered actionable messages at return time (incident balls excluded).",
             },
-            oldest_unread_age_min: {
-              type: "number",
-              description: "Age of the oldest item counted by unread_count, in minutes.",
-            },
-            oldest_unread_ts: {
-              type: "number",
-              description: "Timestamp of the oldest item counted by unread_count (unix ms).",
-            },
+            oldest_unread_age_min: { type: "number", description: "Age of the oldest counted item, minutes." },
+            oldest_unread_ts: { type: "number", description: "Timestamp of the oldest counted item, unix ms." },
             waited_ms: { type: "number", description: "How long the wait lasted." },
-            effective_timeout_ms: {
-              type: "number",
-              description: "The applied timeout after Tribe's maximum-window cap.",
-            },
-            timed_out: {
-              type: "boolean",
-              description: "True only when the timeout elapsed without a qualifying row newer than the wait baseline.",
-            },
-            aborted: {
-              type: "boolean",
-              description: "True when the daemon ended the wait before a qualifying DM arrived.",
-            },
+            effective_timeout_ms: { type: "number", description: "Applied timeout after the maximum-window cap." },
+            timed_out: { type: "boolean", description: "True when no qualifying row arrived before the timeout." },
+            aborted: { type: "boolean", description: "True when the daemon ended the wait early." },
             attention: ATTENTION_SCHEMA,
             woken_by: {
               type: "object",
               description:
-                "Set on every woken result: what woke the wait. kind=message names the row (seq, message_id, type, sender, summary), the ball it opened or moved (request_id), and, for a correlated reply, the request it settled (settles_request_id). kind=daemon-shutdown pairs with reconnect; kind=row-retired carries only seq.",
+                "What woke the wait: kind=message names the row and the ball it opened, moved or settled; daemon-shutdown pairs with reconnect; row-retired carries only seq.",
               properties: {
                 kind: { type: "string", enum: ["message", "daemon-shutdown", "row-retired"] },
                 seq: { type: "number" },
@@ -699,34 +619,25 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
                 summary: { type: ["string", "null"] },
                 request_id: { type: ["string", "null"] },
                 settles_request_id: { type: ["string", "null"] },
-                sent_at: {
-                  type: "string",
-                  description:
-                    "27407: when the waking row was first sent (ISO). A re-presented ball keeps its original timestamp.",
-                },
+                sent_at: { type: "string", description: "When the waking row was first sent (ISO)." },
                 replay: {
                   type: "boolean",
-                  description:
-                    "27407: true when the wake re-presents a row the mailbox already passed (untaken ball, 22203); do not treat it as new.",
+                  description: "True when the wake re-presents an untaken ball the mailbox already passed; not new.",
                 },
               },
               required: ["kind"],
             },
-            requested_ms: { type: "number", description: "Requested MCP wait when status=host_cut." },
-            ceiling_ms: { type: "number", description: "Measured host-safe MCP wait ceiling." },
+            requested_ms: { type: "number", description: "Requested wait when status=host_cut." },
+            ceiling_ms: { type: "number", description: "Host-safe MCP wait ceiling." },
             ceiling_source: {
               type: "string",
               enum: ["documented", "measured"],
               description: "Provenance of ceiling_ms.",
             },
-            advice: {
-              type: "string",
-              enum: ["cli_wait"],
-              description: "Closed routing advice for a refused MCP wait.",
-            },
+            advice: { type: "string", enum: ["cli_wait"], description: "Routing advice for a refused wait." },
             ...ERROR_SHAPE,
           },
-          "Inbox wait result or typed MCP host-ceiling refusal.",
+          "Inbox wait result, or a typed host-ceiling refusal.",
         ),
         oneOf: [
           {
@@ -788,18 +699,18 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Read tribe messages. Default returns attention (unread actionables plus self-owned pending balls), drains the bounded chronological event window, and advances its cursor; `events` omits rows already carried in `attention.actionable_unread`, so a message body appears once per read. ids/with/from/to reads are snapshots. since scans the journal and advances only with advance:true.",
     lifetime: "live-session",
+    exposure: "default",
     mcp: {
       name: "fetch",
       description:
-        "Read tribe messages. Default returns attention (unread actionables plus self-owned pending balls), drains the bounded chronological event window, and advances its cursor; `events` omits rows already carried in `attention.actionable_unread`, so a message body appears once per read. ids/with/from/to reads are snapshots. since scans the journal and advances only with advance:true.",
+        "Read messages. Default: attention (unread actionables plus own pending balls) and a bounded event window, advancing the cursor; events omit rows already in attention. ids/with/from/to are snapshots; since scans the journal and advances only with advance:true.",
       inputSchema: {
         type: "object",
         properties: {
           ids: {
             type: "array",
             items: { type: "string" },
-            description:
-              "Fetch specific message IDs without advancing the cursor. Each entry is a full message id, or a unique prefix of at least 8 characters; an ambiguous or unknown prefix is refused by name.",
+            description: "Message ids (full, or a unique prefix of at least 8 characters); snapshot, no cursor move.",
           },
           topics: {
             type: "array",
@@ -807,13 +718,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             description: "Optional topic globs, e.g. ['github:*', 'git:commit'].",
           },
           since: { type: "number", description: "Scan rows with rowid > since. Default mode uses the session cursor." },
-          with: { type: "string", description: "Bilateral history with this session name." },
+          with: { type: "string", description: "Bilateral history with this seat." },
           from: { type: "string", description: "One-sided history from this sender." },
           to: { type: "string", description: "One-sided history to this recipient." },
-          limit: {
-            type: "number",
-            description: "Max chronological event rows to return (default 50, max 500).",
-          },
+          limit: { type: "number", description: "Max event rows to return (default 50, max 500)." },
           advance: {
             type: "boolean",
             description: "Advance the session cursor after a since/default scan. Default: true only for default drain.",
@@ -821,7 +729,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           receipt: {
             type: "boolean",
             description:
-              "Whether a model is behind this read (default true). Pass false from a relay that forwards fire-and-forget and cannot know the model saw a row — an adapter wake-up drain, a host-stream bridge: the read returns attention and may advance the ambient cursor, but never acknowledges the mailbox cursor and never counts as the seat's attention read, so the rows stay in actionable_unread until the model's own read returns them (21757). A model-initiated read is always a receipt; do not pass false from one.",
+              "Default true: the read acknowledges the mailbox as the seat's attention read. false only from a relay that cannot know the model saw the rows.",
           },
         },
       },
@@ -831,13 +739,13 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           events: {
             type: "array",
             description:
-              "Visible messages. Each: { id, rowid, type, from, to, content, bead?, ref?, ts (ISO), delivery, topic?, room_id? }. Rows already carried in `attention.actionable_unread` are omitted, so a body appears once per read; attention ∪ events is the complete delivered set.",
+              "Visible messages { id, rowid, type, from, to, content, bead?, ref?, ts, delivery, topic? }; rows already in attention.actionable_unread are omitted.",
             items: { type: "object", additionalProperties: true },
           },
-          cursor: { type: "number", description: "Highest rowid returned (or unchanged when no rows matched)." },
+          cursor: { type: "number", description: "Highest rowid returned (unchanged when nothing matched)." },
           ...ERROR_SHAPE,
         },
-        "Default fetch result: { attention, events, cursor } with `events` omitting rows already carried in `attention.actionable_unread`; snapshot result: { events, cursor } with `attention` null (absent) and `events` the full window; { error } on validation failure.",
+        "Default: { attention, events, cursor }; snapshot: { events, cursor }; { error } on validation failure.",
       ),
     },
     cli: available({
@@ -888,9 +796,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Members",
     description: "List active tribe sessions with their domains",
     lifetime: "live-session",
+    exposure: "default",
     mcp: {
       name: "members",
-      description: "List active tribe sessions with their domains",
+      description: "List sessions with transport, owner and mailbox-read verdicts (all: include disconnected rows).",
       inputSchema: {
         type: "object",
         properties: { all: { type: "boolean", description: "Include disconnected session rows (default: false)" } },
@@ -900,41 +809,38 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           sessions: {
             type: "array",
             description:
-              "Per-session rows include the registered delivery mode (push|pull), daemon-authoritative transport_state/transport_alive (connected|disconnected), separate owner_state (live|dead|unknown), mailbox_read_capability (available|unavailable with observed evidence and reason), answer_capability (observed only with a connected, PID-live transport, a readable mailbox, and a consumer of that mailbox: push delivery to a registered client or an inbox wait the owner itself parked) with answer_reason (connected-pid-live-transport, connected-no-consumer for a reachable seat that reads at its next tick, mailbox-read-unavailable, or a transport-down reason) and last_mailbox_read_age_ms (null when it never read), transport_reason, agent_alive, pid_alive, and silence-derived is_silent — pid-probed at read time for connected rows, never asserted from transport-registry presence alone; legacy alive is their conservative conjunction. An exact identity retired by explicit delivery policy remains visible under --all but no longer counts as a missing live seat. transport_registered reports the raw registry fact on its own: a registration whose transport pids are provably dead reads transport_registered true with transport_state disconnected and transport_reason registered-transport-pids-dead, so no row ever pairs a connected transport with a dead pid. Disconnected rows are never pid-probed (a stored PID is reusable and proves nothing once transport is gone), so their pid_alive/agent_alive read true by default while alive stays false. Also carries transport_pids, uptime_min, and activity-only last_seen_sec. A disconnected numeric PID without identity-bound process evidence reports owner unknown. A disconnected row whose transport the daemon refused for presenting this seat's session authority under another seat's name and launch reads transport_reason transport-carries-another-seats-identity and carries foreign_transport (name, launch_id, pid, refused_at). A supervised plugin adapter's row carries adapter_exit_record, the file where its supervisor appends one line per adapter exit.",
+              "One row per session: delivery, transport_state, owner_state, mailbox_read_capability, answer_capability with answer_reason, last_mailbox_read_age_ms, pids, uptime. Vocabulary: /tribe.",
             items: { type: "object", additionalProperties: true },
           },
           membership_discrepancy: {
             type: "object",
             description:
-              "Present when one or more known addressable durable launch rows have no authenticated transport. Carries connected-durable/known-durable/missing counts plus missing launch identities; unidentified and connection-scoped sessions do not inflate the comparison, and missing transport does not establish agent absence. Carries finished_count when one or more other disconnected durable rows were instead classified finished (see finished_launches) — those never inflate missing_count or known_durable_launches. When the daemon was started with a declared roster (TRIBE_EXPECTED_MEMBERS, a plain per-name expected:boolean, never a restart-policy vocabulary), known-durable/connected-durable keep their row meaning and expected_count/connected_expected_count are added (declared-expected names, and those with a live transport), `missing` can also carry state never-registered (a declared-expected name with no durable row at all) or foreign-identity-transport (a declared-expected seat whose connector was refused for carrying another seat's identity, with foreign_transport), and dormant_count/departed_sibling_count/departed_foreign_count appear alongside finished_count for any on-demand or undeclared rows classified this call (see dormant_launches/departed_launches) — absent a declaration none of this moves.",
+              "Present when known durable launches have no transport: missing-transport, never agent absence. With a declared roster, also expected, dormant and departed counts.",
             additionalProperties: true,
           },
           finished_launches: {
             type: "array",
-            description:
-              "Disconnected durable launches whose departure was journaled and is the last thing that happened to their registration — i.e. the launch ended rather than merely losing its transport; present only when non-empty and never itself a degradation signal. Reached with no declared roster, and with one that declares the name on-demand (expected: false) and its departure settled.",
+            description: "Durable launches whose journaled departure was the last thing that happened to them.",
             items: { type: "object", additionalProperties: true },
           },
           dormant_launches: {
             type: "array",
-            description:
-              "Declared-roster-only: on-demand (expected: false) durable launches sitting quiet between uses — hab pages them once on a crash and never remounts, so silence is by design. Present only when non-empty and never a degradation signal; absent entirely with no declared roster.",
+            description: "Declared roster only: on-demand launches quiet between uses.",
             items: { type: "object", additionalProperties: true },
           },
           departed_launches: {
             type: "array",
             description:
-              "Declared-roster-only: disconnected durable launches whose name is absent from the declared roster entirely — nothing expects them up, so they are history nobody was watching. Present only when non-empty and never a degradation signal; absent entirely with no declared roster. Each row carries member_id/name/launch_id/launch_parent_pid, last_seen (ISO of the row's own updated_at), left_at/reason when a keyed departure fact exists (informational only, never a classification input), and why: undeclared-sibling means the name's family (the part before its last '/', or the whole name with none) matches a declared name's family — retired on purpose or dropped by mistake, check the declaration; undeclared-foreign means no declared name shares that family — more likely a probe, a test, or an ad-hoc session.",
+              "Declared roster only: disconnected launches absent from the roster, with why (undeclared-sibling|undeclared-foreign).",
             items: { type: "object", additionalProperties: true },
           },
           unexpected_connected: {
             type: "array",
-            description:
-              "Declared-roster-only: names of currently-connected sessions the declared roster never mentions at all (probes, subagents). Fine to be connected; present only when non-empty, never itself a degradation signal, and never surfaced by tribe.health.",
+            description: "Declared roster only: connected names the roster never mentions.",
             items: { type: "string" },
           },
         },
-        "Members list under `sessions`, plus optional `membership_discrepancy` when known addressable durable launches are missing transports, optional `finished_launches` for durable launches that ended cleanly, and — only when the daemon was started with a declared roster — optional `dormant_launches`, `departed_launches`, and `unexpected_connected`.",
+        "Members under sessions, plus the optional roster projections above when non-empty.",
       ),
     },
     cli: available({
@@ -962,9 +868,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Rename Session",
     description: "Rename this session in the tribe",
     lifetime: "live-session",
+    // Listed although no seat called it in the census: the shipped plugin skill maps `/tribe rename` to it (201 bytes).
+    exposure: "default",
     mcp: {
       name: "rename",
-      description: "Rename this session in the tribe",
+      description: "Rename this session.",
       inputSchema: {
         type: "object",
         properties: { new_name: { type: "string", description: "New session name" } },
@@ -975,15 +883,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           renamed: { type: "boolean" },
           old_name: { type: "string" },
           new_name: { type: "string" },
-          name: { type: "string", description: "Present on rename-to-self no-op." },
-          existing_names: {
-            type: "array",
-            items: { type: "string" },
-            description: "On collision: active session names already in use.",
-          },
+          name: { type: "string", description: "Present on a rename-to-self no-op." },
+          existing_names: { type: "array", items: { type: "string" }, description: "On collision: names in use." },
           ...ERROR_SHAPE,
         },
-        "Rename result: { renamed, old_name, new_name } on success, { renamed:false, name } on no-op, { error, existing_names? } on collision.",
+        "Rename result; { renamed:false, name } on no-op, { error, existing_names? } on collision.",
       ),
     },
     cli: hidden("MCP-only live-session identity mutation; no one-shot CLI projection is defined in this slice."),
@@ -993,65 +897,52 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Health",
     description: "Diagnostic: check for silent members, stale beads, unread messages",
     lifetime: "diagnostic",
+    exposure: "default",
     mcp: {
       name: "health",
-      description: "Diagnostic: check for silent members, stale beads, unread messages",
+      description: "Diagnostic snapshot: silent members, transport wedges, pending balls, cadence, issues.",
       inputSchema: { type: "object", properties: {} },
       outputSchema: OBJ(
         {
           members: {
             type: "array",
             description:
-              "Connected-member diagnostics separate transport_registered, transport_state/transport_alive, owner_state, agent_alive, pid_alive, and silence-derived is_silent; legacy alive is their conservative conjunction, with warnings carrying human-readable causes. A registered transport whose pids are dead reads disconnected here exactly as it does on tribe.members, so the two endpoints cannot disagree about one session.",
+              "Per connected member: transport_state, owner_state, agent_alive, pid_alive and silence-derived is_silent, with warnings.",
             items: { type: "object", additionalProperties: true },
           },
           transport_wedges: {
             type: "array",
-            description:
-              "Disconnected addressable complete-launch rows (plus malformed partial provenance) kept loud with wedge_reason. Exact identities retired by explicit delivery policy remain historical rows but are excluded; a connected retired identity stays loud in members and issues. Unidentified complete-launch rows are counted separately under anonymous_disconnected; connection-scoped no-launch litter is excluded and reapable after grace.",
+            description: "Disconnected addressable launch rows kept loud with wedge_reason.",
             items: { type: "object", additionalProperties: true },
           },
           anonymous_disconnected: {
             type: "number",
-            description:
-              "Count of retained disconnected unknown-* complete-launch rows. They remain observable without inflating addressable transport wedges or membership discrepancy.",
+            description: "Retained disconnected unknown-* rows; never counted as wedges.",
           },
           membership_discrepancy: {
             type: "object",
-            description:
-              "Present when known addressable durable launch rows are missing authenticated transports. Uses the same projection as tribe.members so MISSING is never silently aliased to ABSENT. Carries finished_count when other disconnected durable rows were instead classified finished (a launch that ended, not one that vanished); tribe.health never lists those rows itself — see tribe.members' finished_launches. When the daemon was started with a declared roster (TRIBE_EXPECTED_MEMBERS, a plain per-name expected:boolean, never a restart-policy vocabulary), known-durable/connected-durable instead count the declared-expected names themselves, missing can also carry state never-registered or foreign-identity-transport, and dormant_count/departed_sibling_count/departed_foreign_count appear alongside finished_count for on-demand or undeclared rows (departed split by why — undeclared-sibling shares a declared name's family, undeclared-foreign shares none; tribe.health lists neither list itself — see tribe.members' dormant_launches/departed_launches) — absent a declaration none of this moves, and tribe.health never gains a top-level key either way.",
+            description: "Same projection as members: missing-transport, never agent absence.",
             additionalProperties: true,
           },
-          stale_beads: { type: "number", description: "Count of beads claimed but idle past threshold." },
+          stale_beads: { type: "number", description: "Beads claimed but idle past threshold." },
           unread: {
             type: "array",
-            description: "Actionable direct-message counts per recipient not yet drained.",
+            description: "Actionable direct-message counts per recipient.",
             items: { type: "object", additionalProperties: true },
           },
-          pending_balls: {
-            type: "object",
-            description:
-              "Bounded active-ball summary with counts, oldest ages, per-owner aggregates, and a stale aggregate.",
-            additionalProperties: true,
-          },
+          pending_balls: { type: "object", description: "Bounded active-ball summary.", additionalProperties: true },
           cadence: {
             type: "object",
-            description:
-              "Read-only 24h response latency, open-ball, connected-session cursor lag, and database growth projection. Every subprojection carries as_of_ms; inbox lag is explicitly projection-only and excludes pane/turn seat-liveness verdicts.",
+            description: "24h response latency, open balls, cursor lag and database growth, each with as_of_ms.",
             additionalProperties: true,
           },
           identity: {
             type: "object",
             description:
-              "The identity verifier the daemon booted with (verifier path, null when none; supplies_gen) and live sessions per authority (verified, claimed). A claimed session registered without a verified token and cannot read its own mailbox.",
+              "The identity verifier the daemon booted with, and live sessions per authority (verified, claimed).",
             additionalProperties: true,
           },
-          issues: {
-            type: "array",
-            description:
-              "Diagnostic warnings, including stale balls plus response latency, as-of-stamped connected-session cursor projections, and configured database-growth breaches. Cursor projections never assert seat liveness.",
-            items: { type: "string" },
-          },
+          issues: { type: "array", description: "Diagnostic warnings.", items: { type: "string" } },
         },
         "Health snapshot - members + counts + cadence.",
       ),
@@ -1066,22 +957,18 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Join",
     description: "Join/rejoin: re-announce this session's name and domains after compaction or rejoin.",
     lifetime: "live-session",
+    exposure: "default",
     mcp: {
       name: "join",
-      description: "Join/rejoin: re-announce this session's name and domains after compaction or rejoin.",
+      description: "Join or rejoin as a seat name, e.g. after a start, restart or compaction.",
       inputSchema: {
         type: "object",
         properties: {
-          name: { type: "string", description: "Session name" },
-          domains: {
-            type: "array",
-            items: { type: "string" },
-            description: "Domain expertise areas, e.g. ['silvery', 'flexily'].",
-          },
+          name: { type: "string", description: "Seat name" },
+          domains: { type: "array", items: { type: "string" }, description: "Domain expertise areas." },
           delivery: {
             type: "string",
-            description:
-              "How this session consumes messages. 'push' sends channel notifications. 'pull' queues rows for tribe.fetch. Sender is transport-blind.",
+            description: "push: channel notifications; pull: rows wait for fetch.",
             enum: TRIBE_DELIVERY_MODES,
           },
         },
@@ -1094,13 +981,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           role: { type: "string" },
           domains: { type: "array", items: { type: "string" } },
           delivery: { type: "string", enum: TRIBE_DELIVERY_MODES },
-          previous_name: {
-            type: "string",
-            description: "Set when this join performed a rename relative to the prior session name.",
-          },
+          previous_name: { type: "string", description: "Set when this join renamed the session." },
           ...ERROR_SHAPE,
         },
-        "Join result: { joined, name, role, domains, delivery, previous_name? }. { error } on name validation failure.",
+        "Join result; { error } on name validation failure.",
       ),
     },
     cli: available({
@@ -1141,10 +1025,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Restart the tribe MCP server from the same pinned module root. This changes no code; clients reconnect on their own.",
     lifetime: "operator",
+    exposure: "default",
     mcp: {
       name: "restart",
-      description:
-        "Restart the tribe MCP server from the same pinned module root. This changes no code; clients reconnect on their own.",
+      description: "Restart the tribe daemon from the same module root; changes no code, clients reconnect.",
       inputSchema: {
         type: "object",
         properties: { reason: { type: "string", description: "Why the restart is needed (logged to events)" } },
@@ -1155,7 +1039,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           reason: { type: "string" },
           pid: { type: "number", description: "PID of the daemon about to re-exec." },
         },
-        "Restart acknowledgment - the actual re-exec happens shortly after this response flushes.",
+        "Restart acknowledgment; the re-exec follows shortly after this response.",
       ),
     },
     cli: hidden(
@@ -1169,30 +1053,23 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Generate a retrospective report analyzing tribe message history, coordination health, and per-member activity",
     lifetime: "diagnostic",
+    exposure: "opt-in",
     mcp: {
       name: "retro",
-      description:
-        "Generate a retrospective report analyzing tribe message history, coordination health, and per-member activity",
+      description: "Retrospective report over message history, coordination health and per-member activity.",
       inputSchema: {
         type: "object",
         properties: {
-          since: {
-            type: "string",
-            description: 'Duration to look back (e.g. "2h", "30m", "1d"). Default: entire session.',
-          },
+          since: { type: "string", description: 'Look-back duration, e.g. "2h", "1d" (default: entire session).' },
           format: { type: "string", description: "Output format", enum: ["markdown", "json"], default: "markdown" },
         },
       },
       outputSchema: OBJ(
         {
-          text: {
-            type: "string",
-            description:
-              "Markdown retro report. Present when format=markdown (default). For format=json the structured payload is the full retro report object instead - properties such as session count, message volume, per-member breakdowns.",
-          },
+          text: { type: "string", description: "Markdown report (format=markdown); json returns the report object." },
           ...ERROR_SHAPE,
         },
-        "Retro result: { text } for markdown, full report object for json, { error } on invalid duration.",
+        "Retro result; { error } on an invalid duration.",
       ),
     },
     cli: hidden(
@@ -1205,16 +1082,17 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Debug",
     description: "Dump daemon internals for troubleshooting - clients, per-session cursors.",
     lifetime: "diagnostic",
+    exposure: "opt-in",
     mcp: {
       name: "debug",
-      description: "Dump daemon internals for troubleshooting - clients, per-session cursors.",
+      description: "Dump daemon internals: clients and per-session cursors.",
       inputSchema: { type: "object", properties: {} },
       outputSchema: OBJ(
         {
           clients: { type: "array", items: { type: "object", additionalProperties: true } },
           cursors: { type: "array", items: { type: "object", additionalProperties: true } },
         },
-        "Daemon internals - shape varies by daemon build; always at least { clients, cursors }.",
+        "Daemon internals; at least { clients, cursors }.",
       ),
     },
     cli: hidden("MCP-only diagnostic; no one-shot CLI projection is defined in this slice."),
@@ -1224,25 +1102,26 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Repair",
     description: "Operator-bounded daemon state repair.",
     lifetime: "operator",
+    exposure: "opt-in",
     mcp: {
       name: "repair",
       description:
-        "Operator repair for bounded daemon state fixes: advance one inbox cursor or reap stale connection-scoped transport registrations without deleting history.",
+        "Operator repair: advance one inbox cursor to the tail, or reap stale connection-scoped transport registrations. History is never deleted.",
       inputSchema: {
         type: "object",
         properties: {
-          session: { type: "string", description: "Session name to repair. Defaults to the caller's current session." },
+          session: { type: "string", description: "Seat to repair (default: the caller)." },
           inbox_cursor: {
             type: "string",
             enum: ["tail", "reconcile"],
             description:
-              'Use "tail" to advance only the ambient inbox cursor to the current journal tail. "reconcile" is refused (21757): the actionable mailbox cursor is advance-only and has no reconcile lever; to acknowledge a seat\'s unread actionables on its behalf run `tribe inbox-drain --session <name>`.',
+              "tail advances the ambient inbox cursor to the journal tail; reconcile is refused (acknowledge actionables with `tribe inbox-drain --session <name>`).",
           },
           reap_stale_transports: {
             type: "boolean",
             const: true,
             description:
-              "Reap disconnected connection-scoped registrations after reconnect grace. Durable launch rows, active siblings, messages, and pending balls are preserved.",
+              "Reap disconnected connection-scoped registrations after reconnect grace; durable rows, messages and balls are kept.",
           },
         },
         oneOf: [{ required: ["inbox_cursor"] }, { required: ["reap_stale_transports"] }],
@@ -1265,7 +1144,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           reaped_sessions: { type: "array", items: { type: "object", additionalProperties: true } },
           ...ERROR_SHAPE,
         },
-        "Repair result: cursor fields for inbox repair, auditable examined/reaped/reason counts for stale transports, or { error }.",
+        "Repair result: cursor fields for an inbox repair, examined/reaped/reason counts for stale transports, or { error }.",
       ),
     },
     cli: available({
@@ -1304,27 +1183,21 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Per-session subscription. Governs BOTH the push wakeup and what a tribe.fetch drain returns, so it is the lever for protecting your own context. mode controls focus level: focus = addressed + actionable only; normal = everything minus active mutes; ambient = everything. mute stores topic globs to silence until the optional timestamp. Filtered rows stay durable and remain reachable through an explicit history read (from/with/since) — they are not delivered. Empty args clears the filter.",
     lifetime: "live-session",
+    exposure: "opt-in",
     mcp: {
       name: "filter",
       description:
-        "Per-session subscription. Governs BOTH the push wakeup and what a tribe.fetch drain returns, so it is the lever for protecting your own context. mode controls focus level: focus = addressed + actionable only; normal = everything minus active mutes; ambient = everything. mute stores topic globs to silence until the optional timestamp. Filtered rows stay durable and remain reachable through an explicit history read (from/with/since) — they are not delivered. Empty args clears the filter.",
+        "Per-session subscription for push wakeups and fetch drains: mode focus (addressed + actionable only) | normal (all minus mutes) | ambient (all); mute topic globs until a timestamp. Filtered rows stay readable by explicit history reads. Empty args clear the filter.",
       inputSchema: {
         type: "object",
         properties: {
           mode: {
             type: "string",
             enum: ["focus", "normal", "ambient"],
-            description: "Persistent filter mode. Defaults to 'normal' when args are empty.",
+            description: "Persistent filter mode (default normal).",
           },
-          mute: {
-            type: "array",
-            items: { type: "string" },
-            description: "Optional topic globs to silence, e.g. ['github:*'].",
-          },
-          until: {
-            type: "number",
-            description: "Optional unix-ms timestamp at which mute expires. Absent = persistent.",
-          },
+          mute: { type: "array", items: { type: "string" }, description: "Topic globs to silence, e.g. ['github:*']." },
+          until: { type: "number", description: "Unix-ms timestamp at which the mute expires (absent = persistent)." },
         },
         required: [],
       },
@@ -1332,15 +1205,15 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           set: { type: "boolean" },
           mode: { type: "string", enum: ["focus", "normal", "ambient"] },
-          until: { type: ["string", "null"], description: "ISO timestamp at which mute expires; null when no expiry." },
+          until: { type: ["string", "null"], description: "ISO timestamp at which the mute expires; null when none." },
           mute: {
             type: ["array", "null"],
             items: { type: "string" },
-            description: "Topic globs being silenced; null when not muting anything.",
+            description: "Topic globs silenced; null when none.",
           },
           ...ERROR_SHAPE,
         },
-        "Filter result: { set, mode, until, mute } on success, { error } on argument validation failure.",
+        "Filter result: { set, mode, until, mute }; { error } on argument validation failure.",
       ),
     },
     cli: hidden("MCP-only session filter; no one-shot CLI projection is defined in this slice."),
@@ -1351,23 +1224,23 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Publish this session's latest tool-call-lifecycle snapshot. Daemon caches last-write-wins per session name; chief / observers read via tribe.lifecycle. Payload schema is opaque to the daemon (owned by the publisher).",
     lifetime: "live-session",
+    exposure: "opt-in",
     mcp: {
       name: "lifecycle.publish",
       description:
-        "Publish this session's latest tool-call-lifecycle snapshot. Daemon caches last-write-wins per session name; chief / observers read via tribe.lifecycle. Payload schema is opaque to the daemon (owned by the publisher).",
+        "Publish this session's tool-call lifecycle snapshot (last write wins per seat; read it with lifecycle).",
       inputSchema: {
         type: "object",
         properties: {
           snapshot: {
             type: "object",
-            description:
-              "Opaque lifecycle snapshot. Publisher-owned shape (e.g. { currentState, activeTool, elapsedMs, softDeadlineMs, hardDeadlineMs }). Daemon stores verbatim.",
+            description: "Opaque publisher-owned object, stored verbatim.",
             additionalProperties: true,
           },
           sessionName: {
             type: "string",
             description:
-              "Attribute the snapshot to this session name (the daemon's store key). Required for multiplexing publishers - one host observing many agent sessions over a single connection - so each agent's snapshot is keyed by its own name. Omit to use the connection's own name.",
+              "Seat to attribute the snapshot to (default: this connection's name); for multiplexing publishers.",
           },
         },
         required: ["snapshot"],
@@ -1375,11 +1248,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
       outputSchema: OBJ(
         {
           published: { type: "boolean" },
-          sessionName: { type: "string", description: "The publishing session's tribe name (lookup key)." },
-          receivedAt: { type: "string", description: "ISO timestamp when the daemon received the snapshot." },
+          sessionName: { type: "string", description: "The seat the snapshot is stored under." },
+          receivedAt: { type: "string", description: "ISO timestamp the daemon received it." },
           ...ERROR_SHAPE,
         },
-        "Publish result: { published, sessionName, receivedAt } on success, { error } when the daemon's lifecycle store is unavailable or snapshot is missing.",
+        "Publish result; { error } when the lifecycle store is unavailable or snapshot is missing.",
       ),
     },
     cli: hidden("MCP-only live lifecycle publisher; no one-shot CLI projection is defined in this slice."),
@@ -1390,20 +1263,17 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Publish an agent recovery (force-settle / restart / rotation) as an ambient `health:recovery` broadcast (km @ag/super/20327 lateral channel). The topic is set SERVER-SIDE - clients cannot set topics via tribe.send. `content` is the human-readable summary; `agent`/`seq` are optional metadata for consumer dedup/ordering.",
     lifetime: "live-session",
+    exposure: "opt-in",
     mcp: {
       name: "health.publish",
       description:
-        "Publish an agent recovery (force-settle / restart / rotation) as an ambient `health:recovery` broadcast (km @ag/super/20327 lateral channel). The topic is set SERVER-SIDE - clients cannot set topics via tribe.send. `content` is the human-readable summary; `agent`/`seq` are optional metadata for consumer dedup/ordering.",
+        "Publish an agent recovery (force-settle, restart, rotation) as an ambient health:recovery broadcast.",
       inputSchema: {
         type: "object",
         properties: {
-          content: { type: "string", description: "Human-readable recovery summary (required, non-empty)." },
-          agent: { type: "string", description: "The recovering agent's tribe name (optional metadata)." },
-          seq: {
-            type: "number",
-            description:
-              "Per-agent monotonic recovery sequence from the lateral producer (optional; consumer dedup/ordering).",
-          },
+          content: { type: "string", description: "Human-readable recovery summary (non-empty)." },
+          agent: { type: "string", description: "The recovering agent's seat name." },
+          seq: { type: "number", description: "Per-agent monotonic recovery sequence, for consumer dedup." },
         },
         required: ["content"],
       },
@@ -1411,11 +1281,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           published: { type: "boolean" },
           id: { type: "string", description: "Message id assigned by the daemon." },
-          agent: { type: "string", description: "Echo of the recovering agent's name, when supplied." },
-          seq: { type: "number", description: "Echo of the recovery sequence, when supplied." },
+          agent: { type: "string", description: "Echo of agent, when supplied." },
+          seq: { type: "number", description: "Echo of seq, when supplied." },
           ...ERROR_SHAPE,
         },
-        "Publish result: { published, id } on success, { error } when content is missing/empty.",
+        "Publish result; { error } when content is missing or empty.",
       ),
     },
     cli: hidden("MCP-only health event publisher; no one-shot CLI projection is defined in this slice."),
@@ -1426,37 +1296,32 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Read the latest tool-call-lifecycle snapshot for a session (or all sessions). Diagnostic surface for chief / observers",
     lifetime: "diagnostic",
+    exposure: "opt-in",
     mcp: {
       name: "lifecycle",
-      description:
-        "Read the latest tool-call-lifecycle snapshot for a session (or all sessions). Diagnostic surface for chief / observers",
+      description: "Read the latest lifecycle snapshot for one seat, or every cached snapshot newest first.",
       inputSchema: {
         type: "object",
         properties: {
-          session: {
-            type: "string",
-            description: "Tribe session name (e.g. @agent/8). Omit to list every cached snapshot, newest first.",
-          },
+          session: { type: "string", description: "Seat name; omit to list every cached snapshot." },
         },
       },
       outputSchema: OBJ(
         {
-          session: { type: "string", description: "Echoed back when querying a single session. Omitted on list-all." },
+          session: { type: "string", description: "Echoed for a single-seat query." },
           snapshot: {
             type: ["object", "null"],
-            description:
-              "Single-session result: { sessionName, sessionId, receivedAt (ISO), payload } or null when nothing has been published. Omitted on list-all.",
+            description: "{ sessionName, sessionId, receivedAt, payload }, or null when nothing was published.",
             additionalProperties: true,
           },
           snapshots: {
             type: "array",
-            description:
-              "List-all result: every cached snapshot, newest first. Omitted when querying a single session.",
+            description: "List-all result, newest first.",
             items: { type: "object", additionalProperties: true },
           },
           ...ERROR_SHAPE,
         },
-        "Lifecycle result: { session, snapshot } per-session, { snapshots } list-all, { error } on validation failure.",
+        "Lifecycle result: { session, snapshot } for one seat, { snapshots } for all, { error } on validation failure.",
       ),
     },
     cli: hidden("MCP-only lifecycle reader; no one-shot CLI projection is defined in this slice."),
