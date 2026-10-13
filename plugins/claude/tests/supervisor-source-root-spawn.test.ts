@@ -170,5 +170,10 @@ describe("the supervisor spawns the adapter from the daemon's landing root", () 
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ adapter_pid: null, code: null, signal: null, decision: "stop" })
     expect((rows[0] as { reason?: unknown }).reason).toContain("no code root within 300 ms of the cold start")
+    // @cto 857b0478 (28920 step 3, reading B): the row is what the reader of a dark seat actually sees, so the
+    // remedy rides the reason, host-neutral - no host is named in code.
+    expect((rows[0] as { reason?: unknown }).reason).toContain(
+      "a host that does not respawn this child leaves the seat dark; relaunch the seat",
+    )
   }, 20_000)
 })

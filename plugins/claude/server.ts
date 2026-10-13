@@ -205,16 +205,22 @@ async function superviseAdapter(): Promise<void> {
       () => stopping,
     )
     if (resolution.kind === "unpublished") {
-      // NO SILENT ERRORS (28920): this give-up is terminal for the host's MCP endpoint - the endpoint stays
-      // dead until the seat is relaunched - so it leaves the same durable exit row every other terminal exit
-      // leaves, naming its reason. Until now the only trace was this stderr line in the host's own capture,
-      // which nobody reads for a seat that has gone dark.
+      // NO SILENT ERRORS (28920): this give-up is terminal for the host's MCP endpoint. After a daemon restart a
+      // claude or codex seat re-registers its transport on its own; a cursor seat does not, and its endpoint stays
+      // disconnected until the seat is relaunched, so `hh-hab up <seat> --relaunch` is the recovery and a wait is
+      // not. It is therefore recorded as the same durable exit row every other terminal exit leaves, and the ROW
+      // carries the remedy, host-neutrally - "a host that does not respawn this child leaves the seat dark; relaunch
+      // the seat" - because the row is what the reader of a dark seat actually sees (@cto 857b0478). No host is
+      // named there: one supervisor serves claude, codex and cursor alike. Until now the only trace was this stderr
+      // line in the host's own capture, which nobody reads for a seat that has gone dark.
       recordAdapterExit(exitRecord, {
         adapterPid: undefined,
         code: null,
         signal: null,
         decision: "stop",
-        reason: `refused to start the adapter without a daemon-published landing root; ${resolution.reason}`,
+        reason:
+          `refused to start the adapter without a daemon-published landing root; ${resolution.reason}; ` +
+          "a host that does not respawn this child leaves the seat dark; relaunch the seat",
       })
       process.stderr.write(
         "tribe plugin supervisor: refused to start the adapter without a daemon-published landing root; " +
