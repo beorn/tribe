@@ -15,13 +15,22 @@
  * This module is hot-path — `sanitize()` is called per injected item per
  * UserPromptSubmit. Keep allocations minimal.
  */
+import { injectionTagAlternation } from "./tags.ts"
+
+/**
+ * One precompiled strip for every structural tag {@link tags} names — the ONE
+ * home, so a new wrapper tag stops being a breakout vector here by construction.
+ */
+const STRUCTURAL_TAG_RE = new RegExp(`</?(?:${injectionTagAlternation()})\\b[^>]*>`, "gi")
 
 /**
  * Structural sanitizer for untrusted injected text.
  *
  * - Truncates to `maxLen` chars (post-cleanup)
- * - Strips XML-ish opening/closing tags that could escape our wrappers:
- *   session_memory, injected_context, recall-memory, context-protocol
+ * - Strips every structural tag named in {@link INJECTION_TAG_NAMES}
+ *   (session_memory, injected_context, item, recall-memory, snippet,
+ *   context-protocol, user_prompt, channel, system-reminder) that could
+ *   escape our wrappers or confuse the envelope parser
  * - Strips leading `>` quote markers (prevent block-quote breakout)
  * - Strips triple-backtick code fences
  * - Collapses runs of whitespace (including newlines) to single spaces
@@ -31,10 +40,7 @@
  */
 export function sanitize(text: string, maxLen: number): string {
   return text
-    .replace(/<\/?session_memory[^>]*>/gi, "")
-    .replace(/<\/?injected_context[^>]*>/gi, "")
-    .replace(/<\/?recall-memory[^>]*>/gi, "")
-    .replace(/<\/?context-protocol[^>]*>/gi, "")
+    .replace(STRUCTURAL_TAG_RE, "")
     .replace(/```/g, "")
     .replace(/^[>\s]+/gm, "")
     .replace(/\s+/g, " ")

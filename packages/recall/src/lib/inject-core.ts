@@ -8,7 +8,7 @@
  * discriminated result. The only moving part between them is WHERE the
  * seen set lives — pluggable via the `SeenStore` interface.
  *
- * **Envelope framing** is owned by `@bearly/injection-envelope` — the single
+ * **Envelope framing** is owned by `tribe-injection-envelope` — the single
  * chokepoint for injection defense. Both recall paths build `InjectedItem`s and
  * call `wrapInjectedContext()`, so the `<injected_context>` envelope, its
  * directive attributes, the `<item>` framing, the imperative rewrite and the
@@ -285,7 +285,12 @@ export async function runInjectDelta(
   // The notice replaces an empty injection, never the steps it skipped (@ag/tribe/25071).
   return {
     skipped: false,
-    additionalContext: wrapInjectedContext({ source: "recall", mode: "snippet", items: [vaultNoticeItem()] }),
+    additionalContext: wrapInjectedContext({
+      source: "recall",
+      mode: "snippet",
+      items: [vaultNoticeItem()],
+      snippetChars: opts.snippetChars ?? 300,
+    }),
     newKeys: [],
     turn: store.turn(),
     ...(result.skippedSteps === undefined ? {} : { skippedSteps: result.skippedSteps }),
@@ -491,16 +496,17 @@ async function runRecallInjection(
     if (containsRejectedSignal(text)) continue
 
     const label = r.sessionTitle ?? r.sessionId.slice(0, 8)
-    // The chokepoint renders a short `session` attribute for every item, so a
-    // vault match's full fs_path (or node id) rides in `path` instead of being
-    // truncated away in `sessionId` (the truncation only makes sense for opaque
-    // session UUIDs).
+    // A vault match's locator IS a path (an fs_path or node id), not an opaque
+    // session UUID — so it rides in `path` ONLY. Emitting it as `sessionId` too
+    // would make the chokepoint render a truncated 8-char `session` attribute
+    // AND make the chat row prefer that truncated session over the full path
+    // (the 28904 review's compatibility MUST). A session-backed item keeps its
+    // (truncatable) `sessionId`.
     items.push({
       title: label,
       snippet: text.slice(0, snippetChars),
       type: r.type,
-      sessionId: r.sessionId,
-      ...(r.type === "vault" ? { path: r.sessionId } : {}),
+      ...(r.type === "vault" ? { path: r.sessionId } : { sessionId: r.sessionId }),
     })
     newKeys.push(key)
     if (items.length >= limitSnippets) break
@@ -535,6 +541,10 @@ async function runRecallInjection(
     source: "recall",
     mode: "snippet",
     items: notice ? [vaultNoticeItem(), ...items] : items,
+    // Forward recall's snippet cap so the chokepoint does not re-cap at its own
+    // 300 default — a caller that set `snippetChars` above 300 would otherwise
+    // be truncated silently (28904 review).
+    snippetChars,
   })
 
   emitInjectionDebugEvent({

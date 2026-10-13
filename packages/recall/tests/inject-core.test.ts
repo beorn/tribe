@@ -14,6 +14,7 @@
  */
 
 import { describe, test, expect, beforeEach, vi } from "vitest"
+import { parseInjectedContext } from "../../injection-envelope/src/index.ts"
 
 const {
   CONTEXT_PROTOCOL_FOOTER,
@@ -242,6 +243,42 @@ describe("runInjectDelta — emit only when there's content to frame", () => {
     expect(result.additionalContext).toContain("[historical")
     // The original imperative text remains, just prefixed.
     expect(result.additionalContext).toContain("create a bead that captures")
+  })
+
+  test("a custom snippetChars above the chokepoint default is forwarded, not re-capped at 300", async () => {
+    const body = "x".repeat(500)
+    mockRecall([{ sessionId: "sess-longchars", sessionTitle: "long body", type: "message", snippet: body }])
+    const result = await runInjectDelta("what is the status of km-storage-sync right now?", createMemorySeenStore(), {
+      snippetChars: 500,
+    })
+    if (result.skipped) throw new Error("expected non-skipped result")
+    // recall's public snippetChars option must reach the chokepoint: dropping it
+    // silently re-caps the item body at the chokepoint's own 300 default (28904).
+    const item = parseInjectedContext(result.additionalContext)[0]?.items[0]
+    expect(item?.body).toBeDefined()
+    expect(item!.body.length).toBeGreaterThan(300)
+  })
+
+  test("a vault hit carries its full fs_path as `path`, never a truncated session", async () => {
+    // A vault locator is a path, not an opaque session UUID — emitting it as
+    // `sessionId` would make the envelope render an 8-char `session` and the
+    // chat row prefer that over the full path (the 28904 review MUST). This
+    // pins the LIVE runInjectDelta output, read back through the shared parser.
+    mockRecall([
+      {
+        sessionId: "/pm/infra/docs/long-vault-path.md",
+        sessionTitle: "infra notes",
+        type: "vault",
+        snippet: "A descriptive vault snippet that is plenty long enough to pass the minimum filter.",
+      },
+    ])
+    const result = await runInjectDelta("what did we decide about km-storage-sync layering?", createMemorySeenStore())
+    if (result.skipped) throw new Error("expected non-skipped result")
+    const item = parseInjectedContext(result.additionalContext)[0]?.items.find((i) => i.type === "vault")
+    expect(item?.path).toBe("/pm/infra/docs/long-vault-path.md")
+    expect(item?.session).toBeUndefined()
+    // No truncated 8-char session attribute leaked into the envelope.
+    expect(result.additionalContext).not.toContain('session="/pm/infr"')
   })
 })
 

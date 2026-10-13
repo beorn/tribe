@@ -332,9 +332,10 @@ export function emitHookJson(eventName: string, additionalContext?: string, user
 
 /**
  * Neutralize literal `</user_prompt>` occurrences in user input so adversarial
- * pasted text can't break out of the wrapper. Same pattern as
- * `escapeSnippetBody` in inject-core.ts: insert a space inside the close-tag
- * so it's still readable but no longer a tag.
+ * pasted text can't break out of the wrapper. Same breakout defense the
+ * envelope's `sanitize()` (sanitize.ts) applies to injected bodies — it strips
+ * every tag `tags.ts` names: insert a space inside the close-tag so it's still
+ * readable but no longer a tag.
  */
 function escapeUserPromptBody(text: string): string {
   return text.replaceAll("</user_prompt>", "</ user_prompt>")

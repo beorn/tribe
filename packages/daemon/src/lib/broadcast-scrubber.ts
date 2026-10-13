@@ -24,15 +24,25 @@
 
 import { createLogger } from "loggily"
 import { loadLlm, selectAvailableCheapModels } from "../../../recall/src/lib/llm-backend.ts"
+import { injectionTagAlternation } from "tribe-injection-envelope"
 
 const log = createLogger("tribe:broadcast")
+
+// The structural tags the injection surfaces emit come from the envelope
+// package's ONE home (tribe-injection-envelope src/tags.ts, 28904) so the
+// chokepoint's own <injected_context>/<item> tags are neutralised by
+// construction — a seat quoting its injected context into a broadcast cannot
+// pass them through the scrubber that exists to stop exactly that.
+const TAG_ALT = injectionTagAlternation()
+const TAG_OPEN_RE = new RegExp(`<\\/?(?:${TAG_ALT})\\b`, "i")
+const TAG_STRIP_RE = new RegExp(`<\\/?(?:${TAG_ALT})\\b[^>]*>`, "gi")
 
 // Triggers that make a content string risky for transcript-shape completion.
 // If none of these appear in the pre-scrub content AND the post-scrub content
 // is unchanged from input, the string is safe — skip the Haiku rewrite.
 export const TRIGGER_PATTERNS: readonly RegExp[] = [
   /^(#{1,3}\s*)?(Human|Assistant|User)\s*:/im,
-  /<\/?(system-reminder|channel|recall-memory|snippet|context-protocol|user_prompt)\b/i,
+  TAG_OPEN_RE,
   /UserPromptSubmit hook (?:success|error|additional context)/i,
 ]
 
@@ -46,9 +56,9 @@ export function scrubInjectionShape(content: string): string {
     content
       // strip leading role markers on any line (Human:/Assistant:/User: ± ### prefix)
       .replace(/^(#{1,3}\s*)?(Human|Assistant|User)\s*:\s*/gim, "")
-      // strip system-reminder/channel/recall-memory/snippet/context-protocol tags entirely
-      // (keep inner content as plain text)
-      .replace(/<\/?(system-reminder|channel|recall-memory|snippet|context-protocol|user_prompt)\b[^>]*>/gi, "")
+      // strip every structural injection tag entirely (keep inner content as
+      // plain text) — the list is the envelope package's ONE home (28904)
+      .replace(TAG_STRIP_RE, "")
       // strip the specific hook-status phrases that appear constantly
       .replace(/UserPromptSubmit hook (?:success|error|additional context)[^\n]*/gi, "")
       // collapse whitespace the above left behind

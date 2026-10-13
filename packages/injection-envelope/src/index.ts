@@ -1,5 +1,5 @@
 /**
- * @bearly/injection-envelope — the single chokepoint for all
+ * tribe-injection-envelope — the single chokepoint for all
  * UserPromptSubmit `hookSpecificOutput.additionalContext` emission.
  *
  * Every bearly / accountly / tribe / telegram / github / beads /
@@ -15,6 +15,21 @@ export type { WrapOptions, InjectedItem, EmitMode } from "./emit.ts"
 
 export { rewriteImperativeAsReported, sanitize } from "./sanitize.ts"
 export { defangModelInput } from "./defang.ts"
+
+export {
+  INJECTION_ENVELOPE_TAG,
+  INJECTION_ITEM_TAG,
+  CONTEXT_PROTOCOL_TAG,
+  USER_PROMPT_TAG,
+  CHANNEL_TAG,
+  SYSTEM_REMINDER_TAG,
+  LEGACY_INJECTION_TAGS,
+  INJECTION_TAG_NAMES,
+  injectionTagAlternation,
+} from "./tags.ts"
+
+export { parseInjectedContext, hasInjectedContextFrom } from "./parse.ts"
+export type { ParsedInjectedContext, ParsedInjectedItem } from "./parse.ts"
 
 export type { RegisteredSource } from "./registry.ts"
 
