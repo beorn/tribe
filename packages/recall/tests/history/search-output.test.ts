@@ -40,10 +40,36 @@ vi.mock("../../src/lib/refresh.ts", async (importOriginal) => {
   }
 })
 
-const { cmdSearch, resolveProjectScope } = await import("../../src/lib/search")
-const { closeDb, ftsSearchWithSnippet, getDb, setIndexMeta } = await import("../../src/history/db")
-const { bindVaultDb, resetVaultDbCacheForTests } = await import("../../src/history/vault-fts.ts")
-const { _resetLlmBackendForTests } = await import("../../src/lib/llm-backend")
+type SearchModule = typeof import("../../src/lib/search")
+type DbModule = typeof import("../../src/history/db")
+type VaultModule = typeof import("../../src/history/vault-fts.ts")
+
+// Each test resolves a fresh module graph (vi.resetModules + dynamic import),
+// so the db/vault/LLM-backend memos a prior test left behind cannot leak into
+// this one — the module-scoped reset exports used to be the only way to get
+// that, but a fresh graph IS the reset.
+let cmdSearch: SearchModule["cmdSearch"]
+let resolveProjectScope: SearchModule["resolveProjectScope"]
+let closeDb: DbModule["closeDb"]
+let ftsSearchWithSnippet: DbModule["ftsSearchWithSnippet"]
+let getDb: DbModule["getDb"]
+let setIndexMeta: DbModule["setIndexMeta"]
+let bindVaultDb: VaultModule["bindVaultDb"]
+
+async function loadModules(): Promise<void> {
+  vi.resetModules()
+  const search = await import("../../src/lib/search")
+  // search.ts imports these, so the dynamic imports resolve the same instances.
+  const db = await import("../../src/history/db")
+  const vault = await import("../../src/history/vault-fts.ts")
+  cmdSearch = search.cmdSearch
+  resolveProjectScope = search.resolveProjectScope
+  closeDb = db.closeDb
+  ftsSearchWithSnippet = db.ftsSearchWithSnippet
+  getDb = db.getDb
+  setIndexMeta = db.setIndexMeta
+  bindVaultDb = vault.bindVaultDb
+}
 
 function seedMessage(content: string, id = "a", projectPath = "/test/km"): void {
   const db = getDb()
@@ -214,8 +240,8 @@ describe("recall search output", () => {
   let errSpy: ReturnType<typeof vi.spyOn>
   let stderrWriteSpy: ReturnType<typeof vi.spyOn>
 
-  beforeEach(() => {
-    closeDb()
+  beforeEach(async () => {
+    await loadModules()
     mockAgent.result = null
     mockAgent.options = null
     mockRefreshSpawnCalls = 0
@@ -225,7 +251,6 @@ describe("recall search output", () => {
   })
 
   afterEach(() => {
-    _resetLlmBackendForTests()
     logSpy.mockRestore()
     errSpy.mockRestore()
     stderrWriteSpy.mockRestore()
@@ -236,7 +261,6 @@ describe("recall search output", () => {
     const previousLlmDir = process.env.TRIBE_LLM_DIR
     const previousExitCode = process.exitCode
     delete process.env.TRIBE_LLM_DIR
-    _resetLlmBackendForTests()
     seedMessage("synthesisneedle fixture must show up labeled as a lexical hit, never as a synthesized answer")
 
     try {
@@ -307,7 +331,6 @@ describe("recall search output", () => {
     const dbPath = join(dir, "state.db")
     try {
       seedVaultDb(dbPath, "vaultrawneedle only lives in the km vault, never in a session transcript")
-      resetVaultDbCacheForTests()
       bindVaultDb(dbPath)
 
       await cmdSearch("vaultrawneedle", { raw: true, project: "*" })
@@ -318,7 +341,6 @@ describe("recall search output", () => {
       expect(output).toContain("Vault raw-mode fixture")
       expect(output).toContain("vaultrawneedle")
     } finally {
-      resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -331,7 +353,6 @@ describe("recall search output", () => {
     const dbPath = join(dir, "state.db")
     try {
       seedVaultDb(dbPath, "vaultboundneedle only lives in the km vault")
-      resetVaultDbCacheForTests()
 
       await cmdSearch("vaultboundneedle", { raw: true, project: "*" })
       expect(callsText(errSpy)).toContain("vault: not bound (pass --vault-db)")
@@ -339,13 +360,11 @@ describe("recall search output", () => {
 
       errSpy.mockClear()
       logSpy.mockClear()
-      resetVaultDbCacheForTests()
       bindVaultDb(dbPath)
       await cmdSearch("vaultboundneedle", { raw: true, project: "*" })
       expect(callsText(errSpy)).not.toContain("vault: not bound")
       expect(callsText(logSpy)).toContain("vaultboundneedle")
     } finally {
-      resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -355,7 +374,6 @@ describe("recall search output", () => {
     const dbPath = join(dir, "state.db")
     try {
       seedVaultDb(dbPath, "vaultrawjsonneedle only lives in the km vault")
-      resetVaultDbCacheForTests()
       bindVaultDb(dbPath)
 
       await cmdSearch("vaultrawjsonneedle", { raw: true, json: true, project: "*" })
@@ -367,7 +385,6 @@ describe("recall search output", () => {
       expect(vaultRow).toBeDefined()
       expect(vaultRow!.snippet).toContain("vaultrawjsonneedle")
     } finally {
-      resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -377,7 +394,6 @@ describe("recall search output", () => {
     const dbPath = join(dir, "state.db")
     try {
       seedVaultDb(dbPath, "vaultlimitneedle first", "vaultlimitneedle second")
-      resetVaultDbCacheForTests()
       bindVaultDb(dbPath)
 
       await cmdSearch("vaultlimitneedle", { raw: true, json: true, limit: "1", project: "*" })
@@ -385,7 +401,6 @@ describe("recall search output", () => {
       const payload = jsonStdout<{ results: Array<{ contentType: string }> | null }>(logSpy)
       expect(payload.results?.filter((result) => result.contentType === "vault")).toHaveLength(1)
     } finally {
-      resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -401,7 +416,6 @@ describe("recall search output", () => {
     const dbPath = join(dir, "state.db")
     try {
       seedVaultDb(dbPath, "vaultfilterneedle only lives in the km vault")
-      resetVaultDbCacheForTests()
       bindVaultDb(dbPath)
 
       await cmdSearch("vaultfilterneedle", { raw: true, json: true, project: "*", ...filter })
@@ -409,7 +423,6 @@ describe("recall search output", () => {
       const payload = jsonStdout<{ results: Array<{ contentType: string }> | null }>(logSpy)
       expect(payload.results?.some((result) => result.contentType === "vault") ?? false).toBe(false)
     } finally {
-      resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -436,7 +449,6 @@ describe("recall search output", () => {
         ).run(type, type, "/test/km", type, "rolefilterneedle project knowledge", Date.now())
       }
       seedVaultDb(dbPath, "rolefilterneedle vault knowledge")
-      resetVaultDbCacheForTests()
       bindVaultDb(dbPath)
 
       await cmdSearch("rolefilterneedle", { raw: true, json: true, project: "*", ...filter })
@@ -446,7 +458,6 @@ describe("recall search output", () => {
         payload.results?.map((row) => (row.type ? `${row.contentType}:${row.type}` : row.contentType)).sort(),
       ).toEqual(expected)
     } finally {
-      resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -666,7 +677,6 @@ describe("recall search output", () => {
     try {
       process.env.HOME = home
       // Unbound on purpose, so stderr is exactly the one line an unbound search owes (25149).
-      resetVaultDbCacheForTests()
       await cmdSearch("nohits", {
         agent: true,
         limit: "5",
@@ -676,7 +686,6 @@ describe("recall search output", () => {
     } finally {
       if (prevHome === undefined) delete process.env.HOME
       else process.env.HOME = prevHome
-      resetVaultDbCacheForTests()
       rmSync(home, { recursive: true, force: true })
     }
 

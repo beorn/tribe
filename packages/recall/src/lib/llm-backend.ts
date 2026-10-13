@@ -446,9 +446,3 @@ export function formatCost(cost: number): string {
   if (cost < 1) return `$${cost.toFixed(3)}`
   return `$${cost.toFixed(2)}`
 }
-
-/** Test seam: reset the cached probe + warning latch (vitest only). */
-export function _resetLlmBackendForTests(): void {
-  probe = undefined
-  warned = false
-}

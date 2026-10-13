@@ -36,7 +36,7 @@ import { assertSingleStatement } from "@bearly/sqlite"
  * invokes km, `ensureServer`, or `km daemon`.
  */
 
-import { describe, test, expect, afterEach, vi } from "vitest"
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest"
 import ts from "typescript"
 import { Database } from "bun:sqlite"
 import { createHash } from "node:crypto"
@@ -45,13 +45,13 @@ import { tmpdir } from "node:os"
 import { join, resolve, dirname, extname, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 
-import {
-  bindVaultDb,
-  getVaultDb,
-  getVaultDbPath,
-  searchVault,
-  resetVaultDbCacheForTests,
-} from "../../src/history/vault-fts.ts"
+// A fresh module graph per test starts with an unbound vault and no open
+// handle — what the removed resetVaultDbCacheForTests gave. Rebinding these
+// names in beforeEach keeps every call site unchanged.
+let bindVaultDb: (typeof import("../../src/history/vault-fts.ts"))["bindVaultDb"]
+let getVaultDb: (typeof import("../../src/history/vault-fts.ts"))["getVaultDb"]
+let getVaultDbPath: (typeof import("../../src/history/vault-fts.ts"))["getVaultDbPath"]
+let searchVault: (typeof import("../../src/history/vault-fts.ts"))["searchVault"]
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 // packages/recall/tests/history -> repo root
@@ -346,8 +346,12 @@ function auditModuleGraph(entryPath: string, repoRoot: string): string[] {
 }
 
 describe("vault-fts fail-closed guards", () => {
+  beforeEach(async () => {
+    vi.resetModules()
+    ;({ bindVaultDb, getVaultDb, getVaultDbPath, searchVault } = await import("../../src/history/vault-fts.ts"))
+  })
+
   afterEach(() => {
-    resetVaultDbCacheForTests()
     vi.restoreAllMocks()
   })
 
@@ -357,7 +361,6 @@ describe("vault-fts fail-closed guards", () => {
     try {
       makeKmVaultDb(dbPath)
 
-      resetVaultDbCacheForTests()
       bindVaultDb(dbPath)
 
       // Search over the read-only handle still returns real hits.
@@ -377,7 +380,6 @@ describe("vault-fts fail-closed guards", () => {
       // The read-only handle refuses writes.
       expect(() => db!.exec("INSERT INTO nodes (id, name, title, content) VALUES ('x', 'x', 'x', 'x')")).toThrow()
     } finally {
-      resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -416,7 +418,6 @@ describe("vault-fts fail-closed guards", () => {
       )
       db.close()
 
-      resetVaultDbCacheForTests()
       bindVaultDb(dbPath)
 
       const hits = searchVault("vaultneedle", 5)
@@ -426,7 +427,6 @@ describe("vault-fts fail-closed guards", () => {
       expect(hits[0]?.title).toBe("Termless headless terminal harness")
       expect(hits[0]?.snippet).toContain("vaultneedle")
     } finally {
-      resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -439,12 +439,10 @@ describe("vault-fts fail-closed guards", () => {
       db.exec("CREATE TABLE unrelated (id TEXT)")
       db.close()
 
-      resetVaultDbCacheForTests()
       bindVaultDb(dbPath)
 
       expect(() => searchVault("termless", 5)).toThrowError(/bound by --vault-db\).*Run 'km sync'.*drop the binding/)
     } finally {
-      resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -453,7 +451,6 @@ describe("vault-fts fail-closed guards", () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-vault-guard-missing-"))
     const dbPath = join(dir, "state.db")
     try {
-      resetVaultDbCacheForTests()
       expect(() => bindVaultDb(dbPath)).toThrowError(/--vault-db .*state\.db does not exist/)
 
       // A file bound while present and gone by the first read refuses too, naming the binding.
@@ -462,7 +459,6 @@ describe("vault-fts fail-closed guards", () => {
       rmSync(dbPath)
       expect(() => getVaultDb()).toThrowError(/bound by --vault-db\).*does not exist.*Run 'km sync'.*drop the binding/)
     } finally {
-      resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -476,25 +472,24 @@ describe("vault-fts fail-closed guards", () => {
       const before = snapshotVaultFiles(dir)
       expect(Object.keys(before)).toEqual(expect.arrayContaining(["state.db", "state.db-wal", "state.db-shm"]))
 
-      resetVaultDbCacheForTests()
       bindVaultDb(dbPath)
       expect(searchVault("termless", 5)).toHaveLength(1)
-      resetVaultDbCacheForTests()
 
+      // recall's read-only handle is still open here — only a fresh module graph
+      // drops it, there is no public close. That is harmless for the pin: with
+      // `writer` still open, a closing reader is not the last connection and
+      // cannot checkpoint the WAL.
       const after = snapshotVaultFiles(dir)
       expect(Object.keys(after)).toEqual(Object.keys(before))
       expect(after["state.db"]).toEqual(before["state.db"])
       expect(after["state.db-wal"]).toEqual(before["state.db-wal"])
     } finally {
-      resetVaultDbCacheForTests()
       writer?.close()
       rmSync(dir, { recursive: true, force: true })
     }
   })
 
   test("TYPED DEGRADE: no vault db → null handle + empty typed result, no throw", () => {
-    resetVaultDbCacheForTests()
-
     // A cwd with no `.km/state.db` anywhere up the 8-level walk. The redirected
     // test TMPDIR (see tests/setup/tmpdir-redirect.ts) has no vault ancestor.
     const isolated = mkdtempSync(join(tmpdir(), "tribe-vault-guard-nowalk-"))
@@ -514,7 +509,6 @@ describe("vault-fts fail-closed guards", () => {
   })
 
   test("NO DISCOVERY: a vault database up the cwd is never opened when nothing is bound (25149)", () => {
-    resetVaultDbCacheForTests()
     const vaultRoot = mkdtempSync(join(tmpdir(), "tribe-vault-guard-nodiscovery-"))
     mkdirSync(join(vaultRoot, ".km"))
     makeKmVaultDb(join(vaultRoot, ".km", "state.db"))
@@ -534,14 +528,12 @@ describe("vault-fts fail-closed guards", () => {
     const dbPath = join(dir, "state.db")
     try {
       makeKmVaultDb(dbPath)
-      resetVaultDbCacheForTests()
 
       bindVaultDb(dbPath)
       expect(getVaultDbPath()).toBe(dbPath)
       expect(searchVault("termless", 5)).toHaveLength(1)
       expect(() => bindVaultDb("")).toThrowError(/--vault-db is empty/)
     } finally {
-      resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
     }
   })

@@ -12,9 +12,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 
 process.env.RECALL_DB_PATH = ":memory:"
 
-const { closeDb, getDb } = await import("../../src/history/db")
-const { recall, setRecallLogging } = await import("../../src/history/search")
-const { resetVaultDbCacheForTests } = await import("../../src/history/vault-fts.ts")
+// A fresh module graph per test starts with an empty in-memory index and an
+// unbound vault — what closeDb() + the removed resetVaultDbCacheForTests gave.
+let closeDb: (typeof import("../../src/history/db"))["closeDb"]
+let getDb: (typeof import("../../src/history/db"))["getDb"]
+let recall: (typeof import("../../src/history/search"))["recall"]
+let setRecallLogging: (typeof import("../../src/history/search"))["setRecallLogging"]
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const ANCHOR = "zebracorn"
@@ -88,9 +91,10 @@ async function preparedSql(run: () => Promise<unknown>): Promise<string[]> {
 
 const COUNTS = /\bCOUNT\s*\(/i
 
-beforeEach(() => {
-  closeDb()
-  resetVaultDbCacheForTests()
+beforeEach(async () => {
+  vi.resetModules()
+  ;({ closeDb, getDb } = await import("../../src/history/db"))
+  ;({ recall, setRecallLogging } = await import("../../src/history/search"))
   setRecallLogging(false)
 })
 

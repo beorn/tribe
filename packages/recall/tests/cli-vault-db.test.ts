@@ -16,10 +16,12 @@ const calls: { verb: string; arg: unknown; opts: Record<string, unknown>; vault:
 
 vi.mock("../src/lib/search", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../src/lib/search")>()
-  const { getVaultDbPath } = await import("../src/history/vault-fts.ts")
   return {
     ...orig,
     cmdSearch: async (query: string, opts: Record<string, unknown>) => {
+      // Resolve at call time: a cached factory binds one module generation, and
+      // the test resets modules per case, so the bound vault lives elsewhere.
+      const { getVaultDbPath } = await import("../src/history/vault-fts.ts")
       calls.push({ verb: "search", arg: query, opts, vault: getVaultDbPath() })
     },
   }
@@ -27,28 +29,31 @@ vi.mock("../src/lib/search", async (importOriginal) => {
 
 vi.mock("../src/lib/summarize-daily", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../src/lib/summarize-daily")>()
-  const { getVaultDbPath } = await import("../src/history/vault-fts.ts")
   return {
     ...orig,
     cmdSummarize: async (date: string | undefined, opts: Record<string, unknown>) => {
+      const { getVaultDbPath } = await import("../src/history/vault-fts.ts")
       calls.push({ verb: "summarize", arg: date, opts, vault: getVaultDbPath() })
     },
   }
 })
 
-const { main } = await import("../src/cli.ts")
-const { resetVaultDbCacheForTests } = await import("../src/history/vault-fts.ts")
+// A fresh module graph per test gives an unbound vault — what the removed
+// resetVaultDbCacheForTests gave. cli.ts and the mocked verbs' getVaultDbPath
+// resolve inside the same generation, so they share the vault-fts instance.
+let main: (typeof import("../src/cli.ts"))["main"]
 
 let dir: string
 let vault: string
 let errSpy: ReturnType<typeof vi.spyOn>
 let exitSpy: ReturnType<typeof vi.spyOn>
 
-beforeEach(() => {
+beforeEach(async () => {
+  vi.resetModules()
+  ;({ main } = await import("../src/cli.ts"))
   dir = mkdtempSync(join(tmpdir(), "recall-cli-vault-"))
   vault = join(dir, "state.db")
   new Database(vault).close()
-  resetVaultDbCacheForTests()
   calls.length = 0
   errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
   exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
@@ -59,7 +64,6 @@ beforeEach(() => {
 afterEach(() => {
   errSpy.mockRestore()
   exitSpy.mockRestore()
-  resetVaultDbCacheForTests()
   rmSync(dir, { recursive: true, force: true })
 })
 
