@@ -94,7 +94,7 @@ function processExists(pid: number): boolean {
 type AdapterCodeRoot =
   | { readonly kind: "resolved"; readonly root: string }
   | { readonly kind: "stopped" }
-  | { readonly kind: "unpublished" }
+  | { readonly kind: "unpublished"; readonly reason: string }
 
 /**
  * The landing root the daemon publishes, waited for with one named stderr line per attempt (27531). A COLD START
@@ -129,7 +129,7 @@ async function resolveAdapterCodeRoot(
       `tribe plugin supervisor: no landing root to spawn the adapter from (${failure}); attempt ${attempt + 1}` +
         (decision.giveUp ? `; ${decision.reason}\n` : `, retrying in ${decision.retryDelayMs} ms\n`),
     )
-    if (decision.giveUp) return { kind: "unpublished" }
+    if (decision.giveUp) return { kind: "unpublished", reason: decision.reason }
     await waitForRetry(decision.retryDelayMs)
     attempt += 1
   }
@@ -205,6 +205,17 @@ async function superviseAdapter(): Promise<void> {
       () => stopping,
     )
     if (resolution.kind === "unpublished") {
+      // NO SILENT ERRORS (28920): this give-up is terminal for the host's MCP endpoint - the endpoint stays
+      // dead until the seat is relaunched - so it leaves the same durable exit row every other terminal exit
+      // leaves, naming its reason. Until now the only trace was this stderr line in the host's own capture,
+      // which nobody reads for a seat that has gone dark.
+      recordAdapterExit(exitRecord, {
+        adapterPid: undefined,
+        code: null,
+        signal: null,
+        decision: "stop",
+        reason: `refused to start the adapter without a daemon-published landing root; ${resolution.reason}`,
+      })
       process.stderr.write(
         "tribe plugin supervisor: refused to start the adapter without a daemon-published landing root; " +
           "the host session needs a running tribe daemon (exit 2)\n",

@@ -169,11 +169,16 @@ rows are reaped only after reconnect grace.
 A supervised plugin adapter's exits outlive the host's MCP log. The plugin
 supervisor appends one JSON line per adapter exit (`at`, `adapter_pid`, `code`,
 `signal`, `decision` of `retry` / `stop` / `host-stop` / `clean-exit`, plus
-`attempt` and `retry_delay_ms` for a restart) to `tribe-adapter-exits.jsonl` in
-the launch's state directory, `AG_HOST_SESSION_STATE_DIR`. `members --all` names
-that file as `adapter_exit_record` on the seat's row, connected or not. A line
-that cannot be written, including for a launch with no state directory, is
-reported on the supervisor's own stderr.
+`attempt` and `retry_delay_ms` for a restart, and `reason` for a terminal
+refusal that records why it stopped without retrying) to
+`tribe-adapter-exits.jsonl` in the launch's state directory,
+`AG_HOST_SESSION_STATE_DIR`. `members --all` names that file as
+`adapter_exit_record` on the seat's row, connected or not. A cold-start give-up
+- the daemon published no landing root within the supervisor's startup window,
+so that host's endpoint stays dead until the seat is relaunched - records the
+same row with a null pid, code and signal, so it is never only a line in the
+host's own MCP log. A line that cannot be written, including for a launch with
+no state directory, is reported on the supervisor's own stderr.
 
 Service principals declare `principalClass: "service"` when registering through
 `connectTribeLaunch`. They are attributed senders with their own bare names,

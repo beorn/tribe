@@ -3,7 +3,10 @@
  *           location) instead of the landing root the daemon publishes, so the
  *           adapter executes a projection that can move under it, and the child
  *           cwd is dragged to that root instead of the host's identity cwd
- *           (27531; @cto corrections A and B).
+ *           (27531; @cto corrections A and B). Also: a cold-start give-up exits
+ *           the endpoint without the durable exit row every other terminal
+ *           adapter exit leaves, so a darkened seat has no record naming why
+ *           (28920).
  * @level    l2 - a real supervisor process, a fake daemon on a temp socket, and
  *           a stub landing entry that records how it was spawned
  * @consumer @i/4-supervision/27459-coordination-overhead-has-no-budget/27531-adapters-run-from-the-daemon-landing-root-learned-from-the-daemon-never-shared-main
@@ -16,6 +19,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createLineParser } from "../../../packages/wire/src/parser.ts"
+import { PLUGIN_CODE_ROOT_WINDOW_ENV } from "../supervisor-policy.ts"
 import { isRequest, makeResponse } from "../../../packages/wire/src/rpc.ts"
 import { AG_HOST_SESSION_STATE_DIR_ENV } from "tribe-wire/lib/ag-host-env"
 import { HAB_ID_TOKEN_ENV } from "tribe-wire/lib/hab-session-env"
@@ -69,7 +73,7 @@ function startFakeDaemon(status: unknown): Promise<void> {
   return new Promise((done) => daemon.listen(socketPath, done))
 }
 
-function startSupervisor(): ChildProcess {
+function startSupervisor(overrides: NodeJS.ProcessEnv = {}): ChildProcess {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     TRIBE_SOCKET: socketPath,
@@ -77,6 +81,7 @@ function startSupervisor(): ChildProcess {
     TRIBE_NAME: "@agent/test",
     SPAWN_MARKER: markerPath,
     [AG_HOST_SESSION_STATE_DIR_ENV]: dir,
+    ...overrides,
   }
   delete env[HAB_ID_TOKEN_ENV]
   delete env[TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV]
@@ -147,5 +152,23 @@ describe("the supervisor spawns the adapter from the daemon's landing root", () 
     await new Promise((done) => setTimeout(done, 1_500))
     expect(spawnRecord()).toBeNull()
     expect(supervisor.exitCode).toBeNull()
+  }, 20_000)
+
+  it("a cold-start give-up leaves one durable exit row naming the reason (28920)", async () => {
+    // The terminal give-up used to leave only a stderr line in the host's own capture,
+    // which nobody reads for a seat that goes dark. It is the same terminal event as
+    // every other adapter exit, so it must leave the same durable row.
+    const exitsPath = join(dir, "tribe-adapter-exits.jsonl")
+    await startFakeDaemon({ sessions: [] })
+    const supervisor = startSupervisor({ [PLUGIN_CODE_ROOT_WINDOW_ENV]: "300" })
+    await vi.waitFor(() => expect(supervisor.exitCode).toBe(2), { timeout: 8_000 })
+    expect(spawnRecord()).toBeNull()
+    const rows: unknown[] = readFileSync(exitsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ adapter_pid: null, code: null, signal: null, decision: "stop" })
+    expect((rows[0] as { reason?: unknown }).reason).toContain("no code root within 300 ms of the cold start")
   }, 20_000)
 })

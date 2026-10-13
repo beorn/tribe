@@ -4,10 +4,13 @@
  * A dead adapter used to leave one stderr line in the host's MCP log, which is
  * gone or unfindable by the time anyone asks why a seat reads disconnected. The
  * supervisor appends one JSON line per adapter exit (time, pid, code, signal,
- * restart decision) to `tribe-adapter-exits.jsonl` in the launch's existing
- * state directory, which ag projects as AG_HOST_SESSION_STATE_DIR. It hands the
- * path to its adapter, which registers it, so `tribe members` names the file on
- * the seat's row after the adapter is gone.
+ * restart decision, and for a decided refusal its reason) to
+ * `tribe-adapter-exits.jsonl` in the launch's existing state directory, which ag
+ * projects as AG_HOST_SESSION_STATE_DIR. It hands the path to its adapter, which
+ * registers it, so `tribe members` names the file on the seat's row after the
+ * adapter is gone. A terminal refusal that never spawned a child - a cold-start
+ * give-up - records the same row with a null pid, code and signal, so a darkened
+ * endpoint is never only a host stderr line (28920).
  *
  * There is no other store. A line that cannot be written, including a launch
  * with no state directory, is reported on the supervisor's own stderr.
@@ -41,6 +44,8 @@ export interface AdapterExit {
   readonly decision: AdapterExitDecision
   readonly retryDelayMs?: number
   readonly attempt?: number
+  /** Why this exit happened. A terminal refusal names itself, never only its decision. */
+  readonly reason?: string | undefined
 }
 
 export function recordAdapterExit(target: AdapterExitRecordTarget, exit: AdapterExit): void {
@@ -55,6 +60,7 @@ export function recordAdapterExit(target: AdapterExitRecordTarget, exit: Adapter
       decision: exit.decision,
       ...(exit.retryDelayMs === undefined ? {} : { retry_delay_ms: exit.retryDelayMs }),
       ...(exit.attempt === undefined ? {} : { attempt: exit.attempt }),
+      ...(exit.reason === undefined ? {} : { reason: exit.reason }),
     }
     try {
       appendFileSync(target.path, `${JSON.stringify(line)}\n`)
