@@ -136,6 +136,8 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
   it.each([
     ["status", false],
     ["notify", false],
+    ["request", false],
+    ["query", false],
     ["response", true],
     ["verdict", true],
   ] as const)("%s + reply uses the message type to decide settlement", (type, settles) => {
@@ -191,6 +193,44 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
         count: 0,
       })
     }
+  })
+
+  it("keeps an explicit ref when non-final reply also names a ball", () => {
+    const opts = makeOpts(["sess-chief", "sess-agent-1"])
+    parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: "@agent/1",
+          message: "deliver",
+          type: "request",
+          request: "open-work",
+        },
+        opts,
+      ),
+    )
+    const before = db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get("open-work")
+    const result = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        {
+          to: "@chief",
+          message: "taking",
+          type: "status",
+          reply: "open-work",
+          ref: "explicit-context",
+        },
+        opts,
+      ),
+    )
+    expect(db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get("open-work")).toEqual(before)
+    expect(db.prepare("SELECT ref, reply FROM messages WHERE id = ?").get(result.id as string)).toEqual({
+      ref: "explicit-context",
+      reply: null,
+    })
+    expect(result.warning).toContain("reply open-work was not recorded; ref explicit-context kept")
   })
 
   it("broadcast request snapshots active room members and excludes sender", () => {

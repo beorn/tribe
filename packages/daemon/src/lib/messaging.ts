@@ -620,7 +620,7 @@ export function sendMessage(
   // The type carries disposition; a correlation field cannot turn progress into settlement.
   const settles = type === "response" || type === "verdict"
   const replyId = settles ? (ballTracker.reply ?? null) : null
-  const correlationRef = !settles && ballTracker.reply !== undefined ? ballTracker.reply : ref
+  const correlationRef = ref ?? (!settles ? ballTracker.reply : undefined)
   const expiresInMs = ballTracker.expiresInMs ?? defaultBallTtlMs(type, requestId !== null)
   if (
     requestId &&

@@ -645,7 +645,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           wake_on_correlated_reply: {
             type: "boolean",
             description:
-              "Also wake when a response or verdict carries a validated reply settlement for one of this session's tracked requests. Status/notify correlation is non-closing. Defaults to false.",
+              "Also wake when a response carries a validated reply settlement for one of this session's tracked requests (verdicts already wake). Status and notify correlation is non-closing. Defaults to false.",
           },
         },
       },

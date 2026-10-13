@@ -861,7 +861,7 @@ describe("registerSendCommands", () => {
             // the requested name back (no live holder in this fixture).
             result = { name: (request.params?.name as string) ?? "@chief", role: "member" }
           } else if (request.method === "tribe.send") {
-            const progress = request.params?.type === "status" || request.params?.type === "notify"
+            const progress = ["status", "notify", "request", "query"].includes(String(request.params?.type))
             if (!progress) pendingOpen = false
             const message = request.params?.message
             result =
@@ -914,7 +914,7 @@ describe("registerSendCommands", () => {
 
       // #28844: a delivered progress correlation has no settlement proof. The CLI must
       // name nonsettlement and succeed, rather than treating missing tracker as failure.
-      for (const type of ["status", "notify"]) {
+      for (const type of ["status", "notify", "request", "query"]) {
         const progress = await runCli(["send", "@agent/3", "taking", "--type", type, "--reply", "req-123"])
         expect(progress).toMatchObject({ code: 0, stderr: "" })
         expect(progress.stdout).toContain(
@@ -994,7 +994,7 @@ describe("registerSendCommands", () => {
           params: { owner: "@chief", close: "req-123", idToken: chiefToken },
         },
       ])
-      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(7)
+      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(9)
     } finally {
       server.close()
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
