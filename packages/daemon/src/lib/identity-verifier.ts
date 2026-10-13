@@ -35,6 +35,11 @@ export type IdentityVerdict =
   | { readonly result: "absent" }
   | { readonly result: "unreadable"; readonly reason: string }
   | { readonly result: "contradicted"; readonly reason: string }
+  /**
+   * No verdict yet: the daemon's bounded wrapper synthesises this when a probe outlives the in-path
+   * bound (28927). A module never returns it — checkedVerdict rejects it as outside the contract.
+   */
+  | { readonly result: "undecided"; readonly reason: string }
 
 export type IdentityVerifier = (token: string) => Promise<IdentityVerdict>
 
@@ -66,13 +71,6 @@ export interface BoundedIdentityVerifierOptions {
   readonly now?: () => number
 }
 
-/**
- * No verdict within the bounded wait (28927 pin 4). A typed error, not a verifier fault: the probe is
- * still running and the verifier is not broken, so call sites refuse the call retryably under their own
- * kind and never record an identity-verifier fault (which pages @chief) for it.
- */
-export class IdentityVerdictUndecided extends Error {}
-
 const VERDICT_TTL_MS = 30_000
 const VERDICT_WAIT_MS = 250
 const VERDICT_CACHE_MAX = 1_024
@@ -83,8 +81,8 @@ const VERDICT_CACHE_MAX = 1_024
  * a slow probe for one seat delays that seat's call only, never the dispatch of another's. A per-seat
  * verdict cache (keyed by the token only its seat holds) serves fresh verdicts for a short TTL; at most
  * one probe is in flight per seat and concurrent calls share it. A call waits at most `waitMs` on a
- * probe: past that it is answered undecided-retry at once (a throw the call sites already refuse as a
- * retryable verifier fault) while the probe finishes in the background and lands its verdict in the
+ * probe: past that it is answered with the synthesised `undecided` verdict member at once while the
+ * probe finishes in the background and lands its verdict in the
  * cache. Nothing is ever marked verified without a verdict: only a verdict the probe actually returned
  * — fresh or cached — is ever served as one, and a thrown probe is never cached.
  */
@@ -151,10 +149,11 @@ export function boundedIdentityVerifier(
       if ("verdict" in outcome) return outcome.verdict
       if ("error" in outcome) throw outcome.error
       // Past the bounded wait: a verdict that landed in the same instant still serves; otherwise the
-      // call is answered undecided at once and the probe finishes in the background.
+      // call is answered undecided at once and the probe finishes in the background. The synthesised
+      // undecided is returned, never cached: only a verdict the probe itself returns may be cached.
       const landed = fresh(token)
       if (landed !== undefined) return landed
-      throw new IdentityVerdictUndecided(`identity verdict undecided: no verdict within ${String(waitMs)}ms; retry`)
+      return { result: "undecided", reason: `no verdict within ${String(waitMs)}ms` }
     },
   }
 }
