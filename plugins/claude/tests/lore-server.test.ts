@@ -7,6 +7,11 @@
  * Also pins the standalone marketplace install path and host boundary. The
  * pre-cutover placeholder pointed at bearly's @bearly/tribe; that era ended
  * with the 19273 move.
+ *
+ * @source-grep the recall-bridge boundary — `recall/server.ts` and its socket
+ *   helper are connect-only (no `ensureTribeDaemonIfConfigured`, no autostart)
+ *   and the README names the standalone marketplace install path — is read from
+ *   those files' text.
  */
 
 import { readFileSync } from "node:fs"
