@@ -41,15 +41,15 @@ export default {
       // It runs from an immutable landing; the hab controller restarts it onto the promoted landing (26774,
       // @cto 9e7a89d2).
       // 28691 (one-version plan slice 1.1, @cto Q5): the closure-digest skip is RETIRED — wire restarts on EVERY
-      // promotion, unconditionally. The digest and the declared-pin comparison are both COMPONENT checks, and the
-      // week's two misses were undeclared dependencies (wire's spawned hab, its argv-named verifier), so "the
-      // release is the unit" means restart whenever the running release differs from current.
-      // 27422 (@cto 198c1ee0): the daemon loads bearly and loggily in process from the landing root, so both sibling
-      // gitlinks are declared; the @modelcontextprotocol/sdk escapes are hoisted install bytes the /3 install scope
-      // covers instead.
+      // promotion. The digest and the declared-pin comparison are both COMPONENT checks, and the week's two
+      // misses were undeclared dependencies (wire's spawned hab, its argv-named verifier), so "the release is
+      // the unit" means restart whenever the running release differs from current. 28921 (@cto c97b1bf3):
+      // identical compared pins coalesce — the owed restart waits up to 2 h for a newer landing to ride, never
+      // skipped — and hab's own pin joins the compared set below as `ag`, the gitlink wire spawns hab from.
+      // 27422: bearly and loggily load in process; the sdk escapes are install bytes the /3 install scope covers.
       landingMigration: {
         mechanism: "restart-at-promotion" as const,
-        additionalComponents: ["vendor/bearly", "vendor/loggily"] as const,
+        additionalComponents: ["vendor/bearly", "vendor/loggily", "ag"] as const,
       },
     },
   },
