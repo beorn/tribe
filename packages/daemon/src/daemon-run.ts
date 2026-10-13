@@ -46,7 +46,7 @@ import { pruneOldActivityLogs } from "./lib/activity-log.ts"
 import { countDurableSessionRows } from "./lib/session.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
 import { pageVaultDbRefusal } from "./lib/vault-db-page.ts"
-import { loadIdentityVerifier, type LoadedIdentityVerifier } from "./lib/identity-verifier.ts"
+import { boundedIdentityVerifier, loadIdentityVerifier, type LoadedIdentityVerifier } from "./lib/identity-verifier.ts"
 import { parseDeliveryFallbackPolicy } from "./lib/delivery-resolution.ts"
 import { createDeclaredRosterReader } from "./lib/membership-declared-roster.ts"
 import { drainOutput } from "loggily"
@@ -193,7 +193,7 @@ if (partialShape.config.inheritFd === null) {
 let identityVerifier: LoadedIdentityVerifier | null = null
 if (partialShape.config.identityVerifierPath) {
   try {
-    identityVerifier = await loadIdentityVerifier(partialShape.config.identityVerifierPath)
+    identityVerifier = boundedIdentityVerifier(await loadIdentityVerifier(partialShape.config.identityVerifierPath))
   } catch (error) {
     log.error?.(`Refusing to start: ${error instanceof Error ? error.message : String(error)}`)
     await rootScope[Symbol.asyncDispose]()

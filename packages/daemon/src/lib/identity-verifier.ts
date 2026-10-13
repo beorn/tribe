@@ -57,6 +57,100 @@ export interface LoadedIdentityVerifier {
   readonly readIncidentPolicy?: () => IncidentPolicy
 }
 
+export interface BoundedIdentityVerifierOptions {
+  /** How long a verdict may be served from cache: tens of seconds (28927 pin 2). */
+  readonly ttlMs?: number
+  /** How long a call may wait on a probe before it is answered undecided: a few hundred ms (28927 pin 4). */
+  readonly waitMs?: number
+  /** Clock override for tests; the cache ages by this, the wait by real timers. */
+  readonly now?: () => number
+}
+
+const VERDICT_TTL_MS = 30_000
+const VERDICT_WAIT_MS = 250
+const VERDICT_CACHE_MAX = 1_024
+
+/**
+ * The bounded verifier (28927, @cto f7046649): the daemon never waits on a raw liveness probe on the
+ * dispatcher path. The probe spawn and its wait are asynchronous and scoped to the calling connection —
+ * a slow probe for one seat delays that seat's call only, never the dispatch of another's. A per-seat
+ * verdict cache (keyed by the token only its seat holds) serves fresh verdicts for a short TTL; at most
+ * one probe is in flight per seat and concurrent calls share it. A call waits at most `waitMs` on a
+ * probe: past that it is answered undecided-retry at once (a throw the call sites already refuse as a
+ * retryable verifier fault) while the probe finishes in the background and lands its verdict in the
+ * cache. Nothing is ever marked verified without a verdict: only a verdict the probe actually returned
+ * — fresh or cached — is ever served as one, and a thrown probe is never cached.
+ */
+export function boundedIdentityVerifier(
+  loaded: LoadedIdentityVerifier,
+  options: BoundedIdentityVerifierOptions = {},
+): LoadedIdentityVerifier {
+  const ttlMs = options.ttlMs ?? VERDICT_TTL_MS
+  const waitMs = options.waitMs ?? VERDICT_WAIT_MS
+  const now = options.now ?? Date.now
+  const cache = new Map<string, { verdict: IdentityVerdict; at: number }>()
+  const inFlight = new Map<string, Promise<IdentityVerdict>>()
+
+  const fresh = (token: string): IdentityVerdict | undefined => {
+    const held = cache.get(token)
+    return held !== undefined && now() - held.at < ttlMs ? held.verdict : undefined
+  }
+
+  const probe = (token: string): Promise<IdentityVerdict> => {
+    const existing = inFlight.get(token)
+    if (existing !== undefined) return existing
+    const started = (async (): Promise<IdentityVerdict> => {
+      const verdict = await loaded.verify(token)
+      if (cache.size >= VERDICT_CACHE_MAX) {
+        for (const [key, held] of cache) {
+          if (now() - held.at >= ttlMs) cache.delete(key)
+        }
+        if (cache.size >= VERDICT_CACHE_MAX) {
+          const oldest = cache.keys().next().value
+          if (oldest !== undefined) cache.delete(oldest)
+        }
+      }
+      cache.set(token, { verdict, at: now() })
+      return verdict
+    })()
+    inFlight.set(token, started)
+    const settle = (): void => {
+      if (inFlight.get(token) === started) inFlight.delete(token)
+    }
+    void started.then(settle, settle)
+    return started
+  }
+
+  return {
+    path: loaded.path,
+    suppliesGen: loaded.suppliesGen,
+    ...(loaded.readIncidentPolicy === undefined ? {} : { readIncidentPolicy: loaded.readIncidentPolicy }),
+    verify: async (token: string): Promise<IdentityVerdict> => {
+      const cached = fresh(token)
+      if (cached !== undefined) return cached
+      const pending = probe(token)
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const outcome = await Promise.race([
+        pending.then(
+          (verdict) => ({ verdict }) as const,
+          (error: unknown) => ({ error }) as const,
+        ),
+        new Promise<{ timeout: true }>((resolve) => {
+          timer = setTimeout(() => resolve({ timeout: true }), waitMs)
+        }),
+      ])
+      if (timer !== undefined) clearTimeout(timer)
+      if ("verdict" in outcome) return outcome.verdict
+      if ("error" in outcome) throw outcome.error
+      // Past the bounded wait: a verdict that landed in the same instant still serves; otherwise the
+      // call is answered undecided at once and the probe finishes in the background.
+      const landed = fresh(token)
+      if (landed !== undefined) return landed
+      throw new Error(`identity verdict undecided: no verdict within ${String(waitMs)}ms; retry`)
+    },
+  }
+}
+
 export type SessionAuthority = "verified" | "claimed"
 
 /** A session is verified when it registered with a verified identity token (its sid is recorded), else claimed. */

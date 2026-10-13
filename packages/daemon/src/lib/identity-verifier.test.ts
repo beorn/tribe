@@ -6,7 +6,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { displacementRule, loadIdentityVerifier, sessionAuthority } from "./identity-verifier.ts"
+import {
+  boundedIdentityVerifier,
+  displacementRule,
+  loadIdentityVerifier,
+  sessionAuthority,
+  type IdentityVerdict,
+  type LoadedIdentityVerifier,
+} from "./identity-verifier.ts"
 
 const dir = mkdtempSync(join(tmpdir(), "tribe-identity-verifier-"))
 afterAll(() => rmSync(dir, { recursive: true, force: true }))
@@ -127,6 +134,102 @@ describe("loadIdentityVerifier", () => {
     await expect(verifier.verify("t")).rejects.toThrow(
       `identity verifier ${path} returned a verdict outside the contract`,
     )
+  })
+})
+
+/**
+ * The bounded verifier (28927, @cto f7046649): the daemon never waits on a raw liveness probe on the
+ * dispatcher path. One row per pin of the ruling.
+ */
+describe("boundedIdentityVerifier", () => {
+  const verified: IdentityVerdict = { result: "verified", actor: "@dev/7", sid: "s1" }
+
+  function stub(verify: LoadedIdentityVerifier["verify"]): LoadedIdentityVerifier {
+    return { path: "/stub/verifier.ts", suppliesGen: false, verify }
+  }
+
+  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>((res) => {
+      resolve = res
+    })
+    return { promise, resolve }
+  }
+
+  /** @failure One seat's silent control socket stalls every seat's calls (28927 pin 1).
+   * @level l1 @consumer The daemon dispatcher (one-shot and register verification). */
+  it("a slow probe for one seat does not delay another seat's call", async () => {
+    const slow = deferred<IdentityVerdict>()
+    const wrapped = boundedIdentityVerifier(
+      stub(async (token) => (token === "seat-slow" ? slow.promise : verified)),
+      { waitMs: 5_000 },
+    )
+    const slowCall = wrapped.verify("seat-slow")
+    await expect(wrapped.verify("seat-fast")).resolves.toEqual(verified)
+    slow.resolve(verified)
+    await expect(slowCall).resolves.toEqual(verified)
+  })
+
+  /** @failure Every call pays a fresh 5 s probe for a seat verified seconds ago (28927 pin 2).
+   * @level l1 @consumer The daemon dispatcher (one-shot and register verification). */
+  it("two calls inside the verdict TTL spawn one probe", async () => {
+    let calls = 0
+    let t = 0
+    const wrapped = boundedIdentityVerifier(
+      stub(async () => {
+        calls += 1
+        return verified
+      }),
+      { ttlMs: 30_000, now: () => t },
+    )
+    await expect(wrapped.verify("tok")).resolves.toEqual(verified)
+    t = 29_999
+    await expect(wrapped.verify("tok")).resolves.toEqual(verified)
+    expect(calls).toBe(1)
+    t = 30_000
+    await expect(wrapped.verify("tok")).resolves.toEqual(verified)
+    expect(calls).toBe(2)
+  })
+
+  /** @failure Concurrent calls for one seat each spawn their own probe (28927 pin 3).
+   * @level l1 @consumer The daemon dispatcher (one-shot and register verification). */
+  it("concurrent calls for one seat share the probe in flight", async () => {
+    let calls = 0
+    const probe = deferred<IdentityVerdict>()
+    const wrapped = boundedIdentityVerifier(
+      stub(async () => {
+        calls += 1
+        return probe.promise
+      }),
+      { waitMs: 5_000 },
+    )
+    const pending = [wrapped.verify("tok"), wrapped.verify("tok"), wrapped.verify("tok")]
+    expect(calls).toBe(1)
+    probe.resolve(verified)
+    await expect(Promise.all(pending)).resolves.toEqual([verified, verified, verified])
+    expect(calls).toBe(1)
+  })
+
+  /** @failure The call path waits the probe's full 5 s, or worse, proceeds as if verified (28927 pin 4).
+   * @level l1 @consumer The daemon dispatcher (one-shot and register verification). */
+  it("past the bounded wait the call is answered undecided at once, the probe lands in the background, and only its verdict ever verifies", async () => {
+    let calls = 0
+    const probe = deferred<IdentityVerdict>()
+    const wrapped = boundedIdentityVerifier(
+      stub(async () => {
+        calls += 1
+        return probe.promise
+      }),
+      { waitMs: 30 },
+    )
+    const started = Date.now()
+    await expect(wrapped.verify("tok")).rejects.toThrow(/undecided/)
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(calls).toBe(1)
+    probe.resolve(verified)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await expect(wrapped.verify("tok")).resolves.toEqual(verified)
+    expect(calls).toBe(1)
   })
 })
 
