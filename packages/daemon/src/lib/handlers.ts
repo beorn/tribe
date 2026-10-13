@@ -1127,6 +1127,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(summaryDerived),
     maybeTruncationWarning(truncation),
+    maybeProgressReplyNote(msgType, replyId),
     replyReport.warning,
     maybeUntrackedDeliveryNote(msgType, recipients, willTrack, transport),
   )
@@ -1280,11 +1281,14 @@ function handleMultiSend(input: {
     input.ctx,
     input.sender,
     input.recipients,
-    aggregateReplyTracker(results, input.replyId),
+    input.msgType === "response" || input.msgType === "verdict"
+      ? aggregateReplyTracker(results, input.replyId)
+      : undefined,
   )
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(input.summaryDerived),
     maybeTruncationWarning(input.truncation),
+    maybeProgressReplyNote(input.msgType, input.replyId),
     replyReport.warning,
     maybeUntrackedDeliveryNote(input.msgType, input.recipients, input.willTrack, input.transport),
   )
@@ -1601,6 +1605,11 @@ function maybeUntrackedDeliveryNote(
     )
   }
   return `delivery note — ${parts.join(" ")}`
+}
+
+function maybeProgressReplyNote(type: string, reply: string | null): string | undefined {
+  if (reply === null || (type !== "status" && type !== "notify")) return undefined
+  return `${type} does not settle ball ${reply}; it stays open (settle it with --type response or verdict)`
 }
 
 type Tracker = {

@@ -615,7 +615,10 @@ export function sendMessage(
     throw new Error("correlation request id must be non-empty")
   }
   const persistedRequest = correlationRequest ?? requestId
-  const replyId = ballTracker.reply ?? null
+  // The type carries disposition; a correlation field cannot turn progress into settlement.
+  const settles = type === "response" || type === "verdict"
+  const replyId = settles ? (ballTracker.reply ?? null) : null
+  const correlationRef = !settles && ballTracker.reply !== undefined ? ballTracker.reply : ref
   const expiresInMs = ballTracker.expiresInMs ?? defaultBallTtlMs(type, requestId !== null)
   if (
     requestId &&
@@ -696,7 +699,7 @@ export function sendMessage(
       $kind: resolvedKind,
       $content: content,
       $bead_id: bead_id ?? null,
-      $ref: ref ?? null,
+      $ref: correlationRef ?? null,
       $ts: ts,
       $delivery: delivery,
       $topic: classification.topic ?? null,
