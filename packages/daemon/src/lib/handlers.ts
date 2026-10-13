@@ -804,7 +804,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // Ball-tracker fields (@km/tribe/message-ball-tracker Phase 2a): typed
   // non-self direct actionables auto-open a semantic ball in sendMessage.
   // `request:true` explicitly applies message-id ownership to another type;
-  // a string overrides the id. `reply` closes the referenced semantic ball.
+  // a string overrides the id. Response/verdict + reply settle; other types correlate without closing.
   const requestArg = a.request
   const replyArg = a.reply
   const fanoutArg = a.fanout as "first" | "all" | undefined

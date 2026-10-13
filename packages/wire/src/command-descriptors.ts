@@ -222,7 +222,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           reply: {
             type: "string",
             description:
-              "Ball-tracker settlement reference. Pair response + reply for final disposition; tracker.closed proves release.",
+              "Ball correlation reference. Only response/verdict + reply settle; tracker.closed proves release. Status/notify + reply correlate as ref and leave the ball and deadline open; send reports this explicitly.",
           },
           fanout: {
             type: "string",
@@ -337,7 +337,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           reply_close_failed: {
             type: "boolean",
             description:
-              "Present and true when a declared `reply` closed zero rows. The message was still delivered, but nothing was settled — the id was wrong (fabricated, truncated, or already closed). Re-read `tribe.pending` and reply again with the exact id; do not treat `sent: true` as the ball being closed.",
+              "Present and true when a response/verdict `reply` closed zero rows. The message was still delivered, but nothing was settled — the id was wrong (fabricated, truncated, or already closed). Re-read `tribe.pending` and reply again with the exact id; do not treat `sent: true` as the ball being closed. Status/notify correlation is non-closing and does not set this failure.",
           },
           summary: {
             type: "string",
@@ -645,7 +645,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           wake_on_correlated_reply: {
             type: "boolean",
             description:
-              "Also wake when a response or status carries a validated reply settlement for one of this session's tracked requests. A status + ref TAKING receipt is non-closing. Defaults to false.",
+              "Also wake when a response or verdict carries a validated reply settlement for one of this session's tracked requests. Status/notify correlation is non-closing. Defaults to false.",
           },
         },
       },
