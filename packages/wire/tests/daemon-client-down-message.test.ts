@@ -5,6 +5,11 @@
  * ../../daemon/src/lib/compose/layering.test.ts) instead of executing it —
  * that keeps the check safe while still failing loud if the named start
  * command drifts away from a real file again.
+ *
+ * @source-grep the down-daemon-cure contract — the `Start one with: bun <path>`
+ *   hint in `cli/daemon-client.ts` names a start command that exists on disk —
+ *   is read from that module's source text, since its `process.exit(1)` path
+ *   cannot be executed in a unit test.
  */
 import { existsSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"

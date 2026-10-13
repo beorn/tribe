@@ -3,6 +3,10 @@
  *          when the declared singleton is absent, escaping its lifecycle owner.
  * @level   l0
  * @consumer @ag/tribe/22322-daemon-restart-drops-bridges-with-no-repair-verb
+ * @source-grep the bridge-ownership contract — the provider-owned stdio and HTTP
+ *   bridges are connect-only (`noSpawn: true`) and never create a detached
+ *   daemon outside the declared singleton — is read from `stdio-adapter.ts` and
+ *   `http-adapter.ts` text.
  */
 
 import { readFileSync } from "node:fs"
