@@ -434,7 +434,7 @@ export function pendingCloseCause(ctx: TribeContext, requestId: string, owner: s
   }
 }
 
-function settlementCauseVerb(cause: { settlement: BallSettlementReason; settled_by: string }): string {
+export function settlementCauseVerb(cause: { settlement: BallSettlementReason; settled_by: string }): string {
   switch (cause.settlement) {
     case "answered":
       return `answered by ${cause.settled_by}`
@@ -492,6 +492,19 @@ export function defaultBallTtlMs(type: string, tracked: boolean): number | undef
   if (type === "assign") return undefined
   if (type === "query") return DEFAULT_BALL_TTL_MS_BY_CLASS.query
   return DEFAULT_BALL_TTL_MS_BY_CLASS.request
+}
+
+/**
+ * ONE derivation of a ball's deadline (25057, @cto): the stored expiry when
+ * the sender declared one, else the mechanism default measured from open.
+ * The roster gc sweep and the dispatcher's offline-owner close both read a
+ * deadline through here, so a legacy ball with no structured expiry gets
+ * the same instant from either caller — never two copies to drift apart.
+ */
+export function ballDeadline(row: { expires_at: number | null; opened_at: number }): number | undefined {
+  if (row.expires_at !== null) return row.expires_at
+  const ttl = defaultBallTtlMs("request", true)
+  return ttl === undefined ? undefined : row.opened_at + ttl
 }
 
 /**

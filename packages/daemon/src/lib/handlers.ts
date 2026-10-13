@@ -31,9 +31,11 @@ import {
   deriveSummary,
   logEvent,
   countUnackedAttention,
+  ballDeadline,
   defaultBallTtlMs,
   MAX_BALL_TTL_MS,
   settlePendingRows,
+  settlementCauseVerb,
   pendingCloseCause,
   formatPendingCloseCause,
   type BallTracker,
@@ -2083,8 +2085,9 @@ function settleDeclaredUnrunPairs(
     // 24588 row 4: Condition 1 — live seats can answer, so do not settle if either end has a live launch.
     if (hasLiveLaunch(opts, row.sender) || hasLiveLaunch(opts, row.recipient)) continue
     // 24588 row 4: Condition 2 — sweep must not act on an instant; settle only when past deadline (protects restart gaps).
-    const deadline = row.expires_at ?? row.opened_at + defaultTtl
-    if (now < deadline) continue
+    // ONE derivation (25057): ballDeadline, shared with offlineOwnerCloseAllowed.
+    const deadline = ballDeadline(row)
+    if (deadline === undefined || now < deadline) continue
     rows.push({
       request_id: row.request_id,
       recipient: row.recipient,
@@ -2100,6 +2103,14 @@ function settleDeclaredUnrunPairs(
   return settlePendingRows(ctx, rows, "gc-expired", "declared-roster", now)
 }
 
+/** M1 (25057): what an offline-owner close owes its original sender — one
+ * direct notice, dispatched after the close transaction commits. */
+interface OfflineOwnerCloseNotice {
+  readonly to: string
+  readonly requestId: string
+  readonly summary: string | null
+}
+
 function closeOneBall(
   ctx: TribeContext,
   owner: string,
@@ -2107,7 +2118,7 @@ function closeOneBall(
   now: number,
   transport: OwnerTransportProjector,
   closeEvidence?: string,
-): { request_id: string; closed: number; reason?: string } {
+): { request_id: string; closed: number; reason?: string; senderNotice?: OfflineOwnerCloseNotice } {
   const requestId = pendingRequestIdForOwner(ctx, owner, attemptedId)
   const row = ctx.stmts.selectPendingSettlementForRecipient.get({
     $request_id: requestId,
@@ -2125,7 +2136,36 @@ function closeOneBall(
         : ctx.getName() === row.sender && ctx.getName() !== owner
           ? "sender-withdrawn"
           : "manual-close"
-  return { request_id: requestId, closed: settlePendingRows(ctx, [row], settlement, ctx.getName(), now, closeEvidence) }
+  const closed = settlePendingRows(ctx, [row], settlement, ctx.getName(), now, closeEvidence)
+  return {
+    request_id: requestId,
+    closed,
+    ...(settlement === "offline-owner-close" && closed > 0
+      ? { senderNotice: { to: row.sender, requestId, summary: row.summary } }
+      : {}),
+  }
+}
+
+/** Deliver the M1 notices a committed close collected: no close is silent
+ *  to the sender still waiting on it (25057, @cto). */
+function deliverOfflineOwnerCloseNotices(
+  ctx: TribeContext,
+  results: readonly { senderNotice?: OfflineOwnerCloseNotice }[],
+): void {
+  for (const { senderNotice } of results) {
+    if (senderNotice === undefined) continue
+    const verb = settlementCauseVerb({ settlement: "offline-owner-close", settled_by: ctx.getName() })
+    sendMessage(
+      ctx,
+      senderNotice.to,
+      `Your ball ${senderNotice.requestId} (${senderNotice.summary ?? "no summary"}) is closed: ${verb}. Re-route it if the work is still needed.`,
+      "notify",
+      undefined,
+      senderNotice.requestId,
+      "direct",
+      { summary: `Ball ${senderNotice.requestId} closed: owner offline past deadline` },
+    )
+  }
 }
 
 /** Dispatcher custody uses daemon facts; habitat roster policy stays with the caller. */
@@ -2135,7 +2175,11 @@ function offlineOwnerCloseAllowed(
   now: number,
   transport: OwnerTransportProjector,
 ): boolean {
-  if (ctx.getName() !== ANDON_OWNER || row.expires_at === null || row.expires_at > now) return false
+  if (ctx.getName() !== ANDON_OWNER) return false
+  // 25057: a legacy ball with no structured expiry derives the same deadline
+  // the roster sweep derives (ballDeadline) instead of refusing forever.
+  const deadline = ballDeadline(row)
+  if (deadline === undefined || deadline > now) return false
   const owner = transport.observe(row.recipient)
   return !owner.owner_transport_live && owner.owner_transport_offline_since !== null
 }
@@ -2632,7 +2676,9 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
     // rollback of its peers. A genuine ERROR mid-batch is different — it
     // aborts the transaction, so nothing settles and the caller never sees a
     // `results` array. That is deliberate: on error, no ball was closed.
-    const results = ctx.db.transaction(() => ids.map((id) => closeOneBall(ctx, owner, id, now, transport)))()
+    const outcomes = ctx.db.transaction(() => ids.map((id) => closeOneBall(ctx, owner, id, now, transport)))()
+    deliverOfflineOwnerCloseNotices(ctx, outcomes)
+    const results = outcomes.map(({ senderNotice: _notice, ...row }) => row)
     const closed = results.reduce((total, row) => total + row.closed, 0)
     // The batch composes its OWN summary and never borrows the single-id miss
     // template. That template's text hardcodes "closed 0 rows" and expects a
@@ -2665,6 +2711,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
     const refusal = incidentCloseRefusal(ctx, owner, [closeId], closeEvidence)
     if (refusal !== undefined) return jsonResult({ error: refusal })
     const outcome = ctx.db.transaction(() => closeOneBall(ctx, owner, closeId, now, transport, closeEvidence))()
+    deliverOfflineOwnerCloseNotices(ctx, [outcome])
     const warning = outcome.closed === 0 ? pendingCloseMissWarning(ctx, owner, undefined, closeId) : undefined
     // The one query that ASKS ABOUT a ball: a close aimed at a conflicted id
     // carries every fact in its own result (25654), so the CLI can exit

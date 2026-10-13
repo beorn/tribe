@@ -26,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { ballDeadline } from "./messaging.ts"
 
 const OWNER = "@chief"
 
@@ -251,7 +252,15 @@ describe("closing a ball backlog in one call", () => {
     { name: "before deadline", actor: "@chief", live: false, departed: true, deadline: 60_000, closed: 0 },
     { name: "other caller", actor: "@dev/2", live: false, departed: true, deadline: -1000, closed: 0 },
     { name: "no departure evidence", actor: "@chief", live: false, departed: false, deadline: -1000, closed: 0 },
-    { name: "no structured deadline", actor: "@chief", live: false, departed: true, deadline: null, closed: 0 },
+    // 25057: no structured expiry derives opened_at + default TTL (opened_at=1000 here, long past).
+    {
+      name: "no structured deadline, derived deadline passed",
+      actor: "@chief",
+      live: false,
+      departed: true,
+      deadline: null,
+      closed: 1,
+    },
   ])("admits dispatcher closure only for $name", ({ actor, live, departed, deadline, closed }) => {
     const owner = "@retired/reviewer"
     const now = Date.now()
@@ -329,6 +338,116 @@ describe("closing a ball backlog in one call", () => {
       expect(db.prepare("SELECT count(*) AS c FROM messages WHERE type = 'event.ball.settled'").get()).toEqual({ c: 1 })
     }
     expect(db.prepare("SELECT count(*) AS c FROM messages WHERE type = 'response'").get()).toEqual({ c: 0 })
+    // M1 (25057): an offline-owner close is never silent to its original sender.
+    const notices = db
+      .prepare("SELECT recipient, content FROM messages WHERE type = 'notify' AND kind = 'direct'")
+      .all() as Array<{ recipient: string; content: string }>
+    expect(notices).toHaveLength(closed)
+    if (closed) {
+      expect(notices[0]!.recipient).toBe("@retired/sender")
+      expect(notices[0]!.content).toContain("offline-custody")
+      expect(notices[0]!.content).toContain("closed it because the owner was offline past its deadline")
+    }
+  })
+
+  // @failure A legacy ball with no structured expiry refuses chief closure
+  // forever, or closes before its derived deadline (25057).
+  // @level l2
+  // @consumer tribe.pending offline-owner-close and the roster gc sweep
+  it("derives one deadline for a null-expiry ball: within it refuses, past it closes", () => {
+    expect(ballDeadline({ expires_at: null, opened_at: 1000 })).toBe(1000 + 20 * 60_000)
+    expect(ballDeadline({ expires_at: 4242, opened_at: 1000 })).toBe(4242)
+    const owner = "@retired/reviewer"
+    const now = Date.now()
+    openBall("legacy-no-deadline", owner, "@retired/sender")
+    db.prepare(`INSERT INTO sessions (id, name, role, domains, pid, started_at, updated_at)
+      VALUES ('retired-owner', $owner, 'member', '[]', $pid, $at, $at)`).run({
+      $owner: owner,
+      $pid: process.pid,
+      $at: now - 2000,
+    })
+    db.prepare(`INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, ref)
+      VALUES ('owner-left', 'event.session.left', $owner, '*', 'event', '{}', $at, 'pull', 'retired-owner')`).run({
+      $owner: owner,
+      $at: now - 1500,
+    })
+    const close = () =>
+      JSON.parse(
+        (
+          handleToolCall(caller("@chief"), "tribe.pending", { owner, close: "legacy-no-deadline" }, opts) as {
+            content: Array<{ text: string }>
+          }
+        ).content[0]!.text,
+      ) as { closed?: number }
+    // Opened a minute ago: inside the derived 20-minute deadline, so refused.
+    db.prepare("UPDATE pending_request SET opened_at = $at WHERE request_id = 'legacy-no-deadline'").run({
+      $at: now - 60_000,
+    })
+    expect(close().closed ?? 0).toBe(0)
+    expect(openCount()).toBe(1)
+    // Opened at the epoch fixture instant: derived deadline long past, so closed.
+    db.prepare("UPDATE pending_request SET opened_at = 1000 WHERE request_id = 'legacy-no-deadline'").run()
+    expect(close().closed).toBe(1)
+    expect(openCount()).toBe(0)
+  })
+
+  // @failure An offline-owner close settles silently while the ORIGINAL SENDER
+  // is still live and waiting: its request vanishes with nothing delivered
+  // (25057 M1, @cto d856b55e).
+  // @level l2
+  // @consumer tribe.pending offline-owner-close; the sender's tribe.fetch
+  it("delivers the offline-owner-close notice to a live sender through its normal fetch", async () => {
+    const owner = "@retired/reviewer"
+    const sender = "@live/sender"
+    const now = Date.now()
+    openBall("live-sender-notice", owner, sender)
+    db.prepare(`INSERT INTO sessions (id, name, role, domains, pid, started_at, updated_at)
+      VALUES ('retired-owner', $owner, 'member', '[]', $pid, $at, $at), ('live-sender', $sender, 'member', '[]', $pid, $at, $at)`).run(
+      {
+        $owner: owner,
+        $sender: sender,
+        $pid: process.pid,
+        $at: now - 2000,
+      },
+    )
+    db.prepare(`INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, ref)
+      VALUES ('owner-left', 'event.session.left', $owner, '*', 'event', '{}', $at, 'pull', 'retired-owner')`).run({
+      $owner: owner,
+      $at: now - 1500,
+    })
+    const closeOpts: HandlerOpts = {
+      ...opts,
+      getActiveSessionInfo: () => [
+        {
+          id: "live-sender",
+          name: sender,
+          role: "member",
+          pid: process.pid,
+          cwd: tmpDir,
+          claudeSessionId: null,
+          registeredAt: now,
+          launchId: null,
+          launchParentPid: null,
+          transportPids: [process.pid],
+          pushTransportPids: [],
+        },
+      ],
+    }
+    const result = JSON.parse(
+      (
+        handleToolCall(caller("@chief"), "tribe.pending", { owner, close: "live-sender-notice" }, closeOpts) as {
+          content: Array<{ text: string }>
+        }
+      ).content[0]!.text,
+    ) as { closed?: number }
+    expect(result.closed).toBe(1)
+    // The live sender's own normal read carries the notice: request id,
+    // summary and the settlement cause, so it can re-route.
+    const fetched = await handleToolCall(caller(sender), "tribe.fetch", { limit: 50, receipt: false }, closeOpts)
+    const fetchedText = (fetched as { content: Array<{ text: string }> }).content.map((c) => c.text).join("\n")
+    expect(fetchedText).toContain("live-sender-notice")
+    expect(fetchedText).toContain("sum")
+    expect(fetchedText).toContain("closed it because the owner was offline past its deadline")
   })
 
   /**
