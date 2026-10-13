@@ -174,11 +174,17 @@ refusal that records why it stopped without retrying) to
 `tribe-adapter-exits.jsonl` in the launch's state directory,
 `AG_HOST_SESSION_STATE_DIR`. `members --all` names that file as
 `adapter_exit_record` on the seat's row, connected or not. A cold-start give-up
-- the daemon published no landing root within the supervisor's startup window,
-so that host's endpoint stays dead until the seat is relaunched - records the
-same row with a null pid, code and signal, so it is never only a line in the
-host's own MCP log. A line that cannot be written, including for a launch with
-no state directory, is reported on the supervisor's own stderr.
+- the daemon published no landing root within the supervisor's startup window -
+records the same row with a null pid, code and signal, so it is never only a
+line in the host's own MCP log; its `reason` carries the refusal and, because
+the row is what the reader of a dark seat actually sees, the host-neutral
+remedy. It is also the row that explains a cursor seat that has gone dark:
+after a daemon restart a claude or codex seat re-registers its transport on its
+own, a cursor seat does not, so its endpoint stays disconnected until the seat
+is relaunched - the recovery measured on that seat, where a pane-level MCP
+toggle did not work (`hh-hab up <seat> --relaunch`). A line that cannot be
+written, including for a launch with no state directory, is reported on the
+supervisor's own stderr.
 
 Service principals declare `principalClass: "service"` when registering through
 `connectTribeLaunch`. They are attributed senders with their own bare names,
