@@ -231,6 +231,44 @@ describe("boundedIdentityVerifier", () => {
     await expect(wrapped.verify("tok")).resolves.toEqual(verified)
     expect(calls).toBe(1)
   })
+
+  /** @failure A cold probe at the measured tail (~600 ms: supervisor-socket leg under load, right after a
+   * generation start) is refused undecided even though its verdict lands well inside every downstream
+   * budget (28947). @level l1 @consumer The daemon dispatcher (one-shot and register verification). */
+  it("the default wait serves a probe that lands at ~600ms (28947)", async () => {
+    const wrapped = boundedIdentityVerifier(
+      stub(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 600))
+        return verified
+      }),
+    )
+    await expect(wrapped.verify("tok")).resolves.toEqual(verified)
+  })
+
+  /** @failure The bound is revised from a ratio to a budget instead of the cold tail actually observed:
+   * a probe that outlived the wait lands its verdict in the cache with no record of how long it took
+   * (28947, @cto must). @level l1 @consumer The daemon composition's info log. */
+  it("a probe that outlived the wait reports its eventual duration and verdict kind when it lands (28947)", async () => {
+    const landed: Array<{ elapsedMs: number; result: IdentityVerdict["result"] }> = []
+    const probe = deferred<IdentityVerdict>()
+    const wrapped = boundedIdentityVerifier(
+      stub(async () => probe.promise),
+      {
+        waitMs: 30,
+        onOutlivedProbe: (info) => landed.push(info),
+      },
+    )
+    await expect(wrapped.verify("tok")).resolves.toEqual({ result: "undecided", reason: "no verdict within 30ms" })
+    expect(landed).toEqual([])
+    probe.resolve(verified)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(landed).toHaveLength(1)
+    expect(landed[0]?.result).toBe("verified")
+    expect(landed[0]?.elapsedMs).toBeGreaterThanOrEqual(30)
+    // The next call serves the landed verdict from cache; nothing outlived again.
+    await expect(wrapped.verify("tok")).resolves.toEqual(verified)
+    expect(landed).toHaveLength(1)
+  })
 })
 
 describe("session authority", () => {

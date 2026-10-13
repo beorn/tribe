@@ -193,7 +193,13 @@ if (partialShape.config.inheritFd === null) {
 let identityVerifier: LoadedIdentityVerifier | null = null
 if (partialShape.config.identityVerifierPath) {
   try {
-    identityVerifier = boundedIdentityVerifier(await loadIdentityVerifier(partialShape.config.identityVerifierPath))
+    identityVerifier = boundedIdentityVerifier(await loadIdentityVerifier(partialShape.config.identityVerifierPath), {
+      // 28947 (@cto must): every probe that outlived a caller's wait reports its eventual duration
+      // when it lands, so the wait bound is next set from the cold tail actually observed.
+      onOutlivedProbe: ({ elapsedMs, result }) => {
+        log.info?.(`identity probe that outlived the wait landed after ${elapsedMs}ms with verdict ${result}`)
+      },
+    })
   } catch (error) {
     log.error?.(`Refusing to start: ${error instanceof Error ? error.message : String(error)}`)
     await rootScope[Symbol.asyncDispose]()

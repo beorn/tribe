@@ -65,14 +65,27 @@ export interface LoadedIdentityVerifier {
 export interface BoundedIdentityVerifierOptions {
   /** How long a verdict may be served from cache: tens of seconds (28927 pin 2). */
   readonly ttlMs?: number
-  /** How long a call may wait on a probe before it is answered undecided: a few hundred ms (28927 pin 4). */
+  /** How long a call may wait on a probe before it is answered undecided (28927 pin 4; 28947). */
   readonly waitMs?: number
   /** Clock override for tests; the cache ages by this, the wait by real timers. */
   readonly now?: () => number
+  /**
+   * Told when a probe that outlived some caller's wait lands its verdict in the cache, with its
+   * eventual duration and verdict kind (28947, @cto must): the cold tail actually observed is what
+   * the next revision of the wait bound is set from. A thrown probe lands nothing and is not told.
+   */
+  readonly onOutlivedProbe?: (landed: {
+    readonly elapsedMs: number
+    readonly result: IdentityVerdict["result"]
+  }) => void
 }
 
 const VERDICT_TTL_MS = 30_000
-const VERDICT_WAIT_MS = 250
+// 28947: 250 ms was set against a steady-state probe (p50 2 ms); the measured cold tail — generation
+// starts, register waves, the supervisor-socket leg under load — runs past it, and every refusal in
+// the daemon log clustered there. 1000 ms stays five times under the socket's 5 s ack budget, and
+// the wait is scoped to the calling connection, so only the cold call itself pays.
+const VERDICT_WAIT_MS = 1_000
 const VERDICT_CACHE_MAX = 1_024
 
 /**
@@ -95,6 +108,9 @@ export function boundedIdentityVerifier(
   const now = options.now ?? Date.now
   const cache = new Map<string, { verdict: IdentityVerdict; at: number }>()
   const inFlight = new Map<string, Promise<IdentityVerdict>>()
+  // Each probe's start and whether some caller already stopped waiting on it, keyed by the probe
+  // promise itself: when an outlived probe lands, the composition is told how long it took (28947).
+  const probes = new Map<Promise<IdentityVerdict>, { startedAt: number; outlived: boolean }>()
 
   const fresh = (token: string): IdentityVerdict | undefined => {
     const held = cache.get(token)
@@ -104,6 +120,7 @@ export function boundedIdentityVerifier(
   const probe = (token: string): Promise<IdentityVerdict> => {
     const existing = inFlight.get(token)
     if (existing !== undefined) return existing
+    const startedAt = now()
     const started = (async (): Promise<IdentityVerdict> => {
       const verdict = await loaded.verify(token)
       if (cache.size >= VERDICT_CACHE_MAX) {
@@ -120,10 +137,24 @@ export function boundedIdentityVerifier(
       return verdict
     })()
     inFlight.set(token, started)
+    probes.set(started, { startedAt, outlived: false })
     const settle = (): void => {
       if (inFlight.get(token) === started) inFlight.delete(token)
     }
-    void started.then(settle, settle)
+    void (async () => {
+      try {
+        const verdict = await started
+        const seen = probes.get(started)
+        probes.delete(started)
+        if (seen?.outlived === true) {
+          options.onOutlivedProbe?.({ elapsedMs: now() - seen.startedAt, result: verdict.result })
+        }
+      } catch {
+        probes.delete(started)
+      } finally {
+        settle()
+      }
+    })()
     return started
   }
 
@@ -153,6 +184,8 @@ export function boundedIdentityVerifier(
       // undecided is returned, never cached: only a verdict the probe itself returns may be cached.
       const landed = fresh(token)
       if (landed !== undefined) return landed
+      const seen = probes.get(pending)
+      if (seen !== undefined) seen.outlived = true
       return { result: "undecided", reason: `no verdict within ${String(waitMs)}ms` }
     },
   }
