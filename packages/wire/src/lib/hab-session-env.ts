@@ -8,7 +8,12 @@
  * second spelling. hab-core re-exports them under the same names.
  */
 
-/** A managed seat launch's id; a seat carries it with its habitat root, and one without the other is a broken launch. */
+/**
+ * A managed seat launch's id; a seat carries it with its habitat root, and one without the other is a broken launch.
+ *
+ * BOUNDARY: `HAB_SESSION_LAUNCH_ID` is the legacy storage spelling of the L1 session id — running processes inherit
+ * it, so the NAME does not change here; a rename waits for the next schema bump (@i/21-wire/28810).
+ */
 export const HAB_SESSION_LAUNCH_ID_ENV = "HAB_SESSION_LAUNCH_ID"
 /** The habitat root every hab launch carries. */
 export const HAB_SESSION_HABITAT_ROOT_ENV = "HAB_SESSION_HABITAT_ROOT"
