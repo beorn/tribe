@@ -401,21 +401,28 @@ describe("createInboxWaitManager", () => {
       manager.cancelConnection("conn-default")
       await defaultWait
 
-      sendRequest("req-notify")
-      const notifyWait = manager.wait("@requester", "conn-notify", 1_000, { wakeOnCorrelatedReply: true })
-      let notifySettled = false
-      void notifyWait.then(() => {
-        notifySettled = true
-      })
-      sendReply("notify", "req-notify")
-      await Promise.resolve()
-      expect(notifySettled).toBe(false)
-      manager.cancelConnection("conn-notify")
-      await notifyWait
-
-      for (const type of ["response", "status"] as const) {
+      for (const type of ["notify", "status"] as const) {
         const requestId = `req-${type}`
         const connId = `conn-${type}`
+        sendRequest(requestId)
+        const pending = db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get(requestId)
+        expect(pending).not.toBeNull()
+        const progressWait = manager.wait("@requester", connId, 1_000, { wakeOnCorrelatedReply: true })
+        let progressSettled = false
+        void progressWait.then(() => {
+          progressSettled = true
+        })
+        sendReply(type, requestId)
+        await Promise.resolve()
+        expect(progressSettled).toBe(false)
+        expect(db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get(requestId)).toEqual(pending)
+        manager.cancelConnection(connId)
+        await progressWait
+      }
+
+      {
+        const requestId = "req-response"
+        const connId = "conn-response"
         sendRequest(requestId)
         const wait = manager.wait("@requester", connId, 1_000, { wakeOnCorrelatedReply: true })
         let result: Awaited<typeof wait> | undefined
@@ -423,11 +430,11 @@ describe("createInboxWaitManager", () => {
           result = value
         })
 
-        sendReply(type, `missing-${requestId}`)
+        sendReply("response", `missing-${requestId}`)
         await Promise.resolve()
         expect(result).toBeUndefined()
 
-        sendReply(type, requestId)
+        sendReply("response", requestId)
         await Promise.resolve()
         const settled = result !== undefined
         if (!settled) manager.cancelConnection(connId)
@@ -475,74 +482,82 @@ describe("createInboxWaitManager", () => {
     }
   })
 
-  it("fresh opt-in wait wakes for a pre-existing validated reply only", async () => {
-    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-current-reply-"))
-    const db = openDatabase(join(tmpDir, "tribe.db"))
-    const stmts = createStatements(db)
-    const manager = createInboxWaitManager(
-      (session) => status(session, 0),
-      realAttentionReader(db, stmts),
-      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
-      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply, true),
-    )
-    const requester = makeContext(db, stmts, "requester", "@requester", manager.onMessageInserted)
-    const responder = makeContext(db, stmts, "responder", "@responder", manager.onMessageInserted)
-
-    try {
-      sendMessage(
-        responder,
-        "@requester",
-        "unvalidated response",
-        "response",
-        undefined,
-        undefined,
-        "direct",
-        {},
-        { reply: "missing-request" },
+  it.each(["response", "historical status"] as const)(
+    "fresh opt-in wait wakes for a pre-existing validated %s only",
+    async (kind) => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-current-reply-"))
+      const db = openDatabase(join(tmpDir, "tribe.db"))
+      const stmts = createStatements(db)
+      const manager = createInboxWaitManager(
+        (session) => status(session, 0),
+        realAttentionReader(db, stmts),
+        (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+        (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply, true),
       )
-      await expect(
-        manager.wait("@requester", "conn-unvalidated-current", 0, { wakeOnCorrelatedReply: true }),
-      ).resolves.toMatchObject({ status: "timeout", timed_out: true })
+      const requester = makeContext(db, stmts, "requester", "@requester", manager.onMessageInserted)
+      const responder = makeContext(db, stmts, "responder", "@responder", manager.onMessageInserted)
 
-      sendMessage(
-        requester,
-        "@responder",
-        "please respond",
-        "request",
-        undefined,
-        undefined,
-        "direct",
-        {},
-        { request: "req-current" },
-      )
-      sendMessage(
-        responder,
-        "@requester",
-        "validated status",
-        "status",
-        undefined,
-        undefined,
-        "direct",
-        {},
-        { reply: "req-current" },
-      )
+      try {
+        sendMessage(
+          responder,
+          "@requester",
+          "unvalidated response",
+          "response",
+          undefined,
+          undefined,
+          "direct",
+          {},
+          { reply: "missing-request" },
+        )
+        await expect(
+          manager.wait("@requester", "conn-unvalidated-current", 0, { wakeOnCorrelatedReply: true }),
+        ).resolves.toMatchObject({ status: "timeout", timed_out: true })
 
-      await expect(manager.wait("@requester", "conn-default-current", 0)).resolves.toMatchObject({
-        status: "timeout",
-        timed_out: true,
-      })
-      await expect(
-        manager.wait("@requester", "conn-validated-current", 0, { wakeOnCorrelatedReply: true }),
-      ).resolves.toMatchObject({
-        status: "woken",
-        timed_out: false,
-        waited_ms: immediateWakeMs,
-      })
-    } finally {
-      db.close()
-      rmSync(tmpDir, { recursive: true, force: true })
-    }
-  })
+        sendMessage(
+          requester,
+          "@responder",
+          "please respond",
+          "request",
+          undefined,
+          undefined,
+          "direct",
+          {},
+          { request: "req-current" },
+        )
+        sendMessage(
+          responder,
+          "@requester",
+          "validated response",
+          "response",
+          undefined,
+          undefined,
+          "direct",
+          {},
+          { reply: "req-current" },
+        )
+        if (kind === "historical status") {
+          // Before final-type settlement, stored status rows carried validated reply correlation.
+          // The current writer never creates them; retain the journal reader's historical contract.
+          db.prepare("UPDATE messages SET type = 'status' WHERE reply = ?").run("req-current")
+        }
+
+        await expect(manager.wait("@requester", "conn-default-current", 0)).resolves.toMatchObject({
+          status: "timeout",
+          timed_out: true,
+        })
+        await expect(
+          manager.wait("@requester", "conn-validated-current", 0, { wakeOnCorrelatedReply: true }),
+        ).resolves.toMatchObject({
+          status: "woken",
+          timed_out: false,
+          waited_ms: immediateWakeMs,
+        })
+      } finally {
+        db.close()
+        rmSync(tmpDir, { recursive: true, force: true })
+      }
+    },
+  )
 
   it("re-armed opt-in wait wakes for a validated reply that landed between chunks", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-reply-gap-"))
