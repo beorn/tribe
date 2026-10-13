@@ -90,6 +90,32 @@ class DaemonConnectTimeoutError extends Error {
   }
 }
 
+/**
+ * The closed-connection rejections this module raises, named beside their
+ * throw sites (28900 M2) so a reworded throw cannot silently end a caller's
+ * retry: the reconnecting proxy's pre-write "daemon connection closed;
+ * reconnecting", the raw client's "Connection closed" (possibly after the
+ * write), and the socket error a close rejects pending calls with.
+ * DaemonCallTimeoutError is deliberately NOT in this class: a timeout is not
+ * a closed connection.
+ */
+export function isClosedConnectionError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  if (err.message === "Connection closed" || err.message.includes("daemon connection closed")) return true
+  const code = (err as { code?: unknown }).code
+  return code === "ECONNRESET" || code === "EPIPE"
+}
+
+/** This module's per-call deadline expiry, by class or by its name+code pair. */
+export function isDaemonCallTimeoutError(err: unknown): boolean {
+  if (err instanceof DaemonCallTimeoutError) return true
+  return (
+    err instanceof Error &&
+    err.name === "DaemonCallTimeoutError" &&
+    (err as { code?: unknown }).code === "TRIBE_DAEMON_CALL_TIMEOUT"
+  )
+}
+
 /** Default delay before one stall-time /proc sample. @cto 666b47e8 / #27089. */
 export const STALL_SAMPLE_AFTER_MS = 5_000
 
