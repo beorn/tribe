@@ -20,7 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import tribeHabModule from "../../../../hab.projects.ts"
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { prefixFallbackDeliveryResolver } from "./delivery-resolution.ts"
+import { parseDeliveryFallbackPolicy } from "./delivery-resolution.ts"
 import { handleToolCall, type ActiveSessionInfo, type HandlerOpts } from "./handlers.ts"
 import { createInboxWaitManager } from "./inbox-wait.ts"
 import { registerSession } from "./session.ts"
@@ -258,7 +258,9 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
   })
 
   it("keeps routing and admission on the live transport: a pull seat between waits keeps its mail", () => {
-    const resolveDelivery = prefixFallbackDeliveryResolver(tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS)
+    const resolveDelivery = parseDeliveryFallbackPolicy(
+      tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS,
+    )?.resolveDelivery
     const pullSeat = { delivery: "pull", connected: true, readableMailbox: true, ownerWaiting: false } as const
     addSeat({ ...pullSeat, name: "@ci", lastReadAgeMs: 2 * MINUTE }, 2)
     addSeat({ ...pullSeat, name: "@chief", lastReadAgeMs: 3 * MINUTE }, 3)
@@ -379,7 +381,9 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
       },
       3,
     )
-    const resolveDelivery = prefixFallbackDeliveryResolver(tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS)
+    const resolveDelivery = parseDeliveryFallbackPolicy(
+      tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS,
+    )?.resolveDelivery
     const sent = toolJson(
       handleToolCall(
         sender,

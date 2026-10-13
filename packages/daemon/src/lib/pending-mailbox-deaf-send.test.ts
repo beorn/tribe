@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import tribeHabModule from "../../../../hab.projects.ts"
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { prefixFallbackDeliveryResolver } from "./delivery-resolution.ts"
+import { parseDeliveryFallbackPolicy } from "./delivery-resolution.ts"
 import { handleToolCall, type ActiveSessionInfo, type HandlerOpts } from "./handlers.ts"
 import { registerSession } from "./session.ts"
 
@@ -328,7 +328,8 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
         { to: "@ci", message: "who holds admission", type: "request" },
         {
           ...optsWithLive([liveInfo("sess-chief", "@chief")]),
-          resolveDelivery: prefixFallbackDeliveryResolver(tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS),
+          resolveDelivery: parseDeliveryFallbackPolicy(tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS)
+            ?.resolveDelivery,
         },
       ),
     )

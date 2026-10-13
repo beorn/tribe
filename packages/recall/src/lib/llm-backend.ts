@@ -311,21 +311,6 @@ export function parseDeniedProviders(raw: string | undefined): ReadonlySet<strin
 const EMPTY_DENY_SET: ReadonlySet<string> = new Set()
 
 /**
- * Compatibility helper for older injected backends. Production Recall now
- * passes the deny set as explicit `selectModels` exclusions and leaves the
- * legacy boolean byte-compatible.
- *
- * @deprecated Use providerFacts plus selectModels exclusions.
- */
-export function withProviderDenyList(
-  isProviderAvailable: (provider: string) => boolean,
-  denied: ReadonlySet<string>,
-): (provider: string) => boolean {
-  if (denied.size === 0) return isProviderAvailable
-  return (provider: string) => !denied.has(provider.toLowerCase()) && isProviderAvailable(provider)
-}
-
-/**
  * Bridge Bearly's public structured failure describer into Recall's model
  * shape. `displayName` is not part of Recall's model type, so modelId is a
  * safe stand-in for the compatibility renderer.

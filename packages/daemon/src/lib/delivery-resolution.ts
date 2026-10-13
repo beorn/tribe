@@ -144,11 +144,6 @@ export function parseDeliveryFallbackPolicy(raw: string | undefined): DeliveryFa
   return { resolveDelivery, retiredNames }
 }
 
-/** Backward-compatible resolver-only projection for callers without health state. */
-export function prefixFallbackDeliveryResolver(raw: string | undefined): DirectDeliveryResolver | undefined {
-  return parseDeliveryFallbackPolicy(raw)?.resolveDelivery
-}
-
 /**
  * The live name a refused recipient most likely meant, for the refusal's hint (25807 row 1): "review-adhoc5" means
  * "@dev/review-adhoc5". A live name whose trailing path segments equal the recipient wins, fewest segments first;

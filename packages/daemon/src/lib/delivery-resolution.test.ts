@@ -8,7 +8,7 @@ import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { logEvent } from "./messaging.ts"
-import { nearestLiveName, parseDeliveryFallbackPolicy, prefixFallbackDeliveryResolver } from "./delivery-resolution.ts"
+import { nearestLiveName, parseDeliveryFallbackPolicy } from "./delivery-resolution.ts"
 import { registerSession } from "./session.ts"
 import { DEFAULT_MAX_SILENCE_SEC } from "./session-transport-state.ts"
 import tribeHabModule from "../../../../hab.projects.ts"
@@ -44,12 +44,12 @@ describe("generic direct-message delivery resolution", () => {
   })
 
   it("validates one declared-order prefix fallback table and never infers hierarchy", () => {
-    const resolve = prefixFallbackDeliveryResolver(
+    const resolve = parseDeliveryFallbackPolicy(
       JSON.stringify([
         { prefix: "@worker/special/", to: "@special-manager" },
         { prefix: "@worker/", to: "@manager" },
       ]),
-    )
+    )?.resolveDelivery
     expect(resolve?.({ recipient: "@worker/special/1", answerableNames: new Set() })).toMatchObject({
       status: "accepted",
       state: "bounced",
@@ -66,9 +66,9 @@ describe("generic direct-message delivery resolution", () => {
   })
 
   it("supports and trims an exact-name fallback without matching descendants", () => {
-    const resolve = prefixFallbackDeliveryResolver(
+    const resolve = parseDeliveryFallbackPolicy(
       JSON.stringify([{ name: " @yrd ", to: " @chief ", action: "bounce" }]),
-    )
+    )?.resolveDelivery
     expect(resolve?.({ recipient: "@yrd", answerableNames: new Set(["@chief"]) })).toMatchObject({
       status: "accepted",
       state: "bounced",
@@ -82,7 +82,7 @@ describe("generic direct-message delivery resolution", () => {
 
   it("routes the intentionally unstaffed CI coordinator role to its declared holder", () => {
     const raw = tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS
-    const resolve = prefixFallbackDeliveryResolver(raw)
+    const resolve = parseDeliveryFallbackPolicy(raw)?.resolveDelivery
     expect(resolve?.({ recipient: "@ci", answerableNames: new Set(["@chief"]) })).toMatchObject({
       status: "accepted",
       state: "bounced",
@@ -96,7 +96,7 @@ describe("generic direct-message delivery resolution", () => {
   // terminal identity below, not with @ci's live bounce.
   it("refuses the retired Yrd identity even when a stale transport is answer-capable", () => {
     const raw = tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS
-    const resolve = prefixFallbackDeliveryResolver(raw)
+    const resolve = parseDeliveryFallbackPolicy(raw)?.resolveDelivery
     expect(resolve?.({ recipient: "@yrd", answerableNames: new Set(["@yrd", "@chief"]) })).toEqual({
       status: "refused",
       reason: '"@yrd" is retired; send to successor "@chief"',
@@ -113,7 +113,7 @@ describe("generic direct-message delivery resolution", () => {
 
   it("refuses the retired Fleet identity even when a stale transport is answer-capable", () => {
     const raw = tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS
-    const resolve = prefixFallbackDeliveryResolver(raw)
+    const resolve = parseDeliveryFallbackPolicy(raw)?.resolveDelivery
     expect(resolve?.({ recipient: "@fleet", answerableNames: new Set(["@fleet", "@chief"]) })).toEqual({
       status: "refused",
       reason: '"@fleet" is retired; send to successor "@chief"',
@@ -172,7 +172,7 @@ describe("generic direct-message delivery resolution", () => {
     [JSON.stringify([{ name: "@fleet", to: "@chief", action: "drop" }]), /action must be/],
     [JSON.stringify([{ prefix: "@fleet", to: "@chief", action: "refuse" }]), /exact name/],
   ])("fails loud on an invalid prefix fallback table", (raw, expected) => {
-    expect(() => prefixFallbackDeliveryResolver(raw)).toThrow(expected)
+    expect(() => parseDeliveryFallbackPolicy(raw)).toThrow(expected)
   })
 
   let dir: string
@@ -479,7 +479,9 @@ describe("generic direct-message delivery resolution", () => {
       const recentRecipient = makeContext(db, stmts, "@fleet", "departed-fleet-session")
       logEvent(recentRecipient, "session.left", undefined, { name: "@fleet", reason: "peer-close" })
 
-      const resolveDelivery = prefixFallbackDeliveryResolver(tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS)
+      const resolveDelivery = parseDeliveryFallbackPolicy(
+        tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS,
+      )?.resolveDelivery
 
       const refused = resultJson(
         handleToolCall(
@@ -507,7 +509,9 @@ describe("generic direct-message delivery resolution", () => {
   )
 
   it("refuses untracked Fleet mail before creating a direct-message row", () => {
-    const resolveDelivery = prefixFallbackDeliveryResolver(tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS)
+    const resolveDelivery = parseDeliveryFallbackPolicy(
+      tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS,
+    )?.resolveDelivery
     const refused = resultJson(
       handleToolCall(
         sender,
@@ -529,7 +533,9 @@ describe("generic direct-message delivery resolution", () => {
   ] as const)("refuses mixed %s recipients atomically in order %j", (type, to) => {
     const content = `mixed retired ${type} ${to.join(" then ")}`
     const request = `req-mixed-${type}-${to[0] === "@fleet" ? "retired-first" : "retired-last"}`
-    const resolveDelivery = prefixFallbackDeliveryResolver(tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS)
+    const resolveDelivery = parseDeliveryFallbackPolicy(
+      tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS,
+    )?.resolveDelivery
     const refused = resultJson(
       handleToolCall(
         sender,
@@ -629,7 +635,7 @@ describe("generic direct-message delivery resolution", () => {
     )
     const pullOpts = {
       ...opts(),
-      resolveDelivery: prefixFallbackDeliveryResolver(JSON.stringify([{ name: "@yrd", to: "@chief" }])),
+      resolveDelivery: parseDeliveryFallbackPolicy(JSON.stringify([{ name: "@yrd", to: "@chief" }]))?.resolveDelivery,
     }
 
     const sent = resultJson(

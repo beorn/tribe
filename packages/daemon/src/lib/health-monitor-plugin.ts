@@ -641,12 +641,16 @@ function censusBoundNote(reason: string): string {
 
 /**
  * ONE RULE, ONE PLACE: advance or clear the consecutive-blindness run for a
- * census, and return the run length.
+ * census, and return the run length. The sample loop calls this and reads the
+ * returned run; the alert fires from that run.
  *
- * This lives here rather than inline in the sample loop because the loop is a
- * closure no test can drive. Passing a count straight to the formatter would
- * prove the formatter renders a number and say nothing about whether anything
- * ever counts one (@i/1-instruments/24962).
+ * The run is stated here rather than inline in the sample loop because the loop
+ * is a closure no test can drive. Passing a count straight to the formatter
+ * would prove the formatter renders a number and say nothing about whether
+ * anything ever counts one (@i/1-instruments/24962).
+ *
+ * `kind` accepts both spellings of a failed census: the canonical observation's
+ * `"unavailable"` and the metrics field's `"canonical-unavailable"`.
  */
 export function recordAttributionBlindness(
   state: { attributionBlindSamples: number; firedAlerts?: Set<string> },
@@ -1875,26 +1879,27 @@ export function evaluateAlerts(
   }
 
   // --- Attribution blindness ---
-  // A census that fails to attribute for sustained samples is BLIND.
-  // When attributionBlindSamples reaches the threshold, fire an alert so 30 hours of failure cannot pass silently again.
-  if (metrics.processObservation.kind === "canonical-unavailable") {
-    state.attributionBlindSamples++
-    if (state.attributionBlindSamples >= thresholds.sustainedSamples && !state.firedAlerts.has("attribution:blind")) {
-      state.firedAlerts.add("attribution:blind")
-      alerts.push({
-        type: "attribution",
-        severity: "warning",
-        message:
-          `Process census attribution is BLIND: process census has failed for ${String(state.attributionBlindSamples)} consecutive samples (${metrics.processObservation.reason}). ` +
-          `Run \`hab sysmon snapshot --state-root ${metrics.processObservation.diagnostic.location}\` to attribute by hand; ` +
-          `queried ${metrics.processObservation.diagnostic.query}; excluded ${metrics.processObservation.diagnostic.excluded.join(",")}`,
-        metrics: {},
-        topOffenders: [],
-      })
-    }
-  } else {
-    state.attributionBlindSamples = 0
-    state.firedAlerts.delete("attribution:blind")
+  // A census that fails to attribute for sustained samples is BLIND. The run
+  // advances or clears in ONE place — `recordAttributionBlindness` — and the
+  // alert fires once that run reaches the threshold, so 30 hours of failure
+  // cannot pass silently again (@i/1-instruments/24962).
+  const attributionBlindRun = recordAttributionBlindness(state, metrics.processObservation)
+  if (
+    metrics.processObservation.kind === "canonical-unavailable" &&
+    attributionBlindRun >= thresholds.sustainedSamples &&
+    !state.firedAlerts.has("attribution:blind")
+  ) {
+    state.firedAlerts.add("attribution:blind")
+    alerts.push({
+      type: "attribution",
+      severity: "warning",
+      message:
+        `Process census attribution is BLIND: process census has failed for ${String(attributionBlindRun)} consecutive samples (${metrics.processObservation.reason}). ` +
+        `Run \`hab sysmon snapshot --state-root ${metrics.processObservation.diagnostic.location}\` to attribute by hand; ` +
+        `queried ${metrics.processObservation.diagnostic.query}; excluded ${metrics.processObservation.diagnostic.excluded.join(",")}`,
+      metrics: {},
+      topOffenders: [],
+    })
   }
 
   // --- Worktrees ---
