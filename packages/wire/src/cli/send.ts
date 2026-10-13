@@ -645,7 +645,17 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     }
     process.exit(1)
   }
-  if (input.reply && caller) reportCommittedReplyTracker(caller.name, input.reply, result.tracker)
+  if (input.reply && caller) {
+    const type = input.type ?? "notify"
+    if (type === "response" || type === "verdict") {
+      reportCommittedReplyTracker(caller.name, input.reply, result.tracker)
+    } else {
+      console.log(
+        `${type} does not settle ball ${input.reply}; it stays open (settle it with --type response or verdict)` +
+          (input.ref === undefined ? "" : `; reply ${input.reply} was not recorded; ref ${input.ref} kept`),
+      )
+    }
+  }
   if (result.delivery?.state === "bounced") {
     const { original_target: originalTarget, recipient, reason } = result.delivery
     if (

@@ -804,7 +804,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // Ball-tracker fields (@km/tribe/message-ball-tracker Phase 2a): typed
   // non-self direct actionables auto-open a semantic ball in sendMessage.
   // `request:true` explicitly applies message-id ownership to another type;
-  // a string overrides the id. `reply` closes the referenced semantic ball.
+  // a string overrides the id. Response/verdict + reply settle; other types correlate without closing.
   const requestArg = a.request
   const replyArg = a.reply
   const fanoutArg = a.fanout as "first" | "all" | undefined
@@ -952,8 +952,8 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     if (replyId !== null) {
       return jsonResult({
         error:
-          "tribe.send: invalid options - a re-due keeps the ball open and reply settles it; send the status + ref " +
-          "receipt with expires_in_ms, or the response + reply, not both",
+          "tribe.send: invalid options - a re-due requires the status + ref receipt without reply; " +
+          "send that receipt with expires_in_ms, or omit expires_in_ms to send a non-closing progress reply",
       })
     }
     const resolved = receiptRedue(ctx, { owner: sender, requester: recipients, ref, expiresInMs })
@@ -1127,6 +1127,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(summaryDerived),
     maybeTruncationWarning(truncation),
+    maybeProgressReplyNote(msgType, replyId, a.ref as string | undefined),
     replyReport.warning,
     maybeUntrackedDeliveryNote(msgType, recipients, willTrack, transport),
   )
@@ -1280,11 +1281,14 @@ function handleMultiSend(input: {
     input.ctx,
     input.sender,
     input.recipients,
-    aggregateReplyTracker(results, input.replyId),
+    input.msgType === "response" || input.msgType === "verdict"
+      ? aggregateReplyTracker(results, input.replyId)
+      : undefined,
   )
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(input.summaryDerived),
     maybeTruncationWarning(input.truncation),
+    maybeProgressReplyNote(input.msgType, input.replyId, input.args.ref as string | undefined),
     replyReport.warning,
     maybeUntrackedDeliveryNote(input.msgType, input.recipients, input.willTrack, input.transport),
   )
@@ -1601,6 +1605,14 @@ function maybeUntrackedDeliveryNote(
     )
   }
   return `delivery note — ${parts.join(" ")}`
+}
+
+function maybeProgressReplyNote(type: string, reply: string | null, ref?: string): string | undefined {
+  if (reply === null || type === "response" || type === "verdict") return undefined
+  return (
+    `${type} does not settle ball ${reply}; it stays open (settle it with --type response or verdict)` +
+    (ref === undefined ? "" : `; reply ${reply} was not recorded; ref ${ref} kept`)
+  )
 }
 
 type Tracker = {

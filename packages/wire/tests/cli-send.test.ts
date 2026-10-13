@@ -861,10 +861,11 @@ describe("registerSendCommands", () => {
             // the requested name back (no live holder in this fixture).
             result = { name: (request.params?.name as string) ?? "@chief", role: "member" }
           } else if (request.method === "tribe.send") {
-            pendingOpen = false
+            const progress = ["status", "notify", "request", "query"].includes(String(request.params?.type))
+            if (!progress) pendingOpen = false
             const message = request.params?.message
             result =
-              message === "missing"
+              message === "missing" || progress
                 ? { sent: true }
                 : {
                     sent: true,
@@ -910,6 +911,17 @@ describe("registerSendCommands", () => {
         })
       const runReply = (message: string, reply = "req-123") =>
         runCli(["send", "@agent/3", message, "--type", "response", "--reply", reply])
+
+      // #28844: a delivered progress correlation has no settlement proof. The CLI must
+      // name nonsettlement and succeed, rather than treating missing tracker as failure.
+      for (const type of ["status", "notify", "request", "query"]) {
+        const progress = await runCli(["send", "@agent/3", "taking", "--type", type, "--reply", "req-123"])
+        expect(progress).toMatchObject({ code: 0, stderr: "" })
+        expect(progress.stdout).toContain(
+          `${type} does not settle ball req-123; it stays open (settle it with --type response or verdict)`,
+        )
+        expect(progress.stdout).not.toContain("Closed ")
+      }
 
       const byMessage = await runReply("by-message", "msg-123")
       expect(byMessage).toMatchObject({ code: 0, stderr: "" })
@@ -982,7 +994,7 @@ describe("registerSendCommands", () => {
           params: { owner: "@chief", close: "req-123", idToken: chiefToken },
         },
       ])
-      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(5)
+      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(9)
     } finally {
       server.close()
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })

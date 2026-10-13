@@ -128,6 +128,111 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
+  /**
+   * @failure Progress carrying reply silently releases accepted work (#28844).
+   * @level l1
+   * @consumer Tribe owners sending TAKING receipts or final dispositions.
+   */
+  it.each([
+    ["status", false],
+    ["notify", false],
+    ["request", false],
+    ["query", false],
+    ["response", true],
+    ["verdict", true],
+  ] as const)("%s + reply uses the message type to decide settlement", (type, settles) => {
+    const requestId = "accepted-work"
+    const opts = makeOpts(["sess-chief", "sess-agent-1"])
+    const opened = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: "@agent/1",
+          message: "deliver the repair",
+          type: "request",
+          request: requestId,
+        },
+        opts,
+      ),
+    )
+    expect(opened.sent).toBe(true)
+    const before = db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get(requestId)
+    expect(before).not.toBeNull()
+
+    const result = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        {
+          to: "@chief",
+          message: settles ? "delivered" : "taking; work stays open",
+          summary: "accepted work disposition",
+          type,
+          reply: requestId,
+        },
+        opts,
+      ),
+    )
+    expect(result.sent).toBe(true)
+    expect(result.reply_close_failed).toBeUndefined()
+    if (settles) {
+      expect(result.tracker).toMatchObject({ request_id: requestId, closed: 1 })
+      expect(pendingRecipients(db, requestId)).toEqual([])
+    } else {
+      // Preserve the entire obligation, including its original deadline.
+      expect(db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get(requestId)).toEqual(before)
+      expect(result.warning).toContain(
+        `${type} does not settle ball ${requestId}; it stays open (settle it with --type response or verdict)`,
+      )
+      expect(db.prepare("SELECT ref, reply FROM messages WHERE id = ?").get(result.id as string)).toEqual({
+        ref: requestId,
+        reply: null,
+      })
+      expect(db.prepare("SELECT COUNT(*) AS count FROM messages WHERE type = 'event.ball.settled'").get()).toEqual({
+        count: 0,
+      })
+    }
+  })
+
+  it("keeps an explicit ref when non-final reply also names a ball", () => {
+    const opts = makeOpts(["sess-chief", "sess-agent-1"])
+    parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: "@agent/1",
+          message: "deliver",
+          type: "request",
+          request: "open-work",
+        },
+        opts,
+      ),
+    )
+    const before = db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get("open-work")
+    const result = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        {
+          to: "@chief",
+          message: "taking",
+          type: "status",
+          reply: "open-work",
+          ref: "explicit-context",
+        },
+        opts,
+      ),
+    )
+    expect(db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get("open-work")).toEqual(before)
+    expect(db.prepare("SELECT ref, reply FROM messages WHERE id = ?").get(result.id as string)).toEqual({
+      ref: "explicit-context",
+      reply: null,
+    })
+    expect(result.warning).toContain("reply open-work was not recorded; ref explicit-context kept")
+  })
+
   it("broadcast request snapshots active room members and excludes sender", () => {
     const res = parseToolJson(
       handleToolCall(
@@ -908,7 +1013,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       const count = messageCount()
 
       const res = receipt(agent1, "redue-reply", { expires_in_ms: 600_000, reply: "redue-reply" })
-      expect(res.error).toMatch(/reply settles it/)
+      expect(res.error).toMatch(/status \+ ref receipt without reply/)
       expect(dueOf("redue-reply")).toBe(original)
       expect(messageCount()).toBe(count)
     })

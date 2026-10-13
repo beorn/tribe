@@ -119,7 +119,8 @@ export function deriveSummary(content: string, max = 80): string {
  * request/query/assign automatically open a recipient-owned request; verdict
  * remains wakeable but does not implicitly create a second obligation. An
  * explicit `request` tracks any direct type and overrides its id, while a
- * message with `reply` closes the referenced request. This lower-level writer
+ * response or verdict with `reply` closes the referenced request; other types
+ * retain it as non-closing `ref` correlation. This lower-level writer
  * owns the invariant so plugin and adapter call sites cannot accidentally
  * create an acknowledged actionable with no durable response obligation.
  * `handleSend` resolves explicit multi-target lists and broadcast snapshots
@@ -140,7 +141,8 @@ export type BallTracker = {
    */
   owner?: string
   /**
-   * If set, this message CLOSES the referenced ordinary request. Incident-keyed
+   * On response/verdict, CLOSES the referenced ordinary request. Other types
+   * correlate as ref and preserve ownership. Incident-keyed
    * rows stay open: only `--incident-cleared` / `active:false` settles them.
    */
   reply?: string
@@ -615,7 +617,10 @@ export function sendMessage(
     throw new Error("correlation request id must be non-empty")
   }
   const persistedRequest = correlationRequest ?? requestId
-  const replyId = ballTracker.reply ?? null
+  // The type carries disposition; a correlation field cannot turn progress into settlement.
+  const settles = type === "response" || type === "verdict"
+  const replyId = settles ? (ballTracker.reply ?? null) : null
+  const correlationRef = ref ?? (!settles ? ballTracker.reply : undefined)
   const expiresInMs = ballTracker.expiresInMs ?? defaultBallTtlMs(type, requestId !== null)
   if (
     requestId &&
@@ -696,7 +701,7 @@ export function sendMessage(
       $kind: resolvedKind,
       $content: content,
       $bead_id: bead_id ?? null,
-      $ref: ref ?? null,
+      $ref: correlationRef ?? null,
       $ts: ts,
       $delivery: delivery,
       $topic: classification.topic ?? null,
@@ -771,7 +776,7 @@ export function sendMessage(
         }
       }
       // A daemon boundary settles expired rows before this send path runs.
-      // An ordinary still-open request is closed by an explicit reply here.
+      // An ordinary still-open request is closed by a final-type reply here.
       // Incident-keyed rows stay until the emitter's --incident-cleared edge
       // (pending --close already refuses the same kind).
       if (canonicalReplyId && pendingReply?.request_kind !== "incident") {

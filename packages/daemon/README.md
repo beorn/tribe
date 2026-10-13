@@ -67,6 +67,7 @@ expired/unanswered view derives from the active row, hot and archived deadline
 and settlement facts, and durable replies rather than retaining a second status
 table. Non-reply settlement reasons remain distinct: `manual-close`,
 `incident-cleared`, `gc-expired`, and `sender-withdrawn`; answers derive from
-reply messages.
+response/verdict reply messages. Status and notify carrying reply are stored
+as non-closing ref correlation, preserve the deadline, and report that the ball stays open.
 Reminders, pages, transfer, and escalation remain consuming L3 controller
 policy.
