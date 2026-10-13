@@ -20,12 +20,19 @@ import {
 } from "../supervisor-policy.ts"
 
 describe("SUPERVISOR_CODE_ROOT_WINDOW_MS", () => {
-  it("covers a measured cold daemon start and stays under the host's startup budget", () => {
-    // Measured 2026-10-05, 3/3: a cold tribe daemon answers cli_status in 149-156 ms.
-    // The smallest numeric MCP startup default readable from the installed host
-    // (Claude Code 2.1.289) is 1e4 ms; hh declares no MCP_TIMEOUT override.
-    expect(SUPERVISOR_CODE_ROOT_WINDOW_MS).toBeGreaterThanOrEqual(1_000)
+  it("covers the measured restart-to-publish tail and stays under the host's startup budget (28920)", () => {
+    // The window has to survive a daemon RESTART, not just a cold boot. Measured 2026-10-13 over 128 wire restarts
+    // (the daemon's own stdout, shutdown -> "tribe:socket Listening on", /hh/main.hab/run/sessions/wire/habcp.log):
+    // p50 4 s, p90 6 s, p99 8 s, max 8 s. The pairs are second-resolution, so the three logged at 8 s span 8.0-8.9 s
+    // and the bucket the window must cover is 9000: four intervals EXCEEDED 6000 ms. That the four would each have
+    // become a give-up is not proven by the gaps alone - a respawn is unbounded and start offsets vary - so 8000 is
+    // the negative control below, not an accepted value.
+    // Ceiling: the smallest host-side MCP startup budget substantiated is 1e4 ms (Claude Code 2.1.296's plugin-sync
+    // MCP path, CLAUDE_CODE_SYNC_PLUGINS_MCP_TIMEOUT_MS ?? 1e4); codex and cursor declare no readable default.
+    expect(SUPERVISOR_CODE_ROOT_WINDOW_MS).toBeGreaterThanOrEqual(9_000)
     expect(SUPERVISOR_CODE_ROOT_WINDOW_MS).toBeLessThan(10_000)
+    // Negative control (RED as 8000): the quantized 8 s bucket is 8.0-8.9 s, so 8000 still misses it.
+    expect(8_000).toBeLessThan(SUPERVISOR_CODE_ROOT_WINDOW_MS)
   })
 
   it("an explicit override wins; an absent or malformed one falls back to the measured default", () => {

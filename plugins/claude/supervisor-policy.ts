@@ -10,16 +10,30 @@ export const REEXEC_BACKOFF_MAX_MS = 30_000
 
 /**
  * The window a COLD START waits for the daemon to publish the landing root it runs from (27531). It must cover a
- * cold daemon's start and stay shorter than the host's MCP startup timeout, because the host is waiting on this
- * supervisor for its MCP handshake.
+ * daemon RESTART and stay shorter than the host's MCP startup timeout, because the host is waiting on this
+ * supervisor for its MCP handshake and the adapter spawn plus handshake still have to fit inside what remains.
  *
- * Measured 2026-10-05 on this host, 3/3: a cold `tribe-daemon --socket <tmp>` answers `cli_status` in 149-156 ms
- * (/hh/var/@dev/luna6/27531/measure-daemon-cold-start.ts). The host's own budget is harness-owned: hh declares no
- * MCP_TIMEOUT anywhere, and the only numeric startup default readable from the installed host (Claude Code 2.1.289)
- * is 1e4 ms on its plugin-sync MCP path — so this window stays well under 10 s while keeping ~38x margin over the
- * measured cold start. A respawn is NOT bounded by it: see evaluateCodeRootWait.
+ * Two measurements, deliberately apart. A cold `tribe-daemon --socket <tmp>` answers `cli_status` in 149-156 ms
+ * (measured 2026-10-05, 3/3, /hh/var/@dev/luna6/27531/measure-daemon-cold-start.ts): that is the daemon's own boot,
+ * and it is not what this window waits through. What it waits through is a restart: measured 2026-10-13 over 128
+ * wire restarts (39 h of the daemon's own stdout, shutdown -> `tribe:socket Listening on`,
+ * /hh/main.hab/run/sessions/wire/habcp.log), the gap is p50 4 s, p90 6 s, p99 8 s, max 8 s (28920). Two limits on
+ * reading that. The pairs are second-resolution, so the three logged at 8 s span 8.0-8.9 s and the bucket to cover is
+ * 9000, not 8000. And the gaps establish only that four intervals EXCEEDED the old 6000 ms — not that four cold
+ * starts actually gave up, because a respawn between them is unbounded and start offsets vary. It is that give-up
+ * that leaves a cursor seat dark, which is why this covers the whole measured range and not the top of it.
+ *
+ * The ceiling is harness-owned, and only one of the three hosts states it. Read 2026-10-13 from the installed hosts:
+ * Claude Code 2.1.296 carries MCP_TIMEOUT (default 30) and CLAUDE_CODE_SYNC_PLUGINS_MCP_TIMEOUT_MS ?? 1e4 ms = 10 s
+ * on its plugin-sync MCP path; codex exposes startup_timeout_sec / startup_timeout_ms on its MCP server config but
+ * its default is not readable from the binary; cursor-agent 2026.10.01 declares none for the tribe server. So 10 s
+ * is the smallest ceiling actually substantiated, and this window covers the measured 8 s maximum while staying 1 s
+ * under it. What that 1 s has to hold is the adapter spawn and handshake AFTER the wait: 40/40 attempts answered,
+ * p99 = max = 180 ms (/hh/var/@dev/luna6/28920/measure-adapter-handshake.ts, 28920) — measured in isolation with the
+ * daemon already up, so the fleet-load tail of that path is NOT measured and this margin is its only cover. A respawn
+ * is NOT bounded by this window at all: see evaluateCodeRootWait.
  */
-export const SUPERVISOR_CODE_ROOT_WINDOW_MS = 6_000
+export const SUPERVISOR_CODE_ROOT_WINDOW_MS = 9_000
 export const CODE_ROOT_WAIT_BASE_MS = 250
 export const CODE_ROOT_WAIT_MAX_MS = 2_000
 /** Test/ops override for the cold-start window; an absent value falls back silently, a malformed one warns. */
