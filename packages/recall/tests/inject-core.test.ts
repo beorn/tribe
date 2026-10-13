@@ -4,8 +4,8 @@
  * Covers:
  *   - The trailing context-protocol footer is present on every substantive
  *     prompt, regardless of whether recall found new snippets.
- *   - The <recall-memory> wrapper carries the typed directive attributes
- *     (authority, changes_goal, tool_trigger).
+ *   - The chokepoint's <injected_context> envelope carries the typed directive
+ *     attributes (authority, changes_goal, tool_trigger).
  *   - Imperative-mood snippets are rewritten to reported-speech framing.
  *   - Trivial prompts (empty, short, slash, ack phrases) still skip cleanly
  *     with no output.
@@ -185,7 +185,7 @@ describe("runInjectDelta — emit only when there's content to frame", () => {
     expect(result.reason).toBe("all_seen")
   })
 
-  test("new snippets — emits recall block followed by footer", async () => {
+  test("new snippets — emits the chokepoint envelope followed by the footer", async () => {
     mockRecall([
       {
         sessionId: "sess-abcd1234",
@@ -198,16 +198,18 @@ describe("runInjectDelta — emit only when there's content to frame", () => {
     expect(result.skipped).toBe(false)
     if (result.skipped) return
     expect(result.footerOnly).toBeUndefined()
-    // Structural: recall block precedes footer
-    const recallIdx = result.additionalContext.indexOf("<recall-memory")
+    // Structural: the chokepoint's envelope (with its framed items) precedes the footer
+    const envelopeIdx = result.additionalContext.indexOf('<injected_context source="recall"')
+    const itemIdx = result.additionalContext.indexOf("  <item")
     const footerIdx = result.additionalContext.indexOf("<context-protocol>")
-    expect(recallIdx).toBeGreaterThanOrEqual(0)
-    expect(footerIdx).toBeGreaterThan(recallIdx)
+    expect(envelopeIdx).toBeGreaterThanOrEqual(0)
+    expect(itemIdx).toBeGreaterThan(envelopeIdx)
+    expect(footerIdx).toBeGreaterThan(itemIdx)
     // Footer is present verbatim at the end
     expect(result.additionalContext.endsWith(CONTEXT_PROTOCOL_FOOTER)).toBe(true)
   })
 
-  test("recall-memory block carries typed directive attributes", async () => {
+  test("the chokepoint envelope carries typed directive attributes", async () => {
     mockRecall([
       {
         sessionId: "sess-abcd1234",
@@ -458,7 +460,9 @@ describe("runInjectDelta — an unbound vault is said, once per session (25149)"
     const first = await runInjectDelta("what is the status of km-storage-sync right now?", store, unbound)
     expect(first.skipped).toBe(false)
     if (first.skipped) return
-    expect(framedInner(first.additionalContext, "notice")).toBe(`<vault-notice>${VAULT_UNBOUND_NOTICE}</vault-notice>`)
+    const inner = framedInner(first.additionalContext, "snippet")
+    expect(inner).toContain('title="vault notice"')
+    expect(inner).toContain(VAULT_UNBOUND_NOTICE)
     expect(VAULT_UNBOUND_NOTICE).toContain("vault: not bound (pass --vault-db)")
 
     const second = await runInjectDelta("what is the status of km-storage-sync right now?", store, unbound)
@@ -477,7 +481,7 @@ describe("runInjectDelta — an unbound vault is said, once per session (25149)"
     expect(first.skippedSteps).toEqual({ "recall.messages": "capped" })
   })
 
-  test("with snippets the notice sits inside the same envelope ahead of <recall-memory>; bound, it is absent", async () => {
+  test("with snippets the notice rides as the first framed item; bound, it is absent", async () => {
     mockRecall([
       {
         sessionId: "sess-00000001",
@@ -491,12 +495,17 @@ describe("runInjectDelta — an unbound vault is said, once per session (25149)"
     expect(unboundRun.skipped).toBe(false)
     if (unboundRun.skipped) return
     const inner = framedInner(unboundRun.additionalContext, "snippet")
-    expect(inner.startsWith(`<vault-notice>${VAULT_UNBOUND_NOTICE}</vault-notice>\n<recall-memory>\n`)).toBe(true)
+    const noticeIdx = inner.indexOf('title="vault notice"')
+    const recallItemIdx = inner.indexOf('title="prior"')
+    expect(noticeIdx).toBeGreaterThanOrEqual(0)
+    expect(recallItemIdx).toBeGreaterThan(noticeIdx)
 
     const boundRun = await runInjectDelta("what did we last do on km-board-state?", createMemorySeenStore())
     expect(boundRun.skipped).toBe(false)
     if (boundRun.skipped) return
-    expect(framedInner(boundRun.additionalContext, "snippet").startsWith("<recall-memory>\n")).toBe(true)
+    const boundInner = framedInner(boundRun.additionalContext, "snippet")
+    expect(boundInner).toContain('title="prior"')
+    expect(boundInner).not.toContain("vault notice")
     expect(boundRun.additionalContext).not.toContain("not bound")
   })
 })
