@@ -642,6 +642,18 @@ export function withDispatcher<
           )
         case "absent":
           return refuse(authorityMissing(`the identity verifier found no identity in the ${HAB_ID_TOKEN_ENV}`))
+        case "undecided":
+          // No verdict yet, not a broken verifier (28927 pin 4): refuse retryably under its own kind;
+          // the probe is still running in the background and no fault is recorded for it.
+          log.info?.(
+            `identity verdict undecided on a one-shot caller's token (${verdict.reason}); answered retry at once`,
+          )
+          return refuse(
+            rejected(
+              "identity-undecided",
+              `current session authority could not be evaluated: the identity verdict is undecided (${verdict.reason}); retry`,
+            ),
+          )
         case "verified":
           return { verdict }
         default: {
@@ -1353,6 +1365,18 @@ export function withDispatcher<
           return managedPersona
             ? refuseMissingPersonaToken("absent")
             : { sid: null, gen: null, personaTokenDefect: malformedToken ? "malformed" : "absent" }
+        case "undecided":
+          // No verdict yet, not a broken verifier (28927 pin 4): refuse retryably under its own kind;
+          // the probe is still running in the background and no fault is recorded for it.
+          log.info?.(
+            `identity verdict undecided on the token ${claimed} presented (${verdict.reason}); refused retry at once`,
+          )
+          return {
+            refusal: {
+              message: `register refused: the identity verdict for the token ${claimed} presented is undecided (${verdict.reason}); retry`,
+              data: { kind: "identity-undecided" },
+            },
+          }
       }
     }
 

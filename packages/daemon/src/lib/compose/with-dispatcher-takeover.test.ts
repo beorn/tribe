@@ -1546,6 +1546,89 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     expect(JSON.stringify(clear)).not.toContain(token)
   })
 
+  /** @failure A probe that outlives the bounded wait pages @chief as a broken verifier (28927).
+   * @level l2 @consumer Registering callers (dispatcher identity checks). */
+  it("refuses an undecided verdict retryably and records no verifier fault or incident", async () => {
+    const token = "secret-token-must-stay-private"
+    let undecided = true
+    const harness = createDispatcherHarness({
+      identityVerifier: {
+        path: "/stub/identity-verifier.ts",
+        suppliesGen: true,
+        verify: async () =>
+          undecided
+            ? { result: "undecided", reason: "no verdict within 250ms" }
+            : { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 },
+      },
+    })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-undecided")
+    const refusal = parseError(
+      await harness.register("conn-undecided", {
+        name: "@dev/7",
+        pid: 4207,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: token,
+      }),
+    )
+    expect(refusal.data).toMatchObject({ kind: "identity-undecided" })
+    expect(
+      harness.db.prepare("SELECT count(*) AS n FROM messages WHERE type = 'health:identity-verifier-fault'").get(),
+    ).toEqual({ n: 0 })
+    expect(
+      harness.db.prepare("SELECT count(*) AS n FROM pending_request WHERE request_kind = 'incident'").get(),
+    ).toEqual({ n: 0 })
+    const result = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.health", {}))
+    const health = JSON.parse(result.content[0]!.text) as { issues: string[] }
+    expect(health.issues).not.toContainEqual(expect.stringContaining("identity verifier"))
+    expect(JSON.stringify(refusal)).not.toContain(token)
+
+    // A verified verdict after an undecided one clears nothing: no fault was ever recorded, so no
+    // "repaired" page follows it.
+    undecided = false
+    harness.addPendingClient("conn-after-undecided")
+    parseResult<RegisterResult>(
+      await harness.register("conn-after-undecided", {
+        name: "@dev/7",
+        pid: 4208,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: token,
+      }),
+    )
+    expect(
+      harness.db.prepare("SELECT count(*) AS n FROM messages WHERE type = 'health:identity-verifier-fault'").get(),
+    ).toEqual({ n: 0 })
+  })
+
+  /** @failure The one-shot consumer of an undecided verdict pages @chief as a broken verifier (28927).
+   * @level l2 @consumer One-shot callers (session authority by identity token). */
+  it("refuses an undecided verdict retryably on the one-shot path and records no verifier fault", async () => {
+    const token = "secret-token-must-stay-private"
+    const harness = createDispatcherHarness({
+      identityVerifier: {
+        path: "/stub/identity-verifier.ts",
+        suppliesGen: true,
+        verify: async () => ({ result: "undecided", reason: "no verdict within 250ms" }),
+      },
+    })
+    cleanup = harness.dispose
+    const refusal = parseError(
+      await harness.request("cli_self_inbox_v1", { authority: null, idToken: token, limit: 5, peek: true }),
+    )
+    // The one-shot boundary wraps every authority refusal as unauthenticated; the site kind rides as
+    // its reason, exactly as identity-contradicted does.
+    expect(refusal).toMatchObject({ code: -32003, data: { kind: "unauthenticated", reason: "identity-undecided" } })
+    expect(
+      harness.db.prepare("SELECT count(*) AS n FROM messages WHERE type = 'health:identity-verifier-fault'").get(),
+    ).toEqual({ n: 0 })
+    expect(
+      harness.db.prepare("SELECT count(*) AS n FROM pending_request WHERE request_kind = 'incident'").get(),
+    ).toEqual({ n: 0 })
+    expect(JSON.stringify(refusal)).not.toContain(token)
+  })
+
   it("restores an open verifier incident into health after restart, then clears it on verified repair", async () => {
     const issue = "identity verifier /stub/identity-verifier.ts failed: signing key unreadable"
     const harness = createDispatcherHarness(
