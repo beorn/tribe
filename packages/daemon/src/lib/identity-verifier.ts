@@ -66,6 +66,13 @@ export interface BoundedIdentityVerifierOptions {
   readonly now?: () => number
 }
 
+/**
+ * No verdict within the bounded wait (28927 pin 4). A typed error, not a verifier fault: the probe is
+ * still running and the verifier is not broken, so call sites refuse the call retryably under their own
+ * kind and never record an identity-verifier fault (which pages @chief) for it.
+ */
+export class IdentityVerdictUndecided extends Error {}
+
 const VERDICT_TTL_MS = 30_000
 const VERDICT_WAIT_MS = 250
 const VERDICT_CACHE_MAX = 1_024
@@ -110,6 +117,7 @@ export function boundedIdentityVerifier(
           if (oldest !== undefined) cache.delete(oldest)
         }
       }
+      cache.delete(token)
       cache.set(token, { verdict, at: now() })
       return verdict
     })()
@@ -146,7 +154,7 @@ export function boundedIdentityVerifier(
       // call is answered undecided at once and the probe finishes in the background.
       const landed = fresh(token)
       if (landed !== undefined) return landed
-      throw new Error(`identity verdict undecided: no verdict within ${String(waitMs)}ms; retry`)
+      throw new IdentityVerdictUndecided(`identity verdict undecided: no verdict within ${String(waitMs)}ms; retry`)
     },
   }
 }

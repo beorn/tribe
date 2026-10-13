@@ -9,6 +9,7 @@ import { afterAll, describe, expect, it } from "vitest"
 import {
   boundedIdentityVerifier,
   displacementRule,
+  IdentityVerdictUndecided,
   loadIdentityVerifier,
   sessionAuthority,
   type IdentityVerdict,
@@ -223,7 +224,9 @@ describe("boundedIdentityVerifier", () => {
       { waitMs: 30 },
     )
     const started = Date.now()
-    await expect(wrapped.verify("tok")).rejects.toThrow(/undecided/)
+    const first = wrapped.verify("tok")
+    await expect(first).rejects.toBeInstanceOf(IdentityVerdictUndecided)
+    await expect(first).rejects.toThrow(/undecided/)
     expect(Date.now() - started).toBeLessThan(1_000)
     expect(calls).toBe(1)
     probe.resolve(verified)

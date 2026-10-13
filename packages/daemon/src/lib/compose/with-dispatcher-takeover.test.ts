@@ -36,7 +36,7 @@ import { registerSession } from "../session.ts"
 import { withClientRegistry } from "./with-client-registry.ts"
 import { createBaseTribe } from "./base.ts"
 import { withDispatcher, type DispatcherRuntimeHooks } from "./with-dispatcher.ts"
-import type { IdentityVerdict } from "../identity-verifier.ts"
+import { IdentityVerdictUndecided, type IdentityVerdict } from "../identity-verifier.ts"
 
 // Syntactically readable claims whose signature the stub verifier cannot read. This keeps WA-R31's claimed fallback
 // distinct from 26524's absent or malformed-token refusal on a managed persona.
@@ -772,6 +772,8 @@ function createDispatcherHarness(
               try {
                 return await verifier.verify(key)
               } catch (error) {
+                // The undecided error names no token, so there is no leakage shape to rewrite (28927).
+                if (error instanceof IdentityVerdictUndecided) throw error
                 // Preserve the real verifier's leakage shape: its fault may echo the presented token, not our key.
                 if (key !== token && error instanceof Error) throw new Error(error.message.replaceAll(key, token))
                 throw error
@@ -1544,6 +1546,43 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
       .get() as { recipient: string; content: string }
     expect(clear).toMatchObject({ recipient: "@chief", content: expect.stringContaining("repaired") })
     expect(JSON.stringify(clear)).not.toContain(token)
+  })
+
+  /** @failure A probe that outlives the bounded wait pages @chief as a broken verifier (28927).
+   * @level l2 @consumer Registering callers (dispatcher identity checks). */
+  it("refuses an undecided verdict retryably and records no verifier fault or incident", async () => {
+    const token = "secret-token-must-stay-private"
+    const harness = createDispatcherHarness({
+      identityVerifier: {
+        path: "/stub/identity-verifier.ts",
+        suppliesGen: true,
+        verify: async () => {
+          throw new IdentityVerdictUndecided("identity verdict undecided: no verdict within 250ms; retry")
+        },
+      },
+    })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-undecided")
+    const refusal = parseError(
+      await harness.register("conn-undecided", {
+        name: "@dev/7",
+        pid: 4207,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: token,
+      }),
+    )
+    expect(refusal.data).toMatchObject({ kind: "identity-verdict-undecided" })
+    expect(
+      harness.db.prepare("SELECT count(*) AS n FROM messages WHERE type = 'health:identity-verifier-fault'").get(),
+    ).toEqual({ n: 0 })
+    expect(
+      harness.db.prepare("SELECT count(*) AS n FROM pending_request WHERE request_kind = 'incident'").get(),
+    ).toEqual({ n: 0 })
+    const result = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.health", {}))
+    const health = JSON.parse(result.content[0]!.text) as { issues: string[] }
+    expect(health.issues).not.toContainEqual(expect.stringContaining("identity verifier"))
+    expect(JSON.stringify(refusal)).not.toContain(token)
   })
 
   it("restores an open verifier incident into health after restart, then clears it on verified repair", async () => {

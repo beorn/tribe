@@ -109,6 +109,7 @@ import { shouldLogSlowRequest } from "../slow-request-log.ts"
 import { derivedLaunchPrefixUpperBound } from "../launch-prefix-range.ts"
 import {
   displacementRule,
+  IdentityVerdictUndecided,
   sessionAuthority,
   type IdentityVerdict,
   type LoadedIdentityVerifier,
@@ -614,6 +615,17 @@ export function withDispatcher<
       try {
         verdict = await verifier.verify(token)
       } catch (error) {
+        if (error instanceof IdentityVerdictUndecided) {
+          // No verdict yet, not a broken verifier (28927 pin 4): refuse retryably under its own kind,
+          // and never record the fault that pages @chief for a probe still running in the background.
+          log.debug?.(`identity verdict undecided on a one-shot caller's token; answered retry at once`)
+          return refuse(
+            rejected(
+              "identity-verdict-undecided",
+              "current session authority could not be evaluated: the identity verdict is undecided; retry",
+            ),
+          )
+        }
         const fault = redactIdentityToken(error instanceof Error ? error.message : String(error), token)
         recordIdentityVerifierFault(verifier.path, fault)
         log.error?.(`identity verifier ${verifier.path} failed on a one-shot caller's token: ${fault}`)
@@ -1311,6 +1323,17 @@ export function withDispatcher<
       try {
         verdict = await verifier.verify(token)
       } catch (error) {
+        if (error instanceof IdentityVerdictUndecided) {
+          // No verdict yet, not a broken verifier (28927 pin 4): refuse retryably under its own kind,
+          // and never record the fault that pages @chief for a probe still running in the background.
+          log.debug?.(`identity verdict undecided on the token ${claimed} presented; refused retry at once`)
+          return {
+            refusal: {
+              message: `register refused: the identity verdict for the token ${claimed} presented is undecided; retry`,
+              data: { kind: "identity-verdict-undecided" },
+            },
+          }
+        }
         const fault = redactIdentityToken(error instanceof Error ? error.message : String(error), token)
         recordIdentityVerifierFault(verifier.path, fault)
         log.error?.(`identity verifier ${verifier.path} failed on the token ${claimed} presented: ${fault}`)
