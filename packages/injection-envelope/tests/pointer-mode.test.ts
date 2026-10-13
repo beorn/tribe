@@ -7,22 +7,22 @@
  * call `retrieve_memory(id)` if it needs the full content.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "vitest"
+import { beforeEach, describe, expect, test, vi } from "vitest"
 
-import { wrapInjectedContext } from "../src/index.ts"
-
-// Import retrieve module with auto-register disabled so the tests can
-// set up their own fetchers.
+// Import retrieve with auto-register disabled so the tests set up their own fetchers.
 process.env.INJECTION_ENVELOPE_NO_AUTOREGISTER = "1"
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const retrieve = await import("../src/retrieve.ts")
 
-beforeEach(() => {
-  retrieve.resetRetrieveFetchers()
-})
+// A fresh module graph per test starts from an empty fetcher registry, which is
+// what the removed resetRetrieveFetchers export used to give. Both imports run
+// after resetModules, so index.ts's wrapInjectedContext reads the same
+// retrieve.ts instance the test registers into.
+let wrapInjectedContext: (typeof import("../src/index.ts"))["wrapInjectedContext"]
+let retrieve: typeof import("../src/retrieve.ts")
 
-afterEach(() => {
-  retrieve.resetRetrieveFetchers()
+beforeEach(async () => {
+  vi.resetModules()
+  ;({ wrapInjectedContext } = await import("../src/index.ts"))
+  retrieve = await import("../src/retrieve.ts")
 })
 
 // ---------------------------------------------------------------------------

@@ -68,10 +68,6 @@ export const INDEX_WINDOW_MS = INDEX_WINDOW_DAYS * 24 * 60 * 60 * 1000
 // hub/silvercode/design/ambient-context-safety.md §9 (content quarantine).
 let _ignoreCache: { mtime: number; matchers: ((p: string) => boolean)[] } | null = null
 
-export function resetIgnoreCache(): void {
-  _ignoreCache = null
-}
-
 function loadRecallIgnore(): ((p: string) => boolean)[] {
   const claudeDir = process.env.CLAUDE_DIR || path.join(os.homedir(), ".claude")
   const ignorePath = path.join(claudeDir, ".recall-ignore")

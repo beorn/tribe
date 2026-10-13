@@ -110,11 +110,6 @@ if (process.env.INJECTION_ENVELOPE_NO_AUTOREGISTER !== "1") {
 // Test-only helpers
 // ---------------------------------------------------------------------------
 
-/** Clear all registered fetchers. Used by tests to isolate. */
-export function resetRetrieveFetchers(): void {
-  fetchers.length = 0
-}
-
 /** Inspect the current fetcher count. Used by tests. */
 export function retrieveFetcherCount(): number {
   return fetchers.length

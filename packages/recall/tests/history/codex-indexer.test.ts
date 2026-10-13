@@ -26,14 +26,15 @@ import {
   indexCodexTranscripts,
   safeRollback,
 } from "../../src/history/codex-indexer.ts"
-import {
-  rebuildIndex,
-  INDEX_WINDOW_DAYS,
-  INDEX_WINDOW_MS,
-  pruneOldSessions,
-  isRecallIgnored,
-  resetIgnoreCache,
-} from "../../src/history/indexer.ts"
+// indexer.ts memoizes the parsed .recall-ignore list, so a fresh module graph
+// per test is what the removed resetIgnoreCache export used to give. Rebinding
+// these names in beforeEach keeps every call site unchanged.
+import type * as Indexer from "../../src/history/indexer.ts"
+let rebuildIndex: typeof Indexer.rebuildIndex
+let INDEX_WINDOW_DAYS: typeof Indexer.INDEX_WINDOW_DAYS
+let INDEX_WINDOW_MS: typeof Indexer.INDEX_WINDOW_MS
+let pruneOldSessions: typeof Indexer.pruneOldSessions
+let isRecallIgnored: typeof Indexer.isRecallIgnored
 import { getPersistedFailedSessions } from "../../src/lib/status.ts"
 import { cmdIndex } from "../../src/lib/sessions.ts"
 
@@ -51,7 +52,10 @@ describe("Codex Transcript Indexer", () => {
   let db: Database
   let origClaudeDir: string | undefined
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    vi.resetModules()
+    ;({ rebuildIndex, INDEX_WINDOW_DAYS, INDEX_WINDOW_MS, pruneOldSessions, isRecallIgnored } =
+      await import("../../src/history/indexer.ts"))
     tempDir = mkdtempSync(join(tmpdir(), "recall-codex-test-"))
     origClaudeDir = process.env.CLAUDE_DIR
     const testClaudeDir = join(tempDir, "isolated-claude")
@@ -63,7 +67,6 @@ describe("Codex Transcript Indexer", () => {
 
   afterEach(() => {
     process.exitCode = 0
-    resetIgnoreCache()
     closeDb()
     if (origClaudeDir !== undefined) {
       process.env.CLAUDE_DIR = origClaudeDir
@@ -2762,7 +2765,6 @@ if (process.argv.includes("list")) {
         ].join("\n") + "\n",
         "utf8",
       )
-      resetIgnoreCache()
 
       // Absolute path match
       expect(isRecallIgnored(absPatternFile)).toBe(true)

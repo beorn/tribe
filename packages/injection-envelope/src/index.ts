@@ -32,13 +32,7 @@ export type { TurnManifest, InjectedSpan, TurnManifestReadResult } from "./manif
 export { evaluateGate } from "./gate.ts"
 export type { GateInput, GateDecision, Permission } from "./gate.ts"
 
-export {
-  retrieveMemory,
-  registerRetrieveSource,
-  qmdFetcher,
-  resetRetrieveFetchers,
-  retrieveFetcherCount,
-} from "./retrieve.ts"
+export { retrieveMemory, registerRetrieveSource, qmdFetcher, retrieveFetcherCount } from "./retrieve.ts"
 export type { RetrievedMemory, RetrieveFetcher } from "./retrieve.ts"
 
 export { emitInjectionDebugEvent, installInjectionFileWriter, flushInjectionFileWriters } from "./debug.ts"
