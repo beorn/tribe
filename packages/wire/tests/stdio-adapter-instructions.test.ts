@@ -12,6 +12,9 @@
 // This is a grep-guard: it reads the adapter SOURCE as text and never imports the
 // module (the adapter constructs an MCP Server + registers daemon handlers at load
 // time, so importing it has side effects we don't want in a unit test).
+// @source-grep the turn-start-instruction contract — every role's turn-start
+// inbox guidance routes through one shared `turnStartInboxCheck` constant capped
+// at 10 events — is read from `stdio-adapter.ts` text.
 import { readFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"

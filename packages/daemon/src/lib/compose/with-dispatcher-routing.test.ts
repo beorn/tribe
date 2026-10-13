@@ -1,3 +1,9 @@
+/**
+ * @source-grep the coordination-routing contract — `tribe.repair` and
+ *   `tribe.stop` are dispatched through the normal tool-call dispatcher, never a
+ *   bespoke path — is read from `with-dispatcher.ts` text, not by running the
+ *   dispatcher.
+ */
 import { readFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 import { shouldDeliver } from "./with-broadcast.ts"
