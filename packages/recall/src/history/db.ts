@@ -113,17 +113,14 @@ export {
   updateSessionTitle,
   updateSessionStatus,
   updateSessionTail,
-  getSessionStatus,
   getSession,
   getSessionByPath,
   // Message operations
   insertMessage,
-  getMessageCount,
   // Write operations
   insertWrite,
   // FTS operations
   toFts5Query,
-  ftsSearch,
   ftsSearchWithSnippet,
   // Activity queries
   getActiveSessionsInWindow,
@@ -142,7 +139,6 @@ export {
   refreshSessionTitles,
   getSessionTitle,
   // Unified content
-  insertContent,
   upsertContent,
   clearContent,
   clearContentByType,

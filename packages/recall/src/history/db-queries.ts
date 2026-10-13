@@ -175,48 +175,6 @@ export function updateSessionTail(
   `).run(tailOffset, tailFingerprint, newMessagesCount, sizeBytes, mtimeMs, updatedAt, lastEventAtMs, cwd ?? null, id)
 }
 
-export function getSessionStatus(
-  db: Database,
-  id: string,
-):
-  | {
-      id: string
-      status: string | null
-      messageCount: number
-      failureReason: string | null
-      failureTime: number | null
-      shrinkOldCount: number | null
-      shrinkNewCount: number | null
-    }
-  | undefined {
-  const row = db
-    .prepare(`
-    SELECT id, status, message_count as messageCount, failure_reason as failureReason, failure_time as failureTime, shrink_old_count as shrinkOldCount, shrink_new_count as shrinkNewCount
-    FROM sessions
-    WHERE id = ?
-  `)
-    .get(id) as {
-    id: string
-    status: string | null
-    messageCount: number | null
-    failureReason: string | null
-    failureTime: number | null
-    shrinkOldCount: number | null
-    shrinkNewCount: number | null
-  } | null
-  return row
-    ? {
-        id: row.id,
-        status: row.status ?? null,
-        messageCount: row.messageCount ?? 0,
-        failureReason: row.failureReason ?? null,
-        failureTime: row.failureTime ?? null,
-        shrinkOldCount: row.shrinkOldCount ?? null,
-        shrinkNewCount: row.shrinkNewCount ?? null,
-      }
-    : undefined
-}
-
 export function updateSessionTitle(db: Database, id: string, title: string | null): void {
   db.prepare("UPDATE sessions SET title = ? WHERE id = ?").run(title, id)
 }
@@ -286,13 +244,6 @@ export function insertMessage(
     line ?? null,
   )
   return Number(result.lastInsertRowid)
-}
-
-export function getMessageCount(db: Database, sessionId: string): number {
-  const row = db.prepare("SELECT COUNT(*) as count FROM messages WHERE session_id = ?").get(sessionId) as {
-    count: number
-  }
-  return row.count
 }
 
 // ============================================================================
@@ -381,66 +332,6 @@ export function toFts5Query(query: string): string {
   }
 
   return parts.join(" ")
-}
-
-export function ftsSearch(
-  db: Database,
-  query: string,
-  options: { limit?: number; offset?: number; projectFilter?: string } = {},
-): { results: (MessageRecord & { cwd?: string | null; project_path?: string; rank?: number })[]; total: number } {
-  const { limit = 50, offset = 0, projectFilter } = options
-
-  // Convert search query to FTS5 syntax
-  const ftsQuery = toFts5Query(query)
-
-  const uuidCollapseClause = `
-    AND (m.uuid IS NULL OR m.id = (
-      SELECT m2.id FROM messages m2
-      JOIN sessions s2 ON m2.session_id = s2.id
-      WHERE m2.uuid = m.uuid
-      ORDER BY CASE WHEN s2.parent_session_id IS NULL THEN 0 ELSE 1 END, m2.id ASC
-      LIMIT 1
-    ))
-  `
-
-  let countQuery = `
-    SELECT COUNT(*) as total
-    FROM messages_fts f
-    JOIN messages m ON f.rowid = m.id
-    JOIN sessions s ON m.session_id = s.id
-    WHERE messages_fts MATCH ?
-      AND (m.duplicate_of IS NULL)
-      ${uuidCollapseClause}
-  `
-  let searchQuery = `
-    SELECT m.*, s.project_path, s.cwd, s.parent_session_id, s.agent_id, ${MESSAGE_RANK_SQL} as rank
-    FROM messages_fts f
-    JOIN messages m ON f.rowid = m.id
-    JOIN sessions s ON m.session_id = s.id
-    WHERE messages_fts MATCH ?
-      AND (m.duplicate_of IS NULL)
-      ${uuidCollapseClause}
-  `
-
-  const params: (string | number)[] = [ftsQuery]
-
-  if (projectFilter) {
-    const projectClause = ` AND s.cwd LIKE ?`
-    countQuery += projectClause
-    searchQuery += projectClause
-    params.push(`%${projectFilter}%`)
-  }
-
-  searchQuery += ` ORDER BY rank LIMIT ? OFFSET ?`
-
-  const totalRow = db.prepare(assertSingleStatement(countQuery)).get(...params) as { total: number }
-  const results = db.prepare(assertSingleStatement(searchQuery)).all(...params, limit, offset) as (MessageRecord & {
-    cwd?: string | null
-    project_path?: string
-    rank?: number
-  })[]
-
-  return { results, total: totalRow.total }
 }
 
 export interface MessageSearchOptions {
@@ -940,27 +831,6 @@ export function getSessionTitle(db: Database, sessionId: string): string | null 
 // ============================================================================
 // Unified content table operations
 // ============================================================================
-
-/**
- * Insert content into the unified content table
- */
-export function insertContent(
-  db: Database,
-  contentType: ContentType,
-  sourceId: string,
-  projectPath: string | null,
-  title: string | null,
-  content: string,
-  timestamp: number,
-): number {
-  const result = db
-    .prepare(`
-    INSERT INTO content (content_type, source_id, project_path, title, content, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `)
-    .run(contentType, sourceId, projectPath, title, content, timestamp)
-  return Number(result.lastInsertRowid)
-}
 
 /**
  * Upsert content into the unified content table.

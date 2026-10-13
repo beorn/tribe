@@ -12,7 +12,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { initSchema } from "../../src/history/db-schema.ts"
-import { getMessageCount, getSession, insertMessage } from "../../src/history/db-queries.ts"
+import { getSession, insertMessage } from "../../src/history/db-queries.ts"
+import { getMessageCount } from "../helpers/db-queries.ts"
 import { rebuildIndex } from "../../src/history/indexer.ts"
 
 test("review2: a legacy relative row another profile's root holds survives two runs from this root, unmarked", async () => {

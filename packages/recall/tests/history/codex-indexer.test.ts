@@ -17,13 +17,8 @@ import { tmpdir, homedir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { initSchema } from "../../src/history/db-schema.ts"
-import {
-  getSession,
-  upsertSession,
-  insertMessage,
-  ftsSearchWithSnippet,
-  getSessionStatus,
-} from "../../src/history/db-queries.ts"
+import { getSession, upsertSession, insertMessage, ftsSearchWithSnippet } from "../../src/history/db-queries.ts"
+import { getSessionStatus } from "../helpers/db-queries.ts"
 import { closeDb } from "../../src/history/db.ts"
 import {
   resolveAgBin,

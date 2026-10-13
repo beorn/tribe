@@ -25,7 +25,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { initSchema, CURRENT_SCHEMA_VERSION } from "../../src/history/db-schema.ts"
-import { getSession, ftsSearch, getIndexMeta, setIndexMeta } from "../../src/history/db-queries.ts"
+import { getSession, ftsSearchWithSnippet, getIndexMeta, setIndexMeta } from "../../src/history/db-queries.ts"
 import { closeDb, acquireIndexWriter } from "../../src/history/db.ts"
 import { rebuildIndex, discoverProjectCwds, indexSessionFile } from "../../src/history/indexer.ts"
 import { indexCodexTranscripts } from "../../src/history/codex-indexer.ts"
@@ -571,12 +571,12 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
     await rebuildIndex(db)
 
     // Search filtering by exact cwd substring
-    const hits = ftsSearch(db, "searchable keyword", { projectFilter: "dev-wt7" })
+    const hits = ftsSearchWithSnippet(db, "searchable keyword", { projectFilter: "dev-wt7" })
     expect(hits.results.length).toBeGreaterThanOrEqual(1)
     expect(hits.results[0]!.cwd).toBe(customCwd)
 
     // Non-matching project filter returns 0 results
-    const noHits = ftsSearch(db, "searchable keyword", { projectFilter: "dev-wt99" })
+    const noHits = ftsSearchWithSnippet(db, "searchable keyword", { projectFilter: "dev-wt99" })
     expect(noHits.results).toHaveLength(0)
   })
 

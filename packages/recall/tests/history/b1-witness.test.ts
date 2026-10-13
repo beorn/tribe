@@ -6,13 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { CURRENT_SCHEMA_VERSION, initSchema, runMigrations } from "../../src/history/db-schema.ts"
-import {
-  ftsSearch,
-  ftsSearchWithSnippet,
-  getSession,
-  insertMessage,
-  upsertSession,
-} from "../../src/history/db-queries.ts"
+import { ftsSearchWithSnippet, getSession, insertMessage, upsertSession } from "../../src/history/db-queries.ts"
 import { closeDb } from "../../src/history/db.ts"
 import { rebuildIndex } from "../../src/history/indexer.ts"
 
@@ -368,8 +362,8 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
     const sharedRows = db.prepare("SELECT * FROM messages WHERE uuid = ?").all(sharedUuid)
     expect(sharedRows.length).toBe(2)
 
-    // ftsSearch for "anomaly"
-    const search1 = ftsSearch(db, "anomaly")
+    // ftsSearchWithSnippet for "anomaly"
+    const search1 = ftsSearchWithSnippet(db, "anomaly")
     expect(search1.total).toBe(1)
     expect(search1.results.length).toBe(1)
     expect(search1.results[0]!.session_id).toBe("session-root")
@@ -449,7 +443,7 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
     }
 
     // Verify search for shared prompt returns exactly 1 hit naming parent-87
-    const searchShared = ftsSearch(db, "operations")
+    const searchShared = ftsSearchWithSnippet(db, "operations")
     expect(searchShared.total).toBe(1)
     expect(searchShared.results[0]!.session_id).toBe("parent-87")
 
@@ -472,12 +466,12 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
     insertMessage(db, null, "codex:B", "user", "bravo zebra", null, null, 200, null, 1)
 
     // Searching for term unique to session B must find session B (total = 1)
-    const searchBravo = ftsSearch(db, "bravo")
+    const searchBravo = ftsSearchWithSnippet(db, "bravo")
     expect(searchBravo.total).toBe(1)
     expect(searchBravo.results[0]!.session_id).toBe("codex:B")
 
     // Searching for term in both must find both sessions (total = 2)
-    const searchZebra = ftsSearch(db, "zebra")
+    const searchZebra = ftsSearchWithSnippet(db, "zebra")
     expect(searchZebra.total).toBe(2)
     const sessions = searchZebra.results.map((r) => r.session_id).sort()
     expect(sessions).toEqual(["codex:A", "codex:B"])
@@ -521,11 +515,11 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
     expect(rows[1]!.uuid).toBeNull()
 
     // Both sessions remain searchable
-    const searchBravo = ftsSearch(db, "bravo")
+    const searchBravo = ftsSearchWithSnippet(db, "bravo")
     expect(searchBravo.total).toBe(1)
     expect(searchBravo.results[0]!.session_id).toBe("codex:B")
 
-    const searchZebra = ftsSearch(db, "zebra")
+    const searchZebra = ftsSearchWithSnippet(db, "zebra")
     expect(searchZebra.total).toBe(2)
   })
 
@@ -714,11 +708,11 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
       expect(staleSess?.failure_reason).toBeNull()
 
       // Both codex sessions remain searchable
-      const searchAlpha = ftsSearch(db, "alpha")
+      const searchAlpha = ftsSearchWithSnippet(db, "alpha")
       expect(searchAlpha.total).toBe(1)
       expect(searchAlpha.results[0]!.session_id).toBe("codex:sess-c1")
 
-      const searchBravo = ftsSearch(db, "bravo")
+      const searchBravo = ftsSearchWithSnippet(db, "bravo")
       expect(searchBravo.total).toBe(1)
       expect(searchBravo.results[0]!.session_id).toBe("codex:sess-c2")
 
