@@ -11,7 +11,7 @@
  *   session-start — SessionStart hook (reads stdin JSON: session_id, cwd, ...)
  *   prompt        — UserPromptSubmit hook (reads stdin JSON: prompt, ...)
  *   session-end   — SessionEnd hook
- *   pre-compact   — PreCompact hook (currently a no-op passthrough to cmdHook)
+ *   pre-compact   — PreCompact hook (its own handler, cmdPreCompact: prints the checkpoint context; @cto 22967)
  *
  * Options, after the event:
  *   --vault-db <path> — the km vault the in-process recall searches, bound through recall's bindVaultDb
@@ -77,6 +77,7 @@ type HookEngine = {
   cmdSessionStart: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdSessionStart"]
   cmdSessionEnd: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdSessionEnd"]
   cmdHook: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdHook"]
+  cmdPreCompact: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdPreCompact"]
   bindVaultDb: (typeof import("../../../recall/src/lib/hooks.ts"))["bindVaultDb"]
 }
 
@@ -101,6 +102,7 @@ async function loadHookEngine(): Promise<HookEngine | null> {
         cmdSessionStart: hooks.cmdSessionStart,
         cmdSessionEnd: hooks.cmdSessionEnd,
         cmdHook: hooks.cmdHook,
+        cmdPreCompact: hooks.cmdPreCompact,
         bindVaultDb: hooks.bindVaultDb,
       }
     } catch (err) {
@@ -120,7 +122,8 @@ async function loadInjectionDebug(): Promise<InjectionDebug | null> {
     // In-repo recorder is the default since the 19273 move; the env var is an
     // override seam for forks/experiments only.
     const dir =
-      process.env.TRIBE_INJECTION_DEBUG_DIR ?? fileURLToPath(new URL("../../../injection-envelope/src", import.meta.url))
+      process.env.TRIBE_INJECTION_DEBUG_DIR ??
+      fileURLToPath(new URL("../../../injection-envelope/src", import.meta.url))
     try {
       const mod = await (import(`${dir}/debug.ts`) as Promise<
         typeof import("../../../injection-envelope/src/debug.ts")
@@ -272,10 +275,13 @@ export async function dispatchHook(event: HookEvent, args: HookArgs = {}): Promi
       await engine.cmdSessionEnd()
       return
     case "prompt":
-    case "pre-compact":
-      // Both feed stdin JSON to the UserPromptSubmit-style handler. cmdHook
-      // reads `hook_event_name` from stdin and routes accordingly.
       await engine.cmdHook()
+      return
+    case "pre-compact":
+      // The event the CLI line names routes this payload to its OWN handler. It is never sniffed from stdin
+      // (@cto, 22967): the old shared case sent a PreCompact payload to the prompt handler, which needs `prompt`,
+      // so it logged "no prompt in stdin" and emitted nothing.
+      await engine.cmdPreCompact()
       return
   }
 }

@@ -49,6 +49,7 @@ beforeAll(() => {
       'export async function cmdSessionStart() { globalThis.__hookDispatchTestCalls.push("session-start") }',
       'export async function cmdSessionEnd() { globalThis.__hookDispatchTestCalls.push("session-end") }',
       'export async function cmdHook() { globalThis.__hookDispatchTestCalls.push("hook") }',
+      'export async function cmdPreCompact() { globalThis.__hookDispatchTestCalls.push("pre-compact") }',
       'export async function cmdRemember() { globalThis.__hookDispatchTestCalls.push("remember") }',
       // The engine's own vault binding (recall's bindVaultDb): the call line's --vault-db must reach it.
       "export function bindVaultDb(path) { globalThis.__hookDispatchTestCalls.push(`bind:${path}`) }",
@@ -91,11 +92,18 @@ describe("dispatchHook — cmdRemember stays unreachable (manual-only by design)
     expect(calls).toEqual(["session-start"])
   })
 
-  test("prompt and pre-compact both route to cmdHook only", async () => {
+  test("prompt routes to cmdHook and pre-compact to its own handler (22967)", async () => {
     calls.length = 0
     await dispatchHook("prompt")
     await dispatchHook("pre-compact")
-    expect(calls).toEqual(["hook", "hook"])
+    expect(calls).toEqual(["hook", "pre-compact"])
+  })
+
+  test("pre-compact never reaches cmdHook", async () => {
+    calls.length = 0
+    await dispatchHook("pre-compact")
+    expect(calls).toEqual(["pre-compact"])
+    expect(calls).not.toContain("hook")
   })
 
   test("no dispatched event, across a full event sweep, ever calls cmdRemember", async () => {
@@ -105,7 +113,7 @@ describe("dispatchHook — cmdRemember stays unreachable (manual-only by design)
     await dispatchHook("session-end")
     await dispatchHook("pre-compact")
     expect(calls).not.toContain("remember")
-    expect(calls).toEqual(["session-start", "hook", "session-end", "hook"])
+    expect(calls).toEqual(["session-start", "hook", "session-end", "pre-compact"])
   })
 })
 

@@ -38,6 +38,8 @@ import { TRIBE_METHODS, RECALL_PROTOCOL_VERSION } from "../../../../plugins/clau
 // activity log catches it (km-tribe.activity-log phase 2).
 import { emitHookJson as envelopeEmitHookJson } from "../../../injection-envelope/src/emit.ts"
 import { flushInjectionFileWriters } from "../../../injection-envelope/src/debug.ts"
+import { getVaultDb, searchVault } from "../history/vault-fts.ts"
+import { runBoundedProcessCommand, type BoundedProcessBounds } from "./bounded-process.ts"
 
 /** The call-line vault binding (`tribe hook <event> --vault-db`), for the dispatcher that loads this by path (25149 a3). */
 export { bindVaultDb } from "../history/vault-fts.ts"
@@ -48,6 +50,7 @@ const sessionStartLog = createLogger("recall:hook:session-start")
 const sessionEndLog = createLogger("recall:hook:session-end")
 const hookLog = createLogger("recall:hook:prompt")
 const rememberLog = createLogger("recall:hook:remember")
+const preCompactLog = createLogger("recall:hook:pre-compact")
 
 /**
  * The one sanctioned stderr writer in this file, for FAILING exits only.
@@ -303,9 +306,21 @@ export async function cmdHook(): Promise<void> {
   let sessionId: string | undefined
   try {
     const stdin = await timeStepAsync(steps, "stdin", () => readStdin())
-    let input: { prompt?: string; session_id?: string; transcript_path?: string; cwd?: string }
+    let input: {
+      prompt?: string
+      session_id?: string
+      transcript_path?: string
+      cwd?: string
+      hook_event_name?: string
+    }
     try {
-      input = JSON.parse(stdin) as { prompt?: string; session_id?: string; transcript_path?: string; cwd?: string }
+      input = JSON.parse(stdin) as {
+        prompt?: string
+        session_id?: string
+        transcript_path?: string
+        cwd?: string
+        hook_event_name?: string
+      }
     } catch (e) {
       hookLog.error?.(e instanceof Error ? e : new Error(String(e)), "FATAL: invalid JSON on stdin", {
         elapsed_ms: Date.now() - startTime,
@@ -344,7 +359,10 @@ export async function cmdHook(): Promise<void> {
 
     const prompt = input.prompt
     if (!prompt) {
-      hookLog.warn?.("no prompt in stdin", {
+      // A hook must not block a user's prompt over its own input shape, so the exit stays 0 — but it is never a
+      // silent exit 0 of nothing: the event the payload named is written to the daemon's log (@cto, 22967).
+      hookLog.warn?.("cmdHook: no prompt in stdin — naming the event rather than exiting 0 silently", {
+        event: input.hook_event_name ?? "unknown",
         session: sessionId,
         elapsed_ms: Date.now() - startTime,
         steps: roundSteps(steps),
@@ -404,6 +422,174 @@ export async function cmdHook(): Promise<void> {
     // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
     return drainOutput().then(() => process.exit(1))
   }
+}
+
+// ============================================================================
+// Hook command — PreCompact
+// ============================================================================
+
+/**
+ * Bounds for the two read-only git reads the pre-compact context carries. The whole hook has a small budget, so each
+ * read gets a fraction of it; a read that overruns is named in the context rather than dropped silently.
+ */
+const PRECOMPACT_GIT_BOUNDS: BoundedProcessBounds = {
+  timeoutMs: 1500,
+  killGraceMs: 200,
+  reapGraceMs: 200,
+  drainGraceMs: 200,
+  maxOutputBytes: 256 * 1024,
+}
+
+/** One bounded read-only git read in `subjectRoot`; a failure is named in the returned text, never swallowed. */
+async function preCompactGit(subjectRoot: string, args: readonly string[]): Promise<string> {
+  const label = `git ${args.join(" ")}`
+  try {
+    const result = await runBoundedProcessCommand(
+      ["git", "--no-optional-locks", "-C", subjectRoot, ...args],
+      PRECOMPACT_GIT_BOUNDS,
+    )
+    const text = `${result.stdout}${result.stderr}`.trimEnd()
+    return text.length > 0 ? text : `(${label} produced no output)`
+  } catch (err) {
+    return `(${label} failed for ${subjectRoot}: ${err instanceof Error ? err.message : String(err)})`
+  }
+}
+
+/** The in-progress beads from the bound vault, or the reason they could not be read — never a silent empty list. */
+function preCompactInProgressBeads(): string[] {
+  try {
+    const db = getVaultDb()
+    if (!db) return ["(beads unavailable — no --vault-db bound to this hook line)"]
+    const rows = db
+      .prepare(
+        "SELECT fs_path, title FROM nodes WHERE task_status = 'wip' AND fs_path IS NOT NULL ORDER BY parent_idx, item LIMIT 40",
+      )
+      .all() as { fs_path: string; title: string | null }[]
+    if (rows.length === 0) return ["(none)"]
+    return rows.map((row) =>
+      row.title === null || row.title.length === 0 ? row.fs_path : `${row.fs_path} — ${row.title}`,
+    )
+  } catch (err) {
+    return [`(beads unavailable — ${err instanceof Error ? err.message : String(err)})`]
+  }
+}
+
+/**
+ * PreCompact hook (`tribe hook pre-compact`).
+ *
+ * Ported from `tools/agent-rig/hooks/pre-compact.sh` (deleted in the same landing, 22967; its content was the
+ * specification): it prints a RESUME directive for this session's tracking bead, the in-progress beads, the recent
+ * commits, and the uncommitted changes, so the compact summary carries the session's state.
+ *
+ * The event routes here by the CLI argument (`dispatchHook("pre-compact")`), never by sniffing `hook_event_name` from
+ * stdin as the pre-2026-10-13 dispatch did — that sent a PreCompact payload to the UserPromptSubmit handler, which
+ * needs `prompt`, so it emitted nothing (@cto, 22967).
+ *
+ * stdout is the context channel (the shell's contract, and this handler's whole product); diagnostics go through
+ * loggily. Exit is always 0: a compaction must not be blocked over the hook's own input shape.
+ */
+/**
+ * The tree the checkpoint reads as data: the seat's CODE checkout, never the STATE container.
+ *
+ * Ported from `tools/agent-rig/hooks/hook-roots.sh`'s `HOOK_SUBJECT_ROOT`, which the retired shell sourced:
+ * `CLAUDE_PROJECT_DIR`, and when that root is the STATE container (a seat rooted at `/hh`), its `dev/` CODE
+ * child. Without the child rule a PreCompact payload with `cwd: /hh` runs `git` inside STATE: the wrong
+ * checkpoint context, and a tree our git rules forbid reading (@dev/review2 22967; @cto 6ee4df24,
+ * @hh/tooling/26948). `CLAUDE_PROJECT_DIR` is the live registered-hook path, where parity is exact.
+ *
+ * When it is unset the shell fell back to its own hook-file CODE root (`HOOK_CODE_ROOT`), which this
+ * daemon-side handler has no path to; it falls back to the payload's cwd, then this process's cwd. That
+ * fallback is a hand-run path only, never the registered hook.
+ */
+function preCompactSubjectRoot(payloadCwd?: string): string {
+  const configured = process.env.CLAUDE_PROJECT_DIR
+  const base = configured !== undefined && configured.length > 0 ? configured : (payloadCwd ?? process.cwd())
+  return fs.existsSync(path.join(base, "dev", "tools", "agent-rig", "hooks")) ? path.join(base, "dev") : base
+}
+
+export async function cmdPreCompact(): Promise<void> {
+  const startTime = Date.now()
+  let sessionId: string | undefined
+  let shortId = ""
+  let subjectRoot = preCompactSubjectRoot()
+  const out: string[] = []
+  try {
+    const stdin = await readStdin()
+    let input: { session_id?: string; cwd?: string } = {}
+    if (stdin.trim().length > 0) {
+      try {
+        input = JSON.parse(stdin) as { session_id?: string; cwd?: string }
+      } catch (err) {
+        preCompactLog.warn?.("pre-compact stdin was not JSON", {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+    sessionId = input.session_id
+    shortId = sessionId === undefined ? "" : sessionId.slice(0, 8)
+    subjectRoot = preCompactSubjectRoot(input.cwd)
+
+    let trackingBead: string | null = null
+    if (shortId.length > 0) {
+      try {
+        const match = searchVault(shortId, 5).find((m) => m.fsPath !== null && m.fsPath.endsWith(".md"))
+        trackingBead = match?.fsPath ?? null
+      } catch (err) {
+        preCompactLog.warn?.("pre-compact vault search failed", {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+
+    if (trackingBead !== null) {
+      out.push(`# RESUME: km bd show ${trackingBead}`)
+      out.push(
+        `This session was working on ${trackingBead}. After compact, run 'km bd show ${trackingBead}' FIRST to recover context.`,
+      )
+      out.push("Do NOT list all beads or start new work — resume this bead.")
+      out.push("")
+    }
+
+    out.push(`# Session State at Compact Time (session: ${shortId.length > 0 ? shortId : "unknown"})`)
+    out.push("")
+    out.push("## In-Progress Beads")
+    out.push(...preCompactInProgressBeads())
+    out.push("")
+    out.push("## Recent Commits")
+    out.push(await preCompactGit(subjectRoot, ["log", "--oneline", "-10"]))
+    out.push("")
+    out.push("## Uncommitted Changes")
+    out.push(await preCompactGit(subjectRoot, ["status", "--short"]))
+    out.push("")
+
+    if (trackingBead === null) {
+      out.push("")
+      out.push(
+        shortId.length === 0
+          ? "WARNING: no session id on the PreCompact payload, so no tracking bead could be looked up. Context may be lost after compact."
+          : `WARNING: No tracking bead found for session ${shortId}. Context may be lost after compact.`,
+      )
+    }
+
+    console.log(out.join("\n"))
+    preCompactLog.info?.("pre-compact context emitted", {
+      session: sessionId,
+      lines: out.length,
+      elapsed_ms: Date.now() - startTime,
+    })
+  } catch (err) {
+    // The context is this hook's whole product, so a failure is visible on the same stdout channel as a
+    // plainly-labelled warning rather than an empty exit 0 (@cto, 22967).
+    preCompactLog.error?.(err instanceof Error ? err : new Error(String(err)), "pre-compact FATAL", {
+      session: sessionId,
+    })
+    console.log(
+      `# Session State at Compact Time (session: ${shortId.length > 0 ? shortId : "unknown"})\n` +
+        `(pre-compact context unavailable: ${err instanceof Error ? err.message : String(err)})`,
+    )
+  }
+  // oxlint-disable-next-line typescript/return-await -- a failing drain must stay visible
+  return drainOutput().then(() => process.exit(0))
 }
 
 // ============================================================================
