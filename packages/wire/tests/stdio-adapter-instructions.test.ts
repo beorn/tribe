@@ -39,7 +39,10 @@ describe("turn-start inbox instruction (km 19442 context-flood guard)", () => {
     expect((src.match(/const attentionProjectionInstruction\b/g) ?? []).length).toBe(1)
     expect(src).toContain("attention.actionable_unread")
     expect(src).toContain("attention.pending_balls")
-    expect((src.match(/\$\{attentionProjectionInstruction\}/g) ?? []).length).toBe(3)
+    // One `shared` block carries the projection into every delivery variant (29143 E1b folded the three
+    // per-variant copies into it); each variant interpolates the block exactly once.
+    expect((src.match(/\$\{attentionProjectionInstruction\}/g) ?? []).length).toBe(1)
+    expect((src.match(/\$\{shared\}/g) ?? []).length).toBe(3)
   })
 
   it("no longer tells sessions to replay a 50-event window every turn", () => {
@@ -63,6 +66,23 @@ describe("turn-start inbox instruction (km 19442 context-flood guard)", () => {
     expect(src).toMatch(/with: <your session name>/)
     expect(src).toMatch(/from: <peer>/)
     expect(src).toMatch(/newest matching/)
+  })
+
+  it("no longer tells sessions to broadcast every start, finish, claim or sub-agent (29143 E1b)", () => {
+    // The instructions are re-read by every session on every turn; the old coordination protocol asked for a
+    // broadcast on every task start/finish, bead claim and sub-agent, which is progress traffic, not a transition.
+    for (const marker of [
+      'message="starting:',
+      'message="done:',
+      'message="claimed:',
+      'message="spawned:',
+      "ci-fix:",
+    ]) {
+      expect(src, marker).not.toContain(marker)
+    }
+    expect((src.match(/const messagingInstruction\b/g) ?? []).length).toBe(1)
+    expect((src.match(/\$\{messagingInstruction\}/g) ?? []).length).toBe(3)
+    expect(src).toContain("notify and status carry no instruction")
   })
 
   it("points idle-wait policy at delivery capability metadata instead of hardcoded fetch loops", () => {

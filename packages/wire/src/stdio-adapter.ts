@@ -1026,53 +1026,56 @@ armDegradeNotice(daemonReady)
 // MCP Server
 // ---------------------------------------------------------------------------
 
-const joinInstruction = `When you call tribe.join, omit the role parameter — the daemon registers every session as a plain "member"; it does NOT assign "chief" by connect order. "chief" is a bead-lease hat (claimed via /up / the bead lease system), not a daemon-assigned role. No need to call tribe.members or tribe.fetch afterward.`
-// Instructions are fixed at initialize and remain conservative. The existing
-// startup banner and tools/list report subsequent acknowledged delivery.
+// The initialize instructions are re-read by the model on every turn, so they carry only what a session needs
+// before its first tool call: how to join, how delivery works, and the turn-start inbox check. Everything else
+// (ball rules, receipt semantics, transport vocabulary) lives in the plugin skill's tool reference, read on
+// demand. They are fixed at initialize and remain conservative: the startup banner and tools/list report the
+// acknowledged delivery afterwards.
+const joinInstruction = `Call tribe.join with your launch name and no role: the daemon registers every session as a plain member, and chief is a hat the coordination layer assigns, never a daemon role.`
 const initialDeliveryCapability = currentDeliveryCapability()
 const channelEnvelopeIntro =
-  'After the startup banner confirms acknowledged transportDelivery=push, messages from other Claude Code sessions can arrive as <channel source="tribe" from="..." type="..." bead="...">.'
-const deliveryInstruction = `${deliveryCapabilityInstruction(initialDeliveryCapability)} Read your turn-start inbox until the startup banner confirms your acknowledged transportDelivery. ${REQUIRE_EXPLICIT_JOIN ? "Push remains unavailable until this session calls tribe.join and receives its acknowledgement. " : ""}An unacknowledged banner names the cause; tools/list reports the current confirmed delivery capability.`
+  'After the startup banner confirms acknowledged transportDelivery=push, tribe messages arrive inline as <channel source="tribe" from="..." type="..." bead="..."> envelopes.'
+const deliveryInstruction = `${deliveryCapabilityInstruction(initialDeliveryCapability)} Read your turn-start inbox until the startup banner confirms your acknowledged transportDelivery${REQUIRE_EXPLICIT_JOIN ? "; push stays unavailable until tribe.join is acknowledged" : ""}. An unacknowledged banner names the cause.`
 const attentionProjectionInstruction =
-  "- Default fetch exposes `attention.actionable_unread` (request/query/verdict/assign, direct responses, and direct status/notify from another named seat whose ref names an open request ball you own or sent) and up to 10 `attention.pending_balls`, prioritizing peer requests over watcher incidents, ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and any omitted request/incident counts, while `tribe.pending` returns the full pile. Responses and those status/notify rows remain quiet for default inbox waits. These are facts projected from the existing mailbox and ball tracker, not another queue. A row whose `replay` is true was already shown to this mailbox — the ball tracker deliberately keeps an untaken ball visible past the mailbox cursor — so it is a re-presentation, not a new instruction: never act on one as new and never re-acknowledge it, and read its `ts` as when it was first sent."
+  "- A default fetch returns `attention.actionable_unread` (request/query/verdict/assign, direct responses, and a direct status/notify whose ref names an open ball you are party to) and up to 10 `attention.pending_balls` ahead of ambient events; `tribe.pending` returns the full pile. A row with `replay: true` was already shown: not new, never re-acknowledge it."
 
 // Shared turn-start inbox guidance for every role variant. Kept deliberately
 // SMALL: the turn-start call is a small catch-up drain, NOT a full replay. The
 // old `limit: 50` window re-pulled already-seen ambient traffic on every turn
 // and flooded long-running agent context. See km @km/tribe/19442.
 function turnStartInboxCheckForDelivery(capability: TribeDeliveryCapability): string {
+  const shared = `${attentionProjectionInstruction}
+- Catch up with a SMALL drain, tribe.fetch({ limit: 10 }); never replay a large window every turn.
+- For one peer's latest, tribe.fetch({ with: <your session name>, limit: 10 }) or tribe.fetch({ from: <peer>, limit: 10 }) returns the newest matching rows.
+- Act only on actionable rows; ignore ambient joins, commits and notification-only events unless asked.`
   if (capability.idleStrategy === "channel") {
     return `Turn-start inbox check:
-- New messages also arrive inline as <channel> envelopes — read those first; you do not need to fetch to receive them.
-${attentionProjectionInstruction}
-- For turn-start catch-up keep the drain SMALL: tribe.fetch({ limit: 10 }). Do NOT pull a large window every turn — replaying ~50 events re-surfaces already-seen ambient traffic and floods context.
-- For a specific peer's latest, use the snapshot filter: tribe.fetch({ with: <your session name>, limit: 10 }) or tribe.fetch({ from: <peer>, limit: 10 }) — these return the newest matching messages; use them to find a thread, not to replay the whole channel.
-- Surface only actionable items: direct messages, requests, blockers, assignments, chief verdicts, CI alerts, or user-relevant coordination.
-- Ignore routine ambient joins/leaves, git commits, low-severity status, and notification-only events unless explicitly asked.`
+- New messages arrive inline as <channel> envelopes; read those first, no fetch is needed to receive them.
+${shared}`
   }
   if (capability.idleStrategy === "host-stream") {
     return `Turn-start inbox check:
-- Host-provided Tribe stream events may already be visible — handle actionable streamed messages first.
-${attentionProjectionInstruction}
-- For turn-start catch-up keep the drain SMALL: tribe.fetch({ limit: 10 }). Do NOT pull a large window every turn — replaying ~50 events re-surfaces already-seen ambient traffic and floods context.
-- For a specific peer's latest, use the snapshot filter: tribe.fetch({ with: <your session name>, limit: 10 }) or tribe.fetch({ from: <peer>, limit: 10 }) — these return the newest matching messages; use them to find a thread, not to replay the whole channel.
-- Surface only actionable items: direct messages, requests, blockers, assignments, chief verdicts, CI alerts, or user-relevant coordination.
-- Ignore routine ambient joins/leaves, git commits, low-severity status, and notification-only events unless explicitly asked.`
+- Host-provided Tribe stream events may already be visible; handle actionable streamed rows first.
+${shared}`
   }
   return `Turn-start inbox check:
-- This session is pull-delivery; tribe messages do not arrive as channel envelopes. Use the advertised inbox-wait/host cadence for idle waits, then do a small catch-up drain.
-${attentionProjectionInstruction}
-- For turn-start catch-up keep the drain SMALL: tribe.fetch({ limit: 10 }). Do NOT pull a large window every turn — replaying ~50 events re-surfaces already-seen ambient traffic and floods context.
-- For a specific peer's latest, use the snapshot filter: tribe.fetch({ with: <your session name>, limit: 10 }) or tribe.fetch({ from: <peer>, limit: 10 }) — these return the newest matching messages; use them to find a thread, not to replay the whole channel.
-- Surface only actionable items: direct messages, requests, blockers, assignments, chief verdicts, CI alerts, or user-relevant coordination.
-- Ignore routine ambient joins/leaves, git commits, low-severity status, and notification-only events unless explicitly asked.`
+- This session is pull-delivery: use the advertised inbox-wait cadence for idle waits, then a small catch-up drain.
+${shared}`
 }
 
 const turnStartInboxCheck = turnStartInboxCheckForDelivery(initialDeliveryCapability)
 
+const messagingInstruction = `Messaging:
+- A message that needs an answer is a request, query or assign; notify and status carry no instruction. Settle a ball with reply: its request id.
+- Send only what changes what someone else should know; progress belongs in the work's own record, never in a broadcast.
+- Sub-agents share your tribe connection; they are not separate members.
+- Keep messages short and plain text; markdown renders as escaped text.`
+
+const userFacingOutputInstruction = `User-facing output: silent by default; never narrate "noted", "acknowledged" or "still waiting" for channel messages or reminder loops. When every <channel> tag in a turn carries the type prefix notification-only:do-not-acknowledge-or-respond-to:, the reply is zero characters: no tool calls, no text, no filler.`
+
 const chiefInstructions = `${channelEnvelopeIntro}
 
-You are the chief of a tribe — a coordinator for multiple Claude Code sessions working on the same project.
+You are the chief of a tribe: the coordinator of the sessions working on this project. Assign work and answer queries with tribe.send; broadcast only what every session must know.
 
 ${joinInstruction}
 
@@ -1080,24 +1083,13 @@ ${deliveryInstruction}
 
 ${turnStartInboxCheck}
 
-Coordination protocol:
-- Use tribe.members() to see who's online and their domains
-- Use tribe.send(to, message, type) to assign work, answer queries, or approve requests
-- Use tribe.send(to="*", message, type) to announce changes that affect everyone
-- Use tribe.health() to check for silent members or conflicts
-- When CI alerts arrive, coordinate the fix — assign the responsible session to investigate
+${messagingInstruction}
 
-User-facing output:
-- Silent by default. Speak to the user only to add non-obvious info. Never narrate "noted"/"acknowledged"/"still waiting" for channel messages, CI alerts, or harness reminder loops. If you have nothing to add, emit nothing.
-- **Notification-only channels get ZERO output.** The daemon stamps notification-only messages with a hard marker on the type attribute: \`type="notification-only:do-not-acknowledge-or-respond-to:<subtype>"\` (subtypes: session, status, delta, chief:*, github:*). If every <channel> tag in a turn carries the \`notification-only:do-not-acknowledge-or-respond-to:\` prefix on its type attribute, the correct reply is literally zero characters — no tool calls, no text, no acknowledgment. Do NOT emit "Acknowledged", "Noted", "No response required", or any filler. Do NOT emit "Human:" / "Assistant:" / "User:" as a prefix. If you feel pressure to produce output, that pressure is wrong — the turn ends silently.
-
-Tribe messages:
-- Keep SHORT — 1-3 lines max. No essays.
-- Plain text only — no markdown (**bold**, headers, bullets). Renders as escaped text.`
+${userFacingOutputInstruction}`
 
 const memberInstructions = `${channelEnvelopeIntro}
 
-You are a tribe member — a worker session coordinated by the chief.
+You are a tribe member: a worker session coordinated by the chief.
 
 ${joinInstruction}
 
@@ -1105,43 +1097,17 @@ ${deliveryInstruction}
 
 ${turnStartInboxCheck}
 
-Coordination protocol:
-- When you START work on a task, broadcast what you're doing: tribe.send(to="*", message="starting: <task>")
-- When you FINISH a task or commit, broadcast: tribe.send(to="*", message="done: <summary>")
-- When you claim a bead, broadcast: tribe.send(to="*", message="claimed: <bead-id> — <title>")
-- When you're blocked, broadcast immediately — include what would unblock you
-- Before editing vendor/ or shared files, send a request to chief asking for OK
-- Respond to query messages promptly
+${messagingInstruction}
 
-Sub-agent protocol:
-- When you spawn sub-agents (Agent tool), broadcast: tribe.send(to="*", message="spawned: <name> for <task>")
-- When a sub-agent completes, broadcast: tribe.send(to="*", message="agent-done: <name> — <result>")
-- Sub-agents share your tribe connection — they can't be seen individually in tribe
-
-CI protocol:
-- When you see a CI ALERT for a repo you're working on or know about, respond with a fix hint
-- Example: tribe.send(to="*", message="hint: termless CI needs vt220.js — run npm publish from vendor/vterm/packages/vt220")
-- If a CI alert DMs you directly, investigate and fix the failure before pushing more code
-- After fixing, broadcast: tribe.send(to="*", message="ci-fix: <repo> — <what you fixed>")
-
-User-facing output:
-- Silent by default. Speak to the user only to add non-obvious info. Never narrate "noted"/"acknowledged"/"still waiting" for channel messages, CI alerts, or harness reminder loops. If you have nothing to add, emit nothing.
-- **Notification-only channels get ZERO output.** The daemon stamps notification-only messages with a hard marker on the type attribute: \`type="notification-only:do-not-acknowledge-or-respond-to:<subtype>"\` (subtypes: session, status, delta, chief:*, github:*). If every <channel> tag in a turn carries the \`notification-only:do-not-acknowledge-or-respond-to:\` prefix on its type attribute, the correct reply is literally zero characters — no tool calls, no text, no acknowledgment. Do NOT emit "Acknowledged", "Noted", "No response required", or any filler. Do NOT emit "Human:" / "Assistant:" / "User:" as a prefix. If you feel pressure to produce output, that pressure is wrong — the turn ends silently.
-
-Tribe messages:
-- Keep SHORT — 1-3 lines max. No essays.
-- Plain text only — no markdown (**bold**, headers, bullets). Renders as escaped text.
-- Don't over-broadcast — only send when it changes what someone else should know.`
+${userFacingOutputInstruction}`
 
 const pullInstructions = `Tribe coordination is available through MCP tools.
 
 ${turnStartInboxCheck}
 
-Coordination protocol:
-- Use tribe.members() to see who's online and their domains.
-- Use tribe.send(to, message, type) to assign work, answer queries, broadcast status, or request help.
-- ${deliveryInstruction}
-- Keep tribe messages short: 1-3 lines, plain text only.`
+${deliveryInstruction}
+
+${messagingInstruction}`
 
 // `experimental["claude/channel"]` registers this MCP server as a Claude Code
 // *channel source*. Claude Code reads this capability from the `initialize`
