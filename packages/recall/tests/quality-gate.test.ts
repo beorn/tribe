@@ -11,7 +11,7 @@
 import { describe, test, expect } from "vitest"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { analyzeQuality, isAcceptable } from "../src/lib/quality-gate.ts"
+import { analyzeQuality } from "../src/lib/quality-gate.ts"
 
 const FIXTURE_DIR = join(import.meta.dirname, "quality-gate.fixtures")
 
@@ -24,7 +24,6 @@ describe("analyzeQuality", () => {
     const text = fixture("clean-good")
     const r = analyzeQuality(text)
     expect(r.rejectReason).toBeUndefined()
-    expect(isAcceptable(text)).toBe(true)
   })
 
   test("stuck-loop: rejected with stuck-loop reason", () => {
@@ -32,7 +31,6 @@ describe("analyzeQuality", () => {
     const r = analyzeQuality(text)
     expect(r.rejectReason).toBeDefined()
     expect(r.rejectReason).toMatch(/^stuck-loop:/)
-    expect(isAcceptable(text)).toBe(false)
   })
 
   test("decayed-llm: rejected with decayed-llm reason", () => {
@@ -40,7 +38,6 @@ describe("analyzeQuality", () => {
     const r = analyzeQuality(text)
     expect(r.rejectReason).toBeDefined()
     expect(r.rejectReason).toMatch(/^decayed-llm:/)
-    expect(isAcceptable(text)).toBe(false)
   })
 
   test("cross-session-concat: signals carry the diagnostic shape", () => {
@@ -96,18 +93,7 @@ describe("analyzeQuality", () => {
       child tree which is O(n). We can fix this by maintaining a sparse
       sticky-child index keyed by parent node id.
     `
-    expect(isAcceptable(text)).toBe(true)
-  })
-
-  test("empty text is acceptable (degenerate, nothing to filter)", () => {
-    expect(isAcceptable("")).toBe(true)
-    expect(isAcceptable("   \n\n  ")).toBe(true)
-  })
-
-  test("very short text passes (insufficient data to judge)", () => {
-    // Don't reject a one-line note just because it has no stopwords.
-    expect(isAcceptable("test")).toBe(true)
-    expect(isAcceptable("ok done")).toBe(true)
+    expect(analyzeQuality(text).rejectReason).toBeUndefined()
   })
 
   test("signals object includes diagnostic fields", () => {
@@ -128,15 +114,5 @@ describe("analyzeQuality", () => {
     const text = (phrase + " ").repeat(60) + filler.repeat(40)
     const r = analyzeQuality(text)
     expect(r.rejectReason).toMatch(/stuck-loop/)
-  })
-})
-
-describe("isAcceptable opts", () => {
-  test("opts.minTokens raises the floor for short-text exemption", () => {
-    const text = "ok done shipped pushed merged"
-    // Default exempts short text
-    expect(isAcceptable(text)).toBe(true)
-    // With a low floor we still pass because nothing is repeating
-    expect(isAcceptable(text, { minTokens: 1 })).toBe(true)
   })
 })

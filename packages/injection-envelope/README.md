@@ -23,8 +23,8 @@ instruction]`.
 - **`CONTEXT_PROTOCOL_FOOTER`** — the canonical trailing boundary
   tag, emitted on every substantive prompt regardless of whether
   recall contributed content.
-- **Turn-manifest** — `writeTurnManifest` / `readTurnManifest` /
-  `clearTurnManifest`. Persisted at emit-time, consumed at
+- **Turn-manifest** — `writeTurnManifest` / `readTurnManifest`.
+  Persisted at emit-time, consumed at
   PreToolUse-time by the authority gate so the gate can compare
   candidate tool args against typed text vs injected spans.
 

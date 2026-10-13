@@ -13,7 +13,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest"
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -25,7 +25,6 @@ import {
   wrapInjectedContext,
   type RegisteredSource,
   readTurnManifest,
-  clearTurnManifest,
   writeTurnManifest,
   turnManifestPathForSession,
 } from "../src/index.ts"
@@ -558,20 +557,6 @@ describe("TurnManifest", () => {
     if (read.kind !== "ok") throw new Error("unreachable")
     expect(read.manifest.typedUserText).toBe("second")
     expect(statSync(turnManifestPathForSession(SESSION_ID)).mode & 0o777).toBe(0o600)
-  })
-
-  test("clearTurnManifest removes the file", () => {
-    writeTurnManifest(SESSION_ID, {
-      typedUserText: "x",
-      typedEntities: [],
-      typedShingles: [],
-      explicitWriteAuth: false,
-      untrustedRecall: [],
-      ts: 0,
-    })
-    expect(existsSync(turnManifestPathForSession(SESSION_ID))).toBe(true)
-    clearTurnManifest(SESSION_ID)
-    expect(existsSync(turnManifestPathForSession(SESSION_ID))).toBe(false)
   })
 
   test("wrapInjectedContext writes a manifest when sessionId + items provided", () => {

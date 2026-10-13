@@ -11,11 +11,8 @@
  *   (about 160 characters of common words) that pass was slower than exact's window-first ranking on 84 of 150, so
  *   hook mode ranks the window first (@cto re-ruling 516d4c10; /hh/var/@dev/11/25071-r2/replay.jsonl).
  *
- * The target is what the user waits for; the wall is the failure bound, where recall is skipped loudly.
+ * The prompt hook aims to finish inside 1 s; the wall is the failure bound, where recall is skipped loudly.
  */
-
-/** What the prompt hook's recall aims to finish inside. */
-export const RECALL_TARGET_MS = 1000
 
 /** The hard wall: past it the hook skips recall loudly instead of waiting (the Worker in recall-deadline.ts). */
 export const RECALL_WALL_MS = 1500

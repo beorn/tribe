@@ -247,15 +247,15 @@ describe("25071 row 2 B3: phases run only while the budget covers them", () => {
 })
 
 describe("25071 row 2: the budget is stated once, as named constants", () => {
-  test("a 1.5 s wall, a 1.0 s target, a cap of 1000 ranked window matches, and the cost of one pass", async () => {
+  test("a 1.5 s wall, a cap of 1000 ranked window matches, and the cost of one pass", async () => {
     const budget = await import("../../src/history/recall-budget.ts")
     expect(budget.RECALL_WALL_MS).toBe(1500)
-    expect(budget.RECALL_TARGET_MS).toBe(1000)
     expect(budget.HOOK_CANDIDATE_LIMIT).toBe(1000)
     expect(budget.HOOK_CANDIDATE_PASS_MS).toBeGreaterThan(0)
     // The all-time candidate set's widening, its floor and its survivor minimum went with it (re-ruling 516d4c10).
+    // The 1 s target is prose in this module, not an export; RECALL_WALL_MS is what a call is bounded by.
     expect(Object.keys(budget).sort()).toEqual(
-      ["HOOK_CANDIDATE_LIMIT", "HOOK_CANDIDATE_PASS_MS", "RECALL_TARGET_MS", "RECALL_WALL_MS"].sort(),
+      ["HOOK_CANDIDATE_LIMIT", "HOOK_CANDIDATE_PASS_MS", "RECALL_WALL_MS"].sort(),
     )
   })
 })

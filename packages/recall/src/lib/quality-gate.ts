@@ -53,12 +53,8 @@ export interface QualityResult {
   signals: QualitySignals
 }
 
-export interface QualityOpts {
-  /** Below this token count, exempt the text (insufficient signal). Default 50. */
-  minTokens?: number
-}
-
-const DEFAULT_OPTS: Required<QualityOpts> = { minTokens: 50 }
+/** Below this token count, analyzeQuality ignores the prose heuristics (insufficient signal). */
+const DEFAULT_OPTS = { minTokens: 50 }
 
 // English stopwords + common conversational fillers. Intentionally short — we
 // only need a heuristic, not a linguistics library. Coverage tuned against
@@ -306,20 +302,4 @@ export function analyzeQuality(text: string): QualityResult {
   const score = Math.max(0, 1 - symptomStrength)
 
   return { score, rejectReason, signals }
-}
-
-export function isAcceptable(text: string, opts?: QualityOpts): boolean {
-  const minTokens = opts?.minTokens ?? DEFAULT_OPTS.minTokens
-  const prose = stripFraming(text)
-  const tokens = tokenize(prose)
-  // Short text: only run the always-cheap repeated-line + ngram checks. Skip
-  // the prose heuristics that need enough data to be meaningful.
-  if (tokens.length < minTokens) {
-    const repeat = maxContiguousRepeatedLine(prose)
-    if (repeat >= 10) return false
-    const ng = maxNgramCoverage(tokens)
-    if (ng.coverage > 0.2) return false
-    return true
-  }
-  return analyzeQuality(text).rejectReason === undefined
 }
