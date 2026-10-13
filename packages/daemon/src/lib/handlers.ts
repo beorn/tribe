@@ -952,8 +952,8 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     if (replyId !== null) {
       return jsonResult({
         error:
-          "tribe.send: invalid options - a re-due keeps the ball open and reply settles it; send the status + ref " +
-          "receipt with expires_in_ms, or the response + reply, not both",
+          "tribe.send: invalid options - a re-due requires the status + ref receipt without reply; " +
+          "send that receipt with expires_in_ms, or omit expires_in_ms to send a non-closing progress reply",
       })
     }
     const resolved = receiptRedue(ctx, { owner: sender, requester: recipients, ref, expiresInMs })

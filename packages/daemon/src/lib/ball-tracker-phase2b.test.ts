@@ -1013,7 +1013,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       const count = messageCount()
 
       const res = receipt(agent1, "redue-reply", { expires_in_ms: 600_000, reply: "redue-reply" })
-      expect(res.error).toMatch(/reply settles it/)
+      expect(res.error).toMatch(/status \+ ref receipt without reply/)
       expect(dueOf("redue-reply")).toBe(original)
       expect(messageCount()).toBe(count)
     })
