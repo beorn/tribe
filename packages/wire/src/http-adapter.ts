@@ -16,7 +16,7 @@ import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto"
-import { optionalToolsEnabled, toolListForDeliveryCapability } from "./lib/tools-list.ts"
+import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
 import { adapterLaunchIdentity } from "./lib/adapter-launch-identity.ts"
@@ -231,17 +231,13 @@ function createMcpServer(opts: {
   readonly identityToken: string
   readonly defaultDelivery: TribeDelivery
   readonly deliveryCapability: TribeDeliveryCapability
-  /** List the opt-in verbs too; defaults to the TRIBE_MCP_OPTIONAL_TOOLS=1 environment read. */
-  readonly includeOptionalTools?: boolean
   readonly requireJoin: boolean
   readonly getName: () => string
   readonly setName: (name: string) => void
   readonly setRole: (role: string) => void
   // oxlint-disable-next-line typescript/no-deprecated -- the adapter is built on the low-level Server, as stdio-adapter is
 }): McpServer {
-  const toolsList = toolListForDeliveryCapability(opts.deliveryCapability, {
-    includeOptional: opts.includeOptionalTools ?? optionalToolsEnabled(process.env),
-  })
+  const toolsList = toolListForDeliveryCapability(opts.deliveryCapability)
   // oxlint-disable-next-line typescript/no-deprecated -- the adapter is built on the low-level Server (see its return type)
   const mcp = new McpServer(
     { name: "tribe", version: "0.14.1" },

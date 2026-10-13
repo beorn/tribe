@@ -1,13 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { TRIBE_COMMAND_DESCRIPTORS } from "../src/command-descriptors.ts"
 import { resolveDeliveryCapability } from "../src/lib/delivery.ts"
-import {
-  OPTIONAL_TOOL_NAMES,
-  optionalToolsEnabled,
-  TOOLS_LIST,
-  toolListForDeliveryCapability,
-  TRIBE_MCP_OPTIONAL_TOOLS_ENV,
-} from "../src/lib/tools-list.ts"
+import { CLI_ONLY_TOOLS, TOOLS_LIST, toolListForDeliveryCapability } from "../src/lib/tools-list.ts"
 
 /** The bytes a Claude Code model re-reads per tool each turn: name, description and input schema. The output
  * schema is served on tools/list but never rendered to the model. */
@@ -69,18 +63,12 @@ describe("tribe MCP tools list", () => {
     })
   })
 
-  it("lists only the default-exposure verbs unless the environment opts in (29143)", () => {
-    // Seven of the eight verbs no seat called in the 7-day census behind 29137; each stays callable. The eighth,
-    // rename, stays listed because the shipped plugin skill maps `/tribe rename` to it.
-    expect(OPTIONAL_TOOL_NAMES).toEqual([
-      "retro",
-      "debug",
-      "repair",
-      "filter",
-      "lifecycle.publish",
-      "health.publish",
-      "lifecycle",
-    ])
+  it("lists every verb except the ones the installed CLI covers (29143)", () => {
+    // Of the verbs no seat called over MCP in the 7-day census behind 29137, only these two have a CLI verb; the
+    // others (debug, filter, lifecycle.publish, health.publish, lifecycle) have no other rail and stay listed.
+    expect([...CLI_ONLY_TOOLS.keys()]).toEqual(["retro", "repair"])
+    expect(CLI_ONLY_TOOLS.get("repair")).toContain("tribe repair")
+    expect(CLI_ONLY_TOOLS.get("retro")).toContain("tribe retro")
     expect(TOOLS_LIST.map((tool) => tool.name)).toEqual([
       "send",
       "pending",
@@ -91,21 +79,24 @@ describe("tribe MCP tools list", () => {
       "health",
       "join",
       "restart",
+      "debug",
+      "filter",
+      "lifecycle.publish",
+      "health.publish",
+      "lifecycle",
     ])
-    const everything = toolListForDeliveryCapability(undefined, { includeOptional: true })
-    expect(everything.map((tool) => tool.name)).toEqual(TRIBE_COMMAND_DESCRIPTORS.map((d) => d.mcp.name))
-    expect(optionalToolsEnabled({})).toBe(false)
-    expect(optionalToolsEnabled({ [TRIBE_MCP_OPTIONAL_TOOLS_ENV]: "1" })).toBe(true)
-    expect(optionalToolsEnabled({ [TRIBE_MCP_OPTIONAL_TOOLS_ENV]: "true" })).toBe(false)
+    const listed = new Set(TOOLS_LIST.map((tool) => tool.name))
+    for (const descriptor of TRIBE_COMMAND_DESCRIPTORS) {
+      expect(listed.has(descriptor.mcp.name), descriptor.mcp.name).toBe(descriptor.mcpList === "listed")
+    }
   })
 
-  it("keeps the default list's model-visible text inside its budget (29143)", () => {
-    // Before 29143 the default list weighed 17,023 model-visible bytes (send alone 4,864); the long guidance now
-    // lives in the /tribe skill, read on demand instead of every turn.
-    // Measured at this change: 8,887 in total, send 3,454 (its 14 properties carry three enums and two oneOf shapes).
+  it("keeps the listed tools' model-visible text inside its budget (29143)", () => {
+    // Before 29143 the list weighed 17,023 model-visible bytes (send alone 4,864); the long guidance now lives in
+    // the plugin skill, read on demand instead of every turn. Measured at this change: 11,038 in total, send 3,454.
     const sizes = Object.fromEntries(TOOLS_LIST.map((tool) => [tool.name, modelVisibleBytes(tool)]))
     const total = Object.values(sizes).reduce((sum, bytes) => sum + bytes, 0)
-    expect(total, JSON.stringify(sizes)).toBeLessThanOrEqual(9_000)
-    for (const [name, bytes] of Object.entries(sizes)) expect(bytes, name).toBeLessThanOrEqual(3_600)
+    expect(total, JSON.stringify(sizes)).toBeLessThanOrEqual(12_000)
+    for (const [name, bytes] of Object.entries(sizes)) expect(bytes, name).toBeLessThanOrEqual(4_000)
   })
 })

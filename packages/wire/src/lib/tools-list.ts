@@ -6,24 +6,20 @@
  * explicit descriptor metadata there, even when their CLI projection is hidden,
  * so MCP/CLI drift is reviewable instead of implicit.
  *
- * Every listed tool is re-read by the model on every turn, so the default list
- * carries only the verbs a seat calls (`exposure: "default"`). An
- * `exposure: "opt-in"` verb stays callable but is listed only when the adapter's
- * environment sets TRIBE_MCP_OPTIONAL_TOOLS=1.
+ * Every listed tool is re-read by the model on every turn, so a daemon verb
+ * the installed CLI covers and no seat calls over MCP (`mcpList: { cliOnly }`)
+ * is not listed: it stays a daemon verb the adapter answers by name.
  */
 
 import { TRIBE_COMMAND_DESCRIPTORS, type TribeMcpTool } from "../command-descriptors.ts"
 import { DEFAULT_TRIBE_DELIVERY_CAPABILITY, type TribeDeliveryCapability } from "./delivery.ts"
 
-export const TRIBE_MCP_OPTIONAL_TOOLS_ENV = "TRIBE_MCP_OPTIONAL_TOOLS"
-
-export function optionalToolsEnabled(env: Record<string, string | undefined>): boolean {
-  return env[TRIBE_MCP_OPTIONAL_TOOLS_ENV] === "1"
-}
-
-export const OPTIONAL_TOOL_NAMES: readonly string[] = TRIBE_COMMAND_DESCRIPTORS.filter(
-  (descriptor) => descriptor.exposure === "opt-in",
-).map((descriptor) => descriptor.mcp.name)
+/** MCP verbs the installed CLI covers instead of tools/list: MCP name → CLI spelling. */
+export const CLI_ONLY_TOOLS: ReadonlyMap<string, string> = new Map(
+  TRIBE_COMMAND_DESCRIPTORS.flatMap((descriptor) =>
+    descriptor.mcpList === "listed" ? [] : [[descriptor.mcp.name, descriptor.mcpList.cliOnly] as const],
+  ),
+)
 
 function idleStrategyNote(capability: TribeDeliveryCapability): string {
   if (capability.idleStrategy === "host-stream") return "Idle delivery is the host Tribe stream; do not poll."
@@ -45,11 +41,9 @@ function projectMcpTool(tool: TribeMcpTool, capability: TribeDeliveryCapability)
 
 export function toolListForDeliveryCapability(
   capability: TribeDeliveryCapability = DEFAULT_TRIBE_DELIVERY_CAPABILITY,
-  options: { readonly includeOptional?: boolean } = {},
 ): TribeMcpTool[] {
-  const includeOptional = options.includeOptional === true
-  return TRIBE_COMMAND_DESCRIPTORS.filter((descriptor) => includeOptional || descriptor.exposure === "default").map(
-    (descriptor) => projectMcpTool(descriptor.mcp, capability),
+  return TRIBE_COMMAND_DESCRIPTORS.filter((descriptor) => descriptor.mcpList === "listed").map((descriptor) =>
+    projectMcpTool(descriptor.mcp, capability),
   )
 }
 

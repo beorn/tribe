@@ -69,9 +69,10 @@ export interface TribeCommandDescriptor {
   readonly title: string
   readonly description: string
   readonly lifetime: "live-session" | "one-shot" | "diagnostic" | "operator"
-  /** Whether tools/list carries the verb by default. Every listed tool is re-read by the model each turn, so a verb
-   * no seat calls is `opt-in`: still callable, listed only when the adapter's TRIBE_MCP_OPTIONAL_TOOLS=1. */
-  readonly exposure: "default" | "opt-in"
+  /** Whether tools/list carries the verb. Every listed tool is re-read by the model each turn, so a daemon verb the
+   * installed CLI covers and no seat calls over MCP is `{ cliOnly: "<cli spelling>" }`: still answered by name,
+   * never listed. A verb with no CLI stays listed. */
+  readonly mcpList: "listed" | { readonly cliOnly: string }
   readonly mcp: TribeMcpTool
   readonly cli: TribeCliProjection
 }
@@ -165,7 +166,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Send Message",
     description: 'Send a message to one tribe member, multiple members, or everyone with to: "*".',
     lifetime: "live-session",
-    exposure: "default",
+    mcpList: "listed",
     mcp: {
       name: "send",
       description:
@@ -427,7 +428,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Ball-tracker query: list active requests where the owner must reply, or derive expired/unanswered outcomes from active rows, journal facts, and replies. Default owner is the caller's session.",
     lifetime: "live-session",
-    exposure: "default",
+    mcpList: "listed",
     mcp: {
       name: "pending",
       description:
@@ -567,7 +568,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Long-poll the actionable inbox for a session until a direct request/query/assign/verdict, an incident opened or changed (its summary), or an owned tracked actionable broadcast arrives, or the timeout elapses. MCP requests at or above the measured host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
     lifetime: "live-session",
-    exposure: "default",
+    mcpList: "listed",
     mcp: {
       name: "inbox.wait",
       description: `Short diagnostic wait for actionable inbox activity (default ${DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS}ms); a timeout at or above the ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling returns host_cut with advice=cli_wait, so use \`tribe inbox-wait\` for longer waits. Wakes on direct or owned tracked-broadcast request/query/assign/verdict rows and on an incident opened or changed; notify/status/response never wake by default.`,
@@ -699,7 +700,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Read tribe messages. Default returns attention (unread actionables plus self-owned pending balls), drains the bounded chronological event window, and advances its cursor; `events` omits rows already carried in `attention.actionable_unread`, so a message body appears once per read. ids/with/from/to reads are snapshots. since scans the journal and advances only with advance:true.",
     lifetime: "live-session",
-    exposure: "default",
+    mcpList: "listed",
     mcp: {
       name: "fetch",
       description:
@@ -796,7 +797,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Members",
     description: "List active tribe sessions with their domains",
     lifetime: "live-session",
-    exposure: "default",
+    mcpList: "listed",
     mcp: {
       name: "members",
       description: "List sessions with transport, owner and mailbox-read verdicts (all: include disconnected rows).",
@@ -868,8 +869,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Rename Session",
     description: "Rename this session in the tribe",
     lifetime: "live-session",
-    // Listed although no seat called it in the census: the shipped plugin skill maps `/tribe rename` to it (201 bytes).
-    exposure: "default",
+    // No CLI verb, and the shipped plugin skill maps `/tribe rename` to it, so it stays listed (201 bytes).
+    mcpList: "listed",
     mcp: {
       name: "rename",
       description: "Rename this session.",
@@ -897,7 +898,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Health",
     description: "Diagnostic: check for silent members, stale beads, unread messages",
     lifetime: "diagnostic",
-    exposure: "default",
+    mcpList: "listed",
     mcp: {
       name: "health",
       description: "Diagnostic snapshot: silent members, transport wedges, pending balls, cadence, issues.",
@@ -957,7 +958,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Join",
     description: "Join/rejoin: re-announce this session's name and domains after compaction or rejoin.",
     lifetime: "live-session",
-    exposure: "default",
+    mcpList: "listed",
     mcp: {
       name: "join",
       description: "Join or rejoin as a seat name, e.g. after a start, restart or compaction.",
@@ -1025,7 +1026,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Restart the tribe MCP server from the same pinned module root. This changes no code; clients reconnect on their own.",
     lifetime: "operator",
-    exposure: "default",
+    mcpList: "listed",
     mcp: {
       name: "restart",
       description: "Restart the tribe daemon from the same module root; changes no code, clients reconnect.",
@@ -1053,7 +1054,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Generate a retrospective report analyzing tribe message history, coordination health, and per-member activity",
     lifetime: "diagnostic",
-    exposure: "opt-in",
+    mcpList: { cliOnly: "tribe retro --since <duration> --format markdown|json" },
     mcp: {
       name: "retro",
       description: "Retrospective report over message history, coordination health and per-member activity.",
@@ -1082,7 +1083,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Debug",
     description: "Dump daemon internals for troubleshooting - clients, per-session cursors.",
     lifetime: "diagnostic",
-    exposure: "opt-in",
+    mcpList: "listed",
     mcp: {
       name: "debug",
       description: "Dump daemon internals: clients and per-session cursors.",
@@ -1102,7 +1103,9 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     title: "Repair",
     description: "Operator-bounded daemon state repair.",
     lifetime: "operator",
-    exposure: "opt-in",
+    mcpList: {
+      cliOnly: "tribe repair --reap-stale-transports --json | tribe repair --inbox-cursor tail --session <name>",
+    },
     mcp: {
       name: "repair",
       description:
@@ -1183,7 +1186,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Per-session subscription. Governs BOTH the push wakeup and what a tribe.fetch drain returns, so it is the lever for protecting your own context. mode controls focus level: focus = addressed + actionable only; normal = everything minus active mutes; ambient = everything. mute stores topic globs to silence until the optional timestamp. Filtered rows stay durable and remain reachable through an explicit history read (from/with/since) — they are not delivered. Empty args clears the filter.",
     lifetime: "live-session",
-    exposure: "opt-in",
+    mcpList: "listed",
     mcp: {
       name: "filter",
       description:
@@ -1224,7 +1227,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Publish this session's latest tool-call-lifecycle snapshot. Daemon caches last-write-wins per session name; chief / observers read via tribe.lifecycle. Payload schema is opaque to the daemon (owned by the publisher).",
     lifetime: "live-session",
-    exposure: "opt-in",
+    mcpList: "listed",
     mcp: {
       name: "lifecycle.publish",
       description:
@@ -1263,7 +1266,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Publish an agent recovery (force-settle / restart / rotation) as an ambient `health:recovery` broadcast (km @ag/super/20327 lateral channel). The topic is set SERVER-SIDE - clients cannot set topics via tribe.send. `content` is the human-readable summary; `agent`/`seq` are optional metadata for consumer dedup/ordering.",
     lifetime: "live-session",
-    exposure: "opt-in",
+    mcpList: "listed",
     mcp: {
       name: "health.publish",
       description:
@@ -1296,7 +1299,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     description:
       "Read the latest tool-call-lifecycle snapshot for a session (or all sessions). Diagnostic surface for chief / observers",
     lifetime: "diagnostic",
-    exposure: "opt-in",
+    mcpList: "listed",
     mcp: {
       name: "lifecycle",
       description: "Read the latest lifecycle snapshot for one seat, or every cached snapshot newest first.",
