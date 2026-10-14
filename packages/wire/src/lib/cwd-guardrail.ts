@@ -20,7 +20,8 @@
  *   - `ignore` — skip the check entirely. Use this for chief integration
  *      sessions or exploratory shells where main-repo cwd is legitimate.
  *   - `warn`   — log to debug + send a startup tribe channel notification
- *      pointing the agent at `bun worktree create wtN`.
+ *      pointing the agent at `/worktree` (author CODE in an owned Yrd
+ *      environment; main stays read-only for coordination).
  *   - `refuse` — same warning, plus a louder marker the agent surfaces.
  *      No process exit — the daemon still registers; the agent decides
  *      whether to proceed.
@@ -86,13 +87,13 @@ export function findSiblingPoolSlots(repoRoot: string): string[] {
   return slots
 }
 
-/** Build the canonical "migrate to a worktree" one-liner referenced by the bead. */
+/** Build the canonical "author CODE in an owned environment" one-liner referenced by the bead. */
 export function migrationOneLiner(repoRoot: string): string {
   const repoBasename = basename(repoRoot)
-  // Pick the lowest free slot index for the hint (best-effort — agent may
-  // pick a different one). We don't read the pool here to keep this string
-  // builder side-effect-free.
-  return `bun worktree create wtN && cd ../${repoBasename}-wtN`
+  // Open an owned Yrd environment for the change (the /worktree route). We do
+  // not read the environment list here, to keep this string builder
+  // side-effect-free.
+  return `open an owned Yrd environment for ${repoBasename} (yrd env open --issue <bead>) — see the /worktree skill`
 }
 
 /**
@@ -133,10 +134,9 @@ export function evaluateCwdPolicy(policy: CwdPolicy, probe: CwdProbe): CwdEvalua
   const oneLiner = migrationOneLiner(probe.gitRoot)
   const baseMsg =
     `tribe: standalone session running in main repo (${projectBasename}) on branch ${branch}. ` +
-    `Tribe SOP §F2a says main stays on main — edits should land in a pool slot. ` +
-    `Migrate with: ${oneLiner}. ` +
-    `Pool slots present: ${probe.siblingPoolSlots.join(", ")}. ` +
-    `Set TRIBE_MAIN_REPO_POLICY=ignore (or BEARLY_ALLOW_MAIN_REPO_CWD=1) to silence this for legitimate chief / exploratory sessions.`
+    `Main stays read-only for coordination here — author CODE in an owned Yrd environment, not in main. ` +
+    `Remedy: ${oneLiner}. ` +
+    `Pool slots present: ${probe.siblingPoolSlots.join(", ")}.`
 
   if (policy === "refuse") {
     return { kind: "refuse", message: `REFUSE: ${baseMsg}` }
