@@ -2588,16 +2588,16 @@ export function withDispatcher<
                 }
                 const operation = emitterRead ? "read" : incident?.active === false ? "clear" : "raise"
                 try {
-                  // Membership is decided by the CURRENT module, never by the boot snapshot (28921 review): a
-                  // promotion that ADDS an emitter must be adopted, so the snapshot is only a fast path.
-                  const managed = policy.emitters.includes(emitter)
-                    ? true
-                    : policy.emittersNow === undefined
-                      ? false
-                      : (await policy.emittersNow()).includes(emitter)
-                  if (!managed) return refuseIncident("emitter is not managed by this host policy")
-                  const allowed = await policy.authorize(current.verdict, emitter, operation)
-                  if (allowed !== true) return refuseIncident("verified identity is not authorized for this emitter")
+                  // ONE fresh child answers both (28921 review): membership is read from THIS answer, never from
+                  // the boot snapshot, so a promotion that ADDS an emitter is adopted and one that REMOVES an
+                  // emitter refuses the very next operation.
+                  const grant = await policy.authorize(current.verdict, emitter, operation)
+                  if (!grant.emitters.includes(emitter)) {
+                    return refuseIncident("emitter is not managed by this host policy")
+                  }
+                  if (grant.allow !== true) {
+                    return refuseIncident("verified identity is not authorized for this emitter")
+                  }
                   incidentAuthorization = { emitter, operation }
                 } catch (error) {
                   return refuseIncident(error instanceof Error ? error.message : String(error))
@@ -2629,15 +2629,16 @@ export function withDispatcher<
               if (!("verdict" in current)) return refuseIncident(current.errorMessage)
               const operation = emitterRead ? "read" : incident?.active === false ? "clear" : "raise"
               try {
-                // Membership is decided by the CURRENT module, never by the boot snapshot (28921 review).
-                const managed = policy.emitters.includes(emitter)
-                  ? true
-                  : policy.emittersNow === undefined
-                    ? false
-                    : (await policy.emittersNow()).includes(emitter)
-                if (!managed) return refuseIncident("emitter is not managed by this host policy")
-                const allowed = await policy.authorize(current.verdict, emitter, operation)
-                if (allowed !== true) return refuseIncident("verified identity is not authorized for this emitter")
+                // ONE fresh child answers both (28921 review): membership is read from THIS answer, never from the
+                // boot snapshot, so a promotion that ADDS an emitter is adopted and one that REMOVES an emitter
+                // refuses the very next operation.
+                const grant = await policy.authorize(current.verdict, emitter, operation)
+                if (!grant.emitters.includes(emitter)) {
+                  return refuseIncident("emitter is not managed by this host policy")
+                }
+                if (grant.allow !== true) {
+                  return refuseIncident("verified identity is not authorized for this emitter")
+                }
                 incidentAuthorization = { emitter, operation }
               } catch (error) {
                 return refuseIncident(error instanceof Error ? error.message : String(error))

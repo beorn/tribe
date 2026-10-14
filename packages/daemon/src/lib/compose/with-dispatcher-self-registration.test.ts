@@ -3188,9 +3188,12 @@ describe("managed incident policy availability (28044)", () => {
       suppliesGen: true,
       verify: async () => ({ result: "verified", actor: emitter, kind: "service", sid: "watch-sid", gen: 1 }),
       readIncidentPolicy: () => ({
-        emitters: ["longproc-reading"], // the boot snapshot: this emitter is NOT in it
-        emittersNow: async () => ["longproc-reading", emitter], // the current module added it
-        authorize: (identity, requested) => identity.kind === "service" && identity.actor === requested,
+        emitters: ["longproc-reading"], // a stale cached list: it must never decide the grant
+        // The CURRENT module ADDED the emitter, and the SAME answer names the list it used (28921 review).
+        authorize: async (identity, requested) => ({
+          allow: identity.kind === "service" && identity.actor === requested,
+          emitters: ["longproc-reading", emitter],
+        }),
       }),
     }
     const harness = createDispatcherHarness({ identityVerifier, requiredIncidentEmitters: [emitter] })
@@ -3218,6 +3221,104 @@ describe("managed incident policy availability (28044)", () => {
     expect(connection.socket.destroyed).toBe(false)
   })
 
+  /** @failure An emitter a promotion REMOVED is still granted on its next operation: the boot snapshot names it, so
+   *          a cached membership hit short-circuits the fresh child and the stale grant stands.
+   * @level l1
+   * @consumer Managed incident reads across a landing (28921 review).
+   */
+  it("refuses an emitter a promotion REMOVED, reading membership from the same fresh answer", async () => {
+    const emitter = "workmon"
+    const token = managedToken(emitter, "workmon-sid")
+    let current: readonly string[] = [emitter]
+    const identityVerifier: LoadedIdentityVerifier = {
+      path: "/test/removed-policy.ts",
+      suppliesGen: true,
+      verify: async () => ({ result: "verified", actor: emitter, kind: "service", sid: "workmon-sid", gen: 1 }),
+      readIncidentPolicy: () => ({
+        emitters: [emitter], // the cached list: it still names the emitter after the removal, as a snapshot would
+        // This authorizer allows the actor either way, so the list in THIS same answer is the only thing that can
+        // refuse the operation (28921 review).
+        authorize: async (identity, requested) => ({
+          allow: identity.kind === "service" && identity.actor === requested,
+          emitters: current,
+        }),
+      }),
+    }
+    const harness = createDispatcherHarness({ identityVerifier, requiredIncidentEmitters: [emitter] })
+    cleanup = harness.dispose
+    const connection = harness.connectClient()
+    const registered = JSON.parse(
+      await harness.register(connection.connId, {
+        name: emitter,
+        pid: process.pid,
+        project: "/test",
+        launchParentPid: process.ppid,
+        idToken: token,
+      }),
+    ) as { error?: unknown }
+    expect(registered.error).toBeUndefined()
+    const call = async (method: string, params: Record<string, unknown>) =>
+      JSON.parse(
+        await harness.dispatcher.handleRequest({ jsonrpc: "2.0", id: method, method, params }, connection.connId),
+      ) as { error?: { message: string }; result?: unknown }
+    // Control: while the CURRENT module still names the emitter, the read is admitted — so the refusal below is the
+    // membership read and not some other gate on this path.
+    expect((await call("tribe.pending", { emitter })).error).toBeUndefined()
+    // The promotion REMOVES the emitter. The cached list still names it and this actor is still authorized, so only
+    // the fresh answer's list can refuse the operation: the pre-28921 branch granted this stale read.
+    current = ["longproc-reading"]
+    expect((await call("tribe.pending", { emitter })).error?.message).toContain(
+      "emitter is not managed by this host policy",
+    )
+    expect(connection.socket.destroyed).toBe(false)
+  })
+
+  /** @failure The sessionless (idToken) incident path decides membership the same way as the session path, so a
+   *          promotion that removes an emitter grants one more managed operation there too.
+   * @level l1
+   * @consumer Managed incident writes from the sessionless producers (28921 review).
+   */
+  it("refuses a REMOVED emitter on the sessionless incident path, from the same fresh answer", async () => {
+    const emitter = "workmon"
+    let current: readonly string[] = [emitter]
+    const identityVerifier: LoadedIdentityVerifier = {
+      path: "/test/removed-policy-sessionless.ts",
+      suppliesGen: true,
+      verify: async () => ({ result: "verified", actor: emitter, kind: "service", sid: "workmon-sid", gen: 1 }),
+      readIncidentPolicy: () => ({
+        emitters: [emitter], // cached: it still names the emitter after the removal
+        // The authorizer ALLOWS this actor: only the list in this same answer can refuse the operation.
+        authorize: async () => ({ allow: true, emitters: current }),
+      }),
+    }
+    const harness = createDispatcherHarness({ identityVerifier, requiredIncidentEmitters: [emitter] })
+    cleanup = harness.dispose
+    const connection = harness.connectClient()
+    const sessionlessSend = async () =>
+      JSON.parse(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: "sessionless-removed",
+            method: "tribe.send",
+            params: {
+              to: "@chief",
+              message: "removed emitter",
+              type: "notify",
+              idToken: managedToken(emitter, "workmon-sid"),
+              incident: { emitter, subject: "host", condition: "memory" },
+            },
+          },
+          connection.connId,
+        ),
+      ) as { error?: { message: string } }
+    // Control: while the CURRENT module still names the emitter, this same sessionless send is admitted.
+    expect((await sessionlessSend()).error).toBeUndefined()
+    // The promotion REMOVES the emitter; the cached list still names it, so only the fresh answer can refuse it.
+    current = ["longproc-reading"]
+    expect((await sessionlessSend()).error?.message).toContain("emitter is not managed by this host policy")
+  })
+
   /** @failure A still-connected replaced service retains incident authority from registration.
    * @level l1
    * @consumer Each managed emitter's read/write lifecycle (28044 AC1).
@@ -3235,7 +3336,10 @@ describe("managed incident policy availability (28044)", () => {
           : { result: "contradicted", reason: "instance-is-live: replaced by generation2" },
       readIncidentPolicy: () => ({
         emitters: [emitter],
-        authorize: (identity, requested) => identity.kind === "service" && identity.actor === requested,
+        authorize: async (identity, requested) => ({
+          allow: identity.kind === "service" && identity.actor === requested,
+          emitters: [emitter],
+        }),
       }),
     }
     const harness = createDispatcherHarness({ identityVerifier, requiredIncidentEmitters: [emitter] })

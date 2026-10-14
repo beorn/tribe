@@ -54,18 +54,6 @@ export type IncidentOperation = "read" | "raise" | "clear"
 export type IncidentPolicy = {
   readonly emitters: readonly string[]
   /**
-   * A policy fault seen WHEN THIS POLICY WAS READ, carried as HEALTH data only (28921 review). It never gates an
-   * operation: the incident path re-reads the CURRENT module per call and reports whatever fault that module has
-   * NOW, so a policy broken at boot and repaired at the next landing recovers without a restart.
-   */
-  readonly fault?: string
-  /**
-   * The CURRENT module's emitters, evaluated per call (28921 review). `emitters` above is a snapshot and may only
-   * feed a sync health getter; a membership REFUSAL must not be decided from it, or a promotion that ADDS an
-   * emitter would be refused from stale bytes. Absent on an in-process policy, where the snapshot cannot be stale.
-   */
-  readonly emittersNow?: () => Promise<readonly string[]>
-  /**
    * Whether this identity may act on this emitter. A module that authorizes in its own process (28921) answers with a
    * promise; a composing layer that still holds the policy in process answers with a boolean. Callers await it.
    */
@@ -76,13 +64,40 @@ export type IncidentPolicy = {
   ) => boolean | Promise<boolean>
 }
 
+/**
+ * One fresh child's answer to an authorize request (28921 review): the verdict and the emitter list the module named
+ * IN THAT SAME ANSWER. Membership is read from here, never from a snapshot, so a promotion that REMOVES an emitter
+ * refuses the very next operation instead of granting it from cached bytes.
+ */
+export type LoadedIncidentAuthorization = {
+  readonly allow: boolean
+  readonly emitters: readonly string[]
+}
+
+/**
+ * What the daemon's OWN `readIncidentPolicy()` hands back (28921 review): the composing module's policy, read through
+ * the spawned child. `emitters` is cached data for a sync health getter and never decides a grant; `authorize` asks
+ * the CURRENT module and answers with the list IT used, so one call decides membership and the verdict together.
+ */
+export type LoadedIncidentPolicy = {
+  /** The list as of the last successful fresh call. Cached data: it may feed a sync health getter, never a grant. */
+  readonly emitters: readonly string[]
+  /** A policy fault seen when this policy was last read, carried as HEALTH data only (28921 review). */
+  readonly fault?: string
+  readonly authorize: (
+    identity: Extract<IdentityVerdict, { result: "verified" }>,
+    emitter: string,
+    operation: IncidentOperation,
+  ) => Promise<LoadedIncidentAuthorization>
+}
+
 export interface LoadedIdentityVerifier {
   readonly path: string
   readonly verify: IdentityVerifier
   /** Whether the module declares that its verified verdicts carry `gen`. */
   readonly suppliesGen: boolean
   /** Read and validate the host policy per operation; faults never prevent unrelated traffic. */
-  readonly readIncidentPolicy?: () => IncidentPolicy
+  readonly readIncidentPolicy?: () => LoadedIncidentPolicy
 }
 
 export interface BoundedIdentityVerifierOptions {
@@ -437,9 +452,9 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
   // A broken incident policy is NOT a boot refusal: identity verification stays available and the policy fault is
   // named where it is used (28044 AC1). The child reported it in the same hello.
   const bootPolicyFault = policyFaultOf(hello, path)
-  // The emitter LIST is cached data (it feeds a sync health getter); an authorize VERDICT is always evaluated in a
-  // fresh child, so no authorization is ever decided from cached bytes. Both are refreshed by ANY successful fresh
-  // call, and the fault clears with them, so a repaired policy stops being reported as broken (28921 review).
+  // The emitter LIST is cached data (it feeds a sync health getter); a grant is always decided by ONE fresh child,
+  // and that answer carries the list it used. Both are refreshed by ANY successful fresh call, and the fault clears
+  // with them, so a repaired policy stops being reported as broken (28921 review).
   let emitters = bootEmitters ?? []
   let policyFault = bootPolicyFault
   const call = async (request: VerifierChildRequest): Promise<unknown> => {
@@ -453,7 +468,7 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
     path,
     suppliesGen: hello.suppliesGen === true,
     verify: async (token) => checkedVerdict(await call({ op: "verify", token }), path),
-    readIncidentPolicy: (): IncidentPolicy => {
+    readIncidentPolicy: (): LoadedIncidentPolicy => {
       // Never throws (28921 review): a boot-time fault is carried as health data, and the operation path re-reads
       // the CURRENT module, so a repaired policy is adopted on the next call instead of refused forever.
       return {
@@ -465,28 +480,19 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
         get fault() {
           return policyFault ?? undefined
         },
-        emittersNow: async (): Promise<readonly string[]> => {
-          let answer: HelloAnswer
-          try {
-            answer = (await verifierChild(path, { op: "hello" })) as HelloAnswer
-          } catch (error) {
-            throw new Error(`incident policy ${path}: ${error instanceof Error ? error.message : String(error)}`)
-          }
-          const reported = childEmitters(answer)
-          const fault = policyFaultOf(answer, path)
-          // The message already names the path (policyFaultOf guarantees it), so it is thrown verbatim.
-          if (fault !== null || reported === null) throw new Error(fault ?? `incident policy ${path}`)
-          emitters = reported
-          policyFault = null
-          return reported
-        },
-        authorize: async (identity, emitter: string, operation: IncidentOperation): Promise<boolean> => {
+        authorize: async (
+          identity,
+          emitter: string,
+          operation: IncidentOperation,
+        ): Promise<LoadedIncidentAuthorization> => {
           const answer = (await call({ op: "authorize", identity, emitter, operation })) as AuthorizeAnswer
           const reported = childEmitters(answer)
-          if (
-            reported !== null &&
-            (reported.length !== emitters.length || reported.some((n, i) => n !== emitters[i]))
-          ) {
+          // The verdict and the list come from THIS answer (28921 review): an answer with no usable list cannot
+          // decide membership, so it is refused by name rather than granted from the boot snapshot.
+          if (reported === null) {
+            throw new Error(`identity verifier ${path}: the authorize answer carried no emitter list`)
+          }
+          if (reported.length !== emitters.length || reported.some((n, i) => n !== emitters[i])) {
             log.warn?.(
               `identity verifier ${path}: its incident policy now names ${reported.join(", ")} where this daemon ` +
                 `cached ${emitters.join(", ")} at boot; this verdict came from the current module, and the health ` +
@@ -496,7 +502,7 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
           }
           // A fresh verdict proves the CURRENT policy is usable, so a boot-time fault must stop being reported.
           policyFault = null
-          return answer.allow === true
+          return { allow: answer.allow === true, emitters: reported }
         },
       }
     },

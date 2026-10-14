@@ -40,7 +40,11 @@ describe("loadIdentityVerifier", () => {
     const verifier = await loadIdentityVerifier(path)
     const broken = verifier.readIncidentPolicy!()
     expect(broken.fault).toContain(`incident policy ${path}`)
-    await expect(broken.emittersNow!()).rejects.toThrow(`incident policy ${path}`)
+    // Membership and the verdict come from ONE fresh answer (28921 review), so a broken policy refuses the
+    // OPERATION by name instead of answering a list that could grant it.
+    await expect(
+      broken.authorize({ result: "verified", actor: "workmon", kind: "service", sid: "sid" }, "workmon", "read"),
+    ).rejects.toThrow(`incident policy ${path}`)
 
     // The promotion repairs the module at the path the daemon already holds; the daemon does not restart.
     writeFileSync(
@@ -53,14 +57,15 @@ describe("loadIdentityVerifier", () => {
        }`,
     )
     const repaired = verifier.readIncidentPolicy!()
-    expect(await repaired.emittersNow!()).toEqual(["workmon"])
     expect(
       await repaired.authorize(
         { result: "verified", actor: "workmon", kind: "service", sid: "sid" },
         "workmon",
         "read",
       ),
-    ).toBe(true)
+    ).toEqual({ allow: true, emitters: ["workmon"] })
+    // The successful fresh answer IS what clears the boot fault: a repaired policy stops being reported broken.
+    expect(repaired.fault).toBeUndefined()
   })
 
   /** @failure Membership is decided from the emitter list read at boot, so a landing that ADDS an emitter is
@@ -94,15 +99,15 @@ describe("loadIdentityVerifier", () => {
     unlinkSync(current)
     symlinkSync(join(dir, "membership-b"), current)
 
-    expect(await policy.emittersNow!()).toEqual(["longproc-reading", "coordination-watch"])
-    expect(policy.emitters).toEqual(["longproc-reading", "coordination-watch"])
+    // The SAME fresh answer carries the current list and the verdict (28921 review).
     expect(
       await policy.authorize(
         { result: "verified", actor: "coordination-watch", kind: "service", sid: "sid" },
         "coordination-watch",
         "read",
       ),
-    ).toBe(true)
+    ).toEqual({ allow: true, emitters: ["longproc-reading", "coordination-watch"] })
+    expect(policy.emitters).toEqual(["longproc-reading", "coordination-watch"])
   })
 
   /** @failure Broken incident policy stops identity verification or silently grants managed access.
@@ -128,7 +133,13 @@ describe("loadIdentityVerifier", () => {
       const loadedPolicy = verifier.readIncidentPolicy!()
       expect(loadedPolicy.emitters).toEqual([])
       expect(loadedPolicy.fault).toContain(`incident policy ${path}`)
-      await expect(loadedPolicy.emittersNow!()).rejects.toThrow(`incident policy ${path}`)
+      await expect(
+        loadedPolicy.authorize(
+          { result: "verified", actor: "longproc-reading", kind: "service", sid: "s" },
+          "longproc-reading",
+          "read",
+        ),
+      ).rejects.toThrow(`incident policy ${path}`)
     },
   )
 
@@ -186,23 +197,20 @@ describe("loadIdentityVerifier", () => {
     const verifier = await loadIdentityVerifier(path)
     const policy = verifier.readIncidentPolicy!()
     expect(policy.emitters).toEqual(["longproc-reading"])
+    // Membership and the verdict arrive in the SAME answer (28921 review), so a caller never reconciles a grant
+    // against a list read at a different moment.
+    const grant = (
+      identity: Parameters<typeof policy.authorize>[0],
+      operation: Parameters<typeof policy.authorize>[2],
+    ) => policy.authorize(identity, "longproc-reading", operation)
+    expect(await grant({ result: "verified", actor: "longproc-reading", kind: "service", sid: "s" }, "read")).toEqual({
+      allow: true,
+      emitters: ["longproc-reading"],
+    })
     expect(
-      await policy.authorize(
-        { result: "verified", actor: "longproc-reading", kind: "service", sid: "s" },
-        "longproc-reading",
-        "read",
-      ),
-    ).toBe(true)
-    expect(
-      await policy.authorize(
-        { result: "verified", actor: "longproc-reading", kind: "service", sid: "s" },
-        "longproc-reading",
-        "raise",
-      ),
+      (await grant({ result: "verified", actor: "longproc-reading", kind: "service", sid: "s" }, "raise")).allow,
     ).toBe(false)
-    expect(
-      await policy.authorize({ result: "verified", actor: "someone-else", sid: "s" }, "longproc-reading", "read"),
-    ).toBe(false)
+    expect((await grant({ result: "verified", actor: "someone-else", sid: "s" }, "read")).allow).toBe(false)
   })
 
   it("reports a verifier that cannot even load as a named fault, never as an absent verdict", async () => {
