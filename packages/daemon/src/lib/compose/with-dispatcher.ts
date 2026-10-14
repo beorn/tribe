@@ -225,6 +225,9 @@ export function withDispatcher<
   return (t) => {
     const { db, stmts, daemonCtx, recall: recallHandlers, registry, broadcast, socket } = t
     const { clients, socketToClient } = registry
+    // A stop outcome may update an incident only from the watch that received
+    // this exact notice. The weak key expires with its transport.
+    const notifiedSuccessorYields = new WeakMap<ClientSession, { incumbent: number; successor: number }>()
     // A persisted push row from the previous daemon is not a connected consumer.
     db.prepare("UPDATE sessions SET delivery = 'pull' WHERE delivery <> 'pull'").run()
     const persistDelivery = db.prepare("UPDATE sessions SET delivery = ? WHERE id = ?")
@@ -2130,6 +2133,7 @@ export function withDispatcher<
                 const predecessor = predecessors[0]
                 if (predecessor === undefined) throw new Error("duplicate predecessor vanished after nonempty check")
                 const held = holderIdentity(predecessor.ctx.sessionId)
+                if (held.gen === null) throw new Error("verified duplicate predecessor has no generation")
                 const stored = db
                   .prepare("SELECT launch_parent_pid, launch_parent_start_time FROM sessions WHERE id = ?")
                   .get(predecessor.ctx.sessionId) as {
@@ -2207,6 +2211,7 @@ export function withDispatcher<
                           successorAgStartTime: newBirth,
                         }),
                       )
+                      notifiedSuccessorYields.set(watch, { incumbent: held.gen, successor: verifiedGen as number })
                     } catch (error) {
                       log.error?.(`${resolvedName}: successor yield notice write failed: ${String(error)}`)
                     }
@@ -2545,6 +2550,18 @@ export function withDispatcher<
                 id,
                 -32602,
                 "successor yield outcome has invalid result, bounded reason or generation pair",
+              )
+            }
+            const notified = notifiedSuccessorYields.get(client)
+            if (
+              notified === undefined ||
+              notified.incumbent !== incumbentGeneration ||
+              notified.successor !== successorGeneration
+            ) {
+              return makeError(
+                id,
+                -32003,
+                "successor yield outcome does not match this watch's notified generation pair",
               )
             }
             const incident = {

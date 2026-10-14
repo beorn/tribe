@@ -1902,6 +1902,20 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       )
       expect(watch.sessionId).toBe(pull.sessionId)
       expect(harness.registry.clients.get("old-watch")?.role).toBe("watch")
+      harness.addPendingClient("sibling-watch")
+      const siblingWatch = parseResult<RegisterResult>(
+        await harness.register("sibling-watch", {
+          name: "@dev/7",
+          role: "watch",
+          pid: oldPid,
+          project: "/tmp/p",
+          launchParentPid: oldPid,
+          idToken: "token-g3",
+          delivery: "push",
+          takeover: false,
+        }),
+      )
+      expect(siblingWatch.sessionId).toBe(pull.sessionId)
       if (mode === "act") {
         const premature = parseError(
           await harness.dispatcher.handleRequest(
@@ -1919,7 +1933,7 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
             "old-watch",
           ),
         )
-        expect(premature.message).toContain("no open duplicate incident")
+        expect(premature.message).toContain("notified generation pair")
       }
       harness.addPendingClient("new-pull")
       const refusal = parseError(
@@ -1949,6 +1963,40 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       expect(pages[0]?.content).toContain(mode === "act" ? "yield notice armed" : "would request yield")
       expect(watchSocket.writes.filter((line) => line.includes("successor_yield"))).toHaveLength(mode === "act" ? 1 : 0)
       if (mode === "act") {
+        const wrongSuccessor = parseError(
+          await harness.dispatcher.handleRequest(
+            {
+              jsonrpc: "2.0",
+              id: "wrong-successor-yield-outcome",
+              method: "successor_yield_outcome",
+              params: {
+                outcome: "refused",
+                reason: "wrong successor",
+                incumbentGeneration: 3,
+                successorGeneration: 999,
+              },
+            },
+            "old-watch",
+          ),
+        )
+        expect(wrongSuccessor.message).toContain("notified generation pair")
+        const siblingOutcome = parseError(
+          await harness.dispatcher.handleRequest(
+            {
+              jsonrpc: "2.0",
+              id: "unnotified-watch-yield-outcome",
+              method: "successor_yield_outcome",
+              params: {
+                outcome: "refused",
+                reason: "unnotified watch",
+                incumbentGeneration: 3,
+                successorGeneration: 4,
+              },
+            },
+            "sibling-watch",
+          ),
+        )
+        expect(siblingOutcome.message).toContain("notified generation pair")
         // @failure A wrong-PID expectedChild refusal is printed only in old Ag's
         // terminal, leaving Chief's existing duplicate incident saying "armed".
         const forbidden = parseError(
