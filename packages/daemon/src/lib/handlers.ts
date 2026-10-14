@@ -2101,6 +2101,7 @@ function settleDeclaredUnrunPairs(
       expires_at: row.expires_at,
       message_id: row.message_id,
       fanout: row.fanout,
+      request_kind: row.request_kind,
       summary: row.summary,
     })
   }

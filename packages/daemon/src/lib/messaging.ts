@@ -292,6 +292,9 @@ export type PendingSettlementRow = {
   expires_at: number | null
   message_id: string
   fanout: "first" | "all"
+  /** 29289 - the settled ball's kind. The identity-wake retire below runs only for an incident
+   *  settlement, so an ordinary answered request pays nothing for it. */
+  request_kind: "request" | "incident"
   summary: string | null
 }
 
@@ -307,6 +310,17 @@ export function settlePendingRows(
   closeEvidence?: string,
 ): number {
   for (const row of rows) {
+    if (row.request_kind === "incident") {
+      // 29289 - EVERY way an incident ball closes retires the wake eligibility of the edges already
+      // written for that identity: the emitter's clearing send, an owner's evidenced manual close
+      // when the emitter has died, and gc-expired retention. An edge left at `wakes_owner = 1` cannot
+      // be passed by the mailbox cursor (advance-only over acknowledged ATTENTION) because an incident
+      // row is never attention, so a FRESH inbox-wait re-woke on the spent edge forever - the sticky
+      // wake busy loop. It lives here, in the one function every closure goes through, rather than on
+      // the clear alone. `messages` carries no index on `request`, so this unindexed UPDATE is paid
+      // once per incident closure, which is rare.
+      ctx.stmts.retireIncidentWakeFlags.run({ $request_id: row.request_id })
+    }
     logEvent(
       ctx,
       "ball.settled",
@@ -780,9 +794,8 @@ export function sendMessage(
       // a ball ends. `closePendingRequestAll` because the condition cleared
       // for every owner of that identity, not just one.
       if (incidentRequestId !== null && !incidentActive) {
-        // 29289: retire every edge already written for this identity, so the spent OPEN edge cannot
-        // re-wake a FRESH inbox-wait. The clear never wakes; neither may the edge it retires.
-        ctx.stmts.retireIncidentWakeFlags.run({ $request_id: incidentRequestId })
+        // 29289: the retire happens inside settlePendingRows, so it covers every closure and not only
+        // this one; it is not called here.
         const rows = ctx.stmts.selectPendingSettlementsForRequest.all({
           $request_id: incidentRequestId,
         }) as PendingSettlementRow[]
