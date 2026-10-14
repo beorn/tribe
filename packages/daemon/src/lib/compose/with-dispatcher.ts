@@ -2035,6 +2035,7 @@ export function withDispatcher<
               // This registration adds a separate transport with its own role:
               // a push watch must not turn the pull member into a watch, and a
               // later member must not inherit the watch's role.
+              const holderTransportRole = holder.role
               const attachingTransportRole = role
               // Backfill the durable one-shot fence when multiple transports
               // from a launch fan in before any cross-launch contention.
@@ -2080,6 +2081,8 @@ export function withDispatcher<
                 ...identityLogFields(client),
                 operation: "register",
                 transport_class: transportClass,
+                holder_transport_role: holderTransportRole,
+                attaching_transport_role: attachingTransportRole,
               })
               if (client.delivery === "push" && countUnackedAttention(client.ctx, client.name) > 0) {
                 setImmediate(() => {
