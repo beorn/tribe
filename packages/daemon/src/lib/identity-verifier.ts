@@ -485,7 +485,16 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
           emitter: string,
           operation: IncidentOperation,
         ): Promise<LoadedIncidentAuthorization> => {
-          const answer = (await call({ op: "authorize", identity, emitter, operation })) as AuthorizeAnswer
+          let answer: AuthorizeAnswer
+          try {
+            answer = (await call({ op: "authorize", identity, emitter, operation })) as AuthorizeAnswer
+          } catch (error) {
+            // A policy that fails NOW becomes the CURRENT fault (28921 review, @cto SHOULD 1): this operation is
+            // refused either way, so the health line must not go on reading healthy while grants refuse.
+            const message = error instanceof Error ? error.message : String(error)
+            if (message.includes(`incident policy ${path}:`)) policyFault = message
+            throw error
+          }
           const reported = childEmitters(answer)
           // The verdict and the list come from THIS answer (28921 review): an answer with no usable list cannot
           // decide membership, so it is refused by name rather than granted from the boot snapshot.
@@ -495,8 +504,8 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
           if (reported.length !== emitters.length || reported.some((n, i) => n !== emitters[i])) {
             log.warn?.(
               `identity verifier ${path}: its incident policy now names ${reported.join(", ")} where this daemon ` +
-                `cached ${emitters.join(", ")} at boot; this verdict came from the current module, and the health ` +
-                `line's membership check follows at the next daemon start`,
+                `cached ${emitters.join(", ")} at boot; this verdict came from the current module and the cached ` +
+                `copy now follows it, so the health line's membership check picks it up at its next read`,
             )
             emitters = reported
           }

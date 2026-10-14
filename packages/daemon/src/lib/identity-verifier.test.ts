@@ -68,6 +68,42 @@ describe("loadIdentityVerifier", () => {
     expect(repaired.fault).toBeUndefined()
   })
 
+  /** @failure A policy that breaks AFTER boot refuses grants while the health line still reads healthy, because a
+   *          fault is only ever cleared from a successful call and never recorded from a failing one.
+   * @level   l2
+   * @consumer The incident policy health line across a landing (28921 review, @cto SHOULD 1).
+   */
+  it("records a policy fault that appears AFTER boot, so health never reads healthy while grants refuse", async () => {
+    const path = moduleAt(
+      "policy-breaks-later.ts",
+      `export const IDENTITY_VERIFIER_INTERFACE = 1
+       export async function verifyIdentity() { return { result: "absent" } }
+       export const INCIDENT_POLICY = {
+         emitters: ["workmon"],
+         authorize: (identity, emitter) => identity.actor === emitter,
+       }`,
+    )
+    const verifier = await loadIdentityVerifier(path)
+    const policy = verifier.readIncidentPolicy!()
+    expect(policy.fault).toBeUndefined()
+    expect(
+      await policy.authorize({ result: "verified", actor: "workmon", kind: "service", sid: "sid" }, "workmon", "read"),
+    ).toEqual({ allow: true, emitters: ["workmon"] })
+
+    // The landing breaks the module at the path the daemon already holds; the daemon does not restart.
+    writeFileSync(
+      path,
+      `export const IDENTITY_VERIFIER_INTERFACE = 1
+       export async function verifyIdentity() { return { result: "absent" } }
+       export const INCIDENT_POLICY = { emitters: ["workmon"], authorize: true }`,
+    )
+    await expect(
+      policy.authorize({ result: "verified", actor: "workmon", kind: "service", sid: "sid" }, "workmon", "read"),
+    ).rejects.toThrow(`incident policy ${path}`)
+    // The refusal must be visible to the health line, not only to the caller that refused.
+    expect(policy.fault).toContain(`incident policy ${path}`)
+  })
+
   /** @failure Membership is decided from the emitter list read at boot, so a landing that ADDS an emitter is
    *          refused before the current module is ever asked.
    * @level   l2
