@@ -2031,6 +2031,11 @@ export function withDispatcher<
             )
             if (launchFanIn) {
               const { holder, launch, transportClass, promotedFrom } = launchFanIn
+              // The holder's role describes its already attached transport.
+              // This registration adds a separate transport with its own role:
+              // a push watch must not turn the pull member into a watch, and a
+              // later member must not inherit the watch's role.
+              const attachingTransportRole = role
               // Backfill the durable one-shot fence when multiple transports
               // from a launch fan in before any cross-launch contention.
               if (p.takeover === true && typeof p.name === "string") {
@@ -2053,7 +2058,7 @@ export function withDispatcher<
               if (filterMode !== undefined) applyLaunchDeclaredFilter(holder.ctx, filterMode)
               const client = applyClient(connId, {
                 name: holder.name,
-                role,
+                role: attachingTransportRole,
                 domains: holder.domains,
                 principalClass: holder.principalClass ?? "agent",
                 project,
@@ -2501,6 +2506,74 @@ export function withDispatcher<
               coordinationState: coordState,
               daemon: { pid: process.pid, uptime: Math.floor((Date.now() - socket.startedAt) / 1000) },
             })
+          }
+
+          case "successor_yield_outcome": {
+            const client = clients.get(connId)
+            if (
+              t.config.duplicateYieldMode !== "act" ||
+              !t.config.duplicateIncidentOwner ||
+              client?.role !== "watch" ||
+              client.launchId === null ||
+              client.launchParentPid === null ||
+              client.verifiedHabitatRoot === undefined
+            ) {
+              return makeError(id, -32003, "successor yield outcome requires an authenticated managed launch watch")
+            }
+            const allowed = new Set(["outcome", "reason", "incumbentGeneration", "successorGeneration"])
+            if (Object.keys(p).length !== allowed.size || Object.keys(p).some((key) => !allowed.has(key))) {
+              return makeError(id, -32602, "successor yield outcome accepts only outcome, reason and generation pair")
+            }
+            const outcome = p.outcome
+            const reason = p.reason
+            const incumbentGeneration = p.incumbentGeneration
+            const successorGeneration = p.successorGeneration
+            if (
+              (outcome !== "refused" && outcome !== "no-effect" && outcome !== "unknown-after-write") ||
+              typeof reason !== "string" ||
+              reason.trim().length === 0 ||
+              reason.length > 512 ||
+              !Number.isSafeInteger(incumbentGeneration) ||
+              !Number.isSafeInteger(successorGeneration) ||
+              (successorGeneration as number) <= (incumbentGeneration as number) ||
+              holderIdentity(client.ctx.sessionId).gen !== incumbentGeneration
+            ) {
+              return makeError(
+                id,
+                -32602,
+                "successor yield outcome has invalid result, bounded reason or generation pair",
+              )
+            }
+            const incident = {
+              emitter: "wire",
+              subject: `duplicate-join-${encodeURIComponent(client.name)}`,
+              condition: "conflict",
+              active: true,
+            } as const
+            const owner = t.config.duplicateIncidentOwner
+            const open = stmts.selectIncidentCondition.get({
+              $request_id: incidentKey(incident),
+              $recipient: owner,
+            })
+            if (open === null) {
+              return makeError(id, -32003, `${client.name}: no open duplicate incident for successor yield outcome`)
+            }
+            const summary =
+              `${client.name}: generation ${incumbentGeneration} yield to ${successorGeneration} ` +
+              `stop ${outcome}: ${reason}`
+            sendMessage(
+              daemonCtx,
+              owner,
+              summary,
+              "health:duplicate-join",
+              undefined,
+              undefined,
+              "direct",
+              { delivery: "push", topic: "health:duplicate-join", summary },
+              { incident },
+            )
+            log.warn?.(summary)
+            return makeResponse(id, { updated: true })
           }
 
           case "host_turn_started_v1": {

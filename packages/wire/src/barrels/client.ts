@@ -41,7 +41,12 @@ export { resolvePeerSocketPath, resolveSocketPath } from "../paths.ts"
 
 // Launch registration
 export { connectTribeLaunch } from "../launch-registration.ts"
-export type { TribeLaunchConnection, TribeLaunchDeps, TribeLaunchRequest } from "../launch-registration.ts"
+export type {
+  SuccessorYieldOutcome,
+  TribeLaunchConnection,
+  TribeLaunchDeps,
+  TribeLaunchRequest,
+} from "../launch-registration.ts"
 
 // JSON-RPC framing and the line parser. Already inside this barrel's closure
 // (client.ts imports both), so a consumer that fakes a daemon in a test takes

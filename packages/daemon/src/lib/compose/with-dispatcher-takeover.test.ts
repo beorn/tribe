@@ -1807,6 +1807,40 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       return verdict
     },
   }
+  // @failure Fanning a watch and a member into one launch gives both transports
+  // the first registrant's role, so an outcome arrives on a member or mailbox
+  // delivery is consumed by the watch.
+  // @level l2 @consumer #29262 exact-launch successor watch
+  it.each(["member-first", "watch-first"] as const)("keeps each fan-in transport's role (%s)", async (order) => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const firstRole = order === "member-first" ? "member" : "watch"
+    const secondRole = firstRole === "member" ? "watch" : "member"
+    const registrations = [firstRole, secondRole] as const
+    const ids: string[] = []
+    for (const [index, role] of registrations.entries()) {
+      const connId = `fan-in-${index}`
+      harness.addPendingClient(connId)
+      const registered = parseResult<RegisterResult>(
+        await harness.register(connId, {
+          name: "@dev/7",
+          role,
+          pid: process.pid,
+          project: "/tmp/p",
+          launchParentPid: process.pid,
+          idToken: "token-g3",
+          delivery: role === "member" ? "pull" : "push",
+          takeover: role === "member",
+        }),
+      )
+      ids.push(registered.sessionId)
+      expect(harness.registry.clients.get(connId)?.role).toBe(role)
+    }
+    expect(ids[1]).toBe(ids[0])
+    expect(harness.registry.clients.get("fan-in-0")?.role).toBe(firstRole)
+    expect(harness.registry.clients.get("fan-in-1")?.role).toBe(secondRole)
+  })
+
   // @failure A verified successor closes the incumbent before its exact process incarnation is proved, or a
   // watch registration replaces the pull bootstrap instead of fanning into that launch.
   // @level l2 @consumer Managed Ag duplicate-join observation and its native yield listener.
@@ -1868,6 +1902,25 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       )
       expect(watch.sessionId).toBe(pull.sessionId)
       expect(harness.registry.clients.get("old-watch")?.role).toBe("watch")
+      if (mode === "act") {
+        const premature = parseError(
+          await harness.dispatcher.handleRequest(
+            {
+              jsonrpc: "2.0",
+              id: "premature-yield-outcome",
+              method: "successor_yield_outcome",
+              params: {
+                outcome: "refused",
+                reason: "stop expected child incarnation does not match",
+                incumbentGeneration: 3,
+                successorGeneration: 4,
+              },
+            },
+            "old-watch",
+          ),
+        )
+        expect(premature.message).toContain("no open duplicate incident")
+      }
       harness.addPendingClient("new-pull")
       const refusal = parseError(
         await harness.register("new-pull", {
@@ -1895,6 +1948,72 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       expect(pages[0]).toMatchObject({ recipient: "@chief" })
       expect(pages[0]?.content).toContain(mode === "act" ? "yield notice armed" : "would request yield")
       expect(watchSocket.writes.filter((line) => line.includes("successor_yield"))).toHaveLength(mode === "act" ? 1 : 0)
+      if (mode === "act") {
+        // @failure A wrong-PID expectedChild refusal is printed only in old Ag's
+        // terminal, leaving Chief's existing duplicate incident saying "armed".
+        const forbidden = parseError(
+          await harness.dispatcher.handleRequest(
+            {
+              jsonrpc: "2.0",
+              id: "forged-yield-outcome",
+              method: "successor_yield_outcome",
+              params: {
+                outcome: "refused",
+                reason: "forged",
+                incumbentGeneration: 3,
+                successorGeneration: 4,
+                subject: "another-seat",
+              },
+            },
+            "old-watch",
+          ),
+        )
+        expect(forbidden.message).toContain("accepts only")
+        const member = parseError(
+          await harness.dispatcher.handleRequest(
+            {
+              jsonrpc: "2.0",
+              id: "member-yield-outcome",
+              method: "successor_yield_outcome",
+              params: {
+                outcome: "refused",
+                reason: "wrong transport",
+                incumbentGeneration: 3,
+                successorGeneration: 4,
+              },
+            },
+            "old-pull",
+          ),
+        )
+        expect(member.message).toContain("authenticated managed launch watch")
+        const outcome = parseResult<{ updated: boolean }>(
+          await harness.dispatcher.handleRequest(
+            {
+              jsonrpc: "2.0",
+              id: "wrong-pid-yield-outcome",
+              method: "successor_yield_outcome",
+              params: {
+                outcome: "refused",
+                reason: "stop expected child incarnation 401/birth-old does not match 402/birth-new",
+                incumbentGeneration: 3,
+                successorGeneration: 4,
+              },
+            },
+            "old-watch",
+          ),
+        )
+        expect(outcome.updated).toBe(true)
+        const after = harness.db
+          .prepare("SELECT recipient, content FROM messages WHERE type = 'health:duplicate-join' ORDER BY ts")
+          .all() as Array<{ recipient: string; content: string }>
+        expect(after).toHaveLength(2)
+        expect(after[1]?.content).toContain("stop expected child incarnation 401/birth-old does not match")
+        const holdings = harness.db
+          .prepare("SELECT request_id FROM pending_request WHERE request_kind = 'incident' AND recipient = '@chief'")
+          .all() as Array<{ request_id: string }>
+        expect(holdings).toHaveLength(1)
+        expect(holdings[0]?.request_id).toContain("duplicate-join-%40dev%2F7")
+      }
     },
   )
   // @failure An unobserved or recycled PID is mistaken for the verified contender and a stop notice reaches old Ag.

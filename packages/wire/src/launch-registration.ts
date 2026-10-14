@@ -57,9 +57,23 @@ export interface TribeLaunchConnection {
    */
   ensureRegistered(): Promise<void>
   /** Attach a push watch to this launch without claiming another name or consuming takeover. */
-  attachWatch(onNotification: (method: string, params?: Record<string, unknown>) => void): Promise<void>
+  attachWatch(
+    onNotification: (
+      method: string,
+      params: Record<string, unknown> | undefined,
+      reportOutcome: (outcome: SuccessorYieldOutcome) => Promise<void>,
+    ) => void,
+  ): Promise<void>
   /** Disconnect the owner. Service authority expires; agents retain recovery semantics. */
   close(): void
+}
+
+/** A failed exact-incarnation stop reported over the same authenticated watch. */
+export interface SuccessorYieldOutcome {
+  readonly outcome: "refused" | "no-effect" | "unknown-after-write"
+  readonly reason: string
+  readonly incumbentGeneration: number
+  readonly successorGeneration: number
 }
 
 type TribeLaunchClient = Pick<DaemonClient, "call" | "close"> & {
@@ -172,7 +186,19 @@ export async function connectTribeLaunch(
           log.error?.(`${request.name}'s launch watch could not reattach after ${attempts} attempts: ${String(error)}`),
         onConnect: async (client) => {
           // Install the handler before register's response exposes this watch to a competing successor.
-          client.onNotification(onNotification)
+          client.onNotification((method, params) => {
+            onNotification(method, params, async (outcome) => {
+              const reply = (await client.call("successor_yield_outcome", {
+                outcome: outcome.outcome,
+                reason: outcome.reason,
+                incumbentGeneration: outcome.incumbentGeneration,
+                successorGeneration: outcome.successorGeneration,
+              })) as { updated?: unknown }
+              if (reply.updated !== true) {
+                throw new Error(`Tribe did not confirm ${request.name}'s successor-yield incident update`)
+              }
+            })
+          })
           const registration = (await client.call("register", {
             name: request.name,
             role: "watch",
