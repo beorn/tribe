@@ -38,6 +38,9 @@ export type IdentityVerdict =
       readonly kind?: "service"
       readonly sid: string
       readonly gen?: number
+      /** Optional observed Ag process incarnation. Both fields must be present together. */
+      readonly observedAgPid?: number
+      readonly observedAgStartTime?: string
     }
   | { readonly result: "absent" }
   | { readonly result: "unreadable"; readonly reason: string }
@@ -527,9 +530,21 @@ function checkedVerdict(value: unknown, path: string): IdentityVerdict {
       if (nonEmpty(verdict.actor) && nonEmpty(verdict.sid)) {
         if (verdict.kind !== undefined && verdict.kind !== "service") break
         const kind = verdict.kind === "service" ? { kind: "service" as const } : {}
-        if (verdict.gen === undefined) return { result: "verified", actor: verdict.actor, sid: verdict.sid, ...kind }
+        const hasPid = verdict.observedAgPid !== undefined
+        const hasBirth = verdict.observedAgStartTime !== undefined
+        if (hasPid !== hasBirth) break
+        if (
+          hasPid &&
+          (!Number.isSafeInteger(verdict.observedAgPid) ||
+            (verdict.observedAgPid as number) <= 0 ||
+            !nonEmpty(verdict.observedAgStartTime))
+        ) break
+        const observed = hasPid
+          ? { observedAgPid: verdict.observedAgPid as number, observedAgStartTime: verdict.observedAgStartTime as string }
+          : {}
+        if (verdict.gen === undefined) return { result: "verified", actor: verdict.actor, sid: verdict.sid, ...kind, ...observed }
         if (typeof verdict.gen === "number" && Number.isSafeInteger(verdict.gen) && verdict.gen >= 0) {
-          return { result: "verified", actor: verdict.actor, sid: verdict.sid, gen: verdict.gen, ...kind }
+          return { result: "verified", actor: verdict.actor, sid: verdict.sid, gen: verdict.gen, ...kind, ...observed }
         }
       }
       break
