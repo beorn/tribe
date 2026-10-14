@@ -51,6 +51,8 @@ function spawnFakeDaemon(
     joinAck?: Record<string, unknown>
     wakeupDuringRegister?: boolean
     toolError?: { code: number; message: string; method?: string }
+    /** 29162 — the `tribe.members` reply body, so a test can drive the startup banner headline. */
+    membersReply?: Record<string, unknown>
   } = {},
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
@@ -104,7 +106,11 @@ function spawnFakeDaemon(
           return
         }
         if (msg.method === "tribe.members") {
-          socket.write(makeResponse(msg.id, { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }))
+          socket.write(
+            makeResponse(msg.id, {
+              content: [{ type: "text", text: JSON.stringify(opts.membersReply ?? { sessions: [] }) }],
+            }),
+          )
           return
         }
         if (msg.method === "tribe.join") {
@@ -996,6 +1002,47 @@ describe("stdio adapter delivery modes", () => {
       timeoutMs: 10_000,
     })
     expect(JSON.stringify(startupBanners()[1])).toContain("acknowledged transportDelivery=push")
+    expect(child.exitCode).toBeNull()
+  })
+
+  // 29162 — the startup banner IS the headline a seat reads at startup. When
+  // durable launches have no transport it must name them (sessions lists only
+  // connected rows, so the banner would otherwise read as an all-clear).
+  it("29162: the startup banner names the missing seats from the members headline", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, {
+      membersReply: {
+        sessions: [],
+        headline: "tribe members: 8 MISSING (no transport) — 19/23 expected seats connected; missing: @chief, @dev/5",
+      },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        // push is what emits Claude-only channel notifications (the banner); with
+        // no auto-join the first connect still announces the pre-join pull banner.
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const startupBanners = () =>
+      stdout.filter(
+        (line) =>
+          line.method === "notifications/claude/channel" &&
+          (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
+          JSON.stringify(line).includes("**tribe**"),
+      )
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await waitForCondition(() => startupBanners().length === 1, "startup banner carrying the members headline")
+    const banner = JSON.stringify(startupBanners()[0])
+    expect(banner).toContain("8 MISSING (no transport)")
+    expect(banner).toContain("@chief, @dev/5")
     expect(child.exitCode).toBeNull()
   })
 

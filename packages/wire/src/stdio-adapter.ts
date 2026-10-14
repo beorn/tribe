@@ -779,8 +779,13 @@ function requestPacedReexec(reason: string, supervisedExitCode: () => number | n
  * are already overridable. An unset/nonsensical value keeps the shipped 60s.
  */
 function reconnectWatchdogThresholdMs(): number {
-  const raw = Number(process.env.TRIBE_RECONNECT_WATCHDOG_MS)
-  return Number.isFinite(raw) && raw > 0 ? raw : 60_000
+  const raw = process.env.TRIBE_RECONNECT_WATCHDOG_MS
+  if (raw === undefined) return 60_000
+  const value = Number(raw)
+  if (Number.isFinite(value) && value > 0) return value
+  // NO SILENT ERRORS: a set-but-unusable override is named, not quietly ignored.
+  log.warn?.(`TRIBE_RECONNECT_WATCHDOG_MS=${raw} is not a positive number; using the shipped 60000ms`)
+  return 60_000
 }
 
 const reconnectWatchdog = createReconnectWatchdog({
@@ -944,6 +949,8 @@ function startDaemonConnection(): Promise<DaemonClient> {
             uptime_min: number
             delivery?: string
           }>
+          /** 29162 — present only when durable launches have no transport; names the count and names. */
+          headline?: string
         }
         const sessions = (membersData.sessions ?? []).filter((session) => session.transport_state === "connected")
         const chief = reg.chief || sessions.find((s: { role: string }) => s.role === "chief")?.name || "(none)"
@@ -953,8 +960,12 @@ function startDaemonConnection(): Promise<DaemonClient> {
             .map((s: { name: string; role: string }) => `${s.name} (${s.role})`)
             .join(", ") || "(solo)"
 
+        // 29162 — the banner is the headline a seat actually reads at startup; when
+        // durable launches have no transport, name them here too (sessions lists
+        // only connected rows, so the banner would otherwise read as an all-clear).
+        const missingClause = membersData.headline === undefined ? "" : ` · ${membersData.headline}`
         const shortSocket = SOCKET_PATH.replace(process.env.HOME ?? "", "~")
-        const banner = `**tribe** ${myName} (${myRole}) · chief: ${chief} · ${deliveryAcknowledgementSummary()} · peers: ${peers} · ${shortSocket}`
+        const banner = `**tribe** ${myName} (${myRole}) · chief: ${chief} · ${deliveryAcknowledgementSummary()} · peers: ${peers}${missingClause} · ${shortSocket}`
         sendChannelDetached(banner, { from: "tribe-startup", type: "system" })
       } catch {
         // Non-fatal — banner is diagnostic, don't block startup
