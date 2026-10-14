@@ -1866,9 +1866,19 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
                 observedAgPid: newPid,
                 observedAgStartTime: newBirth as string,
               }
-            : token === "token-g3"
-              ? { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 3, habitatRoot: "/test/habitat" }
-              : identityVerifier.verify(token),
+            : token === "token-g5"
+              ? {
+                  result: "verified",
+                  actor: "@dev/7",
+                  sid: "sid-dev7",
+                  gen: 5,
+                  habitatRoot: "/test/habitat",
+                  observedAgPid: newPid,
+                  observedAgStartTime: newBirth as string,
+                }
+              : token === "token-g3"
+                ? { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 3, habitatRoot: "/test/habitat" }
+                : identityVerifier.verify(token),
       }
       const harness = createDispatcherHarness({ identityVerifier: verifier }, undefined, {
         duplicateIncidentOwner: "@chief",
@@ -1963,6 +1973,23 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       expect(pages[0]?.content).toContain(mode === "act" ? "yield notice armed" : "would request yield")
       expect(watchSocket.writes.filter((line) => line.includes("successor_yield"))).toHaveLength(mode === "act" ? 1 : 0)
       if (mode === "act") {
+        // @failure A second verified duplicate arrives while old Ag's first
+        // exact-child stop is pending, and the first notice's outcome loses its
+        // incident route when the later notice replaces its generation pair.
+        harness.addPendingClient("new-pull-5")
+        const laterRefusal = parseError(
+          await harness.register("new-pull-5", {
+            name: "@dev/7",
+            pid: newPid,
+            project: "/tmp/p",
+            launchParentPid: newPid,
+            idToken: "token-g5",
+            delivery: "pull",
+            takeover: true,
+          }),
+        )
+        expect(laterRefusal).toMatchObject({ data: { kind: "verified-duplicate-join", successorGeneration: 5 } })
+        expect(watchSocket.writes.filter((line) => line.includes("successor_yield"))).toHaveLength(2)
         const wrongSuccessor = parseError(
           await harness.dispatcher.handleRequest(
             {
@@ -2054,8 +2081,9 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
         const after = harness.db
           .prepare("SELECT recipient, content FROM messages WHERE type = 'health:duplicate-join' ORDER BY ts")
           .all() as Array<{ recipient: string; content: string }>
-        expect(after).toHaveLength(2)
-        expect(after[1]?.content).toContain("stop expected child incarnation 401/birth-old does not match")
+        expect(after).toHaveLength(3)
+        expect(after[2]?.content).toContain("stop expected child incarnation 401/birth-old does not match")
+        expect(after[2]?.content).toContain("generation 3 yield to 4")
         const holdings = harness.db
           .prepare("SELECT request_id FROM pending_request WHERE request_kind = 'incident' AND recipient = '@chief'")
           .all() as Array<{ request_id: string }>
