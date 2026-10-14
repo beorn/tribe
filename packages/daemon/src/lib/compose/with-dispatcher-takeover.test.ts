@@ -33,6 +33,7 @@ import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
 import { sendMessage } from "../messaging.ts"
 import { registerSession } from "../session.ts"
+import { readProcessStartTime } from "../session-transport-state.ts"
 import { withClientRegistry } from "./with-client-registry.ts"
 import { createBaseTribe } from "./base.ts"
 import { withDispatcher, type DispatcherRuntimeHooks } from "./with-dispatcher.ts"
@@ -91,6 +92,7 @@ type JsonRpcResponse<T> = {
 }
 
 type RegisterParams = {
+  role?: TribeRole
   delivery?: "push" | "pull"
   adapterExitRecord?: unknown
   name?: string
@@ -688,6 +690,7 @@ describe("one-shot CLI join checkpoint (@ag/tribe/22429)", () => {
 function createDispatcherHarness(
   hooks: DispatcherRuntimeHooks = {},
   seed?: (ctx: ReturnType<typeof createTribeContext>) => void,
+  configOverrides: { duplicateIncidentOwner?: string; duplicateYieldMode?: "observe" | "act" } = {},
 ) {
   const tempDir = mkdtempSync(join(tmpdir(), "tribe-dispatcher-takeover-"))
   const scope = createScope("dispatcher-takeover-test")
@@ -731,6 +734,7 @@ function createDispatcherHarness(
       summaryPollMs: 120_000,
       summarizerMode: "off" as const,
       recallEnabled: false,
+      ...configOverrides,
     },
     db,
     stmts,
@@ -798,7 +802,7 @@ function createDispatcherHarness(
           !params.idToken.includes(".")
             ? { idToken: fixtureToken(params.idToken) }
             : {}),
-          role: "member",
+          role: params.role ?? "member",
           projectName: "km-wt9",
           projectId: "test-project",
           delivery: params.delivery ?? "pull",
@@ -1803,6 +1807,184 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       return verdict
     },
   }
+  // @failure A verified successor closes the incumbent before its exact process incarnation is proved, or a
+  // watch registration replaces the pull bootstrap instead of fanning into that launch.
+  // @level l2 @consumer Managed Ag duplicate-join observation and its native yield listener.
+  it.each(["observe", "act"] as const)(
+    "refuses a verified newer duplicate, pages the configured owner and preserves the pull bootstrap (%s)",
+    async (mode) => {
+      const oldPid = process.ppid
+      const newPid = process.pid
+      const oldBirth = readProcessStartTime(oldPid)
+      const newBirth = readProcessStartTime(newPid)
+      expect(typeof oldBirth).toBe("string")
+      expect(typeof newBirth).toBe("string")
+      const verifier = {
+        ...identityVerifier,
+        verify: async (token: string): Promise<IdentityVerdict> =>
+          token === "token-g4"
+            ? {
+                result: "verified",
+                actor: "@dev/7",
+                sid: "sid-dev7",
+                gen: 4,
+                habitatRoot: "/test/habitat",
+                observedAgPid: newPid,
+                observedAgStartTime: newBirth as string,
+              }
+            : token === "token-g3"
+              ? { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 3, habitatRoot: "/test/habitat" }
+              : identityVerifier.verify(token),
+      }
+      const harness = createDispatcherHarness({ identityVerifier: verifier }, undefined, {
+        duplicateIncidentOwner: "@chief",
+        duplicateYieldMode: mode,
+      })
+      cleanup = harness.dispose
+      const pullSocket = harness.addPendingClient("old-pull")
+      const pull = parseResult<RegisterResult>(
+        await harness.register("old-pull", {
+          name: "@dev/7",
+          pid: oldPid,
+          project: "/tmp/p",
+          launchParentPid: oldPid,
+          idToken: "token-g3",
+          delivery: "pull",
+          takeover: true,
+        }),
+      )
+      const watchSocket = harness.addPendingClient("old-watch")
+      const watch = parseResult<RegisterResult>(
+        await harness.register("old-watch", {
+          name: "@dev/7",
+          role: "watch",
+          pid: oldPid,
+          project: "/tmp/p",
+          launchParentPid: oldPid,
+          idToken: "token-g3",
+          delivery: "push",
+          takeover: false,
+        }),
+      )
+      expect(watch.sessionId).toBe(pull.sessionId)
+      expect(harness.registry.clients.get("old-watch")?.role).toBe("watch")
+      harness.addPendingClient("new-pull")
+      const refusal = parseError(
+        await harness.register("new-pull", {
+          name: "@dev/7",
+          pid: newPid,
+          project: "/tmp/p",
+          launchParentPid: newPid,
+          idToken: "token-g4",
+          delivery: "pull",
+          takeover: true,
+        }),
+      )
+      expect(refusal).toMatchObject({
+        data: { kind: "verified-duplicate-join", incumbentGeneration: 3, successorGeneration: 4 },
+      })
+      expect(pullSocket.destroyedByDispatcher).toBe(false)
+      expect(watchSocket.destroyedByDispatcher).toBe(false)
+      expect(harness.db.prepare("SELECT identity_gen FROM sessions WHERE id = ?").get(pull.sessionId)).toEqual({
+        identity_gen: 3,
+      })
+      const pages = harness.db
+        .prepare("SELECT recipient, content FROM messages WHERE type = 'health:duplicate-join'")
+        .all() as Array<{ recipient: string; content: string }>
+      expect(pages).toHaveLength(1)
+      expect(pages[0]).toMatchObject({ recipient: "@chief" })
+      expect(pages[0]?.content).toContain(mode === "act" ? "yield notice armed" : "would request yield")
+      expect(watchSocket.writes.filter((line) => line.includes("successor_yield"))).toHaveLength(mode === "act" ? 1 : 0)
+    },
+  )
+  // @failure An unobserved or recycled PID is mistaken for the verified contender and a stop notice reaches old Ag.
+  // @level l2 @consumer The incumbent's process must survive uncertainty in Wire's incarnation comparison.
+  it.each(["absent", "candidate-birth", "incumbent-birth", "parent-mismatch"] as const)(
+    "refuses the duplicate without a yield notice when %s proof fails",
+    async (gap) => {
+      const oldPid = process.ppid
+      const newPid = process.pid
+      const newBirth = readProcessStartTime(newPid)
+      expect(typeof newBirth).toBe("string")
+      const verifier = {
+        ...identityVerifier,
+        verify: async (token: string): Promise<IdentityVerdict> =>
+          token === "token-g4"
+            ? {
+                result: "verified",
+                actor: "@dev/7",
+                sid: "sid-dev7",
+                gen: 4,
+                habitatRoot: "/test/habitat",
+                ...(gap === "absent"
+                  ? {}
+                  : {
+                      observedAgPid: gap === "parent-mismatch" ? oldPid : newPid,
+                      observedAgStartTime: gap === "candidate-birth" ? "recycled-birth" : (newBirth as string),
+                    }),
+              }
+            : token === "token-g3"
+              ? { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 3, habitatRoot: "/test/habitat" }
+              : identityVerifier.verify(token),
+      }
+      const harness = createDispatcherHarness({ identityVerifier: verifier }, undefined, {
+        duplicateIncidentOwner: "@chief",
+        duplicateYieldMode: "act",
+      })
+      cleanup = harness.dispose
+      const oldSocket = harness.addPendingClient("old-pull")
+      const old = parseResult<RegisterResult>(
+        await harness.register("old-pull", {
+          name: "@dev/7",
+          pid: oldPid,
+          project: "/tmp/p",
+          launchParentPid: oldPid,
+          idToken: "token-g3",
+          delivery: "pull",
+          takeover: true,
+        }),
+      )
+      const watchSocket = harness.addPendingClient("old-watch")
+      parseResult<RegisterResult>(
+        await harness.register("old-watch", {
+          name: "@dev/7",
+          role: "watch",
+          pid: oldPid,
+          project: "/tmp/p",
+          launchParentPid: oldPid,
+          idToken: "token-g3",
+          delivery: "push",
+          takeover: false,
+        }),
+      )
+      if (gap === "incumbent-birth") {
+        harness.db
+          .prepare("UPDATE sessions SET launch_parent_start_time = ? WHERE id = ?")
+          .run("recycled-birth", old.sessionId)
+      }
+      harness.addPendingClient("new-pull")
+      const refusal = parseError(
+        await harness.register("new-pull", {
+          name: "@dev/7",
+          pid: newPid,
+          project: "/tmp/p",
+          launchParentPid: newPid,
+          idToken: "token-g4",
+          delivery: "pull",
+          takeover: true,
+        }),
+      )
+      expect(refusal).toMatchObject({ code: -32003, data: { kind: "verified-duplicate-join" } })
+      expect(refusal.message).toContain("no yield notice")
+      expect(oldSocket.destroyedByDispatcher).toBe(false)
+      expect(watchSocket.writes.filter((line) => line.includes("successor_yield"))).toEqual([])
+      const page = harness.db
+        .prepare("SELECT recipient, content FROM messages WHERE type = 'health:duplicate-join' LIMIT 1")
+        .get() as { recipient: string; content: string }
+      expect(page.recipient).toBe("@chief")
+      expect(page.content).toContain("exact incarnation proof is unavailable")
+    },
+  )
   const sessionRow = (harness: ReturnType<typeof createDispatcherHarness>, sessionId: string) =>
     harness.db
       .prepare(

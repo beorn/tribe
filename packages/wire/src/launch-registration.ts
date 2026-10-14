@@ -1,5 +1,6 @@
 /** One scoped, daemon-certified launch registration shared by agent hosts and service producers. */
-import { connectToDaemon, type DaemonClient } from "./client.ts"
+import { connectToDaemon, createReconnectingClient, type DaemonClient, type ReconnectingClientOpts } from "./client.ts"
+import { createLogger } from "loggily"
 import { resolveSocketPath } from "./paths.ts"
 import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "./lib/persona-launch-identity.ts"
 import { readUnverifiedTokenClaims } from "./lib/identity-token.ts"
@@ -11,6 +12,8 @@ import {
 } from "./launch-environment.ts"
 import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "./lib/socket.ts"
 import { validateDeliveryAcknowledgement } from "./lib/delivery.ts"
+
+const log = createLogger("tribe-wire:launch-registration")
 
 export interface TribeLaunchRequest {
   readonly name: string
@@ -39,6 +42,8 @@ export interface TribeLaunchConnection {
   readonly joinRetries: number
   readonly launchParentPid: number
   readonly launchId: string
+  /** Daemon session shared by the owner and any verified same-launch watch. */
+  readonly sessionId?: string
   /** Child-process patch: fresh launch proof and names, with caller authority removed. */
   readonly environment: NodeJS.ProcessEnv
   isConnected(): boolean
@@ -51,6 +56,8 @@ export interface TribeLaunchConnection {
    * a `tribe send` exit 75 before its one resend.
    */
   ensureRegistered(): Promise<void>
+  /** Attach a push watch to this launch without claiming another name or consuming takeover. */
+  attachWatch(onNotification: (method: string, params?: Record<string, unknown>) => void): Promise<void>
   /** Disconnect the owner. Service authority expires; agents retain recovery semantics. */
   close(): void
 }
@@ -64,6 +71,7 @@ export interface TribeLaunchDeps {
   readonly socketPath: () => string
   readonly sleep: (milliseconds: number) => Promise<void>
   readonly processId: () => number
+  readonly reconnect?: (options: ReconnectingClientOpts) => Promise<DaemonClient>
 }
 
 const CONNECT_ATTEMPTS = 3
@@ -89,6 +97,7 @@ export async function connectTribeLaunch(
   const providerLaunchId = launchIdFor(request)
   const first = await registerLaunch(request, deps, providerLaunchId)
   let current = first.client
+  let watch: DaemonClient | null = null
   let closed = false
   async function reregisterUnlessAnswering(): Promise<void> {
     if (await ownerTransportAnswers(current)) return
@@ -127,6 +136,7 @@ export async function connectTribeLaunch(
     joinRetries: first.joinRetries,
     launchParentPid: first.processId,
     launchId: first.launchId,
+    sessionId: first.sessionId,
     environment: {
       ...Object.fromEntries(tribeSessionIdentityEnvironmentNames().map((key) => [key, undefined])),
       [TRIBE_LAUNCH_PARENT_PID_ENV]: String(first.processId),
@@ -145,8 +155,72 @@ export async function connectTribeLaunch(
         clearTimeout(hold)
       }
     },
+    async attachWatch(onNotification) {
+      if (closed) throw new Error(`Tribe launch ${first.launchId} (${request.name}) was closed by its owner`)
+      if (watch !== null) throw new Error(`Tribe watch already attached to ${request.name} launch ${first.launchId}`)
+      if (request.idToken === undefined || first.sessionId === undefined) {
+        throw new Error(
+          `Tribe cannot attach ${request.name}'s watch: a verified token and daemon session id are required`,
+        )
+      }
+      const reconnect = deps.reconnect ?? createReconnectingClient
+      const attached = await reconnect({
+        socketPath: deps.socketPath(),
+        noSpawn: true,
+        onDisconnect: () => log.warn?.(`${request.name}'s launch watch disconnected; waiting to reattach`),
+        onReconnectExhausted: (error, attempts) =>
+          log.error?.(`${request.name}'s launch watch could not reattach after ${attempts} attempts: ${String(error)}`),
+        onConnect: async (client) => {
+          // Install the handler before register's response exposes this watch to a competing successor.
+          client.onNotification(onNotification)
+          const registration = (await client.call("register", {
+            name: request.name,
+            role: "watch",
+            principalClass: request.principalClass,
+            domains: [...request.domains],
+            project: request.cwd,
+            peerSocket: null,
+            pid: first.processId,
+            protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+            supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
+            launchId: providerLaunchId,
+            launchParentPid: first.processId,
+            delivery: "push",
+            ...(request.provider === undefined ? {} : { provider: request.provider }),
+            ...(request.account === undefined ? {} : { account: request.account }),
+            idToken: request.idToken,
+            takeover: false,
+          })) as {
+            readonly name?: unknown
+            readonly sessionId?: unknown
+            readonly launchId?: unknown
+            readonly launchParentPid?: unknown
+            readonly transportDelivery?: unknown
+          }
+          if (
+            registration.name !== request.name ||
+            registration.sessionId !== first.sessionId ||
+            registration.launchId !== first.launchId ||
+            registration.launchParentPid !== first.processId ||
+            registration.transportDelivery !== "push"
+          ) {
+            throw new Error(
+              `Tribe watch for ${request.name} did not attach to its owner session ${first.sessionId} ` +
+                `under launch ${first.launchId}/${first.processId}: ${JSON.stringify(registration)}`,
+            )
+          }
+          client.socket.unref()
+        },
+      })
+      if (closed) {
+        attached.close()
+        throw new Error(`Tribe launch ${first.launchId} (${request.name}) closed while attaching its watch`)
+      }
+      watch = attached
+    },
     close: () => {
       closed = true
+      watch?.close()
       current.close()
     },
   }
@@ -172,7 +246,13 @@ async function registerLaunch(
   request: TribeLaunchRequest,
   deps: TribeLaunchDeps,
   providerLaunchId: string,
-): Promise<{ client: TribeLaunchClient; joinRetries: number; launchId: string; processId: number }> {
+): Promise<{
+  client: TribeLaunchClient
+  joinRetries: number
+  launchId: string
+  processId: number
+  sessionId?: string
+}> {
   let lastError: unknown
   const attemptedClients = new Set<TribeLaunchClient>()
   for (let attempt = 0; attempt < CONNECT_ATTEMPTS; attempt++) {
@@ -217,6 +297,7 @@ async function registerLaunch(
         takeover: request.takeover,
       })) as {
         readonly name?: unknown
+        readonly sessionId?: unknown
         readonly principalClass?: unknown
         readonly launchId?: unknown
         readonly launchParentPid?: unknown
@@ -269,7 +350,13 @@ async function registerLaunch(
       // The caller owns this lifetime. A live socket cannot keep a finished
       // service occurrence or provider host alive by itself.
       client.socket.unref()
-      return { client, joinRetries: attempt, launchId, processId }
+      return {
+        client,
+        joinRetries: attempt,
+        launchId,
+        processId,
+        ...(typeof registration.sessionId === "string" ? { sessionId: registration.sessionId } : {}),
+      }
     } catch (error) {
       client?.close()
       lastError = error

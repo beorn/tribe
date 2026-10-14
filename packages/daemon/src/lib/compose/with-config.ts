@@ -49,6 +49,10 @@ export interface TribeConfig {
   readonly identityVerifierPath?: string | null
   /** Explicit host scope remains known when its required policy is unavailable. */
   readonly requiredIncidentEmitters?: readonly string[]
+  /** Habitat policy owner for a verified duplicate launch. Unset outside a managed habitat. */
+  readonly duplicateIncidentOwner?: string
+  /** Observe verified successors before allowing a targeted yield notice. */
+  readonly duplicateYieldMode?: "observe" | "act"
   /** Idle-quit delay in seconds. -1 ("never") disables auto-quit, 0 quits immediately on idle. */
   readonly idleQuitAfterSec: number
   /** Which surface set idleQuitAfterSec — see IdleQuitSource. */
@@ -217,6 +221,15 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
       },
     })
 
+    const duplicateIncidentOwner = process.env.TRIBE_DUPLICATE_INCIDENT_OWNER
+    if (duplicateIncidentOwner !== undefined && duplicateIncidentOwner.trim().length === 0) {
+      throw new Error("TRIBE_DUPLICATE_INCIDENT_OWNER names no incident owner")
+    }
+    const duplicateYieldMode = process.env.TRIBE_DUPLICATE_YIELD_MODE ?? "observe"
+    if (duplicateYieldMode !== "observe" && duplicateYieldMode !== "act") {
+      throw new Error(`TRIBE_DUPLICATE_YIELD_MODE must be observe or act; got ${duplicateYieldMode}`)
+    }
+
     const config: TribeConfig = {
       socketPath: resolveSocketPath(daemonArgs.socket as string | undefined),
       dbPath: String(resolveDbPath(tribeArgs, { migrateLegacy: false })),
@@ -225,6 +238,8 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
       ...vaultDbConfig(classifyVaultDbFlag(daemonArgs["vault-db"])),
       identityVerifierPath: identityVerifierFlag(daemonArgs["identity-verifier"]),
       requiredIncidentEmitters: daemonArgs["require-incident-policy"] as string[] | undefined,
+      duplicateIncidentOwner: duplicateIncidentOwner?.trim(),
+      duplicateYieldMode,
       idleQuitAfterSec: idleQuit.idleQuitAfterSec,
       idleQuitSource: idleQuit.idleQuitSource,
       inheritFd: daemonArgs.fd ? parseInt(String(daemonArgs.fd), 10) : null,

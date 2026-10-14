@@ -50,6 +50,7 @@ import {
   createLineParser,
   isRequest,
   makeError,
+  makeNotification,
   makeResponse,
   negotiateProtocolVersion,
   supportedProtocolVersionsFromAdvertisement,
@@ -86,6 +87,7 @@ import {
   sendMessage,
 } from "../messaging.ts"
 import { registerSession, NameConflictError, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
+import { readProcessStartTime } from "../session-transport-state.ts"
 import {
   adoptByPidCwd,
   adoptIdentity,
@@ -1306,7 +1308,14 @@ export function withDispatcher<
       token: string | null,
       requestedName: unknown,
     ): Promise<
-      | { readonly sid: string | null; readonly gen: number | null; readonly personaTokenDefect?: PersonaTokenDefect }
+      | {
+          readonly sid: string | null
+          readonly gen: number | null
+          readonly habitatRoot?: string
+          readonly observedAgPid?: number
+          readonly observedAgStartTime?: string
+          readonly personaTokenDefect?: PersonaTokenDefect
+        }
       | { readonly refusal: RegistrationRefusal }
     > {
       const verifier = hooks.identityVerifier
@@ -1346,6 +1355,10 @@ export function withDispatcher<
             return {
               sid: verdict.sid,
               gen: verdict.gen ?? null,
+              ...(verdict.habitatRoot === undefined ? {} : { habitatRoot: verdict.habitatRoot }),
+              ...(verdict.observedAgPid === undefined
+                ? {}
+                : { observedAgPid: verdict.observedAgPid, observedAgStartTime: verdict.observedAgStartTime }),
               ...(malformedToken && { personaTokenDefect: "malformed" as const }),
             }
           }
@@ -1569,6 +1582,7 @@ export function withDispatcher<
         pid: number
         launchId: string | null
         launchParentPid: number | null
+        verifiedHabitatRoot?: string
         claudeSessionId: string | null
         peerSocket: string | null
         ctx: TribeContext
@@ -1598,6 +1612,7 @@ export function withDispatcher<
         pid: fields.pid,
         launchId: fields.launchId,
         launchParentPid: fields.launchParentPid,
+        verifiedHabitatRoot: fields.verifiedHabitatRoot,
         claudeSessionId: fields.claudeSessionId,
         peerSocket: fields.peerSocket,
         conn: relPath(socket.socketPath),
@@ -2038,7 +2053,7 @@ export function withDispatcher<
               if (filterMode !== undefined) applyLaunchDeclaredFilter(holder.ctx, filterMode)
               const client = applyClient(connId, {
                 name: holder.name,
-                role: holder.role,
+                role,
                 domains: holder.domains,
                 principalClass: holder.principalClass ?? "agent",
                 project,
@@ -2047,6 +2062,7 @@ export function withDispatcher<
                 pid: clientPid,
                 launchId: launch.id,
                 launchParentPid: launch.parentPid,
+                verifiedHabitatRoot: identity.habitatRoot,
                 claudeSessionId,
                 peerSocket,
                 ctx: holder.ctx,
@@ -2084,6 +2100,117 @@ export function withDispatcher<
                 coordinationState: coordState,
                 daemon: { pid: process.pid, uptime: Math.floor((Date.now() - socket.startedAt) / 1000) },
               })
+            }
+            // A managed successor does not take the older generation's name by closing its socket. The verifier
+            // already decided that the new token is live; its optional kernel observation decides whether this is
+            // the exact Ag incarnation we may ask the old launch to yield. Both outcomes refuse this competing
+            // register, leaving the incumbent and its pull bootstrap attached. The habitat selects the incident
+            // owner and the observation/actuation phase; standalone Tribe keeps its existing takeover semantics.
+            if (t.config.duplicateIncidentOwner && verifiedSid !== null && verifiedGen !== null) {
+              const predecessors = Array.from(clients.values()).filter((candidate) => {
+                if (candidate.id === connId || candidate.name !== resolvedName) return false
+                const held = holderIdentity(candidate.ctx.sessionId)
+                return (
+                  held.authority === "verified" &&
+                  held.sid === verifiedSid &&
+                  held.gen !== null &&
+                  held.gen < verifiedGen
+                )
+              })
+              if (predecessors.length > 0) {
+                const predecessorSessions = new Set(predecessors.map((candidate) => candidate.ctx.sessionId))
+                const predecessor = predecessors[0]
+                if (predecessor === undefined) throw new Error("duplicate predecessor vanished after nonempty check")
+                const held = holderIdentity(predecessor.ctx.sessionId)
+                const stored = db
+                  .prepare("SELECT launch_parent_pid, launch_parent_start_time FROM sessions WHERE id = ?")
+                  .get(predecessor.ctx.sessionId) as {
+                  launch_parent_pid: number | null
+                  launch_parent_start_time: string | null
+                } | null
+                const oldPid = stored?.launch_parent_pid ?? null
+                const oldBirth = stored?.launch_parent_start_time ?? null
+                const newPid = identity.observedAgPid ?? null
+                const newBirth = identity.observedAgStartTime ?? null
+                const oldObserved = oldPid === null ? null : readProcessStartTime(oldPid)
+                const newObserved = newPid === null ? null : readProcessStartTime(newPid)
+                const watch = predecessors.find(
+                  (candidate) =>
+                    candidate.role === "watch" &&
+                    candidate.ctx.sessionId === predecessor.ctx.sessionId &&
+                    candidate.pid === oldPid &&
+                    candidate.launchParentPid === oldPid &&
+                    !candidate.socket.destroyed &&
+                    candidate.socket.writable,
+                )
+                const proofGap =
+                  predecessorSessions.size !== 1
+                    ? "multiple incumbent sessions"
+                    : identity.habitatRoot === undefined ||
+                        predecessor.verifiedHabitatRoot === undefined ||
+                        identity.habitatRoot !== predecessor.verifiedHabitatRoot
+                      ? "successor and incumbent verified habitats are absent or different"
+                      : oldPid === null || oldBirth === null || oldObserved !== oldBirth
+                        ? "incumbent Ag PID/birth is absent, unreadable or changed"
+                        : newPid === null ||
+                            newBirth === null ||
+                            launchIdentity?.parentPid !== newPid ||
+                            newObserved !== newBirth ||
+                            newPid === oldPid
+                          ? "successor Ag PID/birth is absent, unreadable or differs from its launch parent"
+                          : null
+                const subject = `duplicate-join-${encodeURIComponent(resolvedName)}`
+                const summary =
+                  proofGap === null
+                    ? `${resolvedName}: verified live generation ${verifiedGen} (Ag ${newPid}/${newBirth}) ` +
+                      `competes with generation ${held.gen} (Ag ${oldPid}/${oldBirth}); ` +
+                      `${t.config.duplicateYieldMode === "act" ? "yield notice armed" : "would request yield"}; ` +
+                      `${watch ? "authenticated watch attached" : "old Ag watch absent"}`
+                    : `${resolvedName}: verified generation ${verifiedGen} competes with generation ${held.gen}, ` +
+                      `but exact incarnation proof is unavailable: ${proofGap}; no yield notice`
+                sendMessage(
+                  daemonCtx,
+                  t.config.duplicateIncidentOwner,
+                  summary,
+                  "health:duplicate-join",
+                  undefined,
+                  undefined,
+                  "direct",
+                  { delivery: "push", topic: "health:duplicate-join", summary },
+                  { incident: { emitter: "wire", subject, condition: "conflict", active: true } },
+                )
+                log.warn?.(summary)
+                if (proofGap === null && t.config.duplicateYieldMode === "act") {
+                  if (watch === undefined) {
+                    log.error?.(`${resolvedName}: successor yield notice could not be sent: old Ag watch absent`)
+                  } else {
+                    try {
+                      // A successful write queues a notice; only old Ag's later stop/exit observation proves yield.
+                      watch.socket.write(
+                        makeNotification("successor_yield", {
+                          seat: resolvedName,
+                          habitatRoot: identity.habitatRoot,
+                          sid: verifiedSid,
+                          incumbentGeneration: held.gen,
+                          incumbentAgPid: oldPid,
+                          incumbentAgStartTime: oldBirth,
+                          successorGeneration: verifiedGen,
+                          successorAgPid: newPid,
+                          successorAgStartTime: newBirth,
+                        }),
+                      )
+                    } catch (error) {
+                      log.error?.(`${resolvedName}: successor yield notice write failed: ${String(error)}`)
+                    }
+                  }
+                }
+                return makeError(id, -32003, `register refused: ${summary}`, {
+                  kind: "verified-duplicate-join",
+                  reason: proofGap ?? "incumbent-yield-pending",
+                  incumbentGeneration: held.gen,
+                  successorGeneration: verifiedGen,
+                })
+              }
             }
             const samePidHolder = findSamePidNameHolder(resolvedName, clientPid, connId)
             if (samePidHolder) {
@@ -2332,6 +2459,7 @@ export function withDispatcher<
               pid,
               launchId: launchIdentity?.id ?? null,
               launchParentPid: launchIdentity?.parentPid ?? null,
+              verifiedHabitatRoot: identity.habitatRoot,
               claudeSessionId,
               peerSocket,
               ctx: clientCtx,

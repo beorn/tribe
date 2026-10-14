@@ -38,6 +38,7 @@ export type IdentityVerdict =
       readonly kind?: "service"
       readonly sid: string
       readonly gen?: number
+      readonly habitatRoot?: string
       /** Optional observed Ag process incarnation. Both fields must be present together. */
       readonly observedAgPid?: number
       readonly observedAgStartTime?: string
@@ -530,6 +531,8 @@ function checkedVerdict(value: unknown, path: string): IdentityVerdict {
       if (nonEmpty(verdict.actor) && nonEmpty(verdict.sid)) {
         if (verdict.kind !== undefined && verdict.kind !== "service") break
         const kind = verdict.kind === "service" ? { kind: "service" as const } : {}
+        if (verdict.habitatRoot !== undefined && !nonEmpty(verdict.habitatRoot)) break
+        const habitat = verdict.habitatRoot === undefined ? {} : { habitatRoot: verdict.habitatRoot }
         const hasPid = verdict.observedAgPid !== undefined
         const hasBirth = verdict.observedAgStartTime !== undefined
         if (hasPid !== hasBirth) break
@@ -548,10 +551,18 @@ function checkedVerdict(value: unknown, path: string): IdentityVerdict {
             }
           : {}
         if (verdict.gen === undefined) {
-          return { result: "verified", actor: verdict.actor, sid: verdict.sid, ...kind, ...observed }
+          return { result: "verified", actor: verdict.actor, sid: verdict.sid, ...kind, ...habitat, ...observed }
         }
         if (typeof verdict.gen === "number" && Number.isSafeInteger(verdict.gen) && verdict.gen >= 0) {
-          return { result: "verified", actor: verdict.actor, sid: verdict.sid, gen: verdict.gen, ...kind, ...observed }
+          return {
+            result: "verified",
+            actor: verdict.actor,
+            sid: verdict.sid,
+            gen: verdict.gen,
+            ...kind,
+            ...habitat,
+            ...observed,
+          }
         }
       }
       break

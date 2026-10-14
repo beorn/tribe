@@ -8,6 +8,7 @@
  */
 import { describe, expect, it, vi } from "vitest"
 import { TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "../src/lib/socket.ts"
+import type { DaemonClient } from "../src/client.ts"
 import {
   REREGISTER_WINDOW_MS,
   connectTribeLaunch,
@@ -68,6 +69,64 @@ function fakeDaemon(registered: Record<string, unknown>, rowLaunchId: string, me
 }
 
 describe("connectTribeLaunch certifies the launch identity the daemon keyed (25074)", () => {
+  // @failure A native Ag watch consumes takeover or registers another session, so the existing pull owner is lost.
+  // @level l2 @consumer The old Ag receives successor notices on a same-launch push sibling.
+  it("attaches a reconnecting push watch to the certified pull session with takeover false", async () => {
+    const daemon = fakeDaemon({ sessionId: "session-7" }, DERIVED)
+    const events: string[] = []
+    let watchClosed = false
+    let watchRegister: Record<string, unknown> | undefined
+    const deps: TribeLaunchDeps = {
+      ...daemon.deps,
+      reconnect: async (options) => {
+        const watchClient = {
+          onNotification() {
+            events.push("handler")
+          },
+          async call(method: string, params: Record<string, unknown>) {
+            expect(method).toBe("register")
+            events.push("register")
+            watchRegister = params
+            return {
+              name: REQUEST.name,
+              sessionId: "session-7",
+              launchId: DERIVED,
+              launchParentPid: PID,
+              transportDelivery: "push",
+            }
+          },
+          socket: {
+            unref() {
+              events.push("unref")
+            },
+          },
+          close() {
+            watchClosed = true
+          },
+        } as unknown as DaemonClient
+        await options.onConnect?.(watchClient)
+        return watchClient
+      },
+    }
+    const owner = await connectTribeLaunch({ ...REQUEST, idToken: "seat-token" }, deps)
+    await owner.attachWatch(() => {})
+    expect(owner.sessionId).toBe("session-7")
+    expect(events).toEqual(["handler", "register", "unref"])
+    expect(watchRegister).toMatchObject({
+      name: REQUEST.name,
+      role: "watch",
+      launchId: REQUEST.launchId,
+      launchParentPid: PID,
+      pid: PID,
+      delivery: "push",
+      takeover: false,
+      idToken: "seat-token",
+    })
+    await owner.ensureRegistered()
+    expect(owner.isConnected()).toBe(true)
+    owner.close()
+    expect(watchClosed).toBe(true)
+  })
   // @failure 26564: aggregate push from a genuine sibling must not invalidate the bootstrap's own pull ACK.
   // @level l2 @consumer managed provider launch bootstrap
   it("certifies its own pull ACK beside a push sibling", async () => {
