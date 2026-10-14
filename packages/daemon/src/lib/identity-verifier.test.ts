@@ -5,7 +5,7 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
 import {
   boundedIdentityVerifier,
   displacementRule,
@@ -57,13 +57,24 @@ describe("loadIdentityVerifier", () => {
        }`,
     )
     const repaired = verifier.readIncidentPolicy!()
-    expect(
-      await repaired.authorize(
-        { result: "verified", actor: "workmon", kind: "service", sid: "sid" },
-        "workmon",
-        "read",
-      ),
-    ).toEqual({ allow: true, emitters: ["workmon"] })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      expect(
+        await repaired.authorize(
+          { result: "verified", actor: "workmon", kind: "service", sid: "sid" },
+          "workmon",
+          "read",
+        ),
+      ).toEqual({ allow: true, emitters: ["workmon"] })
+      expect(warn.mock.calls).toEqual([
+        [
+          expect.stringMatching(/WARN tribe:identity-verifier$/),
+          expect.stringContaining("its incident policy now names workmon where this daemon cached  at boot"),
+        ],
+      ])
+    } finally {
+      warn.mockRestore()
+    }
     // The successful fresh answer IS what clears the boot fault: a repaired policy stops being reported broken.
     expect(repaired.fault).toBeUndefined()
   })
@@ -136,13 +147,26 @@ describe("loadIdentityVerifier", () => {
     symlinkSync(join(dir, "membership-b"), current)
 
     // The SAME fresh answer carries the current list and the verdict (28921 review).
-    expect(
-      await policy.authorize(
-        { result: "verified", actor: "coordination-watch", kind: "service", sid: "sid" },
-        "coordination-watch",
-        "read",
-      ),
-    ).toEqual({ allow: true, emitters: ["longproc-reading", "coordination-watch"] })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      expect(
+        await policy.authorize(
+          { result: "verified", actor: "coordination-watch", kind: "service", sid: "sid" },
+          "coordination-watch",
+          "read",
+        ),
+      ).toEqual({ allow: true, emitters: ["longproc-reading", "coordination-watch"] })
+      expect(warn.mock.calls).toEqual([
+        [
+          expect.stringMatching(/WARN tribe:identity-verifier$/),
+          expect.stringContaining(
+            "its incident policy now names longproc-reading, coordination-watch where this daemon cached longproc-reading at boot",
+          ),
+        ],
+      ])
+    } finally {
+      warn.mockRestore()
+    }
     expect(policy.emitters).toEqual(["longproc-reading", "coordination-watch"])
   })
 
