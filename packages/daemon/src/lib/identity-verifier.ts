@@ -538,16 +538,18 @@ function checkedVerdict(value: unknown, path: string): IdentityVerdict {
           (!Number.isSafeInteger(verdict.observedAgPid) ||
             (verdict.observedAgPid as number) <= 0 ||
             !nonEmpty(verdict.observedAgStartTime))
-        )
+        ) {
           break
+        }
         const observed = hasPid
           ? {
               observedAgPid: verdict.observedAgPid as number,
               observedAgStartTime: verdict.observedAgStartTime as string,
             }
           : {}
-        if (verdict.gen === undefined)
+        if (verdict.gen === undefined) {
           return { result: "verified", actor: verdict.actor, sid: verdict.sid, ...kind, ...observed }
+        }
         if (typeof verdict.gen === "number" && Number.isSafeInteger(verdict.gen) && verdict.gen >= 0) {
           return { result: "verified", actor: verdict.actor, sid: verdict.sid, gen: verdict.gen, ...kind, ...observed }
         }
