@@ -550,6 +550,43 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
     ).toBe(true)
   })
 
+  test("B3.3b: a discovered root holding only AGENTS.md (root and vendor/*) has its instruction files indexed", async () => {
+    // Since hh 26133 each folder's one instruction file is AGENTS.md; a root with no CLAUDE.md must not index as empty.
+    const agentsProjectDir = join(tempDir, "agents-project")
+    mkdirSync(join(agentsProjectDir, "vendor", "pkg"), { recursive: true })
+    writeFileSync(
+      join(agentsProjectDir, "AGENTS.md"),
+      "# Agents Root Guide\n\nRoot rules for agents-only discovery.\n",
+      "utf8",
+    )
+    writeFileSync(
+      join(agentsProjectDir, "vendor", "pkg", "AGENTS.md"),
+      "# Vendor Pkg Guide\n\nPackage rules for agents-only discovery.\n",
+      "utf8",
+    )
+
+    const projDir = join(projectsDir, "-agents-proj")
+    mkdirSync(projDir, { recursive: true })
+    writeFileSync(
+      join(projDir, "sess-agents.jsonl"),
+      JSON.stringify({
+        type: "user",
+        uuid: "u1",
+        cwd: agentsProjectDir,
+        timestamp: new Date().toISOString(),
+        message: { content: "work on agents-only project" },
+      }) + "\n",
+      "utf8",
+    )
+
+    await rebuildIndex(db)
+
+    const titles = (
+      db.prepare("SELECT title FROM content WHERE content_type = 'claude_md'").all() as Array<{ title: string }>
+    ).map((r) => r.title)
+    expect(titles).toEqual(expect.arrayContaining(["Agents Root Guide", "Vendor Pkg Guide"]))
+  })
+
   test("B3.4: sessions.cwd is the project key for search projectFilter", async () => {
     const customCwd = "/hh/dev-wt7"
     const projDir = join(projectsDir, "-hh-dev-wt7")

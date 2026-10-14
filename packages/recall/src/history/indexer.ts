@@ -1847,23 +1847,23 @@ function indexDocs(db: Database, projectRoot: string, projectPath: string): numb
   return count
 }
 
+/** A folder's agent instruction file: AGENTS.md, or a CLAUDE.md where one remains (hh 26133). */
+const INSTRUCTION_FILE_NAMES = ["AGENTS.md", "CLAUDE.md"] as const
+
 /**
- * Index CLAUDE.md files (root + vendor/*)
+ * Index agent instruction files (AGENTS.md, and any remaining CLAUDE.md) at the root and in vendor/*
  */
 function indexClaudeMd(db: Database, projectRoot: string, projectPath: string): number {
   let count = 0
 
-  const candidates: string[] = [path.join(projectRoot, "CLAUDE.md")]
-
-  // Add vendor/*/CLAUDE.md
+  const folders: string[] = [projectRoot]
   const vendorDir = path.join(projectRoot, "vendor")
   if (fs.existsSync(vendorDir)) {
     for (const entry of fs.readdirSync(vendorDir, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        candidates.push(path.join(vendorDir, entry.name, "CLAUDE.md"))
-      }
+      if (entry.isDirectory()) folders.push(path.join(vendorDir, entry.name))
     }
   }
+  const candidates = folders.flatMap((folder) => INSTRUCTION_FILE_NAMES.map((name) => path.join(folder, name)))
 
   for (const filePath of candidates) {
     if (!fs.existsSync(filePath)) continue
