@@ -2559,7 +2559,7 @@ export function withDispatcher<
               )
             }
             const notified = notifiedSuccessorYields.get(client)
-            if (!notified?.has(`${incumbentGeneration}:${successorGeneration}`)) {
+            if (!notified?.has(`${incumbentGeneration as number}:${successorGeneration as number}`)) {
               return makeError(
                 id,
                 -32003,
