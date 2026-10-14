@@ -1979,6 +1979,18 @@ export function createStatements(db: Database) {
 			message_id = excluded.message_id
 	`),
 
+    /** 29289 - a cleared incident retires the wake eligibility of every edge already written for its
+     *  identity. The clear writes its own row with `wakes_owner = 0`, but the OPEN edge that woke the
+     *  owner keeps its flag, and the mailbox cursor can never advance past a row that is not attention
+     *  (`noOpenIncidentAttentionPredicateSql`), so a FRESH inbox-wait re-woke on the spent edge forever -
+     *  the sticky-wake busy loop (tribe inbox-wait returning woken in ~18 ms with empty attention).
+     *  One ball, one live edge: the clear retires them all. A clearing send stores `request = NULL`
+     *  (`requestId` is nulled when `!incidentActive`), so this selects the open/repeat edges only. */
+    retireIncidentWakeFlags: db.prepare(`
+		UPDATE messages SET wakes_owner = 0
+		WHERE request = $request_id AND is_incident = 1 AND wakes_owner = 1
+	`),
+
     /** Ball-tracker close: deletes pending_request rows for a given (request_id, recipient).
      *  In single-recipient and multi-target cases this matches one row; in broadcast cases
      *  with fanout='first' it deletes all rows for the request when ANY recipient replies. */

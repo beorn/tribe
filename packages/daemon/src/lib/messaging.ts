@@ -780,6 +780,9 @@ export function sendMessage(
       // a ball ends. `closePendingRequestAll` because the condition cleared
       // for every owner of that identity, not just one.
       if (incidentRequestId !== null && !incidentActive) {
+        // 29289: retire every edge already written for this identity, so the spent OPEN edge cannot
+        // re-wake a FRESH inbox-wait. The clear never wakes; neither may the edge it retires.
+        ctx.stmts.retireIncidentWakeFlags.run({ $request_id: incidentRequestId })
         const rows = ctx.stmts.selectPendingSettlementsForRequest.all({
           $request_id: incidentRequestId,
         }) as PendingSettlementRow[]
