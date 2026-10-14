@@ -3175,6 +3175,49 @@ function createFakeServer(): Server {
  * Existing registration tests verify tokens but do not require emitter authority on each operation.
  */
 describe("managed incident policy availability (28044)", () => {
+  /** @failure A landing that ADDS an emitter is refused from the boot snapshot before the current module is asked,
+   *          so the promotion never takes effect for that emitter.
+   * @level l1
+   * @consumer Managed incident reads across a landing (28921 review).
+   */
+  it("admits an emitter a promotion ADDED, asking the current policy instead of the boot snapshot", async () => {
+    const emitter = "coordination-watch"
+    const token = managedToken(emitter, "watch-sid")
+    const identityVerifier: LoadedIdentityVerifier = {
+      path: "/test/promoted-policy.ts",
+      suppliesGen: true,
+      verify: async () => ({ result: "verified", actor: emitter, kind: "service", sid: "watch-sid", gen: 1 }),
+      readIncidentPolicy: () => ({
+        emitters: ["longproc-reading"], // the boot snapshot: this emitter is NOT in it
+        emittersNow: async () => ["longproc-reading", emitter], // the current module added it
+        authorize: (identity, requested) => identity.kind === "service" && identity.actor === requested,
+      }),
+    }
+    const harness = createDispatcherHarness({ identityVerifier, requiredIncidentEmitters: [emitter] })
+    cleanup = harness.dispose
+    const connection = harness.connectClient()
+    const registered = JSON.parse(
+      await harness.register(connection.connId, {
+        name: emitter,
+        pid: process.pid,
+        project: "/test",
+        launchParentPid: process.ppid,
+        idToken: token,
+      }),
+    ) as { error?: unknown }
+    expect(registered.error).toBeUndefined()
+    const call = async (method: string, params: Record<string, unknown>) =>
+      JSON.parse(
+        await harness.dispatcher.handleRequest({ jsonrpc: "2.0", id: method, method, params }, connection.connId),
+      ) as { error?: { message: string }; result?: unknown }
+    // The current module manages it, so the read is admitted even though the boot snapshot does not name it.
+    expect((await call("tribe.pending", { emitter })).error).toBeUndefined()
+    // Control: an emitter in NEITHER list is still refused, by the same reason.
+    const unmanaged = await call("tribe.pending", { emitter: "not-managed-anywhere" })
+    expect(unmanaged.error?.message).toContain("emitter is not managed by this host policy")
+    expect(connection.socket.destroyed).toBe(false)
+  })
+
   /** @failure A still-connected replaced service retains incident authority from registration.
    * @level l1
    * @consumer Each managed emitter's read/write lifecycle (28044 AC1).

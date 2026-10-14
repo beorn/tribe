@@ -2,7 +2,7 @@
  * The identity-verifier load contract (25074 3b, @cto 4a194bbf): the daemon refuses startup, naming the path, for a
  * module it cannot use, and a verdict outside the contract is a fault, never read as "unreadable".
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
@@ -25,6 +25,86 @@ function moduleAt(name: string, source: string): string {
 }
 
 describe("loadIdentityVerifier", () => {
+  /** @failure A policy that faulted at boot is refused FOREVER, so a landing that repairs it never takes effect
+   *          without a daemon restart.
+   * @level   l2
+   * @consumer Incident policy recovery after a landing (28921 review).
+   */
+  it("recovers incident policy on the next call when a promotion repairs a policy that faulted at boot", async () => {
+    const path = moduleAt(
+      "policy-repair.ts",
+      `export const IDENTITY_VERIFIER_INTERFACE = 1
+       export async function verifyIdentity() { return { result: "absent" } }
+       export const INCIDENT_POLICY = { emitters: ["workmon"], authorize: true }`,
+    )
+    const verifier = await loadIdentityVerifier(path)
+    const broken = verifier.readIncidentPolicy!()
+    expect(broken.fault).toContain(`incident policy ${path}`)
+    await expect(broken.emittersNow!()).rejects.toThrow(`incident policy ${path}`)
+
+    // The promotion repairs the module at the path the daemon already holds; the daemon does not restart.
+    writeFileSync(
+      path,
+      `export const IDENTITY_VERIFIER_INTERFACE = 1
+       export async function verifyIdentity() { return { result: "absent" } }
+       export const INCIDENT_POLICY = {
+         emitters: ["workmon"],
+         authorize: (identity, emitter) => identity.actor === emitter,
+       }`,
+    )
+    const repaired = verifier.readIncidentPolicy!()
+    expect(await repaired.emittersNow!()).toEqual(["workmon"])
+    expect(
+      await repaired.authorize(
+        { result: "verified", actor: "workmon", kind: "service", sid: "sid" },
+        "workmon",
+        "read",
+      ),
+    ).toBe(true)
+  })
+
+  /** @failure Membership is decided from the emitter list read at boot, so a landing that ADDS an emitter is
+   *          refused before the current module is ever asked.
+   * @level   l2
+   * @consumer The incident refusal path across a promotion (28921 review).
+   */
+  it("adopts an emitter ADDED by a promotion, so membership is never decided from the boot snapshot", async () => {
+    const current = join(dir, "membership-pointer")
+    const write = (landing: string, emitters: readonly string[]) => {
+      mkdirSync(join(dir, landing), { recursive: true })
+      writeFileSync(
+        join(dir, landing, "verifier.ts"),
+        `export const IDENTITY_VERIFIER_INTERFACE = 1
+         export async function verifyIdentity() { return { result: "absent" } }
+         export const INCIDENT_POLICY = {
+           emitters: ${JSON.stringify(emitters)},
+           authorize: (identity, emitter) => identity.actor === emitter,
+         }`,
+      )
+    }
+    write("membership-a", ["longproc-reading"])
+    write("membership-b", ["longproc-reading", "coordination-watch"])
+    symlinkSync(join(dir, "membership-a"), current)
+
+    const verifier = await loadIdentityVerifier(join(current, "verifier.ts"))
+    const policy = verifier.readIncidentPolicy!()
+    expect(policy.emitters).toEqual(["longproc-reading"])
+
+    // The promotion: the pointer moves. The boot snapshot is now stale and must not decide membership.
+    unlinkSync(current)
+    symlinkSync(join(dir, "membership-b"), current)
+
+    expect(await policy.emittersNow!()).toEqual(["longproc-reading", "coordination-watch"])
+    expect(policy.emitters).toEqual(["longproc-reading", "coordination-watch"])
+    expect(
+      await policy.authorize(
+        { result: "verified", actor: "coordination-watch", kind: "service", sid: "sid" },
+        "coordination-watch",
+        "read",
+      ),
+    ).toBe(true)
+  })
+
   /** @failure Broken incident policy stops identity verification or silently grants managed access.
    * @level l1
    * @consumer Managed incident operations and unrelated Tribe traffic (28044 AC1).
@@ -43,25 +123,92 @@ describe("loadIdentityVerifier", () => {
       )
       const verifier = await loadIdentityVerifier(path)
       expect(await verifier.verify("ordinary-token")).toEqual({ result: "absent" })
-      expect(() => verifier.readIncidentPolicy!()).toThrow(`incident policy ${path}`)
+      // 28921 review: the fault is HEALTH data on the accessor and is named on the OPERATION path, so a policy
+      // repaired at the next landing recovers on the next call instead of being refused forever.
+      const loadedPolicy = verifier.readIncidentPolicy!()
+      expect(loadedPolicy.emitters).toEqual([])
+      expect(loadedPolicy.fault).toContain(`incident policy ${path}`)
+      await expect(loadedPolicy.emittersNow!()).rejects.toThrow(`incident policy ${path}`)
     },
   )
 
-  it("refuses changed policy bytes instead of continuing with the previously loaded grant", async () => {
-    const source = `export const IDENTITY_VERIFIER_INTERFACE = 1
-      export async function verifyIdentity() { return { result: "absent" } }
-      export const INCIDENT_POLICY = { emitters: ['longproc-reading'], authorize: () => true }`
-    const path = moduleAt("policy-changed.ts", source)
+  /** @failure The daemon runs the verifier it imported at boot, so a promotion that changes the verifier never
+   *          reaches the next connect without a wire restart — the 28921 defect, and the second undeclared
+   *          dependency ("its argv-named verifier") that made wire's `ag` pin load-bearing.
+   * @level   l2
+   * @consumer The promotion gate: a landing that moves only the verifier must not need a wire relaunch.
+   */
+  it("adopts a changed verifier on the NEXT CALL, through a promotion pointer, with no restart", async () => {
+    const current = join(dir, "pointer")
+    const write = (landing: string, token: string, emitter: string) => {
+      mkdirSync(join(dir, landing), { recursive: true })
+      writeFileSync(
+        join(dir, landing, "verifier.ts"),
+        `export const IDENTITY_VERIFIER_INTERFACE = 1
+         export async function verifyIdentity(token) {
+           return token === ${JSON.stringify(token)}
+             ? { result: "verified", actor: "@dev/7", sid: "sid-${landing}" }
+             : { result: "absent" }
+         }
+         export const INCIDENT_POLICY = { emitters: [${JSON.stringify(emitter)}], authorize: () => true }`,
+      )
+    }
+    write("landing-a", "token-a", "workmon")
+    write("landing-b", "token-b", "longproc-reading")
+    symlinkSync(join(dir, "landing-a"), current)
+
+    const verifier = await loadIdentityVerifier(join(current, "verifier.ts"))
+    expect(await verifier.verify("token-a")).toMatchObject({ result: "verified", sid: "sid-landing-a" })
+    expect(await verifier.verify("token-b")).toEqual({ result: "absent" })
+
+    // The promotion: the pointer moves. The daemon does not restart and nothing re-imports in place.
+    unlinkSync(current)
+    symlinkSync(join(dir, "landing-b"), current)
+
+    expect(await verifier.verify("token-a")).toEqual({ result: "absent" })
+    expect(await verifier.verify("token-b")).toMatchObject({ result: "verified", sid: "sid-landing-b" })
+  })
+
+  /** @failure An authorization decision is served from a copy of the host policy read when the daemon started.
+   * @level   l1
+   * @consumer The daemon's per-operation incident authorization (28044 AC1).
+   */
+  it("decides authorization in the CURRENT module and reports the emitter list it actually used", async () => {
+    const path = moduleAt(
+      "policy-current.ts",
+      `export const IDENTITY_VERIFIER_INTERFACE = 1
+       export async function verifyIdentity() { return { result: "absent" } }
+       export const INCIDENT_POLICY = {
+         emitters: ["longproc-reading"],
+         authorize: (identity, emitter, operation) => identity.actor === emitter && operation === "read",
+       }`,
+    )
     const verifier = await loadIdentityVerifier(path)
+    const policy = verifier.readIncidentPolicy!()
+    expect(policy.emitters).toEqual(["longproc-reading"])
     expect(
-      verifier.readIncidentPolicy!().authorize(
+      await policy.authorize(
         { result: "verified", actor: "longproc-reading", kind: "service", sid: "s" },
         "longproc-reading",
         "read",
       ),
     ).toBe(true)
-    writeFileSync(path, source + "\n// changed policy bytes")
-    expect(() => verifier.readIncidentPolicy!()).toThrow(`incident policy ${path}`)
+    expect(
+      await policy.authorize(
+        { result: "verified", actor: "longproc-reading", kind: "service", sid: "s" },
+        "longproc-reading",
+        "raise",
+      ),
+    ).toBe(false)
+    expect(
+      await policy.authorize({ result: "verified", actor: "someone-else", sid: "s" }, "longproc-reading", "read"),
+    ).toBe(false)
+  })
+
+  it("reports a verifier that cannot even load as a named fault, never as an absent verdict", async () => {
+    const path = join(dir, "not-a-module.ts")
+    writeFileSync(path, "this is not TypeScript at all !!!\n")
+    await expect(loadIdentityVerifier(path)).rejects.toThrow(`--identity-verifier ${path}: failed to load:`)
   })
 
   /** @failure Managed emitter authorization loses the verified service kind.

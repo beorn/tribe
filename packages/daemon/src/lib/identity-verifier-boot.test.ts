@@ -9,7 +9,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process"
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -126,5 +126,59 @@ describe("the daemon's --identity-verifier boot check (25074 3b)", () => {
       authority: { verified: 1, claimed: 0 },
       tokenless_by_launch_refusals: { count: 0, last_at: null, last_launch_id: null },
     })
+  })
+
+  /** @failure The daemon verifies with the landing it booted from, so a promotion that changes the verifier only
+   *          reaches the fleet through a wire relaunch — the 28921 defect, and the second undeclared dependency
+   *          ("its argv-named verifier") that made wire's `ag` pin load-bearing.
+   * @level   l3
+   * @consumer The promotion gate: a landing that moves only the verifier must not need a wire relaunch.
+   */
+  it("adopts the verifier the promotion pointer moved to, on the next registration, with no daemon restart", async () => {
+    const landings = join(dir, "landings")
+    const tokenA = launchToken("sid-dev7", "@dev/7")
+    const tokenB = launchToken("sid-dev9", "@dev/9")
+    const writeLanding = (landing: string, token: string, actor: string, sid: string) => {
+      mkdirSync(join(landings, landing, "tools"), { recursive: true })
+      writeFileSync(
+        join(landings, landing, "tools", "verifier.ts"),
+        `export const IDENTITY_VERIFIER_INTERFACE = 1
+         export async function verifyIdentity(token) {
+           return token === ${JSON.stringify(token)}
+             ? { result: "verified", actor: ${JSON.stringify(actor)}, sid: ${JSON.stringify(sid)}, gen: 1 }
+             : { result: "absent" }
+         }`,
+      )
+    }
+    writeLanding("landing-a", tokenA, "@dev/7", "sid-dev7")
+    writeLanding("landing-b", tokenB, "@dev/9", "sid-dev9")
+    symlinkSync(join(landings, "landing-a"), join(landings, "current"))
+
+    const socketPath = startDaemon(join(landings, "current", "tools", "verifier.ts"))
+    await waitFor(() => existsSync(socketPath) || daemon?.exitCode !== null, "daemon socket")
+    expect(daemon?.exitCode, output).toBeNull()
+    client = await connectToDaemon(socketPath, { callTimeoutMs: 5_000 })
+    const register = (name: string, idToken: string) =>
+      client!.call("register", {
+        name,
+        role: "member",
+        pid: process.pid,
+        project: dir,
+        delivery: "pull",
+        launchParentPid: process.pid,
+        idToken,
+      })
+    // Landing A's verifier answers `absent` for tokenB (and for anything but tokenA): a register it cannot verify
+    // is refused before registration, so the two registers below are themselves the proof of which landing answered.
+    await register("@dev/7", tokenA)
+
+    // The promotion: the pointer moves to a landing whose verifier answers a DIFFERENT token. Same daemon, no restart.
+    unlinkSync(join(landings, "current"))
+    symlinkSync(join(landings, "landing-b"), join(landings, "current"))
+
+    await register("@dev/9", tokenB)
+    // And the landing the pointer LEFT is genuinely no longer the one answering.
+    await expect(register("@dev/11", tokenA), output).rejects.toThrow()
+    expect(daemon?.exitCode, output).toBeNull()
   })
 })

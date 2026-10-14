@@ -50,13 +50,16 @@ export default {
       // 28691 (one-version plan slice 1.1, @cto Q5): the closure-digest skip is RETIRED — wire restarts on EVERY
       // promotion. The digest and the declared-pin comparison are both COMPONENT checks, and the week's two
       // misses were undeclared dependencies (wire's spawned hab, its argv-named verifier), so "the release is
-      // the unit" means restart whenever the running release differs from current. 28921 (@cto c97b1bf3):
-      // identical compared pins coalesce — the owed restart waits up to 2 h for a newer landing to ride, never
-      // skipped — and hab's own pin joins the compared set below as `ag`, the gitlink wire spawns hab from.
+      // the unit" means restart whenever the running release differs from current. 28921 (@cto c97b1bf3,
+      // e87d593d): identical compared pins coalesce — the owed restart waits up to 2 h for a newer landing to
+      // ride, never skipped — and the `ag` pin is GONE. Both undeclared dependencies now resolve at CALL time,
+      // not launch: wire spawns its hab through the HAB_CLI_BIN promotion pointer (28657) and the daemon SPAWNS
+      // its argv-named verifier per call from a pointer (28921), so ag's bytes never enter this process and an
+      // ag-only promotion needs no restart here.
       // 27422: bearly and loggily load in process; the sdk escapes are install bytes the /3 install scope covers.
       landingMigration: {
         mechanism: "restart-at-promotion" as const,
-        additionalComponents: ["vendor/bearly", "vendor/loggily", "ag"] as const,
+        additionalComponents: ["vendor/bearly", "vendor/loggily"] as const,
       },
     },
   },

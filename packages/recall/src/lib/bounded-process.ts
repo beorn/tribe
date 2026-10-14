@@ -25,6 +25,22 @@ export type BoundedProcessBounds = {
   readonly maxOutputBytes: number
 }
 
+export type BoundedProcessInput = {
+  /**
+   * One payload handed to the child on stdin, then closed. Absent keeps every argv-only caller exactly as it was
+   * (`stdin: "ignore"`). A caller that must pass a value the process table must never show -- an identity token --
+   * writes it here, never in argv.
+   */
+  readonly stdin?: string
+  /**
+   * The child's environment. MEASURED 2026-10-14: `Bun.spawn` without this hands over the environment this process
+   * STARTED with, not its current `process.env` — a variable set after start reaches the parent and not the child
+   * (28921's spawned verifier read a stale habitat name because of it). Pass `{ ...process.env }` when the child must
+   * see what the parent sees now.
+   */
+  readonly env?: Readonly<Record<string, string | undefined>>
+}
+
 export type BoundedProcessCommandFailure =
   | {
       readonly kind: "spawn-failed"
@@ -92,13 +108,18 @@ function validateRequest(argv: readonly string[], bounds: BoundedProcessBounds):
   positiveInteger(bounds.maxOutputBytes, "maxOutputBytes")
 }
 
-function spawnPiped(argv: readonly string[]) {
+function spawnPiped(
+  argv: readonly string[],
+  stdin: "ignore" | "pipe",
+  env: Readonly<Record<string, string | undefined>> | undefined,
+) {
   try {
     return Bun.spawn([...argv], {
       detached: true,
-      stdin: "ignore",
+      stdin,
       stdout: "pipe",
       stderr: "pipe",
+      ...(env === undefined ? {} : { env }),
     })
   } catch (error) {
     throw new BoundedProcessCommandError({
@@ -179,12 +200,26 @@ function isPosixProcessGroupPlatform(): boolean {
 export async function runBoundedProcessCommand(
   argv: readonly string[],
   bounds: BoundedProcessBounds,
+  input: BoundedProcessInput = {},
 ): Promise<BoundedProcessCommandResult> {
   validateRequest(argv, bounds)
-  const child = spawnPiped(argv)
+  const child = spawnPiped(argv, input.stdin === undefined ? "ignore" : "pipe", input.env)
   const label = commandLabel(argv)
   const settlementFailures: string[] = []
   let usedSigkill = false
+  if (input.stdin !== undefined && child.stdin !== undefined) {
+    // Closed, never awaited: a child that stops reading must be settled by the bounds below, not by this write.
+    try {
+      void child.stdin.write(input.stdin)
+      void child.stdin.end()
+    } catch (error: unknown) {
+      settlementFailures.push(
+        "stdin payload was not delivered (" +
+          describeError(error) +
+          "); the child may have read a partial request or none",
+      )
+    }
+  }
 
   const signalTree = (signal: "SIGKILL" | "SIGTERM"): void => {
     let groupReached = false

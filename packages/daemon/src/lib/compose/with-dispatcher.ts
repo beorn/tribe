@@ -1228,6 +1228,12 @@ export function withDispatcher<
               throw new Error(`incident policy ${verifier?.path ?? "(no verifier)"}: required export unavailable`)
             }
             const policy = verifier.readIncidentPolicy()
+            // A fault seen WHEN THE POLICY WAS READ is health data only (28921 review): the incident path re-reads
+            // the current module per call, so this line names a snapshot rather than gating any operation.
+            if (policy.fault !== undefined) {
+              // The fault already names the path (identity-verifier.ts policyFaultOf), so it is thrown verbatim.
+              throw new Error(policy.fault)
+            }
             const absent = required.filter((emitter) => !policy.emitters.includes(emitter))
             if (absent.length > 0) {
               throw new Error(`incident policy ${verifier.path}: missing required emitters ${absent.join(", ")}`)
@@ -2580,12 +2586,17 @@ export function withDispatcher<
                 } catch (error) {
                   return refuseIncident(error instanceof Error ? error.message : String(error))
                 }
-                if (!policy.emitters.includes(emitter)) {
-                  return refuseIncident("emitter is not managed by this host policy")
-                }
                 const operation = emitterRead ? "read" : incident?.active === false ? "clear" : "raise"
                 try {
-                  const allowed = policy.authorize(current.verdict, emitter, operation)
+                  // Membership is decided by the CURRENT module, never by the boot snapshot (28921 review): a
+                  // promotion that ADDS an emitter must be adopted, so the snapshot is only a fast path.
+                  const managed = policy.emitters.includes(emitter)
+                    ? true
+                    : policy.emittersNow === undefined
+                      ? false
+                      : (await policy.emittersNow()).includes(emitter)
+                  if (!managed) return refuseIncident("emitter is not managed by this host policy")
+                  const allowed = await policy.authorize(current.verdict, emitter, operation)
                   if (allowed !== true) return refuseIncident("verified identity is not authorized for this emitter")
                   incidentAuthorization = { emitter, operation }
                 } catch (error) {
@@ -2611,9 +2622,6 @@ export function withDispatcher<
               } catch (error) {
                 return refuseIncident(error instanceof Error ? error.message : String(error))
               }
-              if (!policy.emitters.includes(emitter)) {
-                return refuseIncident("emitter is not managed by this host policy")
-              }
               const authority = db
                 .prepare("SELECT verified_id_token FROM sessions WHERE id = ?")
                 .get(ctx.sessionId) as { verified_id_token: string | null } | null
@@ -2621,7 +2629,14 @@ export function withDispatcher<
               if (!("verdict" in current)) return refuseIncident(current.errorMessage)
               const operation = emitterRead ? "read" : incident?.active === false ? "clear" : "raise"
               try {
-                const allowed = policy.authorize(current.verdict, emitter, operation)
+                // Membership is decided by the CURRENT module, never by the boot snapshot (28921 review).
+                const managed = policy.emitters.includes(emitter)
+                  ? true
+                  : policy.emittersNow === undefined
+                    ? false
+                    : (await policy.emittersNow()).includes(emitter)
+                if (!managed) return refuseIncident("emitter is not managed by this host policy")
+                const allowed = await policy.authorize(current.verdict, emitter, operation)
                 if (allowed !== true) return refuseIncident("verified identity is not authorized for this emitter")
                 incidentAuthorization = { emitter, operation }
               } catch (error) {

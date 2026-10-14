@@ -1,9 +1,10 @@
 /**
  * The identity-verifier seam (25074 3b, @cto 4a194bbf). Tribe declares the contract and never verifies a token
  * itself: the composing layer names a module on the daemon's launch line (`--identity-verifier <absolute path>`),
- * and the daemon loads it once at boot. The module exports `IDENTITY_VERIFIER_INTERFACE = 1` and
- * `verifyIdentity(token)`; a missing file, a wrong interface number or a missing function refuses startup naming
- * the path. With no flag the daemon serves sessions on their claimed name only, and a one-shot caller that needs its
+ * and the daemon SPAWNS it per call from its own runner (28921, @cto e87d593d) rather than importing it, so the
+ * named path may be a promotion pointer the daemon follows without a restart. The module exports
+ * `IDENTITY_VERIFIER_INTERFACE = 1` and `verifyIdentity(token)`; a missing file, a wrong interface number or a
+ * missing function refuses startup naming the path. With no flag the daemon serves sessions on their claimed name only, and a one-shot caller that needs its
  * own session is refused by name (25074 3d-3: the launcher-minted bearer is gone).
  * With the flag, an explicit `@` persona with no token, a syntactically malformed token, or an absent verifier verdict
  * is refused before registration (26524). Bare and unnamed joins remain claimed; a verifier's unreadable verdict for
@@ -14,10 +15,16 @@
  * name.
  */
 
-import { isAbsolute } from "node:path"
-import { accessSync, constants, existsSync, statSync } from "node:fs"
+import { isAbsolute, join } from "node:path"
+import { existsSync } from "node:fs"
+import { createLogger } from "loggily"
+import { runBoundedProcessCommand, type BoundedProcessCommandResult } from "../../../recall/src/lib/bounded-process.ts"
+
+const log = createLogger("tribe:identity-verifier")
 
 export const IDENTITY_VERIFIER_INTERFACE_VERSION = 1
+/** The one marker a verifier child puts on its stderr, so the parent can tell a NAMED reason from a harness fault. */
+export const CHILD_STDERR_MARKER = "identity-verifier-child: "
 
 /**
  * `gen` (25074 3c-2a, @cto aa2918fd) is optional and additive on interface 1: the token's instance generation. With it a
@@ -46,11 +53,27 @@ export type IdentityVerifier = (token: string) => Promise<IdentityVerdict>
 export type IncidentOperation = "read" | "raise" | "clear"
 export type IncidentPolicy = {
   readonly emitters: readonly string[]
+  /**
+   * A policy fault seen WHEN THIS POLICY WAS READ, carried as HEALTH data only (28921 review). It never gates an
+   * operation: the incident path re-reads the CURRENT module per call and reports whatever fault that module has
+   * NOW, so a policy broken at boot and repaired at the next landing recovers without a restart.
+   */
+  readonly fault?: string
+  /**
+   * The CURRENT module's emitters, evaluated per call (28921 review). `emitters` above is a snapshot and may only
+   * feed a sync health getter; a membership REFUSAL must not be decided from it, or a promotion that ADDS an
+   * emitter would be refused from stale bytes. Absent on an in-process policy, where the snapshot cannot be stale.
+   */
+  readonly emittersNow?: () => Promise<readonly string[]>
+  /**
+   * Whether this identity may act on this emitter. A module that authorizes in its own process (28921) answers with a
+   * promise; a composing layer that still holds the policy in process answers with a boolean. Callers await it.
+   */
   readonly authorize: (
     identity: Extract<IdentityVerdict, { result: "verified" }>,
     emitter: string,
     operation: IncidentOperation,
-  ) => boolean
+  ) => boolean | Promise<boolean>
 }
 
 export interface LoadedIdentityVerifier {
@@ -210,13 +233,26 @@ export function displacementRule(holder: SessionAuthority, claimant: SessionAuth
   return "allowed"
 }
 
-/** Refuses loudly, naming the path, for every way the named module can fail the contract. */
-export async function loadIdentityVerifier(path: string): Promise<LoadedIdentityVerifier> {
+/** What the process that IMPORTS the composing module hands back (28921): the module itself is never in this one. */
+export interface LoadedVerifierModule {
+  readonly path: string
+  readonly verify: IdentityVerifier
+  readonly suppliesGen: boolean
+  readonly readIncidentPolicy: () => IncidentPolicy
+}
+
+/**
+ * The module-side contract, checked WHERE THE MODULE LOADS (28921, @cto e87d593d): the spawned child runs this, so
+ * every way a composing module can fail the contract is refused by name in the process that actually saw it, and the
+ * daemon's own process holds none of the module's bytes.
+ *
+ * The "module changed since load" check is gone with the in-process import it guarded: a module imported by a fresh
+ * process on every call cannot be stale, so there is nothing left to compare against a boot-time stat.
+ */
+export async function loadVerifierModule(path: string): Promise<LoadedVerifierModule> {
   const refuse = (why: string): never => {
-    throw new Error(`--identity-verifier ${path}: ${why}`)
+    throw new Error(why)
   }
-  if (!isAbsolute(path)) refuse("must be an absolute path")
-  if (!existsSync(path)) refuse("does not exist")
   let module: Record<string, unknown>
   try {
     module = (await import(path)) as Record<string, unknown>
@@ -235,23 +271,9 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
   if (suppliesGen !== undefined && typeof suppliesGen !== "boolean") {
     refuse(`exports IDENTITY_VERIFIER_SUPPLIES_GEN ${JSON.stringify(suppliesGen)}, not a boolean`)
   }
-  const loadedStat = statSync(path)
   const readIncidentPolicy = (): IncidentPolicy => {
     const fail = (reason: string): never => {
       throw new Error(`incident policy ${path}: ${reason}`)
-    }
-    try {
-      accessSync(path, constants.R_OK)
-      const current = statSync(path)
-      if (
-        current.ino !== loadedStat.ino ||
-        current.mtimeMs !== loadedStat.mtimeMs ||
-        current.size !== loadedStat.size
-      ) {
-        fail("module changed since load; adopt the current module through the daemon's supervisor")
-      }
-    } catch (error) {
-      return fail(error instanceof Error ? error.message : String(error))
     }
     const policy = module.INCIDENT_POLICY as Partial<IncidentPolicy> | null | undefined
     if (
@@ -273,6 +295,211 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
     verify: async (token) => checkedVerdict(await (verify as (token: string) => unknown)(token), path),
     suppliesGen: suppliesGen === true,
     readIncidentPolicy,
+  }
+}
+
+/**
+ * The daemon side of the seam (28921, @cto e87d593d): the composing module is SPAWNED per call, never imported.
+ *
+ * Why: imported in process, the verifier was pinned to the daemon's own landing, so a promotion that changed it was
+ * invisible to the controller — the restart was skipped as equivalent and the fleet verified against abandoned code.
+ * It is also the SECOND undeclared dependency the 28691 comment names ("its argv-named verifier"), which is why
+ * wire's `ag` pin was load-bearing: importing the module imported ag. Spawning it per call is the 28657 shape the
+ * per-call `hab` lookup already uses — resolution happens when the call is made, so the named path may be a promotion
+ * pointer and the daemon still follows it without a restart.
+ *
+ * The runner is Tribe's own code, inside the daemon's digest; only the composing module leaves this process.
+ */
+const CHILD_TIMEOUT_MS = 6_000
+const CHILD_KILL_GRACE_MS = 500
+const CHILD_REAP_GRACE_MS = 1_000
+const CHILD_DRAIN_GRACE_MS = 500
+const CHILD_MAX_OUTPUT_BYTES = 64 * 1024
+
+export type VerifierChildRequest =
+  | { readonly op: "hello" }
+  | { readonly op: "verify"; readonly token: string }
+  | {
+      readonly op: "authorize"
+      readonly identity: Extract<IdentityVerdict, { result: "verified" }>
+      readonly emitter: string
+      readonly operation: IncidentOperation
+    }
+
+type HelloAnswer = {
+  readonly interface?: unknown
+  readonly suppliesGen?: unknown
+  readonly emitters?: unknown
+  readonly policyFault?: unknown
+}
+type AuthorizeAnswer = { readonly allow?: unknown; readonly emitters?: unknown }
+
+/** Exactly one JSON value on stdout, or undefined: a chatty or truncated child is a fault, never a verdict. */
+function exactlyOneJsonValue(stdout: string): unknown | undefined {
+  const trimmed = stdout.trim()
+  if (trimmed === "") return undefined
+  try {
+    return JSON.parse(trimmed) as unknown
+  } catch {
+    // Not a verdict, and never a default: verifierChild refuses this loudly by name ("answered no readable JSON
+    // on stdout"), so nobody reads undefined as a decision here.
+    return undefined // silent-fallback-allow: the caller refuses it by name; this is "no verdict", not a fallback value
+  }
+}
+
+function firstStderrLine(stderr: string): string {
+  const line = stderr.split("\n").find((candidate) => candidate.trim() !== "")
+  return line === undefined ? "(no stderr)" : line.trim()
+}
+
+function childEmitters(answer: { readonly emitters?: unknown }): readonly string[] | null {
+  const emitters = answer.emitters
+  if (!Array.isArray(emitters) || emitters.length === 0) return null
+  const named = emitters.filter((emitter): emitter is string => typeof emitter === "string" && emitter !== "")
+  return named.length === emitters.length ? named : null
+}
+
+/**
+ * The fault a policy answer NAMES, or an unusable policy, ALWAYS naming the path; null when the policy is usable
+ * (28921 review). The message is used verbatim by whichever operation reads the current module, so it is not
+ * re-prefixed — the path appears exactly once.
+ */
+function policyFaultOf(
+  answer: { readonly emitters?: unknown; readonly policyFault?: unknown },
+  path: string,
+): string | null {
+  if (typeof answer.policyFault === "string" && answer.policyFault !== "") return answer.policyFault
+  return childEmitters(answer) === null
+    ? `incident policy ${path}: the module declares no usable INCIDENT_POLICY`
+    : null
+}
+
+/** One bounded, captured child call. The request travels on stdin so a token never reaches the process table. */
+async function verifierChild(path: string, request: VerifierChildRequest): Promise<unknown> {
+  if (process.versions.bun === undefined) {
+    throw new Error(
+      `cannot spawn a verifier child: this daemon is not running under bun (execPath ${process.execPath})`,
+    )
+  }
+  const runner = join(import.meta.dirname, "identity-verifier-child.ts")
+  let result: BoundedProcessCommandResult
+  try {
+    result = await runBoundedProcessCommand(
+      [process.execPath, runner, "--module", path],
+      {
+        timeoutMs: CHILD_TIMEOUT_MS,
+        killGraceMs: CHILD_KILL_GRACE_MS,
+        reapGraceMs: CHILD_REAP_GRACE_MS,
+        drainGraceMs: CHILD_DRAIN_GRACE_MS,
+        maxOutputBytes: CHILD_MAX_OUTPUT_BYTES,
+      },
+      // The composing module reads its habitat from the process environment (HAB_SESSION_HABITAT_ROOT/NAME), exactly
+      // as it did while it was imported, and Bun.spawn only carries the environment this process started with unless
+      // it is handed one (measured 2026-10-14). So the child gets the daemon's CURRENT environment.
+      { stdin: JSON.stringify(request), env: { ...process.env } },
+    )
+  } catch (error) {
+    throw new Error(`its child did not settle: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (result.exitCode !== 0) {
+    const named = firstStderrLine(result.stderr)
+    // A reason the child NAMED is reported verbatim: the operator-visible line for a module that breaks the contract
+    // stays exactly what it was when the module was imported (`--identity-verifier <path>: <reason>`).
+    const reason = named.startsWith(CHILD_STDERR_MARKER) ? named.slice(CHILD_STDERR_MARKER.length) : null
+    throw new Error(reason ?? `its child exited ${result.exitCode}: ${named}`)
+  }
+  const answer = exactlyOneJsonValue(result.stdout)
+  if (answer === undefined) {
+    throw new Error(`its child answered no readable JSON on stdout (${result.stdout.trim().slice(0, 120) || "empty"})`)
+  }
+  return answer
+}
+
+/** Refuses loudly, naming the path, for every way the named verifier can fail: the hello probe IS the boot check. */
+export async function loadIdentityVerifier(path: string): Promise<LoadedIdentityVerifier> {
+  function refuse(why: string): never {
+    throw new Error(`--identity-verifier ${path}: ${why}`)
+  }
+  if (!isAbsolute(path)) refuse("must be an absolute path")
+  if (!existsSync(path)) refuse("does not exist")
+  let hello: HelloAnswer
+  try {
+    hello = (await verifierChild(path, { op: "hello" })) as HelloAnswer
+  } catch (error) {
+    return refuse(error instanceof Error ? error.message : String(error))
+  }
+  if (hello.interface !== IDENTITY_VERIFIER_INTERFACE_VERSION) {
+    refuse(
+      `answers interface ${JSON.stringify(hello.interface)}, this daemon speaks ${IDENTITY_VERIFIER_INTERFACE_VERSION}`,
+    )
+  }
+  const bootEmitters = childEmitters(hello)
+  // A broken incident policy is NOT a boot refusal: identity verification stays available and the policy fault is
+  // named where it is used (28044 AC1). The child reported it in the same hello.
+  const bootPolicyFault = policyFaultOf(hello, path)
+  // The emitter LIST is cached data (it feeds a sync health getter); an authorize VERDICT is always evaluated in a
+  // fresh child, so no authorization is ever decided from cached bytes. Both are refreshed by ANY successful fresh
+  // call, and the fault clears with them, so a repaired policy stops being reported as broken (28921 review).
+  let emitters = bootEmitters ?? []
+  let policyFault = bootPolicyFault
+  const call = async (request: VerifierChildRequest): Promise<unknown> => {
+    try {
+      return await verifierChild(path, request)
+    } catch (error) {
+      throw new Error(`identity verifier ${path}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return {
+    path,
+    suppliesGen: hello.suppliesGen === true,
+    verify: async (token) => checkedVerdict(await call({ op: "verify", token }), path),
+    readIncidentPolicy: (): IncidentPolicy => {
+      // Never throws (28921 review): a boot-time fault is carried as health data, and the operation path re-reads
+      // the CURRENT module, so a repaired policy is adopted on the next call instead of refused forever.
+      return {
+        // Getters, not copied values: a caller that holds this policy across calls sees what the LAST fresh child
+        // reported, never the boot snapshot (28921 review).
+        get emitters() {
+          return emitters
+        },
+        get fault() {
+          return policyFault ?? undefined
+        },
+        emittersNow: async (): Promise<readonly string[]> => {
+          let answer: HelloAnswer
+          try {
+            answer = (await verifierChild(path, { op: "hello" })) as HelloAnswer
+          } catch (error) {
+            throw new Error(`incident policy ${path}: ${error instanceof Error ? error.message : String(error)}`)
+          }
+          const reported = childEmitters(answer)
+          const fault = policyFaultOf(answer, path)
+          // The message already names the path (policyFaultOf guarantees it), so it is thrown verbatim.
+          if (fault !== null || reported === null) throw new Error(fault ?? `incident policy ${path}`)
+          emitters = reported
+          policyFault = null
+          return reported
+        },
+        authorize: async (identity, emitter: string, operation: IncidentOperation): Promise<boolean> => {
+          const answer = (await call({ op: "authorize", identity, emitter, operation })) as AuthorizeAnswer
+          const reported = childEmitters(answer)
+          if (
+            reported !== null &&
+            (reported.length !== emitters.length || reported.some((n, i) => n !== emitters[i]))
+          ) {
+            log.warn?.(
+              `identity verifier ${path}: its incident policy now names ${reported.join(", ")} where this daemon ` +
+                `cached ${emitters.join(", ")} at boot; this verdict came from the current module, and the health ` +
+                `line's membership check follows at the next daemon start`,
+            )
+            emitters = reported
+          }
+          // A fresh verdict proves the CURRENT policy is usable, so a boot-time fault must stop being reported.
+          policyFault = null
+          return answer.allow === true
+        },
+      }
+    },
   }
 }
 
