@@ -25,6 +25,13 @@ export default {
       // unwired for hours and nothing could see that. Belt-and-braces: the daemon also defaults
       // to `never` on its own whenever HAB_SERVICE_NAME is present and no explicit knob is set.
       command: "bun vendor/tribe/packages/daemon/src/daemon.ts --idle-quit-after never",
+      // 29271 (@cto b118aa8e): wire owns its structured log at the daemon's date-stamped activity stream. The
+      // directory is the one the daemon's own writer derives (`activityLogDir`, wire/src/activity-log-contract.ts:
+      // `<HOME>/.local/share/tribe`), written here as the same `$HOME` reference rather than that module's code: a
+      // Hab config module is PURE and may not import executable code or read the ambient process. The `*` keeps a plan
+      // evaluated today from freezing on today's file, and `hab log wire` resolves the newest match by mtime. The
+      // daemon's own `TRIBE_ACTIVITY_LOG=<path>|off` override is a test/dev escape and is not reflected here.
+      log: "$HOME/.local/share/tribe/activity-*.jsonl",
       env: {
         TRIBE_DELIVERY_FALLBACKS:
           '[{"name":"@fleet","to":"@chief","action":"refuse"},{"name":"@ci","to":"@chief"},{"name":"@yrd","to":"@chief","action":"refuse"},{"name":"@fable/0","to":"@chief","action":"refuse"},{"name":"@fable/1","to":"@chief","action":"refuse"}]',
