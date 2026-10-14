@@ -81,4 +81,36 @@ describe("stdio bridge reconnect watchdog", () => {
     expect(onStuck).not.toHaveBeenCalled()
     ac.abort()
   })
+
+  it("keeps the armed window while shouldFire is false, then fires once it lifts (29162 #4)", async () => {
+    vi.useFakeTimers()
+    const ac = new AbortController()
+    const probeDaemon = vi.fn(async () => true)
+    const onStuck = vi.fn()
+    let suppressed = true
+    const watchdog = createReconnectWatchdog({
+      timers: createTimers(ac.signal),
+      thresholdMs: 60_000,
+      retryMs: 5_000,
+      now: () => Date.now(),
+      probeDaemon,
+      shouldFire: () => !suppressed,
+      onStuck,
+    })
+
+    watchdog.markReconnecting()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(probeDaemon).toHaveBeenCalledTimes(1)
+    expect(onStuck).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(probeDaemon).toHaveBeenCalledTimes(2)
+    expect(onStuck).not.toHaveBeenCalled()
+
+    suppressed = false
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(onStuck).toHaveBeenCalledOnce()
+    expect(onStuck).toHaveBeenCalledWith(expect.objectContaining({ reconnectingMs: 70_000 }))
+    ac.abort()
+  })
 })

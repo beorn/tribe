@@ -13,6 +13,15 @@ export function createReconnectWatchdog(opts: {
   retryMs: number
   now: () => number
   probeDaemon: () => Promise<boolean>
+  /**
+   * 29162 — an optional gate consulted only at the moment a fire is due, after a
+   * fresh probe has already succeeded. When it returns false the fire is deferred
+   * and the armed window is KEPT (the watchdog re-probes after retryMs) rather than
+   * consumed: a decision that a replacement must wait (e.g. a daemon generation
+   * change is in flight and its own paced re-exec owns the reconnect) must not burn
+   * the last armed window, which is what left seats dark at 17:01:15.
+   */
+  shouldFire?: () => boolean
   onStuck: (evidence: { reconnectingMs: number }) => void
 }): ReconnectWatchdog {
   const thresholdMs = Math.max(0, opts.thresholdMs)
@@ -52,6 +61,12 @@ export function createReconnectWatchdog(opts: {
     }
     if (reconnectingSince !== startedAt) return
     if (!daemonAnswersFreshConnections) {
+      schedule(retryMs)
+      return
+    }
+
+    // 29162 (#4): defer without consuming — stay armed and re-check after retryMs.
+    if (opts.shouldFire !== undefined && !opts.shouldFire()) {
       schedule(retryMs)
       return
     }

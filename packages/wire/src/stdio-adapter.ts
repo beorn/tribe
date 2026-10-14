@@ -649,8 +649,18 @@ function requestPluginReexec(reason: string, supervisedExitCode = supervisedReex
   process.exit()
 }
 
+/**
+ * 29162 (#4) — true while a daemon generation change owns the reconnect. The
+ * reconnect watchdog must not fire during it: a generation change restarts the
+ * daemon, every transport is dropped in that window, and the paced re-exec is the
+ * path that must resolve it. The single watchdog fire at 17:01:15, mid-restart,
+ * burned the last armed window and left the seat dark.
+ */
+let generationChangeInFlight = false
+
 function handleDaemonGenerationChange(reason: string): void {
   if (supervisedReexecExitCode(2) !== null) {
+    generationChangeInFlight = true
     requestPacedReexec(reason, () => supervisedReexecExitCode(2))
     return
   }
@@ -758,6 +768,7 @@ function requestPacedReexec(reason: string, supervisedExitCode: () => number | n
     )
     .finally(() => {
       pacedReexecPending = false
+      generationChangeInFlight = false
     })
 }
 
@@ -778,14 +789,19 @@ const reconnectWatchdog = createReconnectWatchdog({
       probe?.close()
     }
   },
+  // 29162 (#4) — a generation change owns the reconnect; do not consume the armed window.
+  shouldFire: () => !generationChangeInFlight,
   onStuck({ reconnectingMs }) {
     if (protocolMismatchReason !== null) {
       reportProtocolVersion(`${protocolMismatchReason}; retrying without host re-exec`)
       return
     }
-    requestPluginReexec(
-      `primary transport remained reconnecting for ${reconnectingMs}ms while the daemon answered a fresh connection`,
-    )
+    const reason = `primary transport remained reconnecting for ${reconnectingMs}ms while the daemon answered a fresh connection`
+    // 29162 (#1) — repair in place first; only a fresh connection that ALSO fails
+    // returns the seat to the host, which may not respawn it (the dark-seat cause).
+    void repairPrimaryInPlace().then((repaired) => {
+      if (!repaired) requestPluginReexec(reason)
+    })
   },
 })
 
@@ -1021,6 +1037,39 @@ async function recoverDaemonIfDegraded(): Promise<void> {
 
 daemonReady = startDaemonConnection()
 armDegradeNotice(daemonReady)
+
+/**
+ * 29162 (#1) — repair the primary transport IN PLACE instead of exiting.
+ *
+ * At onStuck the watchdog has just proven a FRESH probe succeeds while this
+ * adapter primary has been reconnecting for the whole armed window. That gap is
+ * "reachable socket vs accepted registration": only a successful onConnect —
+ * whose last step is the register call — clears the watchdog, while the probe
+ * only connects and asks cli_daemon. So the primary cycle is wedged even though
+ * the daemon is registerable, and a NEW connection escapes it.
+ *
+ * We therefore retire the wedged client and adopt a freshly connected+registered
+ * one as the primary, bounded by that client own initial connect budget (no new
+ * budget, no new surface, and the exit path below is unchanged). Exit 75 is only
+ * requested if the fresh connection itself fails.
+ */
+let inPlaceRepair: Promise<boolean> | null = null
+function repairPrimaryInPlace(): Promise<boolean> {
+  if (inPlaceRepair !== null) return inPlaceRepair
+  const previous = daemon
+  daemon = undefined
+  previous?.close()
+  const attempt = startDaemonConnection()
+  armDegradeNotice(attempt)
+  daemonReady = attempt
+  inPlaceRepair = attempt
+    .then(() => true)
+    .catch(() => false)
+    .finally(() => {
+      inPlaceRepair = null
+    })
+  return inPlaceRepair
+}
 
 // ---------------------------------------------------------------------------
 // MCP Server
