@@ -145,7 +145,14 @@ describe("membership projection: declared-roster membership is a function of a p
       const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
         membership_discrepancy?: Record<string, unknown>
         finished_launches?: unknown
+        headline?: unknown
       }
+      // 29162 — the top-level headline names the missing seat by count and by
+      // name, so a reader of `sessions` (connected rows only) cannot mistake
+      // this reply for an all-clear.
+      expect(members.headline).toBe(
+        "tribe members: 1 MISSING (no transport) — 0/1 expected seats connected; missing: @agent/restart-always",
+      )
       expect(members.membership_discrepancy).toEqual({
         status: "degraded",
         connected_durable_launches: 0,

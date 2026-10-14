@@ -819,6 +819,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               "Present when known durable launches have no transport: missing-transport, never agent absence. With a declared roster, also expected, dormant and departed counts.",
             additionalProperties: true,
           },
+          headline: {
+            type: "string",
+            description:
+              "Present alongside membership_discrepancy: names the missing seat count and names, because sessions lists only connected rows (29162).",
+          },
           finished_launches: {
             type: "array",
             description: "Durable launches whose journaled departure was the last thing that happened to them.",

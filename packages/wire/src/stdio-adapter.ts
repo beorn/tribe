@@ -772,9 +772,20 @@ function requestPacedReexec(reason: string, supervisedExitCode: () => number | n
     })
 }
 
+/**
+ * 29162 — the reconnect watchdog's threshold, with a test seam. The shipped
+ * value is 60s; a test that must WITNESS the fire (not wait a minute for it)
+ * overrides it, exactly as TRIBE_CHANNEL_REPLAY_* and TRIBE_DAEMON_CALL_TIMEOUT
+ * are already overridable. An unset/nonsensical value keeps the shipped 60s.
+ */
+function reconnectWatchdogThresholdMs(): number {
+  const raw = Number(process.env.TRIBE_RECONNECT_WATCHDOG_MS)
+  return Number.isFinite(raw) && raw > 0 ? raw : 60_000
+}
+
 const reconnectWatchdog = createReconnectWatchdog({
   timers,
-  thresholdMs: 60_000,
+  thresholdMs: reconnectWatchdogThresholdMs(),
   retryMs: 5_000,
   now: () => Date.now(),
   async probeDaemon() {
@@ -801,6 +812,7 @@ const reconnectWatchdog = createReconnectWatchdog({
     // returns the seat to the host, which may not respawn it (the dark-seat cause).
     void repairPrimaryInPlace().then((repaired) => {
       if (!repaired) requestPluginReexec(reason)
+      return repaired
     })
   },
 })

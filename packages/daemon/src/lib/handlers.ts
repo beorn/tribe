@@ -3397,6 +3397,23 @@ export function projectSessionRowTransport(
   return { active, transportPids, agentPid, evidence }
 }
 
+/**
+ * 29162 — the `tribe members` headline. The reply's `sessions` array lists only
+ * CONNECTED rows, so on 2026-10-13 eight seats with no transport sat invisible
+ * beside it: a reader counted the connected rows and concluded "0 NOT connected"
+ * while `membership_discrepancy.missing` held eight names. Whenever durable
+ * launches have no transport, the reply must SAY SO at the top — by count and by
+ * name — so the missing seats are not a detail only a careful reader finds.
+ */
+function membersDiscrepancyHeadline(d: MembershipDiscrepancy): string {
+  const scope =
+    d.expected_count === undefined
+      ? `${d.connected_durable_launches}/${d.known_durable_launches} known launches connected`
+      : `${d.connected_expected_count ?? d.connected_durable_launches}/${d.expected_count} expected seats connected`
+  const names = d.missing.map((row) => row.name).join(", ")
+  return `tribe members: ${d.missing_count} MISSING (no transport) — ${scope}; missing: ${names}`
+}
+
 function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
   // Membership is sourced from the `room_members` table (Matrix-shape, see
   // km-tribe.matrix-shape). Today every project has exactly one default room
@@ -3535,7 +3552,13 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       : [...new Set(rows.filter((row) => activeIds.has(row.id) && !roster.byName.has(row.name)).map((row) => row.name))]
   return jsonResult({
     sessions,
-    ...(membership.discrepancy === undefined ? {} : { membership_discrepancy: membership.discrepancy }),
+    ...(membership.discrepancy === undefined
+      ? {}
+      : {
+          // 29162 — name the missing seats up front; the sessions list above carries only connected rows.
+          headline: membersDiscrepancyHeadline(membership.discrepancy),
+          membership_discrepancy: membership.discrepancy,
+        }),
     // History, not alarm: a finished launch never sets membership_discrepancy
     // on its own, but stays visible here so a seat's past is not erased along
     // with its old "degraded" noise (@ag/tribe/tribe-membership-projection-

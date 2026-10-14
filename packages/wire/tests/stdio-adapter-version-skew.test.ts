@@ -800,6 +800,62 @@ describe("stdio adapter — protocol version skew", () => {
     expect(generationDaemon.registrations).toEqual([1001, 2002])
   }, 60_000)
 
+  // 29162 #1 (RED row i): the daemon socket disappears and returns; the primary
+  // reconnect's register is DROPPED (the wedge) while a fresh probe still
+  // succeeds. The adapter must repair the primary IN PLACE — re-register on a
+  // fresh connection — and must NOT exit for a host respawn (which, when the
+  // host does not replace it, is the permanent-dark failure this bead removes).
+  it("repairs a wedged primary in place and re-registers without exiting (29162 #1)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const logPath = join(tmpDir, "wedge-repair.log")
+    const generationDaemon = await spawnGenerationDaemon(socketPath)
+    daemon = generationDaemon
+    // Spawned as the RAW adapter (no supervisor): a pre-fix re-exec has no
+    // replacement host, so it exits and never re-registers — the exact dark-seat
+    // shape. The env clears the supervised re-exec code, so a pre-fix fire takes
+    // the un-supervised branch (stderr line + exit 2) instead of ceding to a host.
+    child = captureStderr(
+      spawn(BUN_BIN, [STDIO_ADAPTER, "--socket", socketPath, "--name", "generation-test"], {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          ...STANDALONE_PLUGIN_ENV,
+          TRIBE_DELIVERY: "pull",
+          DEBUG_LOG: logPath,
+          LOG_LEVEL: "debug",
+          // Fire the watchdog in ~1s, not 60s — and below the register call's 10s
+          // timeout, so the primary is still wedged on its held register when it fires.
+          TRIBE_RECONNECT_WATCHDOG_MS: "1000",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      }) as ChildProcessWithoutNullStreams,
+    )
+
+    await waitForRegistrations(child, () => generationDaemon.registrations.length, 1, 15_000, "initial registration")
+
+    // The socket disappears and returns, and the reconnect's register is dropped:
+    // the primary now sits "reconnecting" while the probe (cli_daemon on a fresh
+    // connection) still succeeds — the reachable-socket / un-accepted-registration gap.
+    generationDaemon.holdNextMethod("register")
+    for (const socket of generationDaemon.clients.splice(0)) socket.destroy()
+
+    // The adapter must recover by re-registering on a fresh connection (a 2nd
+    // registration the daemon answers), never by exiting. Pre-fix the watchdog
+    // fired requestPluginReexec here and the adapter exited without re-registering.
+    await waitForRegistrations(
+      child,
+      () => generationDaemon.registrations.length,
+      2,
+      25_000,
+      "in-place re-registration after the wedged reconnect",
+      logPath,
+    )
+    expect(child.exitCode).toBeNull()
+    const log = existsSync(logPath) ? readFileSync(logPath, "utf8") : ""
+    expect(log).not.toContain("requesting current-disk re-exec")
+    expect(log).not.toMatch(/reconnect failed: .*restart the host session/u)
+  }, 60_000)
+
   it("reconnects in place, keeping its identity, when a new daemon runs the SAME code from a different landing (27941 AC2a)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const logPath = join(tmpDir, "generation-in-place.log")
