@@ -1402,9 +1402,11 @@ const MIGRATIONS: readonly Migration[] = [
     name: "message-sender-authority",
     /**
      * 25074 3d-1a (@cto 2bfc1935 Q0): every envelope carries its sender's authority, so a claimed session's message
-     * never reads like a verified seat's. Like wakes_owner, it is a fact about the message fixed at insert, and the
-     * archive half carries it. Every row already here predates it and reads 'unrecorded', stamped before any insert
-     * of this version, so NULL means the daemon's own voice and nothing else (@cto a534d184).
+     * never reads like a verified seat's. It is a fact about the message fixed at insert, and the archive half
+     * carries it - unlike `wakes_owner`, which is NOT fixed at insert: settling an incident ball clears it on the
+     * edges already written for that identity (29289, `retireIncidentWakeFlags` below). Every row already here
+     * predates it and reads 'unrecorded', stamped before any insert of this version, so NULL means the daemon's own
+     * voice and nothing else (@cto a534d184).
      */
     up(db) {
       for (const table of ["messages", "messages_archive"]) {
@@ -1979,6 +1981,23 @@ export function createStatements(db: Database) {
 			message_id = excluded.message_id
 	`),
 
+    /** 29289 - settling an incident ball retires the wake eligibility of every edge already written for
+     *  its identity, whoever settled it: the emitter's clear, an owner's evidenced manual close, or
+     *  gc-expired retention (the call sits in `settlePendingRows`, the one function every closure goes
+     *  through). The closing send writes its own row with `wakes_owner = 0`, but the OPEN edge that woke
+     *  the owner keeps its flag, and the mailbox cursor can never advance past a row that is not attention
+     *  (`noOpenIncidentAttentionPredicateSql`), so a FRESH inbox-wait re-woke on the spent edge forever -
+     *  the sticky-wake busy loop (tribe inbox-wait returning woken in ~18 ms with empty attention).
+     *  One ball, one live edge: settling retires them all. A clearing send stores `request = NULL`
+     *  (`requestId` is nulled when `!incidentActive`), so this selects the open/repeat edges only.
+     *  `wakes_owner` is NOT fixed at insert (the version-37 comment below): a settled-ball edge reads 0.
+     *  An edge archived before its settlement keeps 1 in `messages_archive`, which is harmless because
+     *  nothing that wakes reads the archive - the open edge's own row is what re-woke. */
+    retireIncidentWakeFlags: db.prepare(`
+		UPDATE messages SET wakes_owner = 0
+		WHERE request = $request_id AND is_incident = 1 AND wakes_owner = 1
+	`),
+
     /** Ball-tracker close: deletes pending_request rows for a given (request_id, recipient).
      *  In single-recipient and multi-target cases this matches one row; in broadcast cases
      *  with fanout='first' it deletes all rows for the request when ANY recipient replies. */
@@ -2117,6 +2136,7 @@ export function createStatements(db: Database) {
     /** Full evidence for one exact owner row before a non-reply settlement. */
     selectPendingSettlementForRecipient: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			p.request_kind,
 			COALESCE(m.summary, a.summary) AS summary
 		FROM pending_request p
 		LEFT JOIN messages m ON m.id = p.message_id
@@ -2129,6 +2149,7 @@ export function createStatements(db: Database) {
      *  non-reply settlement such as incident clear. */
     selectPendingSettlementsForRequest: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			p.request_kind,
 			COALESCE(m.summary, a.summary) AS summary
 		FROM pending_request p
 		LEFT JOIN messages m ON m.id = p.message_id
@@ -2141,6 +2162,7 @@ export function createStatements(db: Database) {
      *  gc-expired records what was never answered, not merely a count. */
     selectPendingSettlementsBefore: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			p.request_kind,
 			COALESCE(m.summary, a.summary) AS summary
 		FROM pending_request p
 		LEFT JOIN messages m ON m.id = p.message_id
@@ -2151,6 +2173,7 @@ export function createStatements(db: Database) {
 
     selectPendingSettlementsForRecipientBefore: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			p.request_kind,
 			COALESCE(m.summary, a.summary) AS summary
 		FROM pending_request p
 		LEFT JOIN messages m ON m.id = p.message_id

@@ -42,7 +42,9 @@ export type MessageInsertedInfo = {
   /** Matrix-shape room scope; null until populated by the room-aware path. */
   roomId: string | null
   /** 25662 P3 3 — this row is an incident edge (its open, or a changed condition) and wakes its owner's inbox-wait
-   *  like an actionable type. Mirrors the row's durable `wakes_owner` column. */
+   *  like an actionable type. Mirrors the row's durable `wakes_owner` column — which is not immutable: settling the
+   *  incident ball clears it, on every edge already written for that identity, however the ball ended (29289). So a
+   *  cleared flag on a settled ball's edge is the intended state, never corruption. */
   wakesOwner?: boolean
   /** Immutable incident identity, including repeat observations and clear; mirrors durable is_incident. */
   isIncident?: boolean

@@ -24,6 +24,7 @@ import { handleToolCall, readAttentionProjection, type HandlerOpts } from "./lib
 import { createInboxWaitManager, readInboxWaitWokenBy, type InboxStatus } from "./lib/inbox-wait.ts"
 import { sendMessage } from "./lib/messaging.ts"
 import { registerSession } from "./lib/session.ts"
+import { incidentKey } from "tribe-wire"
 
 const OWNER = "@chief"
 const INCIDENT = { emitter: "tribe-health", subject: "@dev/3", condition: "bridge-lost" }
@@ -150,6 +151,45 @@ describe("an incident wakes its idle owner", () => {
       await expect(cleared).resolves.toMatchObject({ status: "timeout" })
     },
   )
+
+  test("after the clear, a FRESH wait does not re-wake on the spent open edge (29289)", async () => {
+    const { manager, page } = rig()
+    page("@dev/3's tribe bridge is lost", "lost 3 min")
+    // The OPEN edge wakes a fresh wait - that is the intended page (25662).
+    expect(latestWakeSeq(OWNER, true)).toBeGreaterThan(0)
+    page("@dev/3's tribe bridge is lost", "cleared: @dev/3's transport is live again", false)
+    // 29289: the edge is spent and the incident is cleared, so idling must be possible again.
+    expect(latestWakeSeq(OWNER, true)).toBe(0)
+    const parked = manager.wait(OWNER, "conn-after-clear", QUIET_MS)
+    await expect(parked).resolves.toMatchObject({ status: "timeout" })
+  })
+
+  test("an evidenced manual close retires the spent open edge as well (29289)", async () => {
+    const { manager, owner, page } = rig()
+    // A dead emitter cannot clear its own incident; the owner closes it by hand. That is the second
+    // of the three ways an incident ball ends, and before 29289 it left the open edge waking.
+    page("@dev/3's tribe bridge is lost", "lost 3 min")
+    expect(latestWakeSeq(OWNER, true)).toBeGreaterThan(0)
+    const closed = JSON.parse(
+      (
+        handleToolCall(
+          owner,
+          "tribe.pending",
+          {
+            owner: OWNER,
+            close: incidentKey(INCIDENT),
+            close_evidence: "owner attestation: the emitter is gone for good; measured twice",
+          },
+          opts(),
+        ) as { content: Array<{ text: string }> }
+      ).content[0]!.text,
+    ) as { closed: number }
+    expect(closed.closed).toBe(1)
+    // The ball settled, so the edge it opened is spent and must not re-qualify a fresh wait.
+    expect(latestWakeSeq(OWNER, true)).toBe(0)
+    const parked = manager.wait(OWNER, "conn-after-manual-close", QUIET_MS)
+    await expect(parked).resolves.toMatchObject({ status: "timeout" })
+  })
 
   test("a request still wakes, as before", async () => {
     const { manager, peer } = rig()
