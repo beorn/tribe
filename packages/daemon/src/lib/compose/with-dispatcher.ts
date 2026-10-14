@@ -2558,9 +2558,10 @@ export function withDispatcher<
             if (open === null) {
               return makeError(id, -32003, `${client.name}: no open duplicate incident for successor yield outcome`)
             }
+            const incumbent = incumbentGeneration as number
+            const successor = successorGeneration as number
             const summary =
-              `${client.name}: generation ${incumbentGeneration} yield to ${successorGeneration} ` +
-              `stop ${outcome}: ${reason}`
+              `${client.name}: generation ${incumbent} yield to ${successor} ` + `stop ${outcome}: ${reason}`
             sendMessage(
               daemonCtx,
               owner,
