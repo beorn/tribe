@@ -302,6 +302,34 @@ describe("loadIdentityVerifier", () => {
     })
   })
 
+  /** @failure The verifier child returns an observed Ag incarnation, but the daemon drops its PID or kernel birth and
+   *          cannot distinguish a resumed owner from a recycled PID before a successor notice.
+   * @level l2
+   * @consumer Verified-successor yield admission (29262 step 2).
+   * The existing kind/gen row never carries process identity across this child boundary.
+   */
+  it("preserves optional observed Ag incarnation through the verifier child", async () => {
+    const path = moduleAt(
+      "observed-ag-incarnation.ts",
+      `export const IDENTITY_VERIFIER_INTERFACE = 1
+       export async function verifyIdentity() {
+         return {
+           result: "verified", actor: "@dev/7", sid: "seat-7", gen: 4,
+           observedAgPid: 4107, observedAgStartTime: "71990912",
+         }
+       }`,
+    )
+    const verifier = await loadIdentityVerifier(path)
+    expect(await verifier.verify("successor-token")).toEqual({
+      result: "verified",
+      actor: "@dev/7",
+      sid: "seat-7",
+      gen: 4,
+      observedAgPid: 4107,
+      observedAgStartTime: "71990912",
+    })
+  })
+
   it("loads a module that speaks interface 1 and passes its verdicts through", async () => {
     const path = moduleAt(
       "good.ts",
@@ -349,6 +377,25 @@ describe("loadIdentityVerifier", () => {
     await expect(verifier.verify("t")).rejects.toThrow(
       `identity verifier ${path} returned a verdict outside the contract`,
     )
+    // A partial or malformed process incarnation is an explicit contract fault, not a verified identity
+    // with silently discarded process evidence.
+    for (const [name, fields] of [
+      ["missing-birth", `observedAgPid: 4107`],
+      ["invalid-pid", `observedAgPid: 0, observedAgStartTime: "71990912"`],
+      ["empty-birth", `observedAgPid: 4107, observedAgStartTime: ""`],
+    ] as const) {
+      const invalidPath = moduleAt(
+        `${name}.ts`,
+        `export const IDENTITY_VERIFIER_INTERFACE = 1
+         export async function verifyIdentity() {
+           return { result: "verified", actor: "@dev/7", sid: "seat-7", ${fields} }
+         }`,
+      )
+      const invalid = await loadIdentityVerifier(invalidPath)
+      await expect(invalid.verify("t")).rejects.toThrow(
+        `identity verifier ${invalidPath} returned a verdict outside the contract`,
+      )
+    }
   })
 })
 

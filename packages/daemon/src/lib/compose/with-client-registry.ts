@@ -51,6 +51,8 @@ export type ClientSession = {
   launchId: string | null
   /** Launcher PID provenance; paired with launchId to reject stale inheritance. */
   launchParentPid: number | null
+  /** Verified habitat of this connected launch, held only while its socket is attached. */
+  verifiedHabitatRoot?: string
   /** Set by the socket-level `leave` method when the adapter announces WHY it
    *  is about to close (its harness exited). Read once, by the disconnect
    *  handler, into the `session.left` fact's `reason`. Absent means the
