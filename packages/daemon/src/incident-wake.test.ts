@@ -151,6 +151,18 @@ describe("an incident wakes its idle owner", () => {
     },
   )
 
+  test("after the clear, a FRESH wait does not re-wake on the spent open edge (29289)", async () => {
+    const { manager, page } = rig()
+    page("@dev/3's tribe bridge is lost", "lost 3 min")
+    // The OPEN edge wakes a fresh wait - that is the intended page (25662).
+    expect(latestWakeSeq(OWNER, true)).toBeGreaterThan(0)
+    page("@dev/3's tribe bridge is lost", "cleared: @dev/3's transport is live again", false)
+    // 29289: the edge is spent and the incident is cleared, so idling must be possible again.
+    expect(latestWakeSeq(OWNER, true)).toBe(0)
+    const parked = manager.wait(OWNER, "conn-after-clear", QUIET_MS)
+    await expect(parked).resolves.toMatchObject({ status: "timeout" })
+  })
+
   test("a request still wakes, as before", async () => {
     const { manager, peer } = rig()
     const parked = manager.wait(OWNER, "conn-request", 5_000)
