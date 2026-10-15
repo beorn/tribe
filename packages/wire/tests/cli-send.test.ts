@@ -923,6 +923,16 @@ describe("registerSendCommands", () => {
         expect(progress.stdout).not.toContain("Closed ")
       }
 
+      // @ag/tribe/29512: with no pending row for the id, the post-send note must not claim
+      // openness — that is what sent its reader looking for a ball that does not exist.
+      pendingOpen = false
+      const neverTracked = await runCli(["send", "@agent/3", "taking", "--type", "status", "--reply", "req-123"])
+      expect(neverTracked).toMatchObject({ code: 0 })
+      expect(neverTracked.stdout).toContain("no ball was ever opened for it to @chief")
+      expect(neverTracked.stdout).not.toContain("it stays open")
+      expect(neverTracked.stderr).toContain("no pending request req-123 is currently owned by @chief")
+
+      pendingOpen = true
       const byMessage = await runReply("by-message", "msg-123")
       expect(byMessage).toMatchObject({ code: 0, stderr: "" })
       expect(byMessage.stdout).toContain("Closed 1 pending request row(s) for @chief: req-123")
@@ -994,7 +1004,7 @@ describe("registerSendCommands", () => {
           params: { owner: "@chief", close: "req-123", idToken: chiefToken },
         },
       ])
-      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(9)
+      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(10)
     } finally {
       server.close()
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })

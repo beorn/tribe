@@ -459,18 +459,19 @@ async function resolveSendCaller(reply?: string, anonymous = false): Promise<Sen
  * half has expired, been settled out-of-band, or aged past the tracker. The
  * close outcome is reported separately after delivery.
  */
-async function warnPendingReplyOwner(owner: string, reply: string): Promise<void> {
+async function warnPendingReplyOwner(owner: string, reply: string): Promise<boolean | undefined> {
   const pending = mcpJsonContent(await callDaemon("tribe.pending", { owner })) as PendingListResult
   if (pending.error) {
     console.error(`tribe-wire send: note — cannot verify pending request ${reply} for ${owner}: ${pending.error}`)
     console.error(`Sending anyway; the close outcome is reported after delivery.`)
-    return
+    return undefined
   }
   const hasRequest = (pending.pending ?? []).some((p) => p.request_id === reply || p.message_id === reply)
   if (!hasRequest) {
     console.error(`tribe-wire send: note — no pending request ${reply} is currently owned by ${owner}; sending anyway.`)
     console.error(`The close will report 0 rows; the recipient still gets the message.`)
   }
+  return hasRequest
 }
 
 /**
@@ -616,7 +617,10 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     process.exit(2)
   }
   const caller = await resolveSendCaller(input.reply, input.anonymous)
-  if (input.reply && caller) await warnPendingReplyOwner(caller.name, input.reply)
+  // @ag/tribe/29512: whether this reply id names an open ball of the caller's, read from
+  // the tracker the pre-send note already consults (`undefined` when that read failed).
+  let replyBallOpen: boolean | undefined
+  if (input.reply && caller) replyBallOpen = await warnPendingReplyOwner(caller.name, input.reply)
   else if (!input.reply && caller && !input.anonymous) {
     await warnUnreleasedBallToRecipient(caller.name, input.to, type === "status" ? input.ref : undefined)
   }
@@ -650,9 +654,15 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     if (type === "response" || type === "verdict") {
       reportCommittedReplyTracker(caller.name, input.reply, result.tracker)
     } else {
+      const tail = input.ref === undefined ? "" : `; reply ${input.reply} was not recorded; ref ${input.ref} kept`
       console.log(
-        `${type} does not settle ball ${input.reply}; it stays open (settle it with --type response or verdict)` +
-          (input.ref === undefined ? "" : `; reply ${input.reply} was not recorded; ref ${input.ref} kept`),
+        // "it stays open" is a claim about the tracker, so it is made only when the
+        // tracker backs it (@ag/tribe/29512); otherwise name what the tracker holds.
+        (replyBallOpen === false
+          ? `${type} settles nothing: no ball was ever opened for it to ${caller.name} ` +
+            `(check the id against tribe pending --owner ${caller.name})`
+          : `${type} does not settle ball ${input.reply}; it stays open (settle it with --type response or verdict)`) +
+          tail,
       )
     }
   }
