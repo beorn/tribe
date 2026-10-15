@@ -847,7 +847,7 @@ describe("recall search output", () => {
       expect(first!.recallAgent).toBe(expectedAgent)
       expect(second!.recallAgent).toBe(expectedAgent)
       expect(factoryCalls).toBe(1)
-      expect(first).toBe(second)
+      expect(Object.is(first, second), "concurrent imports share their mock namespace").toBe(true)
       await first!.recallAgent("factory-a", {})
       await second!.recallAgent("factory-b", {})
       expect(expectedAgent).toHaveBeenCalledTimes(2)
