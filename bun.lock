@@ -67,6 +67,7 @@
         "@silvery/commander": "^0.24.0",
         "loggily": "^0.11.0",
         "removely": "^0.4.0",
+        "zod": "4.6.5",
       },
       "devDependencies": {
         "tsdown": "0.22.13",

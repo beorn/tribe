@@ -28,7 +28,7 @@
  */
 
 import { createLogger } from "loggily"
-import { readOpenIncidents, sendMessage } from "../messaging.ts"
+import { publishConnectorBatch, readOpenIncidents, sendMessage } from "../messaging.ts"
 import { cleanupOldData, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
 import { resolveRetentionConfig, runRetentionSweep } from "../retention.ts"
 import { loadPlugins } from "../plugin-loader.ts"
@@ -94,6 +94,15 @@ function defaultBuildPluginApi<T extends RuntimeShape>(t: T, opts: RuntimeOpts<T
   const { stmts, daemonCtx, daemonSessionId, registry } = t
   const { clients } = registry
   return {
+    getConnectorFrontier(sourceId) {
+      const row = daemonCtx.db
+        .query("SELECT value FROM coordination WHERE project_id = ? AND key = 'frontier.v1'")
+        .get(`connector:${sourceId}`) as { value: string | null } | null
+      return row?.value ?? null
+    },
+    publishConnectorBatch(batch) {
+      return publishConnectorBatch(daemonCtx, batch)
+    },
     send(recipient, content, type, beadId, classification, incident) {
       sendMessage(
         daemonCtx,

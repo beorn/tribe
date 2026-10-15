@@ -2,7 +2,7 @@
  * Tribe messaging — send messages and log events.
  */
 
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import type { TribeContext } from "./context.ts"
 import { AUTO_TRACK_TYPES_SET, type TribeStatements } from "./database.ts"
 import { sessionAuthority, type SessionAuthority } from "./identity-verifier.ts"
@@ -18,6 +18,7 @@ import {
   type IncidentIdentity,
 } from "tribe-wire"
 import { isExplicitTribePersonaName } from "tribe-wire/lib/persona-name"
+import { findColdExportedIds } from "./retention.ts"
 
 export type { BallSettlementReason } from "tribe-wire"
 
@@ -50,6 +51,236 @@ export type MessageKind = "direct" | "broadcast" | "event"
  * Default for back-compat is `push` (existing call sites unchanged).
  */
 export type Delivery = "push" | "pull"
+
+type MessageRowValues = Record<string, string | number | null>
+
+/** The sole message-row insert, used inside the caller's transaction. It never notifies. */
+function insertMessageRow(ctx: TribeContext, values: MessageRowValues) {
+  return ctx.stmts.insertMessage.run(values)
+}
+
+export type ConnectorJournalEvent = Readonly<{ id: string; kind: string; content: string }>
+export type ConnectorBatch = Readonly<{
+  sourceId: string
+  expectedFrontier: string | null
+  nextFrontier: string
+  schemaDigest: string
+  events: readonly ConnectorJournalEvent[]
+}>
+export type ConnectorBatchReceipt =
+  | Readonly<{
+      kind: "committed" | "already-held"
+      sourceId: string
+      expectedFrontierHash: string | null
+      committedFrontierHash: string
+      schemaDigest: string
+      eventIds: readonly string[]
+      inserted: number
+      replayed: number
+      firstSeq: number | null
+      lastSeq: number | null
+    }>
+  | Readonly<{ kind: "frontier-conflict"; sourceId: string; currentFrontier: string | null }>
+  | Readonly<{ kind: "payload-conflict"; sourceId: string; eventId: string }>
+  | Readonly<{ kind: "source-gap"; sourceId: string; eventId: string; detail: string }>
+  | Readonly<{ kind: "publication-unknown"; sourceId: string; detail: string }>
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex")
+}
+
+/**
+ * Publish a connector's finite observation with its source position. Existing
+ * rows are checked in both journal tiers before the next position is stored;
+ * a rollback leaves neither newly observed events nor a progressed frontier.
+ */
+export function publishConnectorBatch(ctx: TribeContext, batch: ConnectorBatch): ConnectorBatchReceipt {
+  if (!batch.sourceId.trim() || !batch.schemaDigest.trim() || !batch.nextFrontier.trim()) {
+    throw new Error("connector publication requires sourceId, schemaDigest and nextFrontier")
+  }
+  const seen = new Set<string>()
+  for (const event of batch.events) {
+    if (!event.id.trim() || !event.kind.trim() || !event.content.trim()) {
+      throw new Error(`connector ${batch.sourceId}: event id, kind and content must be non-empty`)
+    }
+    if (seen.has(event.id)) throw new Error(`connector ${batch.sourceId}: duplicate event id ${event.id} in one batch`)
+    seen.add(event.id)
+  }
+  const projectId = `connector:${batch.sourceId}`
+  const receipt = ctx.db.transaction((): ConnectorBatchReceipt => {
+    const held = ctx.db
+      .query("SELECT value FROM coordination WHERE project_id = ? AND key = 'frontier.v1'")
+      .get(projectId) as { value: string | null } | null
+    const current = held?.value ?? null
+    const rows = batch.events.map((event) => {
+      const existing = ctx.db
+        .query(
+          "SELECT content, summary, rowid AS seq FROM messages WHERE id = ? UNION ALL SELECT content, summary, seq FROM messages_archive WHERE id = ?",
+        )
+        .all(event.id, event.id) as Array<{ content: string; summary: string | null; seq: number }>
+      const hash = sha256(event.content)
+      return { event, hash, existing }
+    })
+    for (const row of rows) {
+      if (row.existing.some((existing) => existing.content !== row.event.content || existing.summary !== row.hash)) {
+        return { kind: "payload-conflict", sourceId: batch.sourceId, eventId: row.event.id }
+      }
+    }
+    const missingRows = rows.filter((row) => row.existing.length === 0)
+    if (missingRows.length > 0) {
+      const firstMissing = missingRows[0]
+      if (firstMissing === undefined) {
+        throw new Error(`connector ${batch.sourceId}: missing-row count contradicted its first row`)
+      }
+      let cold: Set<string>
+      try {
+        cold = findColdExportedIds(ctx.db, new Set(missingRows.map((row) => row.event.id)))
+      } catch (error) {
+        return {
+          kind: "source-gap",
+          sourceId: batch.sourceId,
+          eventId: firstMissing.event.id,
+          detail: `cold export could not prove event absence: ${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+      const exported = missingRows.find((row) => cold.has(row.event.id))
+      if (exported) {
+        return {
+          kind: "source-gap",
+          sourceId: batch.sourceId,
+          eventId: exported.event.id,
+          detail: "event was exported and removed from the retained hot/archive journal",
+        }
+      }
+      if (current === batch.nextFrontier) {
+        return {
+          kind: "source-gap",
+          sourceId: batch.sourceId,
+          eventId: firstMissing.event.id,
+          detail: "frontier is held but its event row is outside the retained hot/archive journal",
+        }
+      }
+    }
+    if (current !== batch.expectedFrontier) {
+      if (current !== batch.nextFrontier) {
+        return { kind: "frontier-conflict", sourceId: batch.sourceId, currentFrontier: current }
+      }
+    }
+    let inserted = 0
+    let replayed = 0
+    let firstSeq: number | null = null
+    let lastSeq: number | null = null
+    const insertedEvents: Array<{ event: ConnectorJournalEvent; seq: number; ts: number }> = []
+    for (const row of rows) {
+      if (row.existing.length > 0) {
+        replayed++
+        const existing = row.existing[0]
+        if (existing === undefined) {
+          throw new Error(`connector ${batch.sourceId}: replay count contradicted event ${row.event.id}`)
+        }
+        const seq = existing.seq
+        firstSeq = firstSeq === null ? seq : Math.min(firstSeq, seq)
+        lastSeq = lastSeq === null ? seq : Math.max(lastSeq, seq)
+        continue
+      }
+      const ts = Date.now()
+      const result = insertMessageRow(ctx, {
+        $id: row.event.id,
+        $type: `event.${row.event.kind}`,
+        $sender: `connector:${batch.sourceId}`,
+        $session_id: ctx.sessionId,
+        $recipient: "*",
+        $kind: "event",
+        $content: row.event.content,
+        $bead_id: null,
+        $ref: null,
+        $ts: ts,
+        $delivery: "push",
+        $topic: null,
+        $room_id: null,
+        $request: null,
+        $reply: null,
+        $correlated_reply_requester: null,
+        $summary: row.hash,
+        $attention_required: 0,
+        $wakes_owner: 0,
+        $is_incident: 0,
+        $incident_data: null,
+        $between_personas: 0,
+        $sender_authority: null,
+      })
+      if (result.changes !== 1) throw new Error(`connector ${batch.sourceId}: event ${row.event.id} was not inserted`)
+      inserted++
+      const seq = Number(result.lastInsertRowid)
+      firstSeq = firstSeq === null ? seq : Math.min(firstSeq, seq)
+      lastSeq = lastSeq === null ? seq : Math.max(lastSeq, seq)
+      insertedEvents.push({ event: row.event, seq, ts })
+    }
+    if (current !== batch.nextFrontier) {
+      if (held === null) {
+        ctx.db
+          .query(
+            "INSERT INTO coordination (project_id, key, value, updated_by, updated_at) VALUES (?, 'frontier.v1', ?, ?, ?)",
+          )
+          .run(projectId, batch.nextFrontier, ctx.getName(), Date.now())
+      } else {
+        const result = ctx.db
+          .query(
+            "UPDATE coordination SET value = ?, updated_by = ?, updated_at = ? WHERE project_id = ? AND key = 'frontier.v1' AND value IS ?",
+          )
+          .run(batch.nextFrontier, ctx.getName(), Date.now(), projectId, batch.expectedFrontier)
+        if (result.changes !== 1) throw new Error(`connector ${batch.sourceId}: frontier CAS lost while publishing`)
+      }
+    }
+    const committed: ConnectorBatchReceipt = {
+      kind: current === batch.nextFrontier && inserted === 0 ? "already-held" : "committed",
+      sourceId: batch.sourceId,
+      expectedFrontierHash: batch.expectedFrontier === null ? null : sha256(batch.expectedFrontier),
+      committedFrontierHash: sha256(batch.nextFrontier),
+      schemaDigest: batch.schemaDigest,
+      eventIds: batch.events.map((event) => event.id),
+      inserted,
+      replayed,
+      firstSeq,
+      lastSeq,
+    }
+    // Returned to the outer scope so notifications happen only after commit.
+    committedEvents = insertedEvents
+    return committed
+  })
+  let committedEvents: Array<{ event: ConnectorJournalEvent; seq: number; ts: number }> = []
+  let result: ConnectorBatchReceipt
+  try {
+    result = receipt()
+  } catch (error) {
+    // A failed transaction is not a success receipt. The caller re-reads the
+    // frontier before retrying because a commit failure may be ambiguous.
+    return {
+      kind: "publication-unknown",
+      sourceId: batch.sourceId,
+      detail: error instanceof Error ? error.message : String(error),
+    }
+  }
+  for (const { event, seq, ts } of committedEvents) {
+    ctx.onMessageInserted?.({
+      id: event.id,
+      ts,
+      rowid: seq,
+      type: `event.${event.kind}`,
+      kind: "event",
+      sender: `connector:${batch.sourceId}`,
+      senderRole: ctx.getRole(),
+      recipient: "*",
+      content: event.content,
+      bead_id: null,
+      delivery: "push",
+      topic: null,
+      roomId: null,
+      correlatedReply: null,
+    })
+  }
+  return result
+}
 
 /**
  * `ReplyHint` is the per-event hint the daemon derives at delivery time
@@ -714,7 +945,7 @@ export function sendMessage(
       summary: classification.summary ?? null,
     })
     const wakesOwner = incidentTransition === "opened" || incidentTransition === "changed"
-    const result = ctx.stmts.insertMessage.run({
+    const result = insertMessageRow(ctx, {
       $id: id,
       $type: type,
       $sender: sender,
@@ -948,7 +1179,7 @@ export function logEvent(
 ): string {
   const id = randomUUID()
   const sender = options.sender ?? ctx.getName()
-  ctx.stmts.insertMessage.run({
+  insertMessageRow(ctx, {
     $id: id,
     $type: `event.${type}`,
     $sender: sender,

@@ -29,6 +29,7 @@
  */
 
 import type { IncidentIdentity } from "tribe-wire"
+import type { ConnectorBatch, ConnectorBatchReceipt } from "./messaging.ts"
 
 export interface TribePluginApi {
   /** Stable identifier — also the sender name when broadcasting. */
@@ -84,6 +85,12 @@ export type EventClassification = {
 }
 
 export interface TribeClientApi {
+  /** The connector's durable source position; null means no observation has been committed. */
+  getConnectorFrontier?(sourceId: string): string | null
+
+  /** One typed journal batch and source-frontier CAS, owned by Wire's message writer. */
+  publishConnectorBatch?(batch: ConnectorBatch): ConnectorBatchReceipt
+
   /**
    * Direct message to a single recipient (name) or the daemon's dispatcher.
    *

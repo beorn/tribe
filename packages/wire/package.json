@@ -64,6 +64,7 @@
     "./lib/inbox-wait-errors": "./src/lib/inbox-wait-errors.ts",
     "./lib/inbox-wait-gap": "./src/lib/inbox-wait-gap.ts",
     "./lib/delivery-report": "./src/lib/delivery-report.ts",
+    "./lib/git-connector-schema": "./src/lib/git-connector-schema.ts",
     "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {
@@ -199,6 +200,10 @@
         "types": "./dist/lib/delivery-report.d.mts",
         "import": "./dist/lib/delivery-report.mjs"
       },
+      "./lib/git-connector-schema": {
+        "types": "./dist/lib/git-connector-schema.d.mts",
+        "import": "./dist/lib/git-connector-schema.mjs"
+      },
       "./http": {
         "types": "./dist/http-adapter.d.mts",
         "import": "./dist/http-adapter.mjs"
@@ -216,7 +221,8 @@
     "@modelcontextprotocol/sdk": "1.32.1",
     "@silvery/commander": "^0.24.0",
     "loggily": "^0.11.0",
-    "removely": "^0.4.0"
+    "removely": "^0.4.0",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "tsdown": "0.22.13",
@@ -258,6 +264,7 @@
       "src/lib/inbox-wait-errors.ts",
       "src/lib/inbox-wait-gap.ts",
       "src/lib/delivery-report.ts",
+      "src/lib/git-connector-schema.ts",
       "src/http-adapter.ts"
     ],
     "format": "esm"

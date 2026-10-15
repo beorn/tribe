@@ -115,6 +115,7 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   statSync,
@@ -453,6 +454,50 @@ function readExportManifest(path: string, day: string): ExportManifest | null {
     sha256: parsed.sha256,
     ids,
   }
+}
+
+/**
+ * Connector replay checks the retention owner's existing cold export before
+ * treating an ID absent from hot/archive as new. This is a read of the same
+ * export proof archive-delete already writes, not another dedup store.
+ */
+export function findColdExportedIds(db: Database, targets: ReadonlySet<string>): Set<string> {
+  const found = new Set<string>()
+  if (targets.size === 0) return found
+  const config = resolveRetentionConfig()
+  const dir = resolveArchiveExportDir(db, config)
+  if (!existsSync(dir)) {
+    if (config.deleteEnabled) {
+      throw new Error(
+        `connector replay cannot prove unseen IDs: retention delete is enabled but export directory ${dir} is missing`,
+      )
+    }
+    return found
+  }
+  for (const name of readdirSync(dir).filter((entry) =>
+    /^messages-archive-\d{4}-\d{2}-\d{2}\.manifest\.json$/u.test(entry),
+  )) {
+    const day = name.slice("messages-archive-".length, -".manifest.json".length)
+    const manifest = readExportManifest(join(dir, name), day)
+    if (manifest === null) throw new Error(`connector replay export manifest disappeared: ${join(dir, name)}`)
+    const hits = manifest.ids.filter((id) => targets.has(id))
+    if (hits.length === 0) continue
+    const file = join(dir, `messages-archive-${day}.jsonl.gz`)
+    if (!existsSync(file)) throw new Error(`connector replay export data missing for ${hits.join(", ")}: ${file}`)
+    const bytes = readFileSync(file)
+    if (bytes.length < manifest.bytes) throw new Error(`connector replay export data truncated: ${file}`)
+    const committed = bytes.subarray(0, manifest.bytes)
+    const digest = createHash("sha256").update(committed).digest("hex")
+    if (digest !== manifest.sha256) throw new Error(`connector replay export digest mismatch: ${file}`)
+    const proven = new Set(parseExportRows(file, committed).map((row) => row.id))
+    for (const id of hits) {
+      if (!proven.has(id)) {
+        throw new Error(`connector replay manifest ${join(dir, name)} names ${id} absent from verified bytes`)
+      }
+      found.add(id)
+    }
+  }
+  return found
 }
 
 /** Parse the decompressed day file into its row objects. A gunzip failure or a
