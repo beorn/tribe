@@ -2860,7 +2860,10 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     .option(inboxWaitSession.flags, inboxWaitSession.description, inboxWaitSession.default)
     .option(inboxWaitTimeout.flags, inboxWaitTimeout.description, "5m")
     .option(inboxWaitWakeOnCorrelatedReply.flags, inboxWaitWakeOnCorrelatedReply.description)
-    .option("--no-wake-on-correlated-reply", "Do not wake on a validated reply to caller's own tracked request")
+    .option(
+      "--no-wake-on-correlated-reply",
+      "Do not wake on a validated reply settlement to one of this seat's tracked requests, or a direct status or response whose ref names an open ball this seat requested",
+    )
     .option(inboxWaitJson.flags, inboxWaitJson.description)
     .action(async (opts: { session?: string; timeout?: string; wakeOnCorrelatedReply?: boolean; json?: boolean }) => {
       const timeoutMs = opts.timeout ? parseDurationMs(opts.timeout) : DEFAULT_WAIT_TIMEOUT_MS
