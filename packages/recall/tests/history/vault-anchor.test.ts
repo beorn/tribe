@@ -152,3 +152,31 @@ describe("a glossary query that fails on an open vault refuses, naming the vault
     })
   })
 })
+
+describe("a slash token is a path only when it reads as one, never a prose pair (@cto 159a5acb, rule D)", () => {
+  const vault = () => vaultWith([...VAULT, "@yrd/landing/27001-merge.md", "hub/rulings/26678-close-ruling.md"])
+
+  test("and/or, they/them and A/B lead no vault query", async () => {
+    const v = vault()
+    expect(await anchorFor("keep the and/or wording in the merge queue notes", v)).toMatchObject({ identifier: null })
+    expect(await anchorFor("they/them pronouns everywhere in reports", v)).toMatchObject({ identifier: null })
+    expect(await anchorFor("rerun the A/B comparison tonight", v)).toMatchObject({ identifier: null })
+  })
+
+  test("a segment naming a vault root scope makes it a path, and it leads past a prose pair", async () => {
+    expect(await anchorFor("the and/or rule in vendor/yrd queue", vault())).toMatchObject({
+      query: "vendor/yrd queue",
+      identifier: "vendor/yrd",
+    })
+  })
+
+  test("a segment naming a vault directory makes it a path, with no digit, hyphen or root scope in it", async () => {
+    expect(await anchorFor("what does hub/rulings say on closes", vault())).toMatchObject({ identifier: "hub/rulings" })
+  })
+
+  test("with no vault, a file path and a segment with a digit or hyphen still count", async () => {
+    expect(await anchorFor("open docs/principles.md please", null)).toMatchObject({ identifier: "docs/principles.md" })
+    expect(await anchorFor("watch dev/6 and tools/hh-cli today", null)).toMatchObject({ identifier: "dev/6" })
+    expect(await anchorFor("keep the and/or wording", null)).toMatchObject({ identifier: null })
+  })
+})
