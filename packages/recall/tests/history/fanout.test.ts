@@ -167,7 +167,12 @@ describe("fanoutSearch", () => {
       const second = fanoutSearch(db, ["boundedneedle"], { limit: 5, sinceTime: 0 })
       const merged = mergeFanouts(first, second, 5)
       expect(first.skipped).toEqual([
-        expect.objectContaining({ phase: "messages", anchor: "zebracorn", message: expect.stringMatching(/cap|cut/) }),
+        expect.objectContaining({
+          kind: "candidate-cap",
+          phase: "messages",
+          anchor: "zebracorn",
+          message: expect.stringMatching(/cap|cut/),
+        }),
       ])
       expect(merged.skipped).toEqual([...(first.skipped ?? []), ...(second.skipped ?? [])])
       expect(merged.variants).toEqual(["zebracorn", "boundedneedle"])
@@ -185,13 +190,20 @@ describe("fanoutSearch", () => {
     const result = fanoutSearch(db, [""], { limit: 5 })
     expect(result.variants).toEqual([])
     expect(result.skipped).toEqual([
-      expect.objectContaining({ phase: "messages", anchor: "", message: expect.stringMatching(/fts5.*syntax error/i) }),
       expect.objectContaining({
+        kind: "query-rejected",
+        phase: "messages",
+        anchor: "",
+        message: expect.stringMatching(/fts5.*syntax error/i),
+      }),
+      expect.objectContaining({
+        kind: "query-rejected",
         phase: "session_content",
         anchor: "",
         message: expect.stringMatching(/fts5.*syntax error/i),
       }),
       expect.objectContaining({
+        kind: "query-rejected",
         phase: "project_content",
         anchor: "",
         message: expect.stringMatching(/fts5.*syntax error/i),

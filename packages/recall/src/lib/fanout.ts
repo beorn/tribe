@@ -108,7 +108,12 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
     // Only malformed FTS is a skipped query. A closed/corrupt/unavailable
     // database is still a real failure, not an apparently empty search.
     if (!/fts5: (?:syntax error|unterminated string|unknown special query)/i.test(cause)) throw error
-    skipped.push({ phase, anchor, message: `recall ${phase} query ${JSON.stringify(anchor)} skipped: ${cause}` })
+    skipped.push({
+      kind: "query-rejected",
+      phase,
+      anchor,
+      message: `recall ${phase} query ${JSON.stringify(anchor)} skipped: ${cause}`,
+    })
   }
 
   const msgOpts: MessageSearchOptions = {

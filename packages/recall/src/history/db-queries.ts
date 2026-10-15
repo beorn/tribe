@@ -541,6 +541,7 @@ function hookMessageSearch(
     ...(candidates.length > HOOK_CANDIDATE_LIMIT
       ? {
           capped: {
+            kind: "candidate-cap",
             phase: "messages",
             anchor,
             message:

@@ -263,6 +263,7 @@ describe("29482 B2: hook mode bounds eligible candidates before ranking", () => 
     // B1 counts nothing, so the cap is seen by fetching one row past it, not by a COUNT.
     expect(hook.skipped).toEqual([
       {
+        kind: "candidate-cap",
         phase: "messages",
         anchor: ANCHOR,
         message: `recall messages capped before ranking at 1000 eligible matches: prose held 1000, tools held 0; overflow at least 1 for anchor "${ANCHOR}"; results are approximate (29482)`,

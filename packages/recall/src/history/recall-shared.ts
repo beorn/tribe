@@ -87,6 +87,8 @@ export type SearchMode = "exact" | "hook"
 
 /** A phase recall skipped rather than ran, said out loud (@ag/tribe/25071 row 2). */
 export interface RecallSkip {
+  /** A candidate cap is an approximation; only a rejected query degrades the run. */
+  kind?: "candidate-cap" | "query-rejected"
   /** The phase: "messages" when hook mode capped its window. */
   phase: string
   /** The query the phase would have searched. */

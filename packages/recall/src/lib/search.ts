@@ -190,7 +190,7 @@ function recallJsonEnvelope(result: RecallResult): Omit<RecallResult, "results">
 /** Search coverage and index freshness are separate: a cut remains useful but partial. */
 function reportSearchSkips(result: RecallResult, json: boolean | undefined): void {
   if (!result.skipped?.length) return
-  process.exitCode = 3
+  if (result.skipped.some((skip) => skip.kind === "query-rejected")) process.exitCode = 3
   if (!json) {
     for (const skip of result.skipped) console.log(`${YELLOW}⚠ ${skip.message}${RESET}`)
   }
