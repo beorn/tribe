@@ -125,8 +125,8 @@ CREATE TABLE IF NOT EXISTS index_meta (
 -- Unified content table for searching everything
 CREATE TABLE IF NOT EXISTS content (
   id INTEGER PRIMARY KEY,
-  content_type TEXT NOT NULL,  -- message, plan, summary, todo
-  source_id TEXT NOT NULL,     -- session_id, plan filename, todo filename
+  content_type TEXT NOT NULL,  -- project knowledge type
+  source_id TEXT NOT NULL,     -- source identifier within that type
   project_path TEXT,
   title TEXT,
   content TEXT NOT NULL,

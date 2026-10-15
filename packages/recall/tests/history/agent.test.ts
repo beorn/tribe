@@ -401,11 +401,6 @@ test("agent carries bounded-search receipts in its result and round trace", asyn
       message: expect.stringMatching(/syntax error/i),
     }),
     expect.objectContaining({
-      phase: "session_content",
-      anchor: "-badsyntax",
-      message: expect.stringMatching(/syntax error/i),
-    }),
-    expect.objectContaining({
       phase: "project_content",
       anchor: "-badsyntax",
       message: expect.stringMatching(/syntax error/i),

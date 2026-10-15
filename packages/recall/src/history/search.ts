@@ -456,11 +456,10 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       )
     }
 
-    // Hook mode searches live project knowledge within the prompt's time window.
-    // Normal search gets those rows from project_content without a time filter.
+    // Hook mode searches live project knowledge without a time filter, as the
+    // normal project's content phase does. Normal search uses that phase directly.
     const sessionContentOpts: ContentSearchOptions = {
       limit: limit * 2,
-      sinceTime,
       projectFilter,
       snippetTokens,
       types: ["doc", "llm_research", "project_memory", "claude_md"] as ContentType[],
@@ -474,8 +473,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         : { results: [], total: null }
     const sessionMs = Date.now() - contentStart
 
-    // Search project knowledge sources (beads, memory, docs) WITHOUT time filter. Hook mode does not: the vault
-    // phase answers for beads and docs inside the hook's wall (Phase 3).
+    // Normal search uses the same live project knowledge types as the hook.
     const projectStart = Date.now()
     const projectContentOpts: ContentSearchOptions = {
       limit: limit * 2,

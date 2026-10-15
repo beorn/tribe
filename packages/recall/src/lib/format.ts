@@ -150,6 +150,7 @@ export function parseInclude(includeStr: string): ContentType[] {
     docs: "doc",
     claude_md: "claude_md",
     claude: "claude_md",
+    llm_research: "llm_research",
   }
 
   for (const part of parts) {

@@ -169,7 +169,7 @@ export function renderContextPrompt(ctx: QueryContext, opts: { maxChars?: number
   }
 
   if (ctx.recentSessions.length > 0) {
-    lines.push("Recent sessions (most recent first; title + first prompt + summary):")
+    lines.push("Recent sessions (most recent first; title):")
     for (const s of ctx.recentSessions) {
       const parts: string[] = []
       if (s.title) parts.push(`title: ${s.title}`)
@@ -265,13 +265,12 @@ function loadRareVocabulary(db: Database, max: number): string[] {
 
   let rows: { content: string }[] = []
   try {
-    // Sample recent content across types — titles for sessions, body for
-    // beads/plans/summaries. This captures technical terminology.
+    // Sample recent project knowledge to capture technical terminology.
     rows = db
       .prepare(
         `SELECT COALESCE(title, '') || ' ' || COALESCE(SUBSTR(content, 1, 1500), '') AS content
          FROM content
-         WHERE content_type IN ('first_prompt','summary','bead','plan','session_memory','project_memory','llm_research')
+         WHERE content_type IN ('doc','llm_research','project_memory','claude_md')
          ORDER BY timestamp DESC
          LIMIT ?`,
       )

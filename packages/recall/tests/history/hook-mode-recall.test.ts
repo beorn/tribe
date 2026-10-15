@@ -104,6 +104,30 @@ afterEach(() => {
   setRecallLogging(false)
 })
 
+/** @failure The prompt hook requested four retired types and missed live project knowledge. */
+test("hook session_content searches only the four live content types", async () => {
+  const db = getDb()
+  const insert = db.prepare(
+    `INSERT INTO content (content_type, source_id, project_path, title, content, timestamp)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  )
+  for (const type of [
+    "doc",
+    "llm_research",
+    "project_memory",
+    "claude_md",
+    "plan",
+    "summary",
+    "todo",
+    "first_prompt",
+  ]) {
+    insert.run(type, type, "/test/km", type, "livehookneedle", Date.now() - 40 * DAY_MS)
+  }
+
+  const result = await recall("livehookneedle", { mode: "hook", raw: true, limit: 20, phases: ["session_content"] })
+  expect(result.results.map((row) => row.type).sort()).toEqual(["claude_md", "doc", "llm_research", "project_memory"])
+})
+
 describe("25071 row 2 B1: hook mode counts nothing", () => {
   test("the hook path prepares no COUNT; the exact path still counts (the control)", async () => {
     seed(recentWeak(20))

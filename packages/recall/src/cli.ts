@@ -109,7 +109,7 @@ program
   .option("-r, --response", "Assistant messages only (implies --raw)")
   .option("-t, --tool <name>", "Tool filter: Write, Bash, etc. (implies --raw)")
   .option("--session <id>", "Specific session (implies --raw)")
-  .option("-i, --include <types>", "Content types: p,m,s,t,f,b,e,d,c (implies --raw)")
+  .option("-i, --include <types>", "Content types: m,b,e,d,c or long names (implies --raw)")
   .option("--agent", "LLM query-planner mode: plan → fan out → rerank → synthesize")
   .option("--round2 <mode>", "Round 2 mode: auto|wider|deeper|off (default auto)")
   .option("--max-rounds <n>", "Cap agent rounds (1 or 2, default 2)", int)
