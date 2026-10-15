@@ -311,7 +311,7 @@ describe("registerReadCommands", () => {
     ],
     [
       { unread_count: 3, waited_ms: 30_000, oldest_unread_age_min: 12 },
-      "reader: timed out after 30s; 3 unread attention items that do not wake this wait (oldest 12min) — read it with `tribe inbox`.",
+      "reader: timed out after 30s; 3 unread attention items that do not wake this wait (oldest 12min) — read them with `tribe inbox`.",
     ],
     [{ unread_count: 0, waited_ms: 30_000, oldest_unread_age_min: 0 }, "reader: no unanswered actionables within 30s."],
   ])("names the unread rows a timeout could not wake on: %j", (fields, expected) => {

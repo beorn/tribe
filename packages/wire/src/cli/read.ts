@@ -2381,7 +2381,7 @@ export function formatInboxWaitTimeoutLine(result: InboxWaitResult, timeoutMs: n
     return (
       `${result.session}: timed out after ${Math.round(result.waited_ms / 1000)}s; ${n} unread attention ` +
       `item${n === 1 ? "" : "s"} that do${n === 1 ? "es" : ""} not wake this wait ` +
-      `(oldest ${result.oldest_unread_age_min}min) — read it with \`tribe inbox\`.`
+      `(oldest ${result.oldest_unread_age_min}min) — read ${n === 1 ? "it" : "them"} with \`tribe inbox\`.`
     )
   }
   return `${result.session}: no unanswered actionables within ${Math.round(timeoutMs / 1000)}s.`

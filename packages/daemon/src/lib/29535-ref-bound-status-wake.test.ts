@@ -143,13 +143,17 @@ describe("29535 a ref-bound status wakes only its requester, and only under the 
   })
 
   it("stays quiet on the owner side, on a notify, and on a closed ball", () => {
-    // Owner side: the peer asks, the seat answers with a ref-bound status.
-    // The wake tail never admits a row the waiter itself sent.
+    // Owner side: the PEER opens the ball, so @requester is its OWNER, and the
+    // ball's requester sends the precision INTO the waiter's mailbox. The row
+    // is attention for the owner (C2 covers either party) but must not wake
+    // it: the opt-in arm asks only the requester side. Flip side to "either"
+    // in the wake arm and this assertion is the one that fails.
     const ownerCase = fixture()
-    const ball = sendMessage(ownerCase.peer, REQUESTER, "please answer", "request", undefined, undefined, "direct", {}, { request: BALL })
-    const precision = sendMessage(ownerCase.requester, PEER, "a precision on your ball", "status", undefined, BALL)
+    sendMessage(ownerCase.peer, REQUESTER, "please answer", "request", undefined, undefined, "direct", {}, { request: BALL })
+    const precision = sendMessage(ownerCase.peer, REQUESTER, "a precision on your ball", "status", undefined, BALL)
+    const ownerAttention = readAttentionProjection(ownerCase.requester, REQUESTER, Date.now(), 0, makeOpts()).attention
+    expect(ownerAttention.actionable_unread.map((r) => r.id)).toContain(precision.id)
     expect(tailSeq(ownerCase.stmts, REQUESTER, true)).not.toBe(rowidOf(ownerCase, precision.id))
-    void ball
 
     // A notify with the same ref is attention but never a wake: the arm is
     // limited to the correlated reply types.
@@ -157,12 +161,15 @@ describe("29535 a ref-bound status wakes only its requester, and only under the 
     const { row: notifyRow } = openBallAndReply(notifyCase, "notify")
     expect(tailSeq(notifyCase.stmts, REQUESTER, true)).not.toBe(rowidOf(notifyCase, notifyRow.id))
 
-    // A closed ball's ref no longer names anything pending.
+    // A closed ball's ref no longer names anything pending. Closure is
+    // simulated by deleting the pending_request row — exactly what closure
+    // does — and deliberately WITHOUT adding a row to the waiter's mailbox,
+    // so a settling reply cannot move the newest-row tail and mask this.
     const closedCase = fixture()
     const { row: statusRow } = openBallAndReply(closedCase, "status")
     const statusRowid = rowidOf(closedCase, statusRow.id)
     expect(tailSeq(closedCase.stmts, REQUESTER, true)).toBe(statusRowid)
-    sendMessage(closedCase.peer, REQUESTER, "done", "response", undefined, undefined, "direct", {}, { reply: BALL })
-    expect(tailSeq(closedCase.stmts, REQUESTER, true)).not.toBe(statusRowid)
+    closedCase.db.prepare("DELETE FROM pending_request WHERE request_id = ?").run(BALL)
+    expect(tailSeq(closedCase.stmts, REQUESTER, true)).toBe(0)
   })
 })
