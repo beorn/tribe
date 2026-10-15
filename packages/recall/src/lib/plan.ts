@@ -117,6 +117,7 @@ export interface PlanOptions {
   priorPlan?: QueryPlan
   priorResults?: RecallSearchResult[]
   priorVariants?: string[]
+  /** One attempt's deadline; the loop stops at {@link PLANNER_ATTEMPT_CAP} times it (@cto 19102a36). */
   timeoutMs?: number
   /** Use a caller-selected planner model instead of the backend default. */
   model?: LlmModel
@@ -124,10 +125,14 @@ export interface PlanOptions {
   llm?: LlmBackend
 }
 
+/** The planner's total cap, in attempts: the loop stops at this many attempt deadlines (@cto 19102a36). */
+export const PLANNER_ATTEMPT_CAP = 2
+
 /**
- * Run the planner. Provider failures fall through to the next available
- * provider within one shared timeout. Returns `plan: null` only when all
- * candidates fail, so callers can fall back to lexical recall.
+ * Run the planner. A failed or over-deadline attempt falls through to the next
+ * available provider, each with its own deadline, until the total cap. Returns
+ * `plan: null` only when all candidates fail, so callers can fall back to
+ * lexical recall.
  */
 export async function planQuery(query: string, context: QueryContext, options: PlanOptions): Promise<PlanCall> {
   const { round, mode, priorPlan, priorResults = [], priorVariants = [], timeoutMs = 2500 } = options
@@ -155,62 +160,64 @@ export async function planQuery(query: string, context: QueryContext, options: P
 
   const userPrompt = buildUserPrompt(query, context, { round, mode, priorPlan, priorResults, priorVariants })
 
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  // Each attempt has its own deadline, and only the total cap ends the loop: one shared deadline let a slow first
+  // model starve every later one (@cto 19102a36, @ag/llm/29473).
+  const deadline = startedAt + timeoutMs * PLANNER_ATTEMPT_CAP
   let rawResponse = ""
   let cost: number | undefined
   let lastModel: LlmModel | undefined
   const failures: Array<{ modelId: string; error: string }> = []
 
-  try {
-    for (const model of models) {
-      if (controller.signal.aborted) break
-      lastModel = model
+  for (const model of models) {
+    const left = deadline - Date.now()
+    if (left <= 0) break
+    lastModel = model
 
-      let result
-      try {
-        result = await llm.queryModel({
-          question: userPrompt,
-          model,
-          systemPrompt,
-          abortSignal: controller.signal,
-        })
-      } catch (error) {
-        const message = providerError(llm, model, error)
-        log(`planner: ${model.modelId} failed (${message})`)
-        failures.push({ modelId: model.modelId, error: message })
-        continue
-      }
-
-      const usage = result.response.usage
-      if (usage) {
-        cost = (cost ?? 0) + llm.estimateCost(model, usage.promptTokens, usage.completionTokens)
-      }
-      if (result.response.error) {
-        const message = providerError(llm, model, result.response.error)
-        log(`planner: ${model.modelId} failed (${message})`)
-        failures.push({ modelId: model.modelId, error: message })
-        continue
-      }
-
-      rawResponse = result.response.content ?? ""
-
-      const parsed = parsePlanResult(rawResponse)
-      if (parsed.plan) {
-        return {
-          plan: parsed.plan,
-          model: model.modelId,
-          elapsedMs: Date.now() - startedAt,
-          cost,
-          rawResponse,
-        }
-      }
-      const reason = parsed.reason ?? "empty-plan"
-      log(`planner: ${model.modelId} returned no usable plan (${reason})`)
-      failures.push({ modelId: model.modelId, error: reason })
+    const attempt = new AbortController()
+    const timer = setTimeout(() => attempt.abort(), Math.min(timeoutMs, left))
+    let result
+    try {
+      result = await llm.queryModel({
+        question: userPrompt,
+        model,
+        systemPrompt,
+        abortSignal: attempt.signal,
+      })
+    } catch (error) {
+      const message = providerError(llm, model, error)
+      log(`planner: ${model.modelId} failed (${message})`)
+      failures.push({ modelId: model.modelId, error: message })
+      continue
+    } finally {
+      clearTimeout(timer)
     }
-  } finally {
-    clearTimeout(timer)
+
+    const usage = result.response.usage
+    if (usage) {
+      cost = (cost ?? 0) + llm.estimateCost(model, usage.promptTokens, usage.completionTokens)
+    }
+    if (result.response.error) {
+      const message = providerError(llm, model, result.response.error)
+      log(`planner: ${model.modelId} failed (${message})`)
+      failures.push({ modelId: model.modelId, error: message })
+      continue
+    }
+
+    rawResponse = result.response.content ?? ""
+
+    const parsed = parsePlanResult(rawResponse)
+    if (parsed.plan) {
+      return {
+        plan: parsed.plan,
+        model: model.modelId,
+        elapsedMs: Date.now() - startedAt,
+        cost,
+        rawResponse,
+      }
+    }
+    const reason = parsed.reason ?? "empty-plan"
+    log(`planner: ${model.modelId} returned no usable plan (${reason})`)
+    failures.push({ modelId: model.modelId, error: reason })
   }
 
   return {

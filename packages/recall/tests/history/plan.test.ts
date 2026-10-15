@@ -6,7 +6,7 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest"
 import { addWriter, setSuppressConsole, type LogEvent } from "loggily"
 import { setRecallLogging } from "../../src/history/recall-shared.ts"
-import { parsePlanResult, planQuery, planVariants, type QueryPlan } from "../../src/lib/plan"
+import { parsePlanResult, PLANNER_ATTEMPT_CAP, planQuery, planVariants, type QueryPlan } from "../../src/lib/plan"
 import type { QueryContext } from "../../src/lib/context.ts"
 import type { LlmBackend, LlmModel } from "../../src/lib/llm-backend.ts"
 
@@ -313,20 +313,25 @@ describe("planQuery provider fallback", () => {
     expect(logEvents.filter((ev) => ev.message.includes("failed"))).toHaveLength(2)
   })
 
-  test("does not start another provider after the shared planner deadline aborts", async () => {
+  // @failure One deadline was shared by every model, so a slow first model (Google through the agy one-shot) ate it
+  // and the loop broke before the working fallback ran (@ag/llm/29473, @cto 19102a36).
+  test("an attempt over its own deadline moves to the next model, which still answers", async () => {
     vi.useFakeTimers()
-    const gemini: LlmModel = { provider: "google", modelId: "gemini-2.0-flash-lite" }
+    const slow: LlmModel = { provider: "google", modelId: "gemini-2.0-flash-lite" }
     const fallback: LlmModel = { provider: "openrouter", modelId: "deepseek/deepseek-chat" }
     const calls: string[] = []
     const llm = {
       queryModel: async ({ model, abortSignal }) => {
         calls.push(model.modelId)
         if (!abortSignal) throw new Error("planner did not pass its deadline signal")
+        if (model === fallback) {
+          return { response: { content: JSON.stringify({ keywords: ["fallbackanswered"], phrases: [] }) } }
+        }
         await new Promise<void>((resolve) => abortSignal.addEventListener("abort", () => resolve(), { once: true }))
-        return { response: { error: "planner deadline reached" } }
+        return { response: { error: "attempt deadline reached" } }
       },
-      getModel: (id) => [gemini, fallback].find((m) => m.modelId === id),
-      budgetedModelIds: [gemini.modelId, fallback.modelId],
+      getModel: (id) => [slow, fallback].find((m) => m.modelId === id),
+      budgetedModelIds: [slow.modelId, fallback.modelId],
       getCheapModel: () => fallback,
       getCheapModels: () => [fallback],
       estimateCost: () => 0,
@@ -338,9 +343,45 @@ describe("planQuery provider fallback", () => {
       await vi.advanceTimersByTimeAsync(25)
       const result = await pending
 
+      expect(result.plan?.keywords).toEqual(["fallbackanswered"])
+      expect(result.model).toBe(fallback.modelId)
+      expect(calls).toEqual([slow.modelId, fallback.modelId])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test("the total cap ends the loop: no model starts after two attempt deadlines", async () => {
+    vi.useFakeTimers()
+    const models: LlmModel[] = [
+      { provider: "google", modelId: "slow-1" },
+      { provider: "openrouter", modelId: "slow-2" },
+      { provider: "xai", modelId: "never-started" },
+    ]
+    const calls: string[] = []
+    const llm = {
+      queryModel: async ({ model, abortSignal }) => {
+        calls.push(model.modelId)
+        if (!abortSignal) throw new Error("planner did not pass its deadline signal")
+        await new Promise<void>((resolve) => abortSignal.addEventListener("abort", () => resolve(), { once: true }))
+        return { response: { error: "attempt deadline reached" } }
+      },
+      getModel: (id) => models.find((m) => m.modelId === id),
+      budgetedModelIds: models.map((m) => m.modelId),
+      getCheapModel: () => models[0],
+      getCheapModels: () => models,
+      estimateCost: () => 0,
+      isProviderAvailable: () => true,
+    } satisfies LlmBackend
+
+    try {
+      const pending = planQuery("find prior work", emptyContext, { round: 1, llm, timeoutMs: 25 })
+      await vi.advanceTimersByTimeAsync(25 * PLANNER_ATTEMPT_CAP)
+      const result = await pending
+
       expect(result.plan).toBeNull()
-      expect(result.error).toBe("planner deadline reached")
-      expect(calls).toEqual([gemini.modelId])
+      expect(calls).toEqual(["slow-1", "slow-2"])
+      expect(result.error).toBe("slow-1: attempt deadline reached; slow-2: attempt deadline reached")
     } finally {
       vi.useRealTimers()
     }
