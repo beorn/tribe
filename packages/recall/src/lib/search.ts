@@ -287,6 +287,9 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   fs.writeSync(2, `recall-phase ${performance.now().toFixed(1)} import.before ${query === "nohits-a" ? "a" : query === "nohits-b" ? "b" : "other"}\n`)
   const { recallAgent } = await import("./agent.ts")
   fs.writeSync(2, `recall-phase ${performance.now().toFixed(1)} import.after ${query === "nohits-a" ? "a" : query === "nohits-b" ? "b" : "other"}\n`)
+  const diagnosticAgentMatches = recallAgent === Reflect.get(globalThis, Symbol.for("hh.recall.diagnostic.agent"))
+  fs.writeSync(2, `recall-phase ${performance.now().toFixed(1)} agent.identity ${query === "nohits-a" ? "a" : query === "nohits-b" ? "b" : "other"} ${diagnosticAgentMatches}\n`)
+  if (!diagnosticAgentMatches) throw new Error("Temporary recall diagnostic refused an unexpected agent function")
   const agentOpts: AgentRecallOptions = {
     ...base,
     round2: options.round2 ?? "auto",

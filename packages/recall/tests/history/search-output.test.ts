@@ -15,7 +15,7 @@ let mockRefreshSpawnCalls = 0
 
 vi.mock("../../src/lib/agent.ts", () => {
   writeSync(2, `recall-phase ${performance.now().toFixed(1)} agent.factory\n`)
-  return {
+  const exported = {
     recallAgent: (query: string, options: unknown) => {
       writeSync(2, `recall-phase ${performance.now().toFixed(1)} agent.call ${query}\n`)
       if (!mockAgent.result) throw new Error("Test did not install a mock recallAgent")
@@ -23,6 +23,8 @@ vi.mock("../../src/lib/agent.ts", () => {
       return mockAgent.result(query, options as never)
     },
   }
+  Reflect.set(globalThis, Symbol.for("hh.recall.diagnostic.agent"), exported.recallAgent)
+  return exported
 })
 
 // Regression seam for @i/20-search-and-memory/23189: search must never import
