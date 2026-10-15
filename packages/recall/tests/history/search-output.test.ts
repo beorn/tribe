@@ -1,5 +1,5 @@
 import { assertSingleStatement } from "@bearly/sqlite"
-import { mkdtempSync, mkdirSync, rmSync, writeSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Database } from "bun:sqlite"
@@ -14,10 +14,8 @@ const mockAgent: {
 let mockRefreshSpawnCalls = 0
 
 function makeAgentMock() {
-  writeSync(2, `recall-phase ${performance.now().toFixed(1)} agent.factory\n`)
   const exported = {
     recallAgent: (query: string, options: unknown) => {
-      writeSync(2, `recall-phase ${performance.now().toFixed(1)} agent.call ${query}\n`)
       if (!mockAgent.result) throw new Error("Test did not install a mock recallAgent")
       mockAgent.options = options
       return mockAgent.result(query, options as never)
@@ -65,16 +63,11 @@ let setIndexMeta: DbModule["setIndexMeta"]
 let bindVaultDb: VaultModule["bindVaultDb"]
 
 async function loadModules(): Promise<void> {
-  writeSync(2, `recall-phase ${performance.now().toFixed(1)} load.enter\n`)
   vi.resetModules()
-  writeSync(2, `recall-phase ${performance.now().toFixed(1)} load.reset.done\n`)
   const search = await import("../../src/lib/search")
-  writeSync(2, `recall-phase ${performance.now().toFixed(1)} load.search.ready\n`)
   // search.ts imports these, so the dynamic imports resolve the same instances.
   const db = await import("../../src/history/db")
-  writeSync(2, `recall-phase ${performance.now().toFixed(1)} load.db.ready\n`)
   const vault = await import("../../src/history/vault-fts.ts")
-  writeSync(2, `recall-phase ${performance.now().toFixed(1)} load.vault.ready\n`)
   cmdSearch = search.cmdSearch
   resolveProjectScope = search.resolveProjectScope
   closeDb = db.closeDb
@@ -254,7 +247,6 @@ describe("recall search output", () => {
   let stderrWriteSpy: ReturnType<typeof vi.spyOn>
 
   beforeEach(async () => {
-    writeSync(2, `recall-phase ${performance.now().toFixed(1)} setup.enter\n`)
     await loadModules()
     mockAgent.result = null
     mockAgent.options = null
@@ -262,17 +254,13 @@ describe("recall search output", () => {
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
     errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
     stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
-    writeSync(2, `recall-phase ${performance.now().toFixed(1)} setup.done\n`)
   })
 
   afterEach(() => {
-    writeSync(2, `recall-phase ${performance.now().toFixed(1)} cleanup.enter\n`)
     logSpy.mockRestore()
     errSpy.mockRestore()
     stderrWriteSpy.mockRestore()
-    writeSync(2, `recall-phase ${performance.now().toFixed(1)} cleanup.spies.restored\n`)
     closeDb()
-    writeSync(2, `recall-phase ${performance.now().toFixed(1)} cleanup.db.closed\n`)
   })
 
   test("reports a loud tool-broken failure — with the lexical hits, clearly labeled, never silently dropped — when default synthesis is unavailable", async () => {
@@ -501,37 +489,28 @@ describe("recall search output", () => {
 
   test("concurrent stale searches report unproven without starting index refreshes", async () => {
     // Temporary diagnostic checkpoint only: preserve the cold concurrent import and every assertion.
-    writeSync(2, `recall-phase ${performance.now().toFixed(1)} case.enter\n`)
     setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
-    writeSync(2, `recall-phase ${performance.now().toFixed(1)} seed.done\n`)
 
     mockAgent.result = async (query, options) => {
-      writeSync(2, `recall-phase ${performance.now().toFixed(1)} agent.result ${query}\n`)
       return zeroAgentResult(query, options) as never
     }
-    writeSync(2, `recall-phase ${performance.now().toFixed(1)} mock.ready\n`)
     const previousExitCode = process.exitCode
     process.exitCode = 0
 
     try {
       await Promise.all(
         ["nohits-a", "nohits-b"].map((query) => {
-          writeSync(2, `recall-phase ${performance.now().toFixed(1)} search.start ${query}\n`)
           const pending = cmdSearch(query, {
             agent: true,
             limit: "5",
             round2: "off",
           })
-          writeSync(2, `recall-phase ${performance.now().toFixed(1)} search.promise ${query}\n`)
           return pending.then((value) => {
-            writeSync(2, `recall-phase ${performance.now().toFixed(1)} search.done ${query}\n`)
             return value
           })
         }),
       )
-      writeSync(2, `recall-phase ${performance.now().toFixed(1)} search.both.done\n`)
 
-      writeSync(2, `recall-phase ${performance.now().toFixed(1)} assertions.enter\n`)
       expect(mockRefreshSpawnCalls).toBe(0)
       expect(callsText(errSpy)).not.toContain("auto-refresh")
       // The stale answer names the root and window it judged (@ag/recall/27930);
@@ -543,9 +522,7 @@ describe("recall search output", () => {
         /0 results — UNPROVEN \(stale index: 2\.0h old vs \d+m window \(\w+\) on index_meta\.last_rebuild\) for "nohits-b"/,
       )
       expect(process.exitCode).toBe(3)
-      writeSync(2, `recall-phase ${performance.now().toFixed(1)} assertions.done\n`)
     } finally {
-      writeSync(2, `recall-phase ${performance.now().toFixed(1)} case.finally\n`)
       process.exitCode = previousExitCode
     }
   })
@@ -889,8 +866,6 @@ describe("recall search output", () => {
     vi.resetModules()
     try {
       // Preservation phases run separately before replacement: doMock must not mask reset or unmock behavior.
-      // Their receipts follow assertions, so a later replacement RED cannot hide a preservation result.
-      stderrWriteSpy.mockRestore()
       const resetAgent = vi.fn()
       let resetFactoryCalls = 0
       vi.doMock("../../src/lib/agent.ts", async () => {
@@ -911,7 +886,6 @@ describe("recall search output", () => {
       expect(Object.is(resetResult, afterReset)).toBe(true)
       expect(resetFactoryCalls).toBe(1)
       expect(resetAgent).not.toHaveBeenCalled()
-      process.stderr.write('runner-preservation reset PASS {"factoryCalls":1,"sameNamespace":true}\n')
 
       vi.resetModules()
       const unmockAgent = vi.fn()
@@ -930,13 +904,12 @@ describe("recall search output", () => {
       expect(typeof unmocked.recallAgent).toBe("function")
       expect(vi.isMockFunction(unmocked.recallAgent)).toBe(false)
       releaseUnmock()
-      const oldUnmockResult = await unmockImport
+      await unmockImport
       const afterUnmock = await import("../../src/lib/agent.ts")
       expect(Object.is(afterUnmock.recallAgent, unmocked.recallAgent)).toBe(true)
       expect(Object.is(afterUnmock, unmocked)).toBe(true)
       expect(unmockFactoryCalls).toBe(1)
       expect(unmockAgent).not.toHaveBeenCalled()
-      process.stderr.write(`runner-preservation unmock PASS ${JSON.stringify({ factoryCalls: unmockFactoryCalls, laterIsActual: !vi.isMockFunction(afterUnmock.recallAgent), oldResultWasMock: Object.is(oldUnmockResult.recallAgent, unmockAgent) })}\n`)
 
       vi.resetModules()
       vi.doMock("../../src/lib/agent.ts", async () => {
@@ -960,10 +933,7 @@ describe("recall search output", () => {
       await newEntered
       // New entry proves public invalidation ran; settle OLD while NEW is still held.
       releaseOld()
-      const oldResult = await oldImport
-      // Temporary receipt only: the pre-replacement import's identity has no asserted policy.
-      stderrWriteSpy.mockRestore()
-      process.stderr.write(`runner-replacement-old ${JSON.stringify({ old: Object.is(oldResult.recallAgent, oldAgent), current: Object.is(oldResult.recallAgent, newAgent) })}\n`)
+      await oldImport
       releaseNew()
       const replacement = await replacementImport
       const later = await import("../../src/lib/agent.ts")
@@ -1010,7 +980,6 @@ describe("recall search output", () => {
     let invalidExports = true
     let validationFactoryCalls = 0
     vi.resetModules()
-    stderrWriteSpy.mockRestore()
     try {
       vi.doMock("../../src/lib/agent.ts", async () => {
         factoryCalls++
@@ -1035,7 +1004,6 @@ describe("recall search output", () => {
       const retried = await import("../../src/lib/agent.ts")
       expect(Object.is(retried.recallAgent, retryAgent)).toBe(true)
       expect(factoryCalls).toBe(2)
-      process.stderr.write('runner-failure shared-rejection PASS {"initialCalls":1,"callsAfterRetry":2}\n')
 
       vi.resetModules()
       vi.doMock("../../src/lib/agent.ts", async () => {
@@ -1062,7 +1030,6 @@ describe("recall search output", () => {
       expect(Object.is(valid.recallAgent, retryAgent)).toBe(true)
       expect(validationFactoryCalls).toBe(2)
       expect(retryAgent).not.toHaveBeenCalled()
-      process.stderr.write('runner-failure export-validation PASS {"initialCalls":1,"callsAfterRetry":2}\n')
     } finally {
       releaseFailure()
       releaseInvalid()
