@@ -289,6 +289,7 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   fs.writeSync(2, `recall-phase ${performance.now().toFixed(1)} import.after ${query === "nohits-a" ? "a" : query === "nohits-b" ? "b" : "other"}\n`)
   const diagnosticAgentMatches = recallAgent === Reflect.get(globalThis, Symbol.for("hh.recall.diagnostic.agent"))
   fs.writeSync(2, `recall-phase ${performance.now().toFixed(1)} agent.identity ${query === "nohits-a" ? "a" : query === "nohits-b" ? "b" : "other"} ${diagnosticAgentMatches}\n`)
+  fs.writeSync(2, `recall-origin ${query === "nohits-a" ? "a" : query === "nohits-b" ? "b" : "other"} ${JSON.stringify({ imported: { name: recallAgent.name, arity: recallAgent.length, prefix: Function.prototype.toString.call(recallAgent).slice(0, 160) }, registered: { name: Reflect.get(globalThis, Symbol.for("hh.recall.diagnostic.agent")).name, arity: Reflect.get(globalThis, Symbol.for("hh.recall.diagnostic.agent")).length, prefix: Function.prototype.toString.call(Reflect.get(globalThis, Symbol.for("hh.recall.diagnostic.agent"))).slice(0, 160) } })}\n`)
   if (!diagnosticAgentMatches) throw new Error("Temporary recall diagnostic refused an unexpected agent function")
   const agentOpts: AgentRecallOptions = {
     ...base,
