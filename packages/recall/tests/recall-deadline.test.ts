@@ -60,7 +60,7 @@ describe("25071 stopgap: recall that outlives its deadline is skipped, loudly", 
     try {
       const result = await runInjectDelta(SALIENT, createMemorySeenStore(), {
         vaultDb: "/fixture/vault/.km/state.db",
-        deps: { recall, ensureProjectSourcesIndexed: () => {}, findGlossaryAnchor: () => null },
+        deps: { recall, ensureProjectSourcesIndexed: () => {}, deriveVaultAnchor: () => null },
       })
       expect(performance.now() - started).toBeLessThan(2500)
       expect(result).toMatchObject({
@@ -73,11 +73,11 @@ describe("25071 stopgap: recall that outlives its deadline is skipped, loudly", 
     }
   }, 15_000)
 
-  test("one deadline covers the first query and the glossary fallback together", async () => {
+  test("one deadline covers the hook's two calls together", async () => {
     const recall = createDeadlineRecall({ deadlineMs: 600, workerUrl: BLOCKS })
     const started = performance.now()
     try {
-      // The first query answers empty after 400 ms; the fallback then has only the 200 ms left, not a fresh 600.
+      // Call A answers empty after 400 ms; call B then has only the 200 ms left, not a fresh 600.
       await recall("400", {})
       await expect(recall("400", {})).rejects.toBeInstanceOf(RecallDeadlineError)
       expect(performance.now() - started).toBeLessThan(900)

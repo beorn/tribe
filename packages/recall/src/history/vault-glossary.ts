@@ -22,10 +22,13 @@
  * Past 200 entries is a smell; past 500 means we're indexing noise.
  */
 
-import { getVaultDb } from "./vault-fts.ts"
+import { isContentWord, isStopword, openVaultDb } from "./vault-fts.ts"
 
+/** The vault the glossary below was read from: the caller names it, one glossary per path (@cto 456e6e77). */
+let glossaryPath: string | null = null
 let glossarySet: Set<string> | null = null
-let buildAttempted = false
+/** The vault's root scope names (`@ag/…` → `ag`), read in the glossary's pass: a short token naming one is an identifier. */
+let rootScopeSet: Set<string> | null = null
 
 const EXPLICIT_ALIASES: ReadonlyArray<string> = [
   // camelCase code-symbol terms
@@ -66,13 +69,13 @@ const SHORT_EXPLICIT_ALIASES: ReadonlySet<string> = new Set([
  */
 const PROJECT_DIRS: ReadonlyArray<string> = ["vendor/", "apps/", "packages/", "hub/"]
 
-function buildGlossary(): Set<string> | null {
-  if (glossarySet) return glossarySet
-  if (buildAttempted) return null
-  buildAttempted = true
-
-  const db = getVaultDb()
-  if (!db) return null
+function buildGlossary(vaultDb: string): Set<string> | null {
+  if (glossaryPath === vaultDb) return glossarySet
+  // Opened before the path is recorded: a vault that cannot be opened refuses on every call, never cached as none.
+  const db = openVaultDb(vaultDb)
+  glossaryPath = vaultDb
+  glossarySet = null
+  rootScopeSet = null
 
   const out = new Set<string>(EXPLICIT_ALIASES.map((s) => s.toLowerCase()))
 
@@ -128,8 +131,11 @@ function buildGlossary(): Set<string> | null {
       )
       .all() as Array<{ fs_path: string }>
 
+    const roots = new Set<string>()
     for (const { fs_path } of beadRows) {
       const parts = fs_path.replace(/\.md$/, "").split("/")
+      const root = parts[0]?.slice(1)
+      if (root && root.length >= 2 && /^[a-z][a-z0-9-]*$/.test(root)) roots.add(root)
       // parts[0] = "@km", parts[1] = scope. Only the scope.
       const scope = parts[1]
       if (scope && scope.length >= 4 && /^[a-z][a-z0-9-]*$/.test(scope)) {
@@ -138,6 +144,7 @@ function buildGlossary(): Set<string> | null {
     }
 
     glossarySet = out
+    rootScopeSet = roots
     return out
   } catch {
     // silent-fallback-allow: unavailable vault glossary only disables anchor-term boosting.
@@ -145,35 +152,69 @@ function buildGlossary(): Set<string> | null {
   }
 }
 
-/**
- * Tokenize a prompt and return the first matching glossary term, or null.
- *
- * Tokens are lowercased; tokens shorter than 4 chars are ignored to
- * suppress common-word matches.
- */
-export function findGlossaryAnchor(prompt: string): string | null {
-  const glossary = buildGlossary()
-  if (!glossary || glossary.size === 0) return null
-
-  const tokens = prompt.split(/[^A-Za-z0-9.]+/)
-  for (const t of tokens) {
-    if (t.length < 3) continue
-    const lower = t.toLowerCase()
-    // 3-char tokens only match against the explicit short-alias set
-    // (skill names like "pro", "tdd"). Auto-discovered glossary entries
-    // require length 4+ to suppress common-word matches.
-    if (t.length === 3) {
-      if (SHORT_EXPLICIT_ALIASES.has(lower)) return lower
-      continue
-    }
-    if (glossary.has(lower)) return lower
-    const stripped = lower.replace(/[?!.,;:]+$/, "")
-    if (stripped !== lower && stripped.length >= 4 && glossary.has(stripped)) return stripped
-  }
-  return null
+/** The vault query for a prompt: what call A of the prompt hook searches the vault with (@ag/recall Phase 3). */
+export interface VaultAnchor {
+  query: string
+  /** The identifier that leads the query, or null when the query is the prompt's first content words. */
+  identifier: string | null
 }
 
-export function glossarySize(): number {
-  const g = buildGlossary()
-  return g?.size ?? 0
+const ANCHOR_WORDS = 3
+const AT_REF = /^@[A-Za-z0-9][\w.-]*(?:\/[\w.-]+)*$/u
+const PATH = /^[\w.-]+\/[\w./-]+$/u
+const KEBAB = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$/u
+const CAMEL = /^(?:[a-z]+[A-Z]|[A-Z][a-z0-9]+[A-Z])[A-Za-z0-9]*$/u
+const BEAD_NUMBER = /^\d{4,6}$/u
+const PROPER = /^[A-Z][a-z]+$/u
+
+interface PromptWord {
+  token: string
+  /** A capital that opens a sentence is no proper noun. */
+  opensSentence: boolean
+}
+
+function promptWords(prompt: string): PromptWord[] {
+  const words: PromptWord[] = []
+  for (const sentence of prompt.split(/[.!?]+(?:\s+|$)|\n+/u)) {
+    const tokens = sentence
+      .split(/[^A-Za-z0-9_@/.-]+/u)
+      .map((t) => t.replace(/^[./-]+|[./-]+$/gu, ""))
+      .filter((t) => t.length > 0)
+    tokens.forEach((token, i) => words.push({ token, opensSentence: i === 0 }))
+  }
+  return words
+}
+
+/**
+ * The vault query for a prompt, identifier-first (@cto 7f55e4f2, from @dev/5's measurement): the first identifier the
+ * prompt names (an @ref, a path, kebab-case, camelCase, a bead number, a vault root scope such as `ag`, a glossary
+ * term, or a proper noun mid-sentence such as `Jev`, however short) followed by the next content words, three tokens
+ * in all; with no identifier, the first three content words. Null when the prompt has neither. A short query, never
+ * the verbatim prompt: the vault's FTS AND-joins every token. `vaultDb` is the vault whose scopes and glossary count as
+ * identifiers, named by the caller; null, only the shapes and proper nouns do.
+ */
+export function deriveVaultAnchor(prompt: string, vaultDb: string | null): VaultAnchor | null {
+  const glossary = vaultDb === null ? null : buildGlossary(vaultDb)
+  const roots = glossary === null ? null : rootScopeSet
+  const words = promptWords(prompt)
+  const isIdentifier = ({ token, opensSentence }: PromptWord): boolean => {
+    const lower = token.toLowerCase()
+    if ([AT_REF, PATH, KEBAB, CAMEL, BEAD_NUMBER].some((shape) => shape.test(token))) return true
+    if (roots?.has(lower) || glossary?.has(lower) || SHORT_EXPLICIT_ALIASES.has(lower)) return true
+    return !opensSentence && PROPER.test(token) && !isStopword(lower)
+  }
+  const contentAfter = (from: number, count: number): string[] =>
+    words
+      .slice(from)
+      .map((w) => w.token)
+      .filter(isContentWord)
+      .slice(0, count)
+      .map((t) => t.toLowerCase())
+  const at = words.findIndex(isIdentifier)
+  const identifier = words[at]?.token
+  if (identifier !== undefined) {
+    return { query: [identifier, ...contentAfter(at + 1, ANCHOR_WORDS - 1)].join(" "), identifier }
+  }
+  const content = contentAfter(0, ANCHOR_WORDS)
+  return content.length > 0 ? { query: content.join(" "), identifier: null } : null
 }

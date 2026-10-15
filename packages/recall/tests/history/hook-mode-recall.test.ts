@@ -4,8 +4,8 @@
  * B1: hook mode issues no COUNT, not the message total, the content total, or the session-depth corroboration.
  * B2: hook mode ranks the window first, like exact, capped at N ranked matches (@cto re-ruling 516d4c10: the all-time
  *     top-N candidate set was refuted by the real-prompt replay, where hook was slower than exact on 84 of 150).
- * B3: the synonym variants run only while the remaining budget covers one candidate pass; a skipped phase says the
- *     phase, the anchor and the ms left.
+ * Phase 3 (@ag/recall/three-dark-search-paths): hook mode runs the phases its caller names, and never the project
+ *     content or the synonym variants.
  * Exact mode, the default and the CLI's, keeps every count.
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
@@ -213,53 +213,57 @@ describe("25071 row 2 B2: hook mode ranks the window first (@cto re-ruling 516d4
   })
 })
 
-describe("25071 row 2 B3: phases run only while the budget covers them", () => {
-  test("a synonym variant the remaining budget cannot cover is skipped, naming the phase, the anchor and the ms left", async () => {
-    seed(
-      Array.from({ length: 12 }, (_, i) => ({
-        session: `auth-${i}`,
-        content: `auth token note ${String(i)}`,
-        ageDays: 1,
-      })),
-    )
-
-    const hook = await recall("auth", { mode: "hook", raw: true, limit: 5, deadlineAt: Date.now() + 100 })
-
-    const synonym = hook.skipped?.find((s) => s.phase === "synonym")
-    expect(synonym?.anchor).toBe("authentication")
-    expect(synonym?.message).toMatch(/^recall synonym skipped: anchor "authentication", -?\d+ ms left \(25071\)$/)
-  })
-
-  test("recall reports each phase's time, so the hook's steps can name the slow one", async () => {
+describe("Phase 3: hook mode runs the phases its caller names (@ag/recall/three-dark-search-paths, @cto 7f55e4f2)", () => {
+  test("with no phases named, hook mode times vault, messages, session_content and titles, and runs no project_content", async () => {
     seed(recentWeak(20))
 
     const hook = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
 
     expect(Object.keys(hook.timing?.phases ?? {}).sort()).toEqual(
-      [
-        "corroboration",
-        "live_session",
-        "messages",
-        "project_content",
-        "proximity",
-        "session_content",
-        "titles",
-        "vault",
-      ].sort(),
+      ["corroboration", "live_session", "messages", "proximity", "session_content", "titles", "vault"].sort(),
     )
+  })
+
+  test("a vault-only call runs no statement on the message index, not even the corroboration scan", async () => {
+    seed(recentWeak(20))
+
+    const sql = await preparedSql(() => recall(ANCHOR, { mode: "hook", raw: true, limit: 5, phases: ["vault"] }))
+    seed(recentWeak(20))
+    const vaultOnly = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5, phases: ["vault"] })
+
+    expect(sql.filter((q) => /messages_fts/i.test(q))).toEqual([])
+    expect(vaultOnly.results).toEqual([])
+    expect(Object.keys(vaultOnly.timing?.phases ?? {}).sort()).toEqual(
+      ["corroboration", "live_session", "proximity", "vault"].sort(),
+    )
+  })
+
+  test("hook mode runs no synonym variant; exact mode still does (the control)", async () => {
+    const auth = (): Seed[] =>
+      Array.from({ length: 12 }, (_, i) => ({
+        session: `auth-${i}`,
+        content: `auth token note ${String(i)}`,
+        ageDays: 1,
+      }))
+    seed(auth())
+    const hook = await recall("auth", { mode: "hook", raw: true, limit: 5 })
+    seed(auth())
+    const exact = await recall("auth", { raw: true, limit: 5 })
+
+    expect(hook.timing?.phases?.synonyms).toBeUndefined()
+    expect(hook.skipped ?? []).toEqual([])
+    expect(exact.timing?.phases?.synonyms).toBeGreaterThanOrEqual(0)
   })
 })
 
 describe("25071 row 2: the budget is stated once, as named constants", () => {
-  test("a 1.5 s wall, a cap of 1000 ranked window matches, and the cost of one pass", async () => {
+  test("a 1.5 s wall and a cap of 1000 ranked window matches", async () => {
     const budget = await import("../../src/history/recall-budget.ts")
     expect(budget.RECALL_WALL_MS).toBe(1500)
     expect(budget.HOOK_CANDIDATE_LIMIT).toBe(1000)
-    expect(budget.HOOK_CANDIDATE_PASS_MS).toBeGreaterThan(0)
-    // The all-time candidate set's widening, its floor and its survivor minimum went with it (re-ruling 516d4c10).
+    // The all-time candidate set's widening, its floor and its survivor minimum went with it (re-ruling 516d4c10);
+    // the cost of one pass went with the phases it budgeted, the synonym variants and the glossary fallback (Phase 3).
     // The 1 s target is prose in this module, not an export; RECALL_WALL_MS is what a call is bounded by.
-    expect(Object.keys(budget).sort()).toEqual(
-      ["HOOK_CANDIDATE_LIMIT", "HOOK_CANDIDATE_PASS_MS", "RECALL_WALL_MS"].sort(),
-    )
+    expect(Object.keys(budget).sort()).toEqual(["HOOK_CANDIDATE_LIMIT", "RECALL_WALL_MS"].sort())
   })
 })

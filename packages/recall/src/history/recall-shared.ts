@@ -65,8 +65,12 @@ export interface RecallOptions {
    * (@ag/tribe/25071 row 2); see recall-budget.ts.
    */
   mode?: SearchMode
-  /** Hook mode: when the budget runs out, as epoch ms. Defaults to the call's start plus RECALL_WALL_MS. */
-  deadlineAt?: number
+  /**
+   * The search phases this call runs; absent, every one runs. A phase outside the list is neither run nor timed.
+   * Corroboration, the live session, the merge and proximity are assembly, run over what the phases collected
+   * (@ag/recall/three-dark-search-paths Phase 3, @cto 7f55e4f2).
+   */
+  phases?: readonly RecallPhase[]
   /**
    * The vault database this call searches: recall()'s only vault binding (@cto 456e6e77). Absent or null, no vault
    * is searched, and the entry point says so. Each entry point resolves `--vault-db` into it at its boundary, so a
@@ -75,12 +79,15 @@ export interface RecallOptions {
   vaultDb?: string | null
 }
 
+/** A search phase one recall call may run (Phase 3). */
+export type RecallPhase = "vault" | "messages" | "session_content" | "titles"
+
 /** How a search reaches FTS: every match ranked and counted, or the window's matches ranked under a cap (@ag/tribe/25071 row 2). */
 export type SearchMode = "exact" | "hook"
 
 /** A phase recall skipped rather than ran, said out loud (@ag/tribe/25071 row 2). */
 export interface RecallSkip {
-  /** The phase: "messages", "synonym", ... */
+  /** The phase: "messages" when hook mode capped its window. */
   phase: string
   /** The query the phase would have searched. */
   anchor: string
