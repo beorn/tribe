@@ -231,6 +231,9 @@ async function handleAsk(args: Record<string, unknown>): Promise<string> {
 
   // Library fallback (Phase 1 behaviour)
   const result = await recallAgent(query, {
+    // This server resolves no --vault-db at its boundary, so it searches no vault, stated here (a later change
+    // resolves one; @ag/recall/three-dark-search-paths).
+    vaultDb: null,
     limit: askParams.limit,
     since: askParams.since,
     projectFilter: askParams.projectFilter,

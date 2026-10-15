@@ -267,6 +267,8 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
       maxRounds: params.maxRounds,
       speculativeSynth: params.speculativeSynth,
       provenance: engine.readIndexProvenance({}),
+      // The launch line's --vault-db, named on the call: recall() reads no binding of its own (@cto 456e6e77).
+      vaultDb: opts.vaultDbPath ?? null,
     })
     return toAskResult(result, { includeTrace: params.rawTrace })
   }
