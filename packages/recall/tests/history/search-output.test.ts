@@ -801,8 +801,12 @@ describe("recall search output", () => {
     // not the sibling's private loader entry. An internal-entry barrier would deadlock valid deduplication.
     let releaseFactory!: () => void
     let markFactoryEntered!: () => void
-    const release = new Promise<void>((resolve) => { releaseFactory = resolve })
-    const entered = new Promise<void>((resolve) => { markFactoryEntered = resolve })
+    const release = new Promise<void>((resolve) => {
+      releaseFactory = resolve
+    })
+    const entered = new Promise<void>((resolve) => {
+      markFactoryEntered = resolve
+    })
     const expectedAgent = vi.fn(async (query: string) => zeroAgentResult(query))
     let factoryCalls = 0
     const imports: Array<Promise<typeof import("../../src/lib/agent.ts")>> = []
@@ -845,10 +849,18 @@ describe("recall search output", () => {
     let releaseNew!: () => void
     let enteredOld!: () => void
     let enteredNew!: () => void
-    const oldRelease = new Promise<void>((resolve) => { releaseOld = resolve })
-    const newRelease = new Promise<void>((resolve) => { releaseNew = resolve })
-    const oldEntered = new Promise<void>((resolve) => { enteredOld = resolve })
-    const newEntered = new Promise<void>((resolve) => { enteredNew = resolve })
+    const oldRelease = new Promise<void>((resolve) => {
+      releaseOld = resolve
+    })
+    const newRelease = new Promise<void>((resolve) => {
+      releaseNew = resolve
+    })
+    const oldEntered = new Promise<void>((resolve) => {
+      enteredOld = resolve
+    })
+    const newEntered = new Promise<void>((resolve) => {
+      enteredNew = resolve
+    })
     const oldAgent = vi.fn()
     const newAgent = vi.fn()
     let oldFactoryCalls = 0
@@ -858,10 +870,18 @@ describe("recall search output", () => {
     let enteredReset!: () => void
     let releaseUnmock!: () => void
     let enteredUnmock!: () => void
-    const resetRelease = new Promise<void>((resolve) => { releaseReset = resolve })
-    const resetEntered = new Promise<void>((resolve) => { enteredReset = resolve })
-    const unmockRelease = new Promise<void>((resolve) => { releaseUnmock = resolve })
-    const unmockEntered = new Promise<void>((resolve) => { enteredUnmock = resolve })
+    const resetRelease = new Promise<void>((resolve) => {
+      releaseReset = resolve
+    })
+    const resetEntered = new Promise<void>((resolve) => {
+      enteredReset = resolve
+    })
+    const unmockRelease = new Promise<void>((resolve) => {
+      releaseUnmock = resolve
+    })
+    const unmockEntered = new Promise<void>((resolve) => {
+      enteredUnmock = resolve
+    })
     vi.resetModules()
     try {
       // Preservation phases run separately before replacement: doMock must not mask reset or unmock behavior.
@@ -967,10 +987,18 @@ describe("recall search output", () => {
     let enteredFailure!: () => void
     let releaseInvalid!: () => void
     let enteredInvalid!: () => void
-    const failureRelease = new Promise<void>((resolve) => { releaseFailure = resolve })
-    const failureEntered = new Promise<void>((resolve) => { enteredFailure = resolve })
-    const invalidRelease = new Promise<void>((resolve) => { releaseInvalid = resolve })
-    const invalidEntered = new Promise<void>((resolve) => { enteredInvalid = resolve })
+    const failureRelease = new Promise<void>((resolve) => {
+      releaseFailure = resolve
+    })
+    const failureEntered = new Promise<void>((resolve) => {
+      enteredFailure = resolve
+    })
+    const invalidRelease = new Promise<void>((resolve) => {
+      releaseInvalid = resolve
+    })
+    const invalidEntered = new Promise<void>((resolve) => {
+      enteredInvalid = resolve
+    })
     const imports: Array<Promise<typeof import("../../src/lib/agent.ts")>> = []
     const retryAgent = vi.fn()
     const failure = new Error("shared manual factory failure")
@@ -1010,7 +1038,7 @@ describe("recall search output", () => {
         enteredInvalid()
         await invalidRelease
         // Deliberately malformed to exercise the public export-validation failure, not a test type error.
-        return invalidExports ? null as unknown as { recallAgent: typeof retryAgent } : { recallAgent: retryAgent }
+        return invalidExports ? (null as unknown as { recallAgent: typeof retryAgent }) : { recallAgent: retryAgent }
       })
       const invalidFirst = import("../../src/lib/agent.ts")
       const invalidSecond = import("../../src/lib/agent.ts")
