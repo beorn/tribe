@@ -22,7 +22,7 @@
  * Past 200 entries is a smell; past 500 means we're indexing noise.
  */
 
-import { isContentWord, isStopword, openVaultDb } from "./vault-fts.ts"
+import { isContentWord, isStopword, openVaultDb, promptWords, type PromptWord } from "./vault-fts.ts"
 
 /** The vault the glossary below was read from: the caller names it, one glossary per path (@cto 456e6e77). */
 let glossaryPath: string | null = null
@@ -167,31 +167,13 @@ const CAMEL = /^(?:[a-z]+[A-Z]|[A-Z][a-z0-9]+[A-Z])[A-Za-z0-9]*$/u
 const BEAD_NUMBER = /^\d{4,6}$/u
 const PROPER = /^[A-Z][a-z]+$/u
 
-interface PromptWord {
-  token: string
-  /** A capital that opens a sentence is no proper noun. */
-  opensSentence: boolean
-}
-
-function promptWords(prompt: string): PromptWord[] {
-  const words: PromptWord[] = []
-  for (const sentence of prompt.split(/[.!?]+(?:\s+|$)|\n+/u)) {
-    const tokens = sentence
-      .split(/[^A-Za-z0-9_@/.-]+/u)
-      .map((t) => t.replace(/^[./-]+|[./-]+$/gu, ""))
-      .filter((t) => t.length > 0)
-    tokens.forEach((token, i) => words.push({ token, opensSentence: i === 0 }))
-  }
-  return words
-}
-
 /**
  * The vault query for a prompt, identifier-first (@cto 7f55e4f2, from @dev/5's measurement): the first identifier the
  * prompt names (an @ref, a path, kebab-case, camelCase, a bead number, a vault root scope such as `ag`, a glossary
  * term, or a proper noun mid-sentence such as `Jev`, however short) followed by the next content words, three tokens
  * in all; with no identifier, the first three content words. Null when the prompt has neither. A short query, never
- * the verbatim prompt: the vault's FTS AND-joins every token. `vaultDb` is the vault whose scopes and glossary count as
- * identifiers, named by the caller; null, only the shapes and proper nouns do.
+ * the verbatim prompt: searchVault tries every term together first. `vaultDb` is the vault whose scopes and glossary
+ * count as identifiers, named by the caller; null, only the shapes and proper nouns do.
  */
 export function deriveVaultAnchor(prompt: string, vaultDb: string | null): VaultAnchor | null {
   const glossary = vaultDb === null ? null : buildGlossary(vaultDb)

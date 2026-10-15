@@ -980,7 +980,8 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   // type, so omit it when those filters are active rather than returning
   // rows that cannot honor the caller's constraint.
   const vaultFilterActive = question || response || tool !== undefined || session !== undefined || include !== undefined
-  const vaultMatches: VaultMatch[] = query && !vaultFilterActive ? searchVault(query, limit, vaultDb) : []
+  const vault = query && !vaultFilterActive ? searchVault(query, limit, vaultDb) : null
+  const vaultMatches: VaultMatch[] = vault?.matches ?? []
 
   const total = messageResults.total + contentResults.total + vaultMatches.length
   const duration = Date.now() - startTime
@@ -1061,6 +1062,16 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
           total: unprovenEmpty ? null : total,
           durationMs: duration,
           results: unprovenEmpty ? null : allResults,
+          ...(vault !== null && vaultDb !== null
+            ? {
+                vaultQuery: {
+                  form: vault.form,
+                  terms: vault.terms,
+                  unmatched: vault.unmatched,
+                  matched: vault.matched,
+                },
+              }
+            : {}),
         },
         null,
         2,

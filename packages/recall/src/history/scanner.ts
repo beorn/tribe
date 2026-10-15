@@ -95,6 +95,8 @@ export interface HookResult {
   /** Why nothing was injected after a search, and what was searched in how long (29480). */
   emptyReason?: Extract<import("../lib/prompt-filter.ts").InjectSkipReason, "no_results" | "all_seen" | "low_quality">
   searched?: string
+  /** How the vault was searched, when it was: the hook's log row carries it (29487). */
+  vaultQuery?: import("./vault-fts.ts").VaultQuery
   hookOutput?: {
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit"
@@ -134,6 +136,7 @@ export function hookResultFromCore(core: RunInjectDeltaResult): HookResult {
     ...skipped,
     ...(core.emptyRecallReason === undefined ? {} : { emptyReason: core.emptyRecallReason }),
     ...(core.searched === undefined ? {} : { searched: core.searched }),
+    ...(core.vaultQuery === undefined ? {} : { vaultQuery: core.vaultQuery }),
     hookOutput: {
       hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: core.additionalContext },
     },

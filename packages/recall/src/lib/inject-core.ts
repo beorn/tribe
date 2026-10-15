@@ -31,6 +31,7 @@ import {
 import { mergeRecallResults, recall } from "../history/search.ts"
 import type { RecallOptions, RecallPhase, RecallResult } from "../history/recall-shared.ts"
 import { deriveVaultAnchor } from "../history/vault-glossary.ts"
+import type { VaultQuery } from "../history/vault-fts.ts"
 import { RecallDeadlineError } from "./recall-deadline.ts"
 import { RECALL_WALL_MS } from "../history/recall-budget.ts"
 // Envelope framing primitives live in the shared library. Re-exported here so
@@ -212,6 +213,8 @@ export type RunInjectDeltaResult =
       turn: number
       /** True when only the protocol footer was emitted (no fresh recall snippets). */
       footerOnly?: boolean
+      /** How call A searched the vault: the form that ran, its terms, the terms no node holds (29487). */
+      vaultQuery?: VaultQuery
       /**
        * Set when the recall had nothing to inject: the context is one line naming what was searched and how long it
        * took (@ag/recall/three-dark-search-paths Phase 3).
@@ -467,6 +470,9 @@ async function runRecallInjection(
     }
   }
 
+  const vaultQuery = vaultCall?.result.vaultQuery
+  const vaultReceipt = vaultQuery === undefined ? {} : { vaultQuery }
+
   // Call B: the rest, on the prompt, bounded because FTS cost grows super-linearly with query length (25071). Over
   // the wall, A's answer stays and one line names what did not finish.
   let promptCall: Awaited<ReturnType<typeof call>> | null = null
@@ -521,6 +527,7 @@ async function runRecallInjection(
       turn,
       emptyRecallReason: reason,
       searched: said,
+      ...vaultReceipt,
     })
   }
 
@@ -599,6 +606,7 @@ async function runRecallInjection(
     additionalContext,
     newKeys,
     turn,
+    ...vaultReceipt,
   })
 }
 

@@ -422,6 +422,7 @@ export async function cmdHook(): Promise<void> {
       session: sessionId,
       context_len: additionalContext.length,
       ...hookDecisionFields(result),
+      ...(result.vaultQuery === undefined ? {} : { vault_query: result.vaultQuery }),
       elapsed_ms: elapsed,
       steps: roundSteps(steps),
       prompt_preview: prompt.slice(0, 60),
@@ -554,7 +555,7 @@ export async function cmdPreCompact(): Promise<void> {
     if (shortId.length > 0) {
       try {
         // Reads the bound path at this boundary: one of the two non-recall readers left on the binding (@cto 456e6e77).
-        const match = searchVault(shortId, 5, getVaultDbPath()).find(
+        const match = searchVault(shortId, 5, getVaultDbPath()).matches.find(
           (m) => m.fsPath !== null && m.fsPath.endsWith(".md"),
         )
         trackingBead = match?.fsPath ?? null

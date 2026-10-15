@@ -5,6 +5,7 @@
 import { createLogger } from "loggily"
 import type { ContentType } from "./types.ts"
 import type { IndexFreshness } from "../lib/staleness.ts"
+import type { VaultQuery } from "./vault-fts.ts"
 
 // ============================================================================
 // Logging
@@ -123,6 +124,8 @@ export interface RecallResult {
   }
   /** Hook mode only: how the candidate search went. */
   hookSearch?: HookSearchSummary
+  /** How the vault was searched, when it was: the form that ran, its terms, and the terms no node holds (29487). */
+  vaultQuery?: VaultQuery
   /** Each phase skipped rather than run, or cut short (the hook's capped window); absent when none was. */
   skipped?: RecallSkip[]
   /**

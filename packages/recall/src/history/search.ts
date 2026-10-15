@@ -36,7 +36,7 @@ import type {
 
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
-import { searchVault } from "./vault-fts.ts"
+import { searchVault, type VaultQuery } from "./vault-fts.ts"
 
 // Re-export shared items so existing internal imports continue to work
 export { setRecallLogging, log, ONE_HOUR_MS, ONE_DAY_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
@@ -392,7 +392,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     }
   }
   let hookSearch: HookMessageSearch | undefined
-  const said = (): Pick<RecallResult, "hookSearch" | "skipped"> => ({
+  let vaultQuery: VaultQuery | undefined
+  const said = (): Pick<RecallResult, "hookSearch" | "skipped" | "vaultQuery"> => ({
     ...(hookSearch === undefined
       ? {}
       : {
@@ -402,6 +403,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
           },
         }),
     ...(skipped.length === 0 ? {} : { skipped }),
+    ...(vaultQuery === undefined ? {} : { vaultQuery }),
   })
 
   const db = getDb()
@@ -492,12 +494,14 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // rank (more negative = better).
     const vaultDb = options.vaultDb ?? null
     const vaultStart = Date.now()
-    const vaultMatches = runs("vault") ? phase("vault", () => searchVault(query, limit * 2, vaultDb)) : []
+    const vault = runs("vault") ? phase("vault", () => searchVault(query, limit * 2, vaultDb)) : null
+    const vaultMatches = vault?.matches ?? []
     const vaultMs = Date.now() - vaultStart
-    if (vaultMatches.length > 0) {
-      log(`vault FTS: ${vaultMatches.length} matches (${vaultMs}ms) [${vaultDb ?? "?"}]`)
-    } else if (vaultDb !== null) {
-      log(`vault FTS: 0 matches (${vaultMs}ms)`)
+    if (vault !== null && vaultDb !== null) {
+      vaultQuery = { form: vault.form, terms: vault.terms, unmatched: vault.unmatched, matched: vault.matched }
+      log(
+        `vault FTS: ${vaultMatches.length} of ${vault.matched} matched, ${vault.form} of [${vault.terms.join(", ")}]${vault.unmatched.length > 0 ? `, unmatched [${vault.unmatched.join(", ")}]` : ""} (${vaultMs}ms) [${vaultDb}]`,
+      )
     }
 
     // Query expansion: search with synonym variants for broader recall. Not in hook mode (Phase 3).
