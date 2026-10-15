@@ -1774,10 +1774,12 @@ const TRACKED_ATTENTION_FETCH_COLUMNS_SQL = `COALESCE(m.id, a.id) AS id,
  * Incidents remain pending-only because their source message is not an
  * actionable type. Resolve from either retention tier so an open ball cannot
  * disappear merely because its source message was archived. */
+export const NON_EVENT_KINDS_SQL = "'direct', 'broadcast'"
+
 function trackedAttentionPredicateSql(ownerParameter = "$name"): string {
   return `p.recipient = ${ownerParameter}
     AND p.request_kind != 'incident'
-    AND COALESCE(m.kind, a.kind) IN ('direct', 'broadcast')
+    AND COALESCE(m.kind, a.kind) IN (${NON_EVENT_KINDS_SQL})
     AND ${untakenPendingBallPredicateSql("p", TRACKED_ATTENTION_SEQUENCE_SQL)}
     AND ${trackedResponseCursorGateSql(ownerParameter)}`
 }
@@ -1798,6 +1800,27 @@ function trackedResponseCursorGateSql(ownerParameter: string): string {
 
 const TRACKED_ACTIONABLE_TYPE_SQL = `(COALESCE(m.type, a.type) IN (${ACTIONABLE_TYPES_SQL})
   OR COALESCE(m.attention_required, a.attention_required) = 1)`
+
+/** One attention projection for both a mailbox and the fleet health read. */
+function unreadAttentionSql(recipient: string): string {
+  return `
+    SELECT m.id, m.ts
+    FROM messages AS m
+    WHERE m.recipient = ${recipient}
+      AND m.kind = 'direct'
+      AND m.sender != ${recipient}
+      AND ${ATTENTION_PREDICATE_SQL}
+      AND ${noOpenIncidentAttentionPredicateSql("m")}
+      AND ${unretiredAttentionPredicateSql("m")}
+      AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ${recipient}), 0)
+    UNION
+    SELECT COALESCE(m.id, a.id) AS id, COALESCE(m.ts, a.ts) AS ts
+    ${TRACKED_ATTENTION_MESSAGE_JOIN_SQL}
+    WHERE ${trackedAttentionPredicateSql(recipient)}
+      AND COALESCE(m.sender, a.sender) != ${recipient}
+      AND ${TRACKED_ACTIONABLE_TYPE_SQL}
+  `
+}
 
 /** A TAKING receipt is durable evidence for an open ball. Keep it through
  * archive retention until the structured reply removes the pending row. */
@@ -2336,13 +2359,13 @@ export function createStatements(db: Database) {
 			FROM pending_request p
 			LEFT JOIN messages pending_message ON pending_message.id = p.message_id
 			LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
-			JOIN messages r ON ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", "COALESCE(pending_message.rowid, pending_archive.seq)")}
+			CROSS JOIN messages r ON ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", "COALESCE(pending_message.rowid, pending_archive.seq)")}
 			UNION ALL
 			SELECT p.request_id AS request_id, p.recipient, p.message_id, r.ts AS taking_receipt_at_ms
 			FROM pending_request p
 			LEFT JOIN messages pending_message ON pending_message.id = p.message_id
 			LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
-			JOIN messages_archive r ON ${takingStatusForOpenRequestMatchSql("r", "seq", "p", "COALESCE(pending_message.rowid, pending_archive.seq)")}
+			CROSS JOIN messages_archive r ON ${takingStatusForOpenRequestMatchSql("r", "seq", "p", "COALESCE(pending_message.rowid, pending_archive.seq)")}
 		)
 		GROUP BY request_id, recipient, message_id
 	`),
@@ -2667,23 +2690,7 @@ export function createStatements(db: Database) {
       SELECT
         COUNT(*) AS count,
         COALESCE(MIN(ts), 0) AS oldest_ts
-      FROM (
-        SELECT m.id, m.ts
-        FROM messages AS m
-        WHERE m.recipient = $name
-          AND m.kind = 'direct'
-          AND m.sender != $name
-          AND ${ATTENTION_PREDICATE_SQL}
-          AND ${noOpenIncidentAttentionPredicateSql("m")}
-          AND ${unretiredAttentionPredicateSql("m")}
-          AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
-        UNION
-        SELECT COALESCE(m.id, a.id) AS id, COALESCE(m.ts, a.ts) AS ts
-        ${TRACKED_ATTENTION_MESSAGE_JOIN_SQL}
-        WHERE ${trackedAttentionPredicateSql()}
-          AND COALESCE(m.sender, a.sender) != $name
-          AND ${TRACKED_ACTIONABLE_TYPE_SQL}
-      )
+      FROM (${unreadAttentionSql("$name")})
     `),
     ),
 
@@ -2692,28 +2699,18 @@ export function createStatements(db: Database) {
      * incidents or hiding tracked actionables behind an advanced cursor. */
     getAllUnreadDms: db.prepare(
       assertSingleStatement(`
-      SELECT recipient, COUNT(*) AS count
-      FROM (
-        SELECT m.recipient, m.id
-        FROM messages AS m
-        WHERE m.recipient != '*'
-          AND m.kind = 'direct'
-          AND m.sender != m.recipient
-          AND ${ATTENTION_PREDICATE_SQL}
-          AND ${noOpenIncidentAttentionPredicateSql("m")}
-          AND ${unretiredAttentionPredicateSql("m")}
-          AND m.rowid > COALESCE(
-            (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = m.recipient),
-            0
-          )
+      WITH recipients AS (
+        SELECT DISTINCT recipient
+        FROM messages
+        WHERE recipient != '*' AND kind = 'direct'
         UNION
-        SELECT p.recipient, COALESCE(m.id, a.id) AS id
-        ${TRACKED_ATTENTION_MESSAGE_JOIN_SQL}
-        WHERE ${trackedAttentionPredicateSql("p.recipient")}
-          AND COALESCE(m.sender, a.sender) != p.recipient
-          AND ${TRACKED_ACTIONABLE_TYPE_SQL}
+        SELECT recipient FROM pending_request
+      ), unread AS MATERIALIZED (
+        SELECT n.recipient,
+          (SELECT COUNT(*) FROM (${unreadAttentionSql("n.recipient")})) AS count
+        FROM recipients AS n
       )
-      GROUP BY recipient
+      SELECT recipient, count FROM unread WHERE count > 0
     `),
     ),
 

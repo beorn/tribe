@@ -72,13 +72,15 @@ describe("tribe health --json emits exactly one document on every exit path", ()
         const request = JSON.parse(buffer.slice(0, newline)) as { id: number; method: string }
         buffer = buffer.slice(newline + 1)
         methods.push(request.method)
-        socket.write(`${JSON.stringify({
-          jsonrpc: "2.0",
-          id: request.id,
-          ...(errorCode
-            ? { error: { code: errorCode, message: "probe condition" } }
-            : { result: { daemon: { pid: 42, uptime: 100, clients: 2 }, sessions: [{ name: "a" }] } }),
-        })}\n`)
+        socket.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            ...(errorCode
+              ? { error: { code: errorCode, message: "probe condition" } }
+              : { result: { daemon: { pid: 42, uptime: 100, clients: 2 }, sessions: [{ name: "a" }] } }),
+          })}\n`,
+        )
       })
     })
     await new Promise<void>((ready) => server.listen(socketPath, ready))
@@ -89,16 +91,19 @@ describe("tribe health --json emits exactly one document on every exit path", ()
       })
       let stdout = ""
       child.stdout.setEncoding("utf8")
-      child.stdout.on("data", (chunk: string) => { stdout += chunk })
+      child.stdout.on("data", (chunk: string) => {
+        stdout += chunk
+      })
       const code = await new Promise<number | null>((settle, reject) => {
         child.on("close", settle)
         child.on("error", reject)
       })
       expectOneDocument(stdout, code)
-      expect(JSON.parse(stdout).state).toBe(state)
+      const document = JSON.parse(stdout) as { state: string; facts?: Record<string, unknown> }
+      expect(document.state).toBe(state)
       expect(methods).toEqual(["cli_status"])
       if (state === "healthy") {
-        expect(JSON.parse(stdout).facts).toEqual({ pid: 42, uptime: 100, clients: 2, sessions: 1 })
+        expect(document.facts).toEqual({ pid: 42, uptime: 100, clients: 2, sessions: 1 })
       }
     } finally {
       server.close()

@@ -4,6 +4,12 @@
 
 ### Changed
 
+- Health RPC `growth_7d.estimated_bytes` is now `null` with an
+  `estimated_bytes_not_collected` reason unless `TRIBE_HEALTH_DB_GROWTH_WARN_BYTES`
+  is valid. Row counts remain measured; invalid settings also produce a warning.
+  `health --json` uses lightweight control-path liveness; interactive health and
+  the health RPC retain detailed diagnostics.
+
 - **Requires Bun (0.3.0).** `engines` declares Bun only; the Node promise is
   dropped. The library imports `bun:sqlite` and so never imported under Node,
   which a fresh Node consumer probe shows (hh #26691). The `tribe-wire` bin keeps

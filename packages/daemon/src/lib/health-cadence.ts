@@ -2,6 +2,7 @@ import { assertSingleStatement } from "@bearly/sqlite"
 import type { Database } from "bun:sqlite"
 import {
   ATTENTION_PREDICATE_SQL,
+  NON_EVENT_KINDS_SQL,
   noOpenIncidentAttentionPredicateSql,
   unretiredAttentionPredicateSql,
   wakePredicateSql,
@@ -36,11 +37,13 @@ const INBOX_LAG_EVIDENCE = {
   verdict: "projection-only",
 } as const
 
+type DbGrowthWarning = { kind: "unset" } | { kind: "valid"; bytes: number } | { kind: "invalid"; raw: string }
+
 export type HealthCadenceOptions = {
   now: number
   connectedSessionNames: string[]
   requestedSessionNames?: string[]
-  dbGrowthWarningBytes?: number | null
+  dbGrowthWarning?: DbGrowthWarning
   /**
    * Session NAME whose actionable-response SLA to project (e.g. `@chief`).
    * `undefined` → fall back to `process.env.TRIBE_SLA_ROLE`; `null`/empty →
@@ -133,10 +136,19 @@ export type HealthCadenceProjection = ProjectionStamp & {
     message_rows: number
     archive_rows: number
     growth_7d: {
-      estimated_bytes: number
       message_rows: number
       archive_rows: number
-    }
+    } & (
+      | { estimated_bytes: number }
+      | {
+          estimated_bytes: null
+          estimated_bytes_not_collected: {
+            reason: "warning-threshold-unset" | "warning-threshold-invalid"
+            setting: "TRIBE_HEALTH_DB_GROWTH_WARN_BYTES"
+            observed: string | null
+          }
+        }
+    )
     growth_warning_bytes: number | null
   }
   warnings: string[]
@@ -463,22 +475,25 @@ function inboxLagProjection(
   // Both halves of a pair always share the identical WHERE clause, differing
   // only in which physical table (and which column supplies the shared
   // seq/rowid position) they read from.
-  const lagQueryMessages = db.prepare(`
+  const lagPredicate = `kind IN (${NON_EVENT_KINDS_SQL})
+    AND sender != $session
+    AND recipient IN ($session, '*')`
+  const lagQueryMessages = db.prepare(
+    assertSingleStatement(`
     SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
     FROM messages
     WHERE rowid > $cursor
-      AND kind != 'event'
-      AND sender != $session
-      AND (recipient = $session OR recipient = '*')
-  `)
-  const lagQueryArchive = db.prepare(`
+      AND ${lagPredicate}
+  `),
+  )
+  const lagQueryArchive = db.prepare(
+    assertSingleStatement(`
     SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
     FROM messages_archive
     WHERE seq > $cursor
-      AND kind != 'event'
-      AND sender != $session
-      AND (recipient = $session OR recipient = '*')
-  `)
+      AND ${lagPredicate}
+  `),
+  )
   // One attention-lag shape, two readings (27735): every unacknowledged direct attention row, and the subset
   // that wakes the seat's inbox-wait. `wakePredicateSql` is the one home for "waking"; nothing here lists types.
   const attentionLagSql = (table: "messages" | "messages_archive", extraPredicate: string): string => {
@@ -635,7 +650,7 @@ function inboxLagProjection(
 function databaseProjection(
   db: Database,
   now: number,
-  growthWarningBytes: number | null,
+  growthWarning: DbGrowthWarning,
 ): {
   projection: HealthCadenceProjection["database"]
   warnings: string[]
@@ -650,14 +665,17 @@ function databaseProjection(
   `)
     .get() as { message_rows: number; archive_rows: number }
   const growth = db
-    .prepare(`
+    .prepare(
+      assertSingleStatement(`
       SELECT
         (SELECT COUNT(*) FROM messages WHERE ts >= $cutoff AND ts <= $now) AS message_rows,
         (
           SELECT COUNT(*) FROM messages_archive
           WHERE archived_at >= $cutoff AND archived_at <= $now
         ) AS archive_rows,
-        COALESCE((
+        ${
+          growthWarning.kind === "valid"
+            ? `COALESCE((
           SELECT SUM(
             length(CAST(id AS BLOB)) + length(CAST(type AS BLOB)) +
             length(CAST(sender AS BLOB)) + length(CAST(recipient AS BLOB)) +
@@ -673,39 +691,59 @@ function databaseProjection(
           )
           FROM messages_archive
           WHERE archived_at >= $cutoff AND archived_at <= $now
-        ), 0) AS estimated_bytes
-    `)
+        ), 0)`
+            : "NULL"
+        } AS estimated_bytes
+    `),
+    )
     .get({ $cutoff: now - 7 * DAY, $now: now }) as {
     message_rows: number
     archive_rows: number
-    estimated_bytes: number
+    estimated_bytes: number | null
   }
-  const projection = {
+  const growthMeasurement: HealthCadenceProjection["database"]["growth_7d"] = {
+    message_rows: growth.message_rows,
+    archive_rows: growth.archive_rows,
+    ...(growthWarning.kind === "valid"
+      ? // The valid SQL arm COALESCEs each sum to zero, so it cannot return NULL.
+        { estimated_bytes: growth.estimated_bytes as number }
+      : {
+          estimated_bytes: null,
+          estimated_bytes_not_collected: {
+            reason: growthWarning.kind === "unset" ? "warning-threshold-unset" : "warning-threshold-invalid",
+            setting: "TRIBE_HEALTH_DB_GROWTH_WARN_BYTES",
+            observed: growthWarning.kind === "invalid" ? growthWarning.raw.slice(0, 64) : null,
+          },
+        }),
+  }
+  const projection: HealthCadenceProjection["database"] = {
     as_of_ms: now,
     bytes: pageCount * pageSize,
     message_rows: counts.message_rows,
     archive_rows: counts.archive_rows,
-    growth_7d: {
-      estimated_bytes: growth.estimated_bytes,
-      message_rows: growth.message_rows,
-      archive_rows: growth.archive_rows,
-    },
-    growth_warning_bytes: growthWarningBytes,
+    growth_7d: growthMeasurement,
+    growth_warning_bytes: growthWarning.kind === "valid" ? growthWarning.bytes : null,
   }
   const warnings =
-    growthWarningBytes !== null && growth.estimated_bytes > growthWarningBytes
+    growthWarning.kind === "invalid"
       ? [
-          `7d DB growth estimate ${growth.estimated_bytes}B exceeds configured ${growthWarningBytes}B; ` +
-            `suggest archive/GC (messages=${growth.message_rows}, archive=${growth.archive_rows})`,
+          `Invalid TRIBE_HEALTH_DB_GROWTH_WARN_BYTES=${JSON.stringify(growthWarning.raw.slice(0, 64))}; expected a non-negative finite number; growth bytes not collected`,
         ]
-      : []
+      : growthWarning.kind === "valid" &&
+          growth.estimated_bytes !== null &&
+          growth.estimated_bytes > growthWarning.bytes
+        ? [
+            `7d DB growth estimate ${growth.estimated_bytes}B exceeds configured ${growthWarning.bytes}B; ` +
+              `suggest archive/GC (messages=${growth.message_rows}, archive=${growth.archive_rows})`,
+          ]
+        : []
   return { projection, warnings }
 }
 
-export function parseDbGrowthWarningBytes(raw: string | undefined): number | null {
-  if (raw === undefined || raw.trim() === "") return null
+export function parseDbGrowthWarningBytes(raw: string | undefined): DbGrowthWarning {
+  if (raw === undefined || raw.trim() === "") return { kind: "unset" }
   const value = Number(raw)
-  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : null
+  return Number.isFinite(value) && value >= 0 ? { kind: "valid", bytes: Math.floor(value) } : { kind: "invalid", raw }
 }
 
 /** Parse the opt-in `TRIBE_SLA_ROLE` env value into a session name or null. */
@@ -736,7 +774,7 @@ export function projectHealthCadence(db: Database, options: HealthCadenceOptions
   const { now } = options
   const responseLatency = responseLatencyProjection(db, now)
   const inboxLag = inboxLagProjection(db, now, options.connectedSessionNames, options.requestedSessionNames)
-  const database = databaseProjection(db, now, options.dbGrowthWarningBytes ?? null)
+  const database = databaseProjection(db, now, options.dbGrowthWarning ?? { kind: "unset" })
 
   const slaRole = resolveSlaRole(options.slaRole)
   const sla =

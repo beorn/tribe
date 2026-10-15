@@ -304,7 +304,9 @@ describe("20876 Tribe health cadence", () => {
         slaRole: null,
       })
       const growth = result.database.growth_7d
-      const configuredWarnings = result.warnings.filter((warning) => /growth|TRIBE_HEALTH_DB_GROWTH_WARN_BYTES/.test(warning))
+      const configuredWarnings = result.warnings.filter((warning) =>
+        /growth|TRIBE_HEALTH_DB_GROWTH_WARN_BYTES/.test(warning),
+      )
       expect(growth).toMatchObject({ message_rows: 10, archive_rows: 1 })
       if (raw !== undefined && raw.trim() !== "" && Number.isFinite(Number(raw)) && Number(raw) >= 0) {
         expect(threshold).toEqual({ kind: "valid", bytes: Number(raw) })
