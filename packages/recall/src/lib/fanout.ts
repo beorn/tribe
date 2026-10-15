@@ -291,14 +291,18 @@ function rankFanout(docs: Map<string, AggregatedDoc>, hitCounts: Map<string, num
     scored.push({ agg, hits: hitCounts.get(key) ?? 1, finalRank: boostedRank(agg.bestRank, agg.timestamp) })
   }
   scored.sort((a, b) => (a.hits !== b.hits ? b.hits - a.hits : a.finalRank - b.finalRank))
-  const results: RecallSearchResult[] = scored.slice(0, limit).map(({ agg, finalRank }) => ({
-    type: agg.type,
-    sessionId: agg.sessionId,
-    sessionTitle: agg.sessionTitle,
-    timestamp: agg.timestamp,
-    snippet: agg.bestSnippet,
-    rank: finalRank,
-  }))
+  const results: RecallSearchResult[] = []
+  for (const { agg, finalRank } of scored) {
+    if (results.length >= limit) break
+    results.push({
+      type: agg.type,
+      sessionId: agg.sessionId,
+      sessionTitle: agg.sessionTitle,
+      timestamp: agg.timestamp,
+      snippet: agg.bestSnippet,
+      rank: finalRank,
+    })
+  }
   const coverages = [...hitCounts.values()].sort((a, b) => b - a)
   return {
     results,

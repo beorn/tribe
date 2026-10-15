@@ -493,14 +493,12 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       ...(runs("messages") ? { messages: messageOpts } : {}),
       ...(!hook && options.phases === undefined ? { projectContent: projectContentOpts } : {}),
       ...(runs("vault") ? { vault: { limit: limit * 2, dbPath: vaultDb } } : {}),
-      titles: runs("titles"),
       measure: phase,
     })
     const messageResults = candidates.messages
     const projectContentResults = candidates.projectContent
     const vault = candidates.vault
     const vaultMatches = vault?.matches ?? []
-    const sessionTitles = candidates.titles
     const msgMs = phases.messages ?? 0
     hookSearch = messageResults.hook
     if (hookSearch?.capped) skipped.push(hookSearch.capped)
@@ -584,6 +582,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
 
     const searchMs = Date.now() - searchStart
     log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms project=${projectMs}ms)`)
+
+    // Title enrichment follows the lexical and synonym reads, as before.
+    const sessionTitles = retrieveCandidates({ db, query: "", titles: runs("titles"), measure: phase }).titles
 
     // Session depth corroboration: sessions with more matching messages are more relevant.
     // A session with 10 messages about the topic is more authoritative than one with 1 passing mention.
