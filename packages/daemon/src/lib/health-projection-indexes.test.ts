@@ -235,6 +235,11 @@ describe("health projection reads the archive through an index", () => {
     `),
     )
     const actual = stmts.getAllUnreadDms.all() as Array<{ recipient: string; count: number }>
+    // #29521: listing recipients must read only the covering index, not each
+    // direct message's payload. The result oracle alone cannot detect this cost.
+    const fleetPlan = plan(db, stmts.getAllUnreadDms.toString())
+    expect(fleetPlan).toMatch(/\b(?:SCAN|SEARCH) messages USING COVERING INDEX\b/)
+    expect(fleetPlan).not.toMatch(/\bSCAN (?:messages|m)\b(?! USING COVERING INDEX\b)/)
     const sort = (rows: Array<{ recipient: string; count: number }>) =>
       rows.sort((a, b) => a.recipient.localeCompare(b.recipient))
     expect(sort(actual)).toEqual(sort(db.prepare(assertSingleStatement(OLD_FLEET_UNREAD_SQL)).all() as typeof actual))

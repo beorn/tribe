@@ -2701,7 +2701,9 @@ export function createStatements(db: Database) {
       assertSingleStatement(`
       WITH recipients AS (
         SELECT DISTINCT recipient
-        FROM messages
+        -- #29521, CTO ruling 2026-10-15 (0ce10d30): covering enumeration reads
+        -- 13 MB instead of 147 MB. Lock that plan and fail loudly if the index disappears.
+        FROM messages INDEXED BY idx_messages_recipient_kind
         WHERE recipient != '*' AND kind = 'direct'
         UNION
         SELECT recipient FROM pending_request
