@@ -108,6 +108,7 @@ afterEach(() => {
  * @level l1 @consumer recall(): the real SQLite boundary fails after the primary search collected a hit.
  */
 test.each([
+  { phase: "synonym_messages", failure: "database", table: "messages_fts", anchor: "authentication" },
   { phase: "synonym_project_content", failure: "database", table: "content_fts", anchor: "authentication" },
   { phase: "corroboration", failure: "database", table: "messages_fts", anchor: "auth" },
   { phase: "synonym_messages", failure: "syntax", table: "messages_fts", anchor: "authentication" },
