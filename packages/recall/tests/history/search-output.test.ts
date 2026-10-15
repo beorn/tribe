@@ -13,7 +13,7 @@ const mockAgent: {
 } = { result: null, options: null }
 let mockRefreshSpawnCalls = 0
 
-vi.mock("../../src/lib/agent.ts", () => {
+function makeAgentMock() {
   writeSync(2, `recall-phase ${performance.now().toFixed(1)} agent.factory\n`)
   const exported = {
     recallAgent: (query: string, options: unknown) => {
@@ -25,7 +25,9 @@ vi.mock("../../src/lib/agent.ts", () => {
   }
   Reflect.set(globalThis, Symbol.for("hh.recall.diagnostic.agent"), exported.recallAgent)
   return exported
-})
+}
+
+vi.mock("../../src/lib/agent.ts", () => makeAgentMock())
 
 // Regression seam for @i/20-search-and-memory/23189: search must never import
 // this query-refresh capability. If it is wired back in, the stale-search test
@@ -814,6 +816,46 @@ describe("recall search output", () => {
     } finally {
       process.chdir(prevCwd)
       rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test("cold sibling imports share one async manual factory and its mock namespace", async () => {
+    // The original search journey has a synchronous factory; it cannot prove pending-factory sharing.
+    // This public barrier witnesses both import calls initiated and the first factory entered,
+    // not the sibling's private loader entry. An internal-entry barrier would deadlock valid deduplication.
+    let releaseFactory!: () => void
+    let markFactoryEntered!: () => void
+    const release = new Promise<void>((resolve) => { releaseFactory = resolve })
+    const entered = new Promise<void>((resolve) => { markFactoryEntered = resolve })
+    const expectedAgent = vi.fn(async (query: string) => zeroAgentResult(query))
+    let factoryCalls = 0
+    const imports: Array<Promise<typeof import("../../src/lib/agent.ts")>> = []
+    vi.resetModules()
+    vi.doMock("../../src/lib/agent.ts", async () => {
+      factoryCalls++
+      markFactoryEntered()
+      await release
+      return { recallAgent: expectedAgent }
+    })
+    try {
+      imports.push(import("../../src/lib/agent.ts"))
+      imports.push(import("../../src/lib/agent.ts"))
+      await entered
+      releaseFactory()
+      const [first, second] = await Promise.all(imports)
+      // Establish both exact identities BEFORE invoking either export: the actual agent must never run.
+      expect(first!.recallAgent).toBe(expectedAgent)
+      expect(second!.recallAgent).toBe(expectedAgent)
+      expect(factoryCalls).toBe(1)
+      expect(first).toBe(second)
+      await first!.recallAgent("factory-a", {})
+      await second!.recallAgent("factory-b", {})
+      expect(expectedAgent).toHaveBeenCalledTimes(2)
+    } finally {
+      releaseFactory()
+      await Promise.allSettled(imports)
+      vi.doMock("../../src/lib/agent.ts", makeAgentMock)
+      vi.resetModules()
     }
   })
 })
