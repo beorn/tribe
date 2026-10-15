@@ -53,6 +53,58 @@ afterAll(() => {
 })
 
 describe("tribe health --json emits exactly one document on every exit path", () => {
+  // Hab only needs control-path liveness. A full cli_health diagnostic here
+  // read 849 MB per probe on the live store (29521).
+  it.each([
+    ["healthy", undefined],
+    ["absent", "ENOENT"],
+    ["unhealthy", "diagnostic-failed"],
+    ["unknown", "TRIBE_DAEMON_CALL_TIMEOUT"],
+  ] as const)("uses lightweight status for the %s arm", async (state, errorCode) => {
+    const socketPath = join(DIR, `${state}.sock`)
+    const methods: string[] = []
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        const newline = buffer.indexOf("\n")
+        if (newline < 0) return
+        const request = JSON.parse(buffer.slice(0, newline)) as { id: number; method: string }
+        buffer = buffer.slice(newline + 1)
+        methods.push(request.method)
+        socket.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          ...(errorCode
+            ? { error: { code: errorCode, message: "probe condition" } }
+            : { result: { daemon: { pid: 42, uptime: 100, clients: 2 }, sessions: [{ name: "a" }] } }),
+        })}\n`)
+      })
+    })
+    await new Promise<void>((ready) => server.listen(socketPath, ready))
+    try {
+      const child = spawn(BUN_BIN, [CLI, "health", "--json"], {
+        env: probeEnv(socketPath),
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+      let stdout = ""
+      child.stdout.setEncoding("utf8")
+      child.stdout.on("data", (chunk: string) => { stdout += chunk })
+      const code = await new Promise<number | null>((settle, reject) => {
+        child.on("close", settle)
+        child.on("error", reject)
+      })
+      expectOneDocument(stdout, code)
+      expect(JSON.parse(stdout).state).toBe(state)
+      expect(methods).toEqual(["cli_status"])
+      if (state === "healthy") {
+        expect(JSON.parse(stdout).facts).toEqual({ pid: 42, uptime: 100, clients: 2, sessions: 1 })
+      }
+    } finally {
+      server.close()
+    }
+  })
+
   it.each([
     ["a missing socket", join(DIR, "missing.sock")],
     ["a regular file where a socket belongs", REGULAR_FILE],

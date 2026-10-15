@@ -6,7 +6,7 @@ import { safeRemoveSync } from "removely"
 
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { projectHealthCadence } from "./health-cadence.ts"
+import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { handleToolCall, type ActiveSessionInfo, type HandlerOpts } from "./handlers.ts"
 
 const MINUTE = 60_000
@@ -216,7 +216,7 @@ describe("20876 Tribe health cadence", () => {
     const options = {
       now,
       connectedSessionNames: ["@agent/5"],
-      dbGrowthWarningBytes: 1,
+      dbGrowthWarning: parseDbGrowthWarningBytes("1"),
       slaRole: "@chief",
     }
 
@@ -290,6 +290,44 @@ describe("20876 Tribe health cadence", () => {
       expect.stringMatching(/7d.*growth.*archive\/GC/i),
     ])
   })
+
+  // 29521: unarmed diagnostics must not scan message bodies, and an invalid
+  // setting must be visible instead of silently disabling its warning.
+  it.each([undefined, "  ", "invalid", "-1", "x".repeat(100), "0", "1", "1000000000"])(
+    "collects growth bytes only for a valid configured threshold (%s)",
+    (raw) => {
+      const threshold = parseDbGrowthWarningBytes(raw)
+      const result = projectHealthCadence(db, {
+        now,
+        connectedSessionNames: [],
+        dbGrowthWarning: threshold,
+        slaRole: null,
+      })
+      const growth = result.database.growth_7d
+      const configuredWarnings = result.warnings.filter((warning) => /growth|TRIBE_HEALTH_DB_GROWTH_WARN_BYTES/.test(warning))
+      expect(growth).toMatchObject({ message_rows: 10, archive_rows: 1 })
+      if (raw !== undefined && raw.trim() !== "" && Number.isFinite(Number(raw)) && Number(raw) >= 0) {
+        expect(threshold).toEqual({ kind: "valid", bytes: Number(raw) })
+        expect(growth.estimated_bytes).toBeGreaterThan(0)
+        expect(growth).not.toHaveProperty("estimated_bytes_not_collected")
+        expect(result.database.growth_warning_bytes).toBe(Number(raw))
+        expect(configuredWarnings).toHaveLength(Number(raw) < growth.estimated_bytes! ? 1 : 0)
+      } else {
+        const unset = raw === undefined || raw.trim() === ""
+        expect(threshold).toEqual(unset ? { kind: "unset" } : { kind: "invalid", raw })
+        expect(growth.estimated_bytes).toBeNull()
+        expect(growth.estimated_bytes).not.toBe(0)
+        expect(growth).toHaveProperty("estimated_bytes_not_collected", {
+          reason: unset ? "warning-threshold-unset" : "warning-threshold-invalid",
+          setting: "TRIBE_HEALTH_DB_GROWTH_WARN_BYTES",
+          observed: unset ? null : raw!.slice(0, 64),
+        })
+        expect(result.database.growth_warning_bytes).toBeNull()
+        expect(configuredWarnings).toHaveLength(unset ? 0 : 1)
+        if (!unset) expect(configuredWarnings[0]).toContain(raw!.slice(0, 64))
+      }
+    },
+  )
 
   it("enforces a sub-minute Chief actionable-response target for completed and open work", () => {
     insertResponsePair(db, {
@@ -670,7 +708,7 @@ describe("20876 Tribe health cadence", () => {
     const cadence = projectHealthCadence(db, {
       now,
       connectedSessionNames: ["@chief", "@agent/5"],
-      dbGrowthWarningBytes: 1,
+      dbGrowthWarning: parseDbGrowthWarningBytes("1"),
       slaRole: null,
     })
 
