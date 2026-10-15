@@ -300,6 +300,10 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   // stale answer says what it judged without the caller running a second tool.
   if (base.provenanceDetail) result.provenanceDetail = base.provenanceDetail
 
+  // A failed planner falls through to the default recall: a degraded answer whatever it found, never a clean one.
+  // With no fall-through hits nothing else marks it, so exit 0 read as "searched, found nothing" (pair-042).
+  if (result.fellThrough) process.exitCode = 3
+
   // Check FIRST, before requireSynthesizedAnswer would throw a generic "no
   // synthesized answer" error that discards the lexical hits recallAgent()
   // already found — mirrors formatRecallOutput's own ordering on the
