@@ -208,13 +208,13 @@ describe("health projection reads the archive through an index", () => {
         (107, 'taking', 'status', 'epsilon', 'caller', 'body', 700, 'direct', NULL, NULL, 'taken-ball', 0, 0),
         (108, 'response', 'response', 'caller', 'response-owner', 'body', 800, 'direct', 'response-ball', NULL, NULL, 1, 0),
         (109, 'incident', 'request', 'caller', 'incident-owner', 'body', 900, 'direct', 'incident-ball', NULL, NULL, 1, 1),
-        (110, 'self', 'query', 'self-owner', 'self-owner', 'body', 1000, 'direct', NULL, NULL, NULL, 0, 0);
+        (110, 'self', 'query', 'self-owner', 'self-owner', 'body', 1000, 'direct', NULL, NULL, NULL, 0, 0)
     `),
     )
     db.exec(
       assertSingleStatement(`
       INSERT INTO messages_archive (seq, id, type, sender, recipient, content, ts, archived_at, kind, request) VALUES
-        (21, 'archived', 'request', 'caller', 'archive-owner', 'body', 50, 90, 'direct', 'archive-ball');
+        (21, 'archived', 'request', 'caller', 'archive-owner', 'body', 50, 90, 'direct', 'archive-ball')
     `),
     )
     db.exec(
@@ -225,13 +225,13 @@ describe("health projection reads the archive through an index", () => {
         ('archive-ball', 'archive-owner', 'caller', 50, 10000, 'archived', 'first', 'request'),
         ('taken-ball', 'epsilon', 'caller', 600, 10000, 'taken', 'first', 'request'),
         ('response-ball', 'response-owner', 'caller', 800, 10000, 'response', 'first', 'request'),
-        ('incident-ball', 'incident-owner', 'caller', 900, 10000, 'incident', 'first', 'incident');
+        ('incident-ball', 'incident-owner', 'caller', 900, 10000, 'incident', 'first', 'incident')
     `),
     )
     db.exec(
       assertSingleStatement(`
       INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at) VALUES
-        ('alpha', 1000, 1000), ('beta', 1000, 1000), ('response-owner', 1000, 1000);
+        ('alpha', 1000, 1000), ('beta', 1000, 1000), ('response-owner', 1000, 1000)
     `),
     )
     const actual = stmts.getAllUnreadDms.all() as Array<{ recipient: string; count: number }>
@@ -260,20 +260,20 @@ describe("health projection reads the archive through an index", () => {
       INSERT INTO messages (rowid, id, type, sender, recipient, content, ts, kind, ref) VALUES
         (101, 'original', 'request', 'caller', 'owner', 'body', 100, 'direct', NULL),
         (102, 'hot-taking', 'status', 'owner', 'caller', 'body', 200, 'direct', 'ball'),
-        (103, 'wrong-owner', 'status', 'other', 'caller', 'body', 900, 'direct', 'ball');
+        (103, 'wrong-owner', 'status', 'other', 'caller', 'body', 900, 'direct', 'ball')
     `),
     )
     db.exec(
       assertSingleStatement(`
       INSERT INTO messages_archive (seq, id, type, sender, recipient, content, ts, archived_at, kind, ref) VALUES
         (104, 'archive-taking', 'status', 'owner', 'caller', 'body', 300, 400, 'direct', 'original'),
-        (99, 'too-early', 'status', 'owner', 'caller', 'body', 800, 900, 'direct', 'ball');
+        (99, 'too-early', 'status', 'owner', 'caller', 'body', 800, 900, 'direct', 'ball')
     `),
     )
     db.exec(
       assertSingleStatement(`
       INSERT INTO pending_request (request_id, recipient, sender, opened_at, expires_at, message_id, fanout) VALUES
-        ('ball', 'owner', 'caller', 100, 10000, 'original', 'first');
+        ('ball', 'owner', 'caller', 100, 10000, 'original', 'first')
     `),
     )
     expect(stmts.selectTakingReceiptsForOpenBalls.all()).toEqual([
