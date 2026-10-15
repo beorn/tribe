@@ -177,6 +177,16 @@ describe("content search eligibility and work", () => {
           expect(() => searchAll(db, "-budget", { types: [...types], mode })).toThrow(/syntax error near "NOT"/)
         }
       }
+      // LIMIT 0 skips ranked SELECT's MATCH evaluation. Exact COUNT must still
+      // raise its original syntax error when the requested types are absent.
+      expect(() => searchAll(db, "-budget", { types: ["doc"], limit: 0 })).toThrow(/syntax error near "NOT"/)
+      for (const types of [["first_prompt"], ["plan", "summary", "todo", "first_prompt"]] as const) {
+        expect(() => searchAll(db, "-budget", { types: [...types], limit: 0 })).toThrow(/syntax error near "NOT"/)
+        expect(searchAll(db, "-budget", { types: [...types], limit: 0, mode: "hook" })).toEqual({
+          results: [],
+          total: null,
+        })
+      }
       db.run("DROP TABLE content_fts")
       expect(() => searchAll(db, "budget", { types: ["first_prompt"] })).toThrow(/no such table: content_fts/)
     } finally {

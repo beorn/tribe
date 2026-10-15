@@ -933,6 +933,7 @@ export function searchAll(
 
   const params: (string | number)[] = [ftsQuery]
   let typeClause = ""
+  let availabilityClause = ""
   let projectClause = ""
   let timeClause = ""
 
@@ -942,8 +943,9 @@ export function searchAll(
     // content reads. The gain holds only while all requested types are absent;
     // the first such row restores the original path. General-case cure is open.
     // Frozen-corpus proof SHA256: 44129b1e152eb0d30d5c298c434bb1e709eed4bee9573e5c4f6f196fe6834106.
-    typeClause = ` AND EXISTS (SELECT 1 FROM content available_type WHERE available_type.content_type IN (${placeholders})) AND c.content_type IN (${placeholders})`
-    params.push(...types, ...types)
+    availabilityClause = ` AND EXISTS (SELECT 1 FROM content available_type WHERE available_type.content_type IN (${placeholders}))`
+    typeClause = ` AND c.content_type IN (${placeholders})`
+    params.push(...types)
   }
 
   if (projectFilter) {
@@ -956,6 +958,9 @@ export function searchAll(
     params.push(sinceTime)
   }
 
+  // Keep COUNT's original shape: LIMIT 0 bypasses ranked MATCH, and SQLite's
+  // availability rewrite can skip invalid MATCH instead of raising its error.
+  // Proof: type-limit0-error-control-0817.json; VM: type-single-vm-0804.json (29482).
   const countQuery = `
     SELECT COUNT(*) as total
     FROM content_fts f
@@ -969,12 +974,15 @@ export function searchAll(
            bm25(content_fts, 2.0, 10.0) as rank
     FROM content_fts f
     JOIN content c ON f.rowid = c.id
-    WHERE content_fts MATCH ?${typeClause}${projectClause}${timeClause}
+    WHERE content_fts MATCH ?${availabilityClause}${typeClause}${projectClause}${timeClause}
     ORDER BY rank
     LIMIT ? OFFSET ?
   `
 
-  const results = db.prepare(assertSingleStatement(searchQuery)).all(...params, limit, offset) as ContentSearchHit[]
+  const searchParams = types?.length ? [ftsQuery, ...types, ...params.slice(1)] : params
+  const results = db
+    .prepare(assertSingleStatement(searchQuery))
+    .all(...searchParams, limit, offset) as ContentSearchHit[]
   if (mode === "hook") return { results, total: null }
   const totalRow = db.prepare(assertSingleStatement(countQuery)).get(...params) as { total: number }
   return { results, total: totalRow.total }
