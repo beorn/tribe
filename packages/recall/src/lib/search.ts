@@ -285,8 +285,6 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
 
 async function runAgentSearch(query: string, options: SearchOptions, base: RecallOptions): Promise<void> {
   const { recallAgent } = await import("./agent.ts")
-  const diagnosticAgentMatches = recallAgent === Reflect.get(globalThis, Symbol.for("hh.recall.diagnostic.agent"))
-  if (!diagnosticAgentMatches) throw new Error("Temporary recall diagnostic refused an unexpected agent function")
   const agentOpts: AgentRecallOptions = {
     ...base,
     round2: options.round2 ?? "auto",

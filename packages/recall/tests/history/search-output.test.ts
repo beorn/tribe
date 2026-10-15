@@ -21,7 +21,6 @@ function makeAgentMock() {
       return mockAgent.result(query, options as never)
     },
   }
-  Reflect.set(globalThis, Symbol.for("hh.recall.diagnostic.agent"), exported.recallAgent)
   return exported
 }
 
