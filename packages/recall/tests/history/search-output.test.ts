@@ -901,7 +901,9 @@ describe("recall search output", () => {
       await newEntered
       // New entry proves public invalidation ran; settle OLD while NEW is still held.
       releaseOld()
-      await oldImport
+      const oldResult = await oldImport
+      // Temporary receipt only: the pre-replacement import's identity has no asserted policy.
+      process.stderr.write(`runner-replacement-old ${JSON.stringify({ old: Object.is(oldResult.recallAgent, oldAgent), current: Object.is(oldResult.recallAgent, newAgent) })}\n`)
       releaseNew()
       const replacement = await replacementImport
       const later = await import("../../src/lib/agent.ts")
