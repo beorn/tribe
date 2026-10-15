@@ -383,17 +383,30 @@ describe("recallAgent — fallthrough", () => {
 })
 
 // Fanout owns creating receipts; this checks the separate orchestration risk:
-// a real SQLite cut must survive agent result and per-round trace assembly.
-test("agent carries bounded-search receipts in its result and round trace", async () => {
-  mockHolder.fn = buildMockQueryModel([
-    { match: /query planner/i, content: buildPlanJson({ keywords: ["zebracorn", "-badsyntax"] }) },
-    { content: "A bounded answer" },
-  ])
+// real SQLite cuts/rejections in both rounds must survive final merge and trace.
+// @failure round-2 search receipts disappear when the agent merges its results
+// @level l2
+// @consumer recallAgent callers and optional CLI round traces
+test("agent carries both rounds' bounded-search receipts in its result and trace", async () => {
+  let plannerCalls = 0
+  const plans = [
+    buildPlanJson({ keywords: ["zebracorn", "-badsyntax"] }),
+    buildPlanJson({ keywords: ["roundtwocap", "-roundtwobadsyntax"] }),
+  ]
+  const synth = buildMockQueryModel([{ content: "A bounded answer" }])
+  mockHolder.fn = async (opts) => {
+    if (!opts.systemPrompt?.match(/query planner/i)) return synth(opts)
+    const content = plans[plannerCalls++]
+    if (!content) throw new Error("Unexpected extra planner call")
+    return buildMockQueryModel([{ content }])(opts)
+  }
   seedCorpus({
-    sessions: [{ id: "dense-receipt", title: "Dense", messages: Array.from({ length: 1003 }, () => "zebracorn") }],
+    sessions: [
+      { id: "dense-receipt", title: "Dense", messages: Array.from({ length: 1003 }, () => "zebracorn roundtwocap") },
+    ],
   })
-  const result = await recallAgent("zebracorn", { limit: 1, raw: true })
-  expect(result.skipped).toEqual([
+  const result = await recallAgent("zebracorn", { limit: 1, raw: true, round2: "deeper" })
+  const firstRound = [
     expect.objectContaining({ phase: "messages", anchor: "zebracorn", message: expect.stringMatching(/cap|cut/) }),
     expect.objectContaining({
       phase: "messages",
@@ -405,9 +418,26 @@ test("agent carries bounded-search receipts in its result and round trace", asyn
       anchor: "-badsyntax",
       message: expect.stringMatching(/syntax error/i),
     }),
-  ])
-  expect(result.trace.rounds[0]?.skipped).toEqual(result.skipped)
+  ]
+  const secondRound = [
+    expect.objectContaining({ phase: "messages", anchor: "roundtwocap", message: expect.stringMatching(/cap|cut/) }),
+    expect.objectContaining({
+      phase: "messages",
+      anchor: "-roundtwobadsyntax",
+      message: expect.stringMatching(/syntax error/i),
+    }),
+    expect.objectContaining({
+      phase: "project_content",
+      anchor: "-roundtwobadsyntax",
+      message: expect.stringMatching(/syntax error/i),
+    }),
+  ]
+  expect(plannerCalls).toBe(2)
+  expect(result.trace.rounds).toHaveLength(2)
+  expect(result.skipped).toEqual([...firstRound, ...secondRound])
+  expect(result.trace.rounds[0]?.skipped).toEqual(firstRound)
+  expect(result.trace.rounds[1]?.skipped).toEqual(secondRound)
   expect(result.trace.rounds[0]?.variants).toEqual(["zebracorn"])
-  expect(result.trace.decision.reason).toMatch(/fraction=1\.00/)
+  expect(result.trace.rounds[1]?.variants).toEqual(["roundtwocap"])
   expect(result.results[0]?.sessionId).toBe("dense-receipt")
 })
