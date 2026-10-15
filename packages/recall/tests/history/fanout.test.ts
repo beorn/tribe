@@ -9,8 +9,9 @@
 
 import { describe, test, expect, beforeEach, vi } from "vitest"
 import { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 import { initSchema } from "../../src/history/db-schema"
-import { searchAll } from "../../src/history/db-queries"
+import { searchAll, toFts5Query, type ContentSearchOptions } from "../../src/history/db-queries"
 import { fanoutSearch, mergeFanouts } from "../../src/lib/fanout"
 
 // ============================================================================
@@ -58,6 +59,132 @@ function insertContent(
 // ============================================================================
 // Tests
 // ============================================================================
+
+describe("content search eligibility and work", () => {
+  test.each([{ types: ["plan"] as const }, { types: ["plan", "summary", "todo", "first_prompt"] as const }])(
+    "absent $types reject MATCH hits before wide content reads without skipping MATCH validation",
+    ({ types }) => {
+      // Result-only tests miss the 29482 regression: zero rows can cost a wide
+      // fetch per MATCH hit. SQLite 3.53.4's VM witnesses work without timing.
+      const db = makeDb()
+      insertContent(db, "doc", "document", "budget", "budget needle body same", 0)
+      const prepare = vi.spyOn(db, "prepare")
+      let sql: string[]
+      try {
+        expect(searchAll(db, "budget", { types: [...types] })).toEqual({ results: [], total: 0 })
+        sql = prepare.mock.calls.map((call) => String(call[0])).filter((query) => query.includes("bm25(content_fts"))
+      } finally {
+        prepare.mockRestore()
+      }
+      try {
+        expect(sql).toHaveLength(1) // Ranked SELECT validates MATCH before consulting availability.
+        const root = db.prepare("SELECT rootpage FROM sqlite_schema WHERE name = 'content'").get() as {
+          rootpage: number
+        }
+        const typeRoot = db.prepare("SELECT rootpage FROM sqlite_schema WHERE name = 'idx_content_type'").get() as {
+          rootpage: number
+        }
+        for (const query of sql) {
+          const typeBindings = (query.match(/\?/g)?.length ?? 0) - 3
+          const bindings = [
+            toFts5Query("budget"),
+            ...Array.from({ length: typeBindings }, (_, i) => types[i % types.length]!),
+            5,
+            0,
+          ]
+          type Instruction = { addr: number; opcode: string; p1: number; p2: number; p4: string | null }
+          const vm = db.prepare(assertSingleStatement(`EXPLAIN ${query}`)).all(...bindings) as Instruction[]
+          const matches = vm.filter((op) => op.opcode === "VFilter" && /M\d/.test(op.p4 ?? ""))
+          expect(matches).toHaveLength(1)
+          const match = matches[0]!
+          const content = vm.find((op) => op.opcode === "OpenRead" && op.p2 === root.rootpage)!
+          const seek = vm.find((op) => op.opcode === "SeekRowid" && op.p1 === content.p1)!
+          const gate = vm.find((op) => op.opcode === "IfNot" && op.addr > match.addr && op.addr < seek.addr)
+          expect(gate).toBeDefined()
+          expect(gate!.p2).toBeGreaterThan(seek.addr)
+          expect(vm.some((op) => op.opcode === "Once" && op.addr > match.addr && op.addr < gate!.addr)).toBe(true)
+          expect(vm.some((op) => op.opcode === "OpenRead" && op.p2 === typeRoot.rootpage && op.addr < gate!.addr)).toBe(
+            true,
+          )
+          expect(vm.filter((op) => op.opcode === "Column" && op.p1 === content.p1 && op.addr < gate!.addr)).toEqual([])
+        }
+      } finally {
+        db.close()
+      }
+    },
+  )
+
+  test("type availability preserves positive fields, tied order, filters, pagination and exact/hook totals", () => {
+    // The absence-only optimization also touches present types and all-time
+    // callers; existing fanout tests do not exercise this option combination.
+    const db = makeDb()
+    const body = "budget needle body same"
+    const rows = [
+      ["plan", "a", "/alpha", -1],
+      ["plan", "b", "/alpha", 0],
+      ["plan", "c", "/blpha", 100],
+      ["bead", "d", null, 101],
+      ["doc", "e", "/alpha/sub", 1000],
+    ] as const
+    for (const [type, source, project, time] of rows) {
+      db.prepare(
+        "INSERT INTO content(content_type,source_id,project_path,title,content,timestamp) VALUES(?,?,?,?,?,?)",
+      ).run(type, source, project, "budget", body, time)
+    }
+    const cases: { options: ContentSearchOptions; ids: number[]; total: number }[] = [
+      { options: {}, ids: [1, 2, 3, 4, 5], total: 5 },
+      { options: { types: [] }, ids: [1, 2, 3, 4, 5], total: 5 },
+      { options: { types: ["first_prompt"] }, ids: [], total: 0 },
+      { options: { types: ["plan"], limit: 1, offset: 1 }, ids: [2], total: 3 },
+      { options: { types: ["plan"], limit: 0 }, ids: [], total: 3 },
+      { options: { types: ["plan"], sinceTime: 0, projectFilter: "/_lpha" }, ids: [2, 3], total: 2 },
+      { options: { projectFilter: "%" }, ids: [1, 2, 3, 5], total: 4 },
+      { options: { types: ["plan", "bead"], snippetTokens: 3, limit: 2, offset: 1 }, ids: [2, 3], total: 4 },
+    ]
+    try {
+      for (const { options, ids, total } of cases) {
+        for (const mode of ["exact", "hook"] as const) {
+          const result = searchAll(db, "budget", { ...options, mode })
+          expect(result.total).toBe(mode === "hook" ? null : total)
+          expect(result.results.map((row) => row.id)).toEqual(ids)
+          for (const row of result.results) {
+            const [type, source, project, time] = rows[row.id - 1]!
+            expect(row).toMatchObject({
+              content_type: type,
+              source_id: source,
+              project_path: project,
+              timestamp: time,
+              title: "budget",
+              content: body,
+            })
+            expect(row.rank).toBeLessThan(0)
+            expect(row.rank).toBe(result.results[0]!.rank)
+            expect(row.snippet).toContain(">>>budget<<<")
+          }
+        }
+      }
+    } finally {
+      db.close()
+    }
+  })
+
+  test("absent types do not mask MATCH syntax, missing-index or closed-database errors", () => {
+    const db = makeDb()
+    insertContent(db, "doc", "document", "budget", "budget", 0)
+    try {
+      for (const mode of ["exact", "hook"] as const) {
+        for (const types of [["doc"], ["first_prompt"]] as const) {
+          expect(() => searchAll(db, "-budget", { types: [...types], mode })).toThrow(/syntax error near "NOT"/)
+        }
+      }
+      db.run("DROP TABLE content_fts")
+      expect(() => searchAll(db, "budget", { types: ["first_prompt"] })).toThrow(/no such table: content_fts/)
+    } finally {
+      db.close()
+    }
+    expect(() => searchAll(db, "budget", { types: ["first_prompt"] })).toThrow(/closed/)
+  })
+})
 
 describe("fanoutSearch", () => {
   let db: Database

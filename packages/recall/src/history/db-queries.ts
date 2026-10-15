@@ -937,8 +937,13 @@ export function searchAll(
   let timeClause = ""
 
   if (types && types.length > 0) {
-    typeClause = ` AND c.content_type IN (${types.map(() => "?").join(",")})`
-    params.push(...types)
+    const placeholders = types.map(() => "?").join(",")
+    // SQLite 3.53.4's ranked SELECT validates MATCH, then checks this index once before wide
+    // content reads. The gain holds only while all requested types are absent;
+    // the first such row restores the original path. General-case cure is open.
+    // Frozen-corpus proof SHA256: 44129b1e152eb0d30d5c298c434bb1e709eed4bee9573e5c4f6f196fe6834106.
+    typeClause = ` AND EXISTS (SELECT 1 FROM content available_type WHERE available_type.content_type IN (${placeholders})) AND c.content_type IN (${placeholders})`
+    params.push(...types, ...types)
   }
 
   if (projectFilter) {
