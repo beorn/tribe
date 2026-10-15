@@ -10,6 +10,7 @@
 import { describe, test, expect, beforeEach, vi } from "vitest"
 import { Database } from "bun:sqlite"
 import { initSchema } from "../../src/history/db-schema"
+import { searchAll } from "../../src/history/db-queries"
 import { fanoutSearch, mergeFanouts } from "../../src/lib/fanout"
 
 // ============================================================================
@@ -154,13 +155,15 @@ describe("fanoutSearch", () => {
   })
 
   // The small coverage fixtures never cut a candidate set or expose the unused
-  // exact message COUNT. Exercise the real SQLite boundary, not a mocked receipt.
-  test("bounded message fanout avoids counts and preserves cut receipts across rounds", () => {
+  // message or content COUNT. Exercise the real SQLite boundary, not a mocked receipt.
+  test("fanout avoids message and content counts and preserves hits and cut receipts across rounds", () => {
     const now = Date.now()
     insertSession(db, "dense", "Dense matching session", now)
     db.transaction(() => {
       for (let i = 0; i < 1003; i++) insertMessage(db, "dense", "zebracorn boundedneedle", now - i)
     })()
+    insertContent(db, "plan", "dense-plan", "Session plan", "zebracorn boundedneedle", now)
+    insertContent(db, "bead", "dense-bead", "Project record", "zebracorn boundedneedle", now - 3600_000)
     const prepare = vi.spyOn(db, "prepare")
     try {
       const first = fanoutSearch(db, ["zebracorn"], { limit: 5, sinceTime: 0 })
@@ -177,10 +180,20 @@ describe("fanoutSearch", () => {
       expect(merged.skipped).toEqual([...(first.skipped ?? []), ...(second.skipped ?? [])])
       expect(merged.variants).toEqual(["zebracorn", "boundedneedle"])
       expect(merged.hitCounts.get("message:dense")).toBe(2)
-      const countedMessageQueries = prepare.mock.calls
+      expect(merged.hitCounts.get("plan:dense-plan")).toBe(2)
+      expect(merged.hitCounts.get("bead:dense-bead")).toBe(2)
+      expect(first.results.map((r) => r.type).sort()).toEqual(["bead", "message", "plan"])
+      const countedQueries = prepare.mock.calls
         .map(([sql]) => String(sql))
-        .filter((sql) => /messages_fts/.test(sql) && /\bCOUNT\s*\(/i.test(sql))
-      expect(countedMessageQueries).toEqual([])
+        .filter((sql) => /(?:messages|content)_fts/.test(sql) && /\bCOUNT\s*\(/i.test(sql))
+      expect(countedQueries).toEqual([])
+      prepare.mockClear()
+      const exact = searchAll(db, "zebracorn", { types: ["plan"], sinceTime: 0, limit: 5 })
+      expect(exact.total).toBe(1)
+      expect(exact.results.map((r) => r.source_id)).toEqual(["dense-plan"])
+      expect(
+        prepare.mock.calls.some(([sql]) => /content_fts/.test(String(sql)) && /\bCOUNT\s*\(/i.test(String(sql))),
+      ).toBe(true)
     } finally {
       prepare.mockRestore()
     }

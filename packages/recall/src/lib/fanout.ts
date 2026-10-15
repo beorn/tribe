@@ -124,6 +124,7 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
     mode: "hook",
   }
   const sessionContentOpts: ContentSearchOptions = {
+    mode: "hook",
     limit: perVariantLimit,
     sinceTime,
     projectFilter,
@@ -131,6 +132,7 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
     types: SESSION_CONTENT_TYPES,
   }
   const projectContentOpts: ContentSearchOptions = {
+    mode: "hook",
     limit: perVariantLimit,
     projectFilter,
     snippetTokens,
