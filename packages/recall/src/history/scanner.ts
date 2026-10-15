@@ -435,7 +435,7 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
         searchBenchmarks.push(runSearchBenchmark(bq.query, bq.label, bq.since, bq.types))
       } catch (error) {
         // NO SILENT ZEROS: a failed query names itself and its error, contributes NO row, and (below) withholds
-        // the search-quality verdict instead of counting as an empty result.
+        // the probes' yield lines instead of counting as an empty result.
         benchmarkFailures++
         const detail = error instanceof Error ? error.message : String(error)
         log(`review: search benchmark ${bq.label} FAILED: ${detail}`)
@@ -444,24 +444,9 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
     }
   }
 
-  // Search quality recommendations — computed only over a complete, successful cohort.
+  // The probes' yield lines, computed only over a complete, successful cohort.
   if (!skipSearchBenchmarks && benchmarkFailures === 0 && searchBenchmarks.length > 0) {
-    const totalResults = searchBenchmarks.reduce((sum, b) => sum + b.resultCount, 0)
-    if (totalResults === 0) {
-      recommendations.push("All benchmark queries returned 0 results — index may be empty or corrupt")
-    } else {
-      const allFromOneSess = searchBenchmarks.every((b) => b.uniqueSessions <= 1 && b.resultCount > 0)
-      if (allFromOneSess) {
-        recommendations.push("Results only from 1 session per query — index may be incomplete")
-      }
-      const avgLatency = searchBenchmarks.reduce((sum, b) => sum + b.latencyMs, 0) / searchBenchmarks.length
-      const diverseSessions = searchBenchmarks.reduce((sum, b) => sum + b.uniqueSessions, 0)
-      if (avgLatency < 500 && totalResults > 0 && diverseSessions > 2) {
-        recommendations.push(
-          `Search quality is good — ${totalResults} results across ${diverseSessions} sessions in ${Math.round(avgLatency)}ms avg`,
-        )
-      }
-    }
+    recommendations.push(...benchmarkRecommendations(searchBenchmarks))
   }
 
   // ── Recall Quality Test ───────────────────────────────────────────────
@@ -845,6 +830,18 @@ function findMemorySessionsDir(projectRoot: string): string | null {
     if (fs.existsSync(dir)) return dir
   }
   return null
+}
+
+/**
+ * What status says about the four canned FTS probes: yield and latency only (@ag/recall/three-dark-search-paths
+ * acceptance 6; @chief 2026-10-15). Result volume, session spread and speed measure no relevance, so no line here calls
+ * them search quality; what the probes found and how long they took is in searchBenchmarks itself.
+ */
+export function benchmarkRecommendations(benchmarks: ReviewResult["searchBenchmarks"]): string[] {
+  const totalResults = benchmarks.reduce((sum, b) => sum + b.resultCount, 0)
+  if (totalResults === 0) return ["All benchmark queries returned 0 results — index may be empty or corrupt"]
+  const allFromOneSession = benchmarks.every((b) => b.uniqueSessions <= 1 && b.resultCount > 0)
+  return allFromOneSession ? ["Results only from 1 session per query — index may be incomplete"] : []
 }
 
 function runSearchBenchmark(
