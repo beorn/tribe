@@ -285,7 +285,7 @@ export function insertWrite(
 /**
  * Escape a token for FTS5 query syntax.
  * FTS5 treats certain characters specially (e.g., . is column selector).
- * Tokens with special characters are quoted as phrases.
+ * Every token is quoted as an exact phrase, including tokens without special characters.
  */
 function escapeToken(token: string): { text: string; quoted: boolean } {
   // Strip trailing punctuation that would confuse FTS5
@@ -325,7 +325,8 @@ export function toFts5Query(query: string): string {
       // Quoted phrases can't use prefix matching
       parts.push(`NOT ${escaped.text}${escaped.quoted ? "" : "*"}`)
     } else {
-      // Prefix match for each term (unless quoted)
+      // escapeToken currently quotes every token: these are exact phrases,
+      // not prefix queries. Document frequency must follow the emitted syntax.
       const escaped = escapeToken(token)
       parts.push(`${escaped.text}${escaped.quoted ? "" : "*"}`)
     }
@@ -345,8 +346,8 @@ export interface MessageSearchOptions {
   sessionId?: string // Filter by session ID
   snippetTokens?: number // Snippet window size (default 64)
   /**
-   * "exact" (the default) ranks and counts every match in the window. "hook" ranks at most HOOK_CANDIDATE_LIMIT of
-   * them and counts nothing (@ag/tribe/25071 row 2).
+   * "exact" (the default) ranks and counts every match in the window. "hook" selects at most
+   * HOOK_CANDIDATE_LIMIT eligible IDs before ranking and counts nothing (@ag/recall/29482).
    */
   mode?: SearchMode
   /** Hook mode only: count the total too (default false). Exact mode always counts. */
@@ -473,10 +474,10 @@ function countMessages(db: Database, ftsQuery: string, filter: { sql: string; pa
 }
 
 /**
- * Hook mode (@ag/tribe/25071 row 2; @cto re-ruling 516d4c10): exact mode's order, the window filter first and bm25
- * over the survivors, capped at HOOK_CANDIDATE_LIMIT ranked matches, counting nothing. The all-time top-N candidate
- * set it replaced was refuted by the real-prompt replay: hook was slower than exact on 84 of 150 prompts, because on
- * this corpus the window, not bm25, is the selective predicate (/hh/var/@dev/11/25071-r2/replay.jsonl).
+ * Select eligible matching IDs before scoring: a ranked LIMIT still scored every match (29482 measured
+ * 1.3–3.5 s on broad single terms). Apply the existing window/filters first, then hold newest prose before tools
+ * under the existing cap. Under the cap the set and rank are exact; above it the receipt names the approximation.
+ * BM25 still prepares global phrase frequencies, so this bounds per-document scoring, not the whole query wall.
  */
 function hookMessageSearch(
   db: Database,
@@ -486,20 +487,46 @@ function hookMessageSearch(
   const { limit = 50, offset = 0, snippetTokens = 64, withTotal = false } = options
   const ftsQuery = toFts5Query(query)
   const filter = messageFilterSql(options)
-  type Candidate = { id: number; session_id: string; rank: number }
-  // One row past the cap says whether the cap cut the window, without a COUNT (B1).
-  const ranked = db
-    .prepare(
-      assertSingleStatement(`SELECT m.id AS id, m.session_id AS session_id, ${MESSAGE_RANK_SQL} AS rank
+  type Candidate = { id: number; session_id: string }
+  const selectCandidates = (toolFilter: string, candidateLimit: number): Candidate[] =>
+    db
+      .prepare(
+        assertSingleStatement(`SELECT m.id AS id, m.session_id AS session_id
+       FROM messages_fts f
+       JOIN messages m ON f.rowid = m.id
+       JOIN sessions s ON m.session_id = s.id
+       WHERE messages_fts MATCH ? AND ${filter.sql} ${toolFilter}
+       ORDER BY f.rowid DESC LIMIT ?`),
+      )
+      .all(ftsQuery, ...filter.params, candidateLimit) as Candidate[]
+  // The extra eligible ID witnesses overflow without COUNT or ranking it. An
+  // explicit tool lookup must not spend its candidate capacity on prose.
+  const prose = options.toolName ? [] : selectCandidates("AND m.tool_name IS NULL", HOOK_CANDIDATE_LIMIT + 1)
+  const tools =
+    prose.length > HOOK_CANDIDATE_LIMIT
+      ? []
+      : selectCandidates(options.toolName ? "" : "AND m.tool_name IS NOT NULL", HOOK_CANDIDATE_LIMIT + 1 - prose.length)
+  const candidates = [...prose, ...tools]
+  const held = candidates.slice(0, HOOK_CANDIDATE_LIMIT)
+  const proseHeld = Math.min(prose.length, held.length)
+  const toolsHeld = held.length - proseHeld
+  const survivors =
+    held.length === 0
+      ? []
+      : (db
+          .prepare(
+            assertSingleStatement(`SELECT m.id AS id, m.session_id AS session_id, ${MESSAGE_RANK_SQL} AS rank
        FROM messages_fts f
        JOIN messages m ON f.rowid = m.id
        JOIN sessions s ON m.session_id = s.id
        WHERE messages_fts MATCH ? AND ${filter.sql}
-       ORDER BY rank LIMIT ?`),
-    )
-    .all(ftsQuery, ...filter.params, HOOK_CANDIDATE_LIMIT + 1) as Candidate[]
-  const survivors = ranked.slice(0, HOOK_CANDIDATE_LIMIT)
-  const anchor = query.length > 80 ? `${query.slice(0, 80)}…` : query
+         AND f.rowid IN (SELECT value FROM json_each(?))
+       ORDER BY rank`),
+          )
+          .all(ftsQuery, ...filter.params, JSON.stringify(held.map((row) => row.id))) as (Candidate & {
+          rank: number
+        })[])
+  const anchor = query
 
   const sessionDepths = new Map<string, number>()
   for (const c of survivors) sessionDepths.set(c.session_id, (sessionDepths.get(c.session_id) ?? 0) + 1)
@@ -508,14 +535,15 @@ function hookMessageSearch(
     survivors: survivors.length,
     sessionDepths,
     // Loud, because a cut window is the one case where hook can differ from exact (@cto 4b15f0bc).
-    ...(ranked.length > HOOK_CANDIDATE_LIMIT
+    ...(candidates.length > HOOK_CANDIDATE_LIMIT
       ? {
           capped: {
             phase: "messages",
             anchor,
             message:
-              `recall messages capped: survivors capped at ${String(HOOK_CANDIDATE_LIMIT)} of more than ` +
-              `${String(HOOK_CANDIDATE_LIMIT)} window matches for anchor "${anchor}" (25071)`,
+              `recall messages capped before ranking at ${String(HOOK_CANDIDATE_LIMIT)} eligible matches: ` +
+              `prose held ${String(proseHeld)}, tools held ${String(toolsHeld)}; overflow at least 1 ` +
+              `for anchor "${anchor}"; results are approximate (29482)`,
           },
         }
       : {}),

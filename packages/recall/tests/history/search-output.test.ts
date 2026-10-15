@@ -257,6 +257,35 @@ describe("recall search output", () => {
     closeDb()
   })
 
+  // Receipt creation is covered by real SQLite fanout/agent tests. This is the
+  // distinct CLI transport boundary, including its early synthesis-failure path.
+  test.each([
+    { json: false, failedSynthesis: false },
+    { json: true, failedSynthesis: false },
+    { json: false, failedSynthesis: true },
+  ])("agent output retains search receipts ($json JSON, synthesis failed $failedSynthesis)", async ({ json, failedSynthesis }) => {
+    setIndexMeta(getDb(), "last_rebuild", new Date().toISOString())
+    const previousExitCode = process.exitCode
+    const skipped = [{ phase: "messages", anchor: "receiptneedle", message: "recall messages capped for receiptneedle: prose held 1000, tools held 0; overflow" }]
+    mockAgent.result = async (query) => ({
+      ...(failedSynthesis ? synthesisFailureAgentResult(query) : zeroAgentResult(query, { provenance: "complete" })),
+      skipped,
+    }) as never
+    try {
+      process.exitCode = 0
+      await cmdSearch("receiptneedle", { agent: true, json, project: "*", round2: "off" })
+      if (json) {
+        expect(jsonStdout<{ skipped: unknown }>(logSpy).skipped).toEqual(skipped)
+      } else {
+        expect(callsText(logSpy)).toContain(skipped[0]!.message)
+        expect(callsText(logSpy)).not.toContain("No results found")
+      }
+      expect(process.exitCode).toBe(3)
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
   test("reports a loud tool-broken failure — with the lexical hits, clearly labeled, never silently dropped — when default synthesis is unavailable", async () => {
     const previousLlmDir = process.env.TRIBE_LLM_DIR
     const previousExitCode = process.exitCode

@@ -381,3 +381,26 @@ describe("recallAgent — fallthrough", () => {
     expect(result.trace.rounds[0]!.planner.error).toBe("empty-plan")
   })
 })
+
+// Fanout owns creating receipts; this checks the separate orchestration risk:
+// a real SQLite cut must survive agent result and per-round trace assembly.
+test("agent carries bounded-search receipts in its result and round trace", async () => {
+  mockHolder.fn = buildMockQueryModel([
+    { match: /query planner/i, content: buildPlanJson({ keywords: ["zebracorn", "-badsyntax"] }) },
+    { content: "A bounded answer" },
+  ])
+  seedCorpus({
+    sessions: [{ id: "dense-receipt", title: "Dense", messages: Array.from({ length: 1003 }, () => "zebracorn") }],
+  })
+  const result = await recallAgent("zebracorn", { limit: 1, raw: true })
+  expect(result.skipped).toEqual([
+    expect.objectContaining({ phase: "messages", anchor: "zebracorn", message: expect.stringMatching(/cap|cut/) }),
+    expect.objectContaining({ phase: "messages", anchor: "-badsyntax", message: expect.stringMatching(/syntax error/i) }),
+    expect.objectContaining({ phase: "session_content", anchor: "-badsyntax", message: expect.stringMatching(/syntax error/i) }),
+    expect.objectContaining({ phase: "project_content", anchor: "-badsyntax", message: expect.stringMatching(/syntax error/i) }),
+  ])
+  expect(result.trace.rounds[0]?.skipped).toEqual(result.skipped)
+  expect(result.trace.rounds[0]?.variants).toEqual(["zebracorn"])
+  expect(result.trace.decision.reason).toMatch(/fraction=1\.00/)
+  expect(result.results[0]?.sessionId).toBe("dense-receipt")
+})

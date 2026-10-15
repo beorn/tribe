@@ -10,6 +10,7 @@
 import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
+import type { RecallSkip } from "../history/recall-shared.ts"
 
 export interface TracePayload {
   query: string
@@ -49,6 +50,8 @@ export interface RoundTrace {
   planner: { model: string | null; elapsedMs: number; error?: string }
   plan: unknown
   variants: string[]
+  /** The cut or rejected work behind this round's results. */
+  skipped?: RecallSkip[]
   stats: {
     totalQueries: number
     rawHits: number

@@ -137,6 +137,62 @@ describe("25071 row 2 B1: hook mode counts nothing", () => {
 })
 
 describe("25071 row 2 B2: hook mode ranks the window first (@cto re-ruling 516d4c10)", () => {
+  test("29482 caps eligible candidates before ranking and reports the approximation", async () => {
+    // A survivor LIMIT still returns the old strongest row; a pre-score ID cap
+    // excludes it. Existing output-count cases cannot distinguish those paths.
+    seed([
+      { session: "old-best", content: `${ANCHOR} `.repeat(80), ageDays: 2 },
+      ...recentWeak(1000),
+      ...unmatched(500),
+    ])
+    const { ftsSearchWithSnippet } = await import("../../src/history/db")
+    const db = getDb()
+    const exact = ftsSearchWithSnippet(db, ANCHOR, { limit: 5 })
+    const hook = ftsSearchWithSnippet(db, ANCHOR, { mode: "hook", limit: 5 })
+
+    expect(exact.results[0]?.session_id).toBe("old-best")
+    expect(hook.results.some((r) => r.session_id === "old-best")).toBe(false)
+    expect(hook.hook.survivors).toBe(1000)
+    expect(hook.hook.capped?.message).toContain("prose held 1000")
+    expect(hook.hook.capped?.message).toContain("tools held 0")
+    expect(hook.hook.capped?.message).toContain("overflow")
+  }, 30_000)
+
+  test("29482 matches before the candidate cap, retaining an older rare eligible hit", async () => {
+    // Newer nonmatches and ineligible matches must not consume the candidate
+    // set. This distinguishes MATCH/filter-first from a global recent-row cap.
+    seed([{ session: "eligible-old", content: ANCHOR, ageDays: 29 }, ...recentWeak(1200), ...unmatched(1200)])
+    const { ftsSearchWithSnippet } = await import("../../src/history/db")
+    const db = getDb()
+    db.prepare("UPDATE sessions SET cwd = '/other'").run()
+    db.prepare("UPDATE sessions SET cwd = '/target' WHERE id = 'eligible-old'").run()
+    const hook = ftsSearchWithSnippet(db, ANCHOR, { mode: "hook", projectFilter: "/target", limit: 5 })
+
+    expect(hook.results.map((r) => r.session_id)).toEqual(["eligible-old"])
+    expect(hook.hook.survivors).toBe(1)
+    expect(hook.hook.capped).toBeUndefined()
+  }, 30_000)
+
+  test("29482 keeps prose under tool pressure and honors an explicit tool lookup", async () => {
+    // Final tool weighting cannot recover prose excluded by a recent-row cap.
+    seed([
+      ...Array.from({ length: 12 }, (_, i) => ({ session: `prose-${i}`, content: ANCHOR, ageDays: 2 })),
+      ...recentWeak(1001),
+    ])
+    const { ftsSearchWithSnippet } = await import("../../src/history/db")
+    const db = getDb()
+    db.prepare("UPDATE messages SET tool_name = 'Bash' WHERE session_id LIKE 'new-%'").run()
+    const prose = ftsSearchWithSnippet(db, ANCHOR, { mode: "hook", limit: 5 })
+    const tools = ftsSearchWithSnippet(db, ANCHOR, { mode: "hook", toolName: "Bash", limit: 5 })
+
+    expect(prose.results).toHaveLength(5)
+    expect(prose.results.every((r) => r.session_id.startsWith("prose-"))).toBe(true)
+    expect(prose.hook.capped?.message).toContain("prose held 12, tools held 988")
+    expect(tools.results).toHaveLength(5)
+    expect(tools.results.every((r) => r.tool_name === "Bash")).toBe(true)
+    expect(tools.hook.capped?.message).toContain("prose held 0, tools held 1000")
+  }, 30_000)
+
   test("on a plentiful index, hook and exact inject the same five, and hook says how many window matches it ranked", async () => {
     // recall() closes the index when it returns, and an in-memory index closes empty: seed before each call.
     // The unmatched rows give the anchor a real IDF, so bm25 orders the matches instead of tying them all.
@@ -183,7 +239,7 @@ describe("25071 row 2 B2: hook mode ranks the window first (@cto re-ruling 516d4
       {
         phase: "messages",
         anchor: ANCHOR,
-        message: `recall messages capped: survivors capped at 1000 of more than 1000 window matches for anchor "${ANCHOR}" (25071)`,
+        message: `recall messages capped before ranking at 1000 eligible matches: prose held 1000, tools held 0; overflow at least 1 for anchor "${ANCHOR}"; results are approximate (29482)`,
       },
     ])
   }, 30_000)

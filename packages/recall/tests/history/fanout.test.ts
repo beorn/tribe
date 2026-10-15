@@ -7,7 +7,7 @@
  * above single-variant hits with better raw BM25.
  */
 
-import { describe, test, expect, beforeEach } from "vitest"
+import { describe, test, expect, beforeEach, vi } from "vitest"
 import { Database } from "bun:sqlite"
 import { initSchema } from "../../src/history/db-schema"
 import { fanoutSearch, mergeFanouts } from "../../src/lib/fanout"
@@ -130,7 +130,7 @@ describe("fanoutSearch", () => {
     const badVariants = ['"unclosed', "*@#$%", "", "   "]
     const result = fanoutSearch(db, badVariants, { limit: 10, sinceTime: 0 })
     // Should not throw; may return empty results
-    expect(result.variants).toEqual(badVariants)
+    expect(result.variants).toEqual(['"unclosed', "*@#$%"])
     expect(Array.isArray(result.results)).toBe(true)
   })
 
@@ -151,6 +151,46 @@ describe("fanoutSearch", () => {
 
     const bananaHits = result.variantHits.get("banana")!
     expect(bananaHits.length).toBe(1) // only sess-1
+  })
+
+  // The small coverage fixtures never cut a candidate set or expose the unused
+  // exact message COUNT. Exercise the real SQLite boundary, not a mocked receipt.
+  test("bounded message fanout avoids counts and preserves cut receipts across rounds", () => {
+    const now = Date.now()
+    insertSession(db, "dense", "Dense matching session", now)
+    db.transaction(() => {
+      for (let i = 0; i < 1003; i++) insertMessage(db, "dense", "zebracorn boundedneedle", now - i)
+    })()
+    const prepare = vi.spyOn(db, "prepare")
+    try {
+      const first = fanoutSearch(db, ["zebracorn"], { limit: 5, sinceTime: 0 })
+      const second = fanoutSearch(db, ["boundedneedle"], { limit: 5, sinceTime: 0 })
+      const merged = mergeFanouts(first, second, 5)
+      expect(first.skipped).toEqual([
+        expect.objectContaining({ phase: "messages", anchor: "zebracorn", message: expect.stringMatching(/cap|cut/) }),
+      ])
+      expect(merged.skipped).toEqual([...(first.skipped ?? []), ...(second.skipped ?? [])])
+      expect(merged.variants).toEqual(["zebracorn", "boundedneedle"])
+      expect(merged.hitCounts.get("message:dense")).toBe(2)
+      const countedMessageQueries = prepare.mock.calls
+        .map(([sql]) => String(sql))
+        .filter((sql) => /messages_fts/.test(sql) && /\bCOUNT\s*\(/i.test(sql))
+      expect(countedMessageQueries).toEqual([])
+    } finally {
+      prepare.mockRestore()
+    }
+  })
+
+  test("invalid FTS queries carry their phase, query and actual cause; database failure still throws", () => {
+    const result = fanoutSearch(db, [""], { limit: 5 })
+    expect(result.variants).toEqual([])
+    expect(result.skipped).toEqual([
+      expect.objectContaining({ phase: "messages", anchor: "", message: expect.stringMatching(/fts5.*syntax error/i) }),
+      expect.objectContaining({ phase: "session_content", anchor: "", message: expect.stringMatching(/fts5.*syntax error/i) }),
+      expect.objectContaining({ phase: "project_content", anchor: "", message: expect.stringMatching(/fts5.*syntax error/i) }),
+    ])
+    db.close()
+    expect(() => fanoutSearch(db, ["needle"], { limit: 5 })).toThrow()
   })
 })
 

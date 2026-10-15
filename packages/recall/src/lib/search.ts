@@ -187,6 +187,15 @@ function recallJsonEnvelope(result: RecallResult): Omit<RecallResult, "results">
   return result
 }
 
+/** Search coverage and index freshness are separate: a cut remains useful but partial. */
+function reportSearchSkips(result: RecallResult, json: boolean | undefined): void {
+  if (!result.skipped?.length) return
+  process.exitCode = 3
+  if (!json) {
+    for (const skip of result.skipped) console.log(`${YELLOW}⚠ ${skip.message}${RESET}`)
+  }
+}
+
 // ============================================================================
 // Main search command
 // ============================================================================
@@ -283,6 +292,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   // The CLI's own verdict names its root and window on the result it prints, so a
   // stale answer says what it judged without the caller running a second tool.
   result.provenanceDetail = freshness
+  reportSearchSkips(result, json)
   formatRecallOutput(result, { json })
 }
 
@@ -298,6 +308,7 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   }
 
   const result = await recallAgent(query, agentOpts)
+  reportSearchSkips(result, options.json)
 
   // The CLI's own verdict names its root and window on the result it prints, so a
   // stale answer says what it judged without the caller running a second tool.
@@ -599,7 +610,9 @@ function formatRecallOutput(result: RecallResult, options: { json?: boolean }): 
     // returned 0 and suggest --raw fallback. The previous "No results found"
     // looked authoritative when it wasn't — raw mode with the same token
     // may return matches (variant-construction bug class).
-    if (result.provenance === "complete") {
+    if (result.skipped?.length) {
+      console.log(`No results returned from partial search for "${result.query}"`)
+    } else if (result.provenance === "complete") {
       console.log(`No results found for "${result.query}"`)
     } else {
       console.log(`0 results${unprovenSuffix(result.provenance, result.provenanceDetail)} for "${result.query}"`)

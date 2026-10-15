@@ -201,7 +201,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   rounds.push(buildRoundTrace(1, undefined, planR1, variantsR1, fanoutR1))
 
   log(
-    `agent: round 1 fanout → ${fanoutR1.stats.rawHits} raw, ${fanoutR1.stats.uniqueDocs} unique, top-coverage=${fanoutR1.stats.topCoverage}/${variantsR1.length} (${fanoutR1.stats.msTotal}ms)`,
+    `agent: round 1 fanout → ${fanoutR1.stats.rawHits} raw, ${fanoutR1.stats.uniqueDocs} unique, top-coverage=${fanoutR1.stats.topCoverage}/${fanoutR1.variants.length} (${fanoutR1.stats.msTotal}ms)`,
   )
 
   // ──────────────────────────────────────────────────────────────────────
@@ -231,7 +231,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   let finalFanout: FanoutResult = fanoutR1
 
   if (maxRounds >= 2 && round2 !== "off") {
-    decision = chooseRound2Mode(round2, fanoutR1, variantsR1.length, limit)
+    decision = chooseRound2Mode(round2, fanoutR1, fanoutR1.variants.length, limit)
     log(`agent: round 2 decision = ${decision.round2Mode} (${decision.reason})`)
 
     if (decision.round2Mode !== "off") {
@@ -240,7 +240,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
         mode: decision.round2Mode,
         priorPlan: planR1.plan,
         priorResults: fanoutR1.results,
-        priorVariants: variantsR1,
+        priorVariants: fanoutR1.variants,
         timeoutMs: planTimeoutMs,
         llm,
       })
@@ -256,7 +256,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
         rounds.push(buildRoundTrace(2, decision.round2Mode, planR2, [], null))
       } else {
         // Filter out variants we already tried in round 1
-        const r1Set = new Set(variantsR1)
+        const r1Set = new Set(fanoutR1.variants)
         const variantsR2 = planVariants(planR2.plan).filter((v) => !r1Set.has(v))
         log(`agent: round 2 plan → ${variantsR2.length} NEW variants (planner=${planR2.model} ${planR2.elapsedMs}ms)`)
 
@@ -270,7 +270,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
           fanoutElapsed.push(fanoutR2.stats.msTotal)
           rounds.push(buildRoundTrace(2, decision.round2Mode, planR2, variantsR2, fanoutR2))
           log(
-            `agent: round 2 fanout → ${fanoutR2.stats.rawHits} raw, ${fanoutR2.stats.uniqueDocs} unique, top-coverage=${fanoutR2.stats.topCoverage}/${variantsR2.length} (${fanoutR2.stats.msTotal}ms)`,
+            `agent: round 2 fanout → ${fanoutR2.stats.rawHits} raw, ${fanoutR2.stats.uniqueDocs} unique, top-coverage=${fanoutR2.stats.topCoverage}/${fanoutR2.variants.length} (${fanoutR2.stats.msTotal}ms)`,
           )
           finalFanout = mergeFanouts(fanoutR1, fanoutR2, limit)
         } else {
@@ -361,6 +361,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
     provenance: options.provenance ?? "unknown",
     synthesis: synthesis.text,
     results: finalFanout.results,
+    ...(finalFanout.skipped?.length ? { skipped: finalFanout.skipped } : {}),
     durationMs: totalMs,
     llmCost: plannerUsd + synthUsd,
     timing: {
@@ -483,7 +484,8 @@ function buildRoundTrace(
       error: planCall.error,
     },
     plan: planCall.plan,
-    variants,
+    variants: fanout?.variants ?? variants,
+    ...(fanout?.skipped?.length ? { skipped: fanout.skipped } : {}),
     stats: fanout?.stats ?? {
       totalQueries: 0,
       rawHits: 0,
