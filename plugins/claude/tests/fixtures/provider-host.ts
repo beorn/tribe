@@ -14,8 +14,9 @@ import { spawn, type ChildProcess } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV } from "tribe-wire/lib/session-identity-env"
 
-const server = process.argv[2]
-if (server === undefined) throw new Error("provider-host fixture: argv[2] must name the supervisor's server.ts")
+const serverArg = process.argv[2]
+if (serverArg === undefined) throw new Error("provider-host fixture: argv[2] must name the supervisor's server.ts")
+const server: string = serverArg
 const env: NodeJS.ProcessEnv = { ...process.env }
 if (process.env.FIXTURE_DECLARE_PARENT === "1") env[TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV] = String(process.ppid)
 const report = (row: Record<string, unknown>) => process.stdout.write(`${JSON.stringify(row)}\n`)
