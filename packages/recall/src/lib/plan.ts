@@ -225,7 +225,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
         rawResponse,
       }
     }
-    const error = parsed.error ?? parsed.reason ?? "empty-plan"
+    const error = parsed.error ?? parsed.reason
     log(`planner: ${model.modelId} returned no usable plan (${error})`)
     failures.push({ modelId: model.modelId, error })
   }
@@ -367,7 +367,9 @@ export type PlanParseReason = "empty-input" | "parse-failed" | "empty-plan"
  *    nothing new to add (legitimate in round 2 when everything useful was
  *    already tried in round 1)
  */
-export function parsePlanResult(raw: string): { plan: QueryPlan | null; reason?: PlanParseReason; error?: string } {
+export function parsePlanResult(
+  raw: string,
+): { plan: QueryPlan } | { plan: null; reason: PlanParseReason; error?: string } {
   if (!raw) return { plan: null, reason: "empty-input" }
 
   // Strip code fences
