@@ -61,13 +61,18 @@ function insertContent(
 // ============================================================================
 
 describe("content search eligibility and work", () => {
-  test.each([{ types: ["plan"] as const }, { types: ["plan", "summary", "todo", "first_prompt"] as const }])(
+  test.each([
+    { types: ["project_memory"] as const, seedDoc: true },
+    { types: ["doc", "llm_research", "project_memory", "claude_md"] as const, seedDoc: false },
+  ])(
     "absent $types reject MATCH hits before wide content reads without skipping MATCH validation",
-    ({ types }) => {
+    ({ types, seedDoc }) => {
       // Result-only tests miss the 29482 regression: zero rows can cost a wide
       // fetch per MATCH hit. SQLite 3.53.4's VM witnesses work without timing.
       const db = makeDb()
-      insertContent(db, "doc", "document", "budget", "budget needle body same", 0)
+      // An empty content table makes all four live types absent; the single
+      // type case has real MATCH hits whose wide doc reads must be skipped.
+      if (seedDoc) insertContent(db, "doc", "document", "budget", "budget needle body same", 0)
       const prepare = vi.spyOn(db, "prepare")
       let sql: string[]
       try {
@@ -120,11 +125,11 @@ describe("content search eligibility and work", () => {
     const db = makeDb()
     const body = "budget needle body same"
     const rows = [
-      ["plan", "a", "/alpha", -1],
-      ["plan", "b", "/alpha", 0],
-      ["plan", "c", "/blpha", 100],
-      ["bead", "d", null, 101],
-      ["doc", "e", "/alpha/sub", 1000],
+      ["doc", "a", "/alpha", -1],
+      ["doc", "b", "/alpha", 0],
+      ["doc", "c", "/blpha", 100],
+      ["llm_research", "d", null, 101],
+      ["project_memory", "e", "/alpha/sub", 1000],
     ] as const
     for (const [type, source, project, time] of rows) {
       db.prepare(
@@ -134,12 +139,12 @@ describe("content search eligibility and work", () => {
     const cases: { options: ContentSearchOptions; ids: number[]; total: number }[] = [
       { options: {}, ids: [1, 2, 3, 4, 5], total: 5 },
       { options: { types: [] }, ids: [1, 2, 3, 4, 5], total: 5 },
-      { options: { types: ["first_prompt"] }, ids: [], total: 0 },
-      { options: { types: ["plan"], limit: 1, offset: 1 }, ids: [2], total: 3 },
-      { options: { types: ["plan"], limit: 0 }, ids: [], total: 3 },
-      { options: { types: ["plan"], sinceTime: 0, projectFilter: "/_lpha" }, ids: [2, 3], total: 2 },
+      { options: { types: ["claude_md"] }, ids: [], total: 0 },
+      { options: { types: ["doc"], limit: 1, offset: 1 }, ids: [2], total: 3 },
+      { options: { types: ["doc"], limit: 0 }, ids: [], total: 3 },
+      { options: { types: ["doc"], sinceTime: 0, projectFilter: "/_lpha" }, ids: [2, 3], total: 2 },
       { options: { projectFilter: "%" }, ids: [1, 2, 3, 5], total: 4 },
-      { options: { types: ["plan", "bead"], snippetTokens: 3, limit: 2, offset: 1 }, ids: [2, 3], total: 4 },
+      { options: { types: ["doc", "llm_research"], snippetTokens: 3, limit: 2, offset: 1 }, ids: [2, 3], total: 4 },
     ]
     try {
       for (const { options, ids, total } of cases) {
@@ -173,14 +178,14 @@ describe("content search eligibility and work", () => {
     insertContent(db, "doc", "document", "budget", "budget", 0)
     try {
       for (const mode of ["exact", "hook"] as const) {
-        for (const types of [["doc"], ["first_prompt"]] as const) {
+        for (const types of [["doc"], ["project_memory"]] as const) {
           expect(() => searchAll(db, "-budget", { types: [...types], mode })).toThrow(/syntax error near "NOT"/)
         }
       }
       // LIMIT 0 skips ranked SELECT's MATCH evaluation. Exact COUNT must still
       // raise its original syntax error when the requested types are absent.
       expect(() => searchAll(db, "-budget", { types: ["doc"], limit: 0 })).toThrow(/syntax error near "NOT"/)
-      for (const types of [["first_prompt"], ["plan", "summary", "todo", "first_prompt"]] as const) {
+      for (const types of [["project_memory"], ["llm_research", "project_memory", "claude_md"]] as const) {
         expect(() => searchAll(db, "-budget", { types: [...types], limit: 0 })).toThrow(/syntax error near "NOT"/)
         expect(searchAll(db, "-budget", { types: [...types], limit: 0, mode: "hook" })).toEqual({
           results: [],
@@ -188,11 +193,11 @@ describe("content search eligibility and work", () => {
         })
       }
       db.run("DROP TABLE content_fts")
-      expect(() => searchAll(db, "budget", { types: ["first_prompt"] })).toThrow(/no such table: content_fts/)
+      expect(() => searchAll(db, "budget", { types: ["project_memory"] })).toThrow(/no such table: content_fts/)
     } finally {
       db.close()
     }
-    expect(() => searchAll(db, "budget", { types: ["first_prompt"] })).toThrow(/closed/)
+    expect(() => searchAll(db, "budget", { types: ["project_memory"] })).toThrow(/closed/)
   })
 })
 
