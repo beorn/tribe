@@ -687,7 +687,9 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "wake-on-correlated-reply",
           flags: "--wake-on-correlated-reply",
-          description: "Also wake on a validated reply settlement to one of this session's tracked requests",
+          description:
+            "Also wake on a validated reply settlement to one of this session's tracked requests, or on a direct " +
+            "status/response whose ref names an open ball this session requested",
           mapsTo: "wake_on_correlated_reply",
         },
         { name: "json", flags: "--json", description: "Emit machine-readable JSON (for hooks)" },

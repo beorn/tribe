@@ -16,6 +16,7 @@ import {
   formatPendingBallLine,
   formatRestartResult,
   formatInboxStatus,
+  formatInboxWaitTimeoutLine,
   registerReadCommands,
   resolveRepairOptions,
   tribeFetchScope,
@@ -29,6 +30,7 @@ import {
   MAX_INBOX_WAIT_TIMEOUT_MS,
   resolveInboxWaitOptions,
   resolveWaitOptions,
+  type InboxWaitResult,
 } from "../src/lib/inbox-wait-options.ts"
 import { TRIBE_FETCH_TOPICS_WINDOW } from "../src/lib/fetch-limits.ts"
 
@@ -294,6 +296,33 @@ describe("registerReadCommands", () => {
     expect(cmd).toBeDefined()
     const flags = optionFlags(cmd!)
     expect(flags).toEqual(expect.arrayContaining(["--session", "--timeout", "--json"]))
+  })
+
+  /** @failure 29535: a terminal timeout printed "no unanswered actionables"
+   *  while the payload beside it carried unread rows that do not wake the wait
+   *  (attention is wider than waking by design, 27735) — so a reader is told
+   *  nothing arrived while work is in hand.
+   * @level l0
+   * @consumer inbox-wait CLI readers */
+  test.each([
+    [
+      { unread_count: 1, waited_ms: 240_153, oldest_unread_age_min: 3 },
+      "reader: timed out after 240s; 1 unread attention item that does not wake this wait (oldest 3min) — read it with `tribe inbox`.",
+    ],
+    [
+      { unread_count: 3, waited_ms: 30_000, oldest_unread_age_min: 12 },
+      "reader: timed out after 30s; 3 unread attention items that do not wake this wait (oldest 12min) — read it with `tribe inbox`.",
+    ],
+    [{ unread_count: 0, waited_ms: 30_000, oldest_unread_age_min: 0 }, "reader: no unanswered actionables within 30s."],
+  ])("names the unread rows a timeout could not wake on: %j", (fields, expected) => {
+    const result = {
+      session: "reader",
+      status: "timeout",
+      timed_out: true,
+      aborted: false,
+      ...fields,
+    } as unknown as InboxWaitResult
+    expect(formatInboxWaitTimeoutLine(result, 30_000)).toBe(expected)
   })
 
   // 28909 — the one-shot reads whose stdout the harness truncates at 69,632

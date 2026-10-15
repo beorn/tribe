@@ -1813,6 +1813,35 @@ function takingStatusForOpenRequestMatchSql(
     AND ${receipt}.${receiptSequence} > ${originalSequence}`
 }
 
+/** One correlation, two callers — so the attention classification and the
+ *  opt-in wake arm cannot drift (@cto 29535).
+ *
+ *  `refExpr` names an open request ball that `partyExpr` is on `side` of:
+ *  - `either` — the insert-time classification's question. C2 (@cto c49b6d2a):
+ *    a direct status/notify whose ref names a live ball EITHER party holds is
+ *    attention: "a TAKING receipt to the requester, a precision to the owner,
+ *    a third seat's status on a live ball".
+ *  - `requester` — the opt-in wake arm's narrower question. Only the seat that
+ *    REQUESTED the ball is woken: an owner-side precision stays quiet.
+ *
+ *  Attention is wider than waking, deliberately: a row can be counted without
+ *  costing a model turn. The wake arm is reached only under
+ *  `$include_correlated_replies`, so this widens no default wake class. */
+export function refBoundOpenRequestPredicateSql(
+  refExpr: string,
+  partyExpr: string,
+  side: "either" | "requester",
+): string {
+  const partyMatch =
+    side === "requester" ? `sender = ${partyExpr}` : `(recipient = ${partyExpr} OR sender = ${partyExpr})`
+  return `${refExpr} IS NOT NULL AND EXISTS (
+						SELECT 1 FROM pending_request
+						WHERE (request_id = ${refExpr} OR message_id = ${refExpr})
+							AND request_kind = 'request'
+							AND ${partyMatch}
+					)`
+}
+
 function takingStatusProtectsOpenBallPredicateSql(receipt: string, receiptSequence: string): string {
   const pending = "taking_pending"
   const originalMessage = "taking_original_message"
@@ -1908,12 +1937,7 @@ export function createStatements(db: Database) {
 				WHEN $attention_required = 1 THEN 1
 				WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1
 				WHEN $kind = 'direct' AND $sender != $recipient AND $type IN ('status', 'notify') AND $between_personas = 1
-					AND $ref IS NOT NULL AND EXISTS (
-						SELECT 1 FROM pending_request
-						WHERE (request_id = $ref OR message_id = $ref)
-							AND request_kind = 'request'
-							AND (recipient = $recipient OR sender = $recipient)
-					) THEN 1
+					AND ${refBoundOpenRequestPredicateSql("$ref", "$recipient", "either")} THEN 1
 				ELSE 0
 			END)
 	`),
@@ -2754,7 +2778,10 @@ export function createStatements(db: Database) {
           OR (
             $include_correlated_replies = 1
             AND type IN (${CORRELATED_REPLY_TYPES_SQL})
-            AND correlated_reply_requester = $name
+            AND (
+              correlated_reply_requester = $name
+              OR ${refBoundOpenRequestPredicateSql("m.ref", "$name", "requester")}
+            )
           )
         )
         AND (
