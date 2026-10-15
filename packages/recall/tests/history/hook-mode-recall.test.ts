@@ -2,13 +2,14 @@
  * The prompt hook's recall runs in hook mode, inside a stated budget (@ag/tribe/25071 row 2, @cto ruling 2026-09-23).
  *
  * B1: hook mode issues no COUNT, not the message total, the content total, or the session-depth corroboration.
- * B2: hook mode ranks the window first, like exact, capped at N ranked matches (@cto re-ruling 516d4c10: the all-time
- *     top-N candidate set was refuted by the real-prompt replay, where hook was slower than exact on 84 of 150).
+ * B2: hook mode selects eligible matching IDs before ranking; all window filters apply before the candidate cap.
+ *     Ranking uses one MATCH cursor so its global phrase-frequency setup is not repeated per held ID (29482).
  * Phase 3 (@ag/recall/three-dark-search-paths): hook mode runs the phases its caller names, and never the project
  *     content or the synonym variants.
  * Exact mode, the default and the CLI's, keeps every count.
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
+import { assertSingleStatement } from "@bearly/sqlite"
 
 process.env.RECALL_DB_PATH = ":memory:"
 
@@ -136,7 +137,88 @@ describe("25071 row 2 B1: hook mode counts nothing", () => {
   })
 })
 
-describe("25071 row 2 B2: hook mode ranks the window first (@cto re-ruling 516d4c10)", () => {
+describe("29482 B2: hook mode bounds eligible candidates before ranking", () => {
+  test("29482 ranking keeps one MATCH cursor instead of restarting global BM25 setup for every held ID", async () => {
+    // The accepted work bound includes BM25's global phrase-frequency setup.
+    // Hit/count fixtures pass even when SQLite repeats that setup per ID; its
+    // native VM exposes the repeat without a load-dependent timing assertion.
+    seed(recentWeak(20))
+    const { ftsSearchWithSnippet, toFts5Query } = await import("../../src/history/db-queries")
+    const db = getDb()
+    const statements = await preparedSql(async () => ftsSearchWithSnippet(db, ANCHOR, { mode: "hook", limit: 5 }))
+    const ranking = statements.find((sql) => sql.includes("bm25(messages_fts") && sql.includes("json_each"))
+    expect(ranking).toBeDefined()
+    type Instruction = { addr: number; opcode: string; p2: number; p4: string | null }
+    const vm = db
+      .prepare(assertSingleStatement(`EXPLAIN ${ranking!}`))
+      .all(toFts5Query(ANCHOR), "[1,2,3,4,5]") as Instruction[]
+    const matchFilters = vm.filter((op) => op.opcode === "VFilter" && /M\d/.test(op.p4 ?? ""))
+    expect(matchFilters).toHaveLength(1)
+    const match = matchFilters[0]!
+    const restartingLoops = vm.filter(
+      (op) => /^(Next|Prev)$/.test(op.opcode) && op.addr > match.addr && op.p2 <= match.addr,
+    )
+    expect(restartingLoops).toEqual([])
+    const rank = vm.find((op) => op.opcode === "Function" && op.p4?.startsWith("bm25("))!
+    expect(vm.some((op) => op.opcode === "NotFound" && op.addr > match.addr && op.addr < rank.addr)).toBe(true)
+  })
+
+  test("29482 caps eligible candidates before ranking and reports the approximation", async () => {
+    // A survivor LIMIT still returns the old strongest row; a pre-score ID cap
+    // excludes it. Existing output-count cases cannot distinguish those paths.
+    seed([
+      { session: "old-best", content: `${ANCHOR} `.repeat(80), ageDays: 2 },
+      ...recentWeak(1000),
+      ...unmatched(500),
+    ])
+    const { ftsSearchWithSnippet } = await import("../../src/history/db")
+    const db = getDb()
+    const exact = ftsSearchWithSnippet(db, ANCHOR, { limit: 5 })
+    const hook = ftsSearchWithSnippet(db, ANCHOR, { mode: "hook", limit: 5 })
+
+    expect(exact.results[0]?.session_id).toBe("old-best")
+    expect(hook.results.some((r) => r.session_id === "old-best")).toBe(false)
+    expect(hook.hook.survivors).toBe(1000)
+    expect(hook.hook.capped?.message).toContain("prose held 1000")
+    expect(hook.hook.capped?.message).toContain("tools held 0")
+    expect(hook.hook.capped?.message).toContain("overflow")
+  }, 30_000)
+
+  test("29482 matches before the candidate cap, retaining an older rare eligible hit", async () => {
+    // Newer nonmatches and ineligible matches must not consume the candidate
+    // set. This distinguishes MATCH/filter-first from a global recent-row cap.
+    seed([{ session: "eligible-old", content: ANCHOR, ageDays: 29 }, ...recentWeak(1200), ...unmatched(1200)])
+    const { ftsSearchWithSnippet } = await import("../../src/history/db")
+    const db = getDb()
+    db.prepare("UPDATE sessions SET cwd = '/other'").run()
+    db.prepare("UPDATE sessions SET cwd = '/target' WHERE id = 'eligible-old'").run()
+    const hook = ftsSearchWithSnippet(db, ANCHOR, { mode: "hook", projectFilter: "/target", limit: 5 })
+
+    expect(hook.results.map((r) => r.session_id)).toEqual(["eligible-old"])
+    expect(hook.hook.survivors).toBe(1)
+    expect(hook.hook.capped).toBeUndefined()
+  }, 30_000)
+
+  test("29482 keeps prose under tool pressure and honors an explicit tool lookup", async () => {
+    // Final tool weighting cannot recover prose excluded by a recent-row cap.
+    seed([
+      ...Array.from({ length: 12 }, (_, i) => ({ session: `prose-${i}`, content: ANCHOR, ageDays: 2 })),
+      ...recentWeak(1001),
+    ])
+    const { ftsSearchWithSnippet } = await import("../../src/history/db")
+    const db = getDb()
+    db.prepare("UPDATE messages SET tool_name = 'Bash' WHERE session_id LIKE 'new-%'").run()
+    const prose = ftsSearchWithSnippet(db, ANCHOR, { mode: "hook", limit: 5 })
+    const tools = ftsSearchWithSnippet(db, ANCHOR, { mode: "hook", toolName: "Bash", limit: 5 })
+
+    expect(prose.results).toHaveLength(5)
+    expect(prose.results.every((r) => r.session_id.startsWith("prose-"))).toBe(true)
+    expect(prose.hook.capped?.message).toContain("prose held 12, tools held 988")
+    expect(tools.results).toHaveLength(5)
+    expect(tools.results.every((r) => r.tool_name === "Bash")).toBe(true)
+    expect(tools.hook.capped?.message).toContain("prose held 0, tools held 1000")
+  }, 30_000)
+
   test("on a plentiful index, hook and exact inject the same five, and hook says how many window matches it ranked", async () => {
     // recall() closes the index when it returns, and an in-memory index closes empty: seed before each call.
     // The unmatched rows give the anchor a real IDF, so bm25 orders the matches instead of tying them all.
@@ -172,7 +254,7 @@ describe("25071 row 2 B2: hook mode ranks the window first (@cto re-ruling 516d4
     expect(hook.results.every((r) => r.sessionId.startsWith("new-"))).toBe(true)
   }, 30_000)
 
-  test("N caps the ranked window matches, and says so: the one case where hook can differ from exact", async () => {
+  test("N caps eligible window matches before ranking and reports the approximation", async () => {
     seed([...unmatched(50), ...recentWeak(1003)])
 
     const hook = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
@@ -181,9 +263,10 @@ describe("25071 row 2 B2: hook mode ranks the window first (@cto re-ruling 516d4
     // B1 counts nothing, so the cap is seen by fetching one row past it, not by a COUNT.
     expect(hook.skipped).toEqual([
       {
+        kind: "candidate-cap",
         phase: "messages",
         anchor: ANCHOR,
-        message: `recall messages capped: survivors capped at 1000 of more than 1000 window matches for anchor "${ANCHOR}" (25071)`,
+        message: `recall messages capped before ranking at 1000 eligible matches: prose held 1000, tools held 0; overflow at least 1 for anchor "${ANCHOR}"; results are approximate (29482)`,
       },
     ])
   }, 30_000)

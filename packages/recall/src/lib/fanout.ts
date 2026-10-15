@@ -16,7 +16,7 @@ import {
   type ContentSearchOptions,
 } from "../history/db.ts"
 import type { ContentType } from "../history/types.ts"
-import type { RecallSearchResult } from "../history/recall-shared.ts"
+import type { RecallSearchResult, RecallSkip } from "../history/recall-shared.ts"
 import { boostedRank } from "../history/search.ts"
 
 // ============================================================================
@@ -33,12 +33,15 @@ export interface FanoutOptions {
 }
 
 export interface FanoutResult {
+  /** Variants with at least one successful phase query, including zero-hit and capped searches. */
   variants: string[]
   results: RecallSearchResult[]
   /** doc-key → number of variants that hit this doc */
   hitCounts: Map<string, number>
   /** variant → set of doc keys that matched */
   variantHits: Map<string, string[]>
+  /** Candidate cuts and rejected queries, in search order; absent for a complete search. */
+  skipped?: RecallSkip[]
   stats: FanoutStats
 }
 
@@ -73,9 +76,11 @@ const PROJECT_CONTENT_TYPES: ContentType[] = [
  * Run a list of FTS variants against the indexed corpus and merge results
  * with coverage reranking.
  *
- * Note: bun:sqlite is synchronous, so the "fan out" here is sequential FTS5
- * calls within a single event-loop turn. Each FTS call is <5ms on a warm DB;
- * 60 calls is ~300ms. The LLM planner, not fan-out, is the latency floor.
+ * bun:sqlite calls run sequentially. Measurements on 2026-10-15 found
+ * 250–400 ms per variant and 14–24 s for 40–60 variants: message BM25 scored
+ * every match before LIMIT (29482). Messages now use the bounded candidate
+ * query; content searches remain separate work. Neither a survivor limit nor
+ * the planner's latency establishes a bound on the whole fanout.
  */
 export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptions): FanoutResult {
   const startedAt = Date.now()
@@ -94,14 +99,29 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
   const docs = new Map<string, AggregatedDoc>()
   const hitCounts = new Map<string, number>()
   const variantHits = new Map<string, string[]>()
+  const searchedVariants: string[] = []
   let totalQueries = 0
   let rawHits = 0
+  const skipped: RecallSkip[] = []
+  const rejectedQuery = (phase: string, anchor: string, error: unknown): void => {
+    const cause = error instanceof Error ? error.message : String(error)
+    // Only malformed FTS is a skipped query. A closed/corrupt/unavailable
+    // database is still a real failure, not an apparently empty search.
+    if (!/fts5: (?:syntax error|unterminated string|unknown special query)/i.test(cause)) throw error
+    skipped.push({
+      kind: "query-rejected",
+      phase,
+      anchor,
+      message: `recall ${phase} query ${JSON.stringify(anchor)} skipped: ${cause}`,
+    })
+  }
 
   const msgOpts: MessageSearchOptions = {
     limit: perVariantLimit,
     sinceTime,
     projectFilter,
     snippetTokens,
+    mode: "hook",
   }
   const sessionContentOpts: ContentSearchOptions = {
     limit: perVariantLimit,
@@ -118,6 +138,7 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
   }
 
   for (const variant of variants) {
+    const queriesBefore = totalQueries
     // Dedupe doc keys WITHIN this variant — coverage means "how many distinct
     // variants found this doc", not "how many rows matched". Multiple messages
     // from the same session matching one variant is still just 1 coverage hit.
@@ -138,6 +159,7 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
     // Messages
     try {
       const res = ftsSearchWithSnippet(db, variant, msgOpts)
+      if (res.hook?.capped) skipped.push(res.hook.capped)
       totalQueries++
       rawHits += res.results.length
       for (const r of res.results) {
@@ -150,8 +172,8 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
           rank: r.rank,
         })
       }
-    } catch {
-      // FTS5 can reject some queries (special chars). Skip rather than crash.
+    } catch (error) {
+      rejectedQuery("messages", variant, error)
     }
 
     // Session-scoped content
@@ -170,8 +192,8 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
           rank: r.rank,
         })
       }
-    } catch {
-      /* skip */
+    } catch (error) {
+      rejectedQuery("session_content", variant, error)
     }
 
     // Project knowledge (no time filter)
@@ -190,11 +212,14 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
           rank: r.rank,
         })
       }
-    } catch {
-      /* skip */
+    } catch (error) {
+      rejectedQuery("project_content", variant, error)
     }
 
-    variantHits.set(variant, [...variantSeen])
+    if (totalQueries > queriesBefore) {
+      searchedVariants.push(variant)
+      variantHits.set(variant, [...variantSeen])
+    }
   }
 
   // Coverage-first rerank: multi-variant hits dominate single-variant hits
@@ -235,10 +260,11 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
   const medianCoverage = coverages.length > 0 ? coverages[Math.floor(coverages.length / 2)]! : 0
 
   return {
-    variants,
+    variants: searchedVariants,
     results,
     hitCounts,
     variantHits,
+    ...(skipped.length > 0 ? { skipped } : {}),
     stats: {
       totalQueries,
       rawHits,
@@ -315,12 +341,14 @@ export function mergeFanouts(a: FanoutResult, b: FanoutResult, limit: number): F
   const coverages = [...hitCounts.values()].sort((x, y) => y - x)
   const topCoverage = coverages[0] ?? 0
   const medianCoverage = coverages.length > 0 ? coverages[Math.floor(coverages.length / 2)]! : 0
+  const skipped = [...(a.skipped ?? []), ...(b.skipped ?? [])]
 
   return {
     variants: [...new Set([...a.variants, ...b.variants])],
     results,
     hitCounts,
     variantHits,
+    ...(skipped.length > 0 ? { skipped } : {}),
     stats: {
       totalQueries: a.stats.totalQueries + b.stats.totalQueries,
       rawHits: a.stats.rawHits + b.stats.rawHits,

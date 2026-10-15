@@ -17,5 +17,5 @@
 /** The hard wall: past it the hook skips recall loudly instead of waiting (the Worker in recall-deadline.ts). */
 export const RECALL_WALL_MS = 1500
 
-/** Hook mode ranks at most this many window matches (the window first, then bm25; @cto re-ruling 516d4c10). */
+/** Hold at most this many eligible matching IDs before per-document scoring; overflow is reported (29482). */
 export const HOOK_CANDIDATE_LIMIT = 1000
