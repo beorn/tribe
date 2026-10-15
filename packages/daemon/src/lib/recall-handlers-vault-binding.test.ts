@@ -17,6 +17,16 @@ import { VAULT_UNBOUND_NOTICE } from "../../../recall/src/lib/inject-core.ts"
 import { getVaultDbPath } from "../../../recall/src/history/vault-fts.ts"
 import { createRecallHandlers } from "./recall-handlers.ts"
 
+const recallAgentMock = vi.hoisted(() => vi.fn())
+
+vi.mock("../../../recall/src/lib/agent.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../recall/src/lib/agent.ts")>()),
+  recallAgent: recallAgentMock,
+}))
+vi.mock("../../../recall/src/lib/search.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../recall/src/lib/search.ts")>()),
+  readIndexProvenance: () => "complete",
+}))
 vi.mock("../../../recall/src/history/project-sources.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../recall/src/history/project-sources.ts")>()),
   ensureProjectSourcesIndexed: () => undefined,
@@ -95,5 +105,41 @@ describe("a daemon whose --vault-db names no file refuses the calls that need th
     } finally {
       await handlers.close()
     }
+  })
+})
+
+// @failure The daemon's ask ran agent mode with no vault on the call: once recall() stopped reading the module
+// binding, daemon.ask searched none, silently (@cto 501c4d73).
+describe("the daemon's ask names its --vault-db on the agent call", () => {
+  test("bound, the agent call carries the launch line's vault; unbound, null", async () => {
+    recallAgentMock.mockResolvedValue({
+      query: "q",
+      synthesis: null,
+      provenance: "complete",
+      results: [],
+      durationMs: 0,
+      trace: { rounds: [], decision: { round2Mode: "off", reason: "test" }, contextChars: 0 },
+      fellThrough: false,
+    })
+    for (const [name, vaultDbPath] of [
+      ["ask-bound", vaultDb],
+      ["ask-unbound", null],
+    ] as const) {
+      const handlers = createRecallHandlers({
+        dbPath: join(base, `lore-${name}.db`),
+        socketPath: join(base, "lore.sock"),
+        daemonVersion: "test",
+        vaultDbPath,
+      })
+      try {
+        await handlers.dispatch({ sessionId: `s-${name}`, claudePid: null }, TRIBE_METHODS.ask, { query: "q" })
+      } finally {
+        await handlers.close()
+      }
+    }
+    expect(recallAgentMock.mock.calls.map(([, options]) => (options as { vaultDb?: unknown }).vaultDb)).toEqual([
+      vaultDb,
+      null,
+    ])
   })
 })
