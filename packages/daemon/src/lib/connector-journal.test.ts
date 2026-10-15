@@ -11,8 +11,12 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase } from "./database.ts"
+import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { publishConnectorBatch } from "./messaging.ts"
 import { runRetentionSweep, type RetentionConfig } from "./retention.ts"
+import { registerSession } from "./session.ts"
+import { withBroadcast } from "./compose/with-broadcast.ts"
+import { withClientRegistry } from "./compose/with-client-registry.ts"
 
 const open: Array<{ dir: string; db: Database }> = []
 afterEach(() => {
@@ -49,10 +53,79 @@ const first = {
   expectedFrontier: null,
   nextFrontier: '{"version":1,"tips":["a"]}',
   schemaDigest: "schema-v1",
-  events: [{ id: "git:v1:a", kind: "git.commit", content: '{"oid":"a","subject":"first"}' }],
+  events: [
+    {
+      id: "git:v1:a",
+      kind: "git.commit",
+      content: '{"oid":"a","subject":"first"}',
+      topic: "git:commit",
+      summary: "git a: first",
+    },
+  ],
 } as const
 
 describe("connector journal publication", () => {
+  it("keeps a 100-event burst out of ordinary fetch and push while a positioned reader sees all rows", () => {
+    const { db, ctx } = fixture()
+    const seat = createTribeContext({
+      db,
+      stmts: ctx.stmts,
+      sessionId: "ordinary-seat",
+      sessionRole: "member",
+      initialName: "@ordinary",
+      domains: [],
+      claudeSessionId: null,
+      claudeSessionName: null,
+    })
+    registerSession(seat, "connector-test", () => true, null, 1234, "push", "/repo", null, "codex")
+    const deferred: Array<() => void> = []
+    const scope = { defer: (fn: () => void) => deferred.push(fn) }
+    const { registry } = withClientRegistry()({ scope, startedAt: 0 } as never)
+    const writes: string[] = []
+    registry.attachTransport("ordinary", {
+      id: "ordinary",
+      name: "@ordinary",
+      role: "member",
+      delivery: "push",
+      ctx: seat,
+      socket: { destroyed: false, writable: true, write: (text: string) => writes.push(text) },
+    } as never)
+    withBroadcast()({ scope, stmts: ctx.stmts, daemonCtx: ctx, registry } as never)
+    try {
+      const events = Array.from({ length: 100 }, (_, index) => ({
+        id: `git:v1:burst-${String(index).padStart(3, "0")}`,
+        kind: "git.commit",
+        content: JSON.stringify({ oid: `burst-${index}`, subject: `commit ${index}` }),
+        topic: "git:commit",
+        summary: `git burst-${index}: commit ${index}`,
+      }))
+      expect(publishConnectorBatch(ctx, { ...first, events }).kind).toBe("committed")
+      const opts: HandlerOpts = {
+        cleanup: () => {},
+        userRenamed: false,
+        setUserRenamed: () => {},
+        getActiveSessionIds: () => new Set([seat.sessionId]),
+        hasActiveTransport: (id) => id === seat.sessionId,
+        getActiveSessionInfo: () => [],
+      }
+      const result = handleToolCall(seat, "tribe.fetch", {}, opts) as { content: Array<{ text: string }> }
+      const fetched = JSON.parse(result.content[0]?.text ?? "{}") as { events?: Array<{ id: string }> }
+      expect(fetched.events?.some((event) => event.id.startsWith("git:v1:burst-")) ?? false).toBe(false)
+      expect(writes).toEqual([])
+      const positioned = db
+        .query("SELECT id FROM messages WHERE kind='event' AND type='event.git.commit' ORDER BY rowid")
+        .all() as Array<{ id: string }>
+      expect(positioned.map((row) => row.id)).toEqual(events.map((event) => event.id))
+      expect(db.query("SELECT delivery, topic, summary FROM messages WHERE id=?").get(events[0]!.id)).toEqual({
+        delivery: "pull",
+        topic: "git:commit",
+        summary: events[0]!.summary,
+      })
+    } finally {
+      for (const dispose of deferred.reverse()) dispose()
+    }
+  })
+
   it("advances an empty frontier without a wake and refuses a stale writer without partial rows", () => {
     const { db, ctx, wake } = fixture()
     const empty = { ...first, events: [] }
@@ -63,7 +136,15 @@ describe("connector journal publication", () => {
       publishConnectorBatch(ctx, {
         ...first,
         nextFrontier: '{"version":1,"tips":["other"]}',
-        events: [{ id: "git:v1:other", kind: "git.commit", content: '{"oid":"other"}' }],
+        events: [
+          {
+            id: "git:v1:other",
+            kind: "git.commit",
+            content: '{"oid":"other"}',
+            topic: "git:commit",
+            summary: "git other",
+          },
+        ],
       }).kind,
     ).toBe("frontier-conflict")
     expect(db.query("SELECT id FROM messages WHERE id='git:v1:other'").get()).toBeNull()
@@ -118,7 +199,15 @@ describe("connector journal publication", () => {
         ...first,
         expectedFrontier: first.nextFrontier,
         nextFrontier: '{"version":1,"tips":["b"]}',
-        events: [{ id: "git:v1:b", kind: "git.commit", content: '{"oid":"b","subject":"second"}' }],
+        events: [
+          {
+            id: "git:v1:b",
+            kind: "git.commit",
+            content: '{"oid":"b","subject":"second"}',
+            topic: "git:commit",
+            summary: "git b: second",
+          },
+        ],
       }),
     ).toMatchObject({ kind: "publication-unknown", detail: "injected frontier failure" })
     expect(db.query("SELECT id FROM messages WHERE id='git:v1:b'").all()).toEqual([])
@@ -136,7 +225,10 @@ describe("connector journal publication", () => {
       WHEN NEW.id='git:v1:c' BEGIN SELECT RAISE(ABORT, 'injected second insert failure'); END`)
     const result = publishConnectorBatch(ctx, {
       ...first,
-      events: [first.events[0], { id: "git:v1:c", kind: "git.commit", content: '{"oid":"c"}' }],
+      events: [
+        first.events[0],
+        { id: "git:v1:c", kind: "git.commit", content: '{"oid":"c"}', topic: "git:commit", summary: "git c" },
+      ],
     })
     expect(result).toMatchObject({ kind: "publication-unknown", detail: "injected second insert failure" })
     expect(db.query("SELECT id FROM messages WHERE id LIKE 'git:v1:%'").all()).toEqual([])

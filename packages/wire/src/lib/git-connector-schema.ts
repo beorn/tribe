@@ -120,7 +120,9 @@ export const GitFrontierSchema = z
     version: z.literal(1),
     sourceId: nonempty,
     contractVersion: z.literal("git.commit.v1"),
+    declarationDigest: nonempty,
     decoderDigest: nonempty,
+    schemaDigest: nonempty,
     snapshotStamp: nonempty,
     bindings: z.record(
       z.string(),

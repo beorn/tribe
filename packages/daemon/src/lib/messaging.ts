@@ -59,7 +59,13 @@ function insertMessageRow(ctx: TribeContext, values: MessageRowValues) {
   return ctx.stmts.insertMessage.run(values)
 }
 
-export type ConnectorJournalEvent = Readonly<{ id: string; kind: string; content: string }>
+export type ConnectorJournalEvent = Readonly<{
+  id: string
+  kind: string
+  content: string
+  topic: string
+  summary: string
+}>
 export type ConnectorBatch = Readonly<{
   sourceId: string
   expectedFrontier: string | null
@@ -100,8 +106,17 @@ export function publishConnectorBatch(ctx: TribeContext, batch: ConnectorBatch):
   }
   const seen = new Set<string>()
   for (const event of batch.events) {
-    if (!event.id.trim() || !event.kind.trim() || !event.content.trim()) {
-      throw new Error(`connector ${batch.sourceId}: event id, kind and content must be non-empty`)
+    if (
+      !event.id.trim() ||
+      !event.kind.trim() ||
+      !event.content.trim() ||
+      !event.topic.trim() ||
+      !event.summary.trim()
+    ) {
+      throw new Error(`connector ${batch.sourceId}: event id, kind, content, topic and summary must be non-empty`)
+    }
+    if (/[\r\n]/u.test(event.summary)) {
+      throw new Error(`connector ${batch.sourceId}: event ${event.id} summary must be one line`)
     }
     if (seen.has(event.id)) throw new Error(`connector ${batch.sourceId}: duplicate event id ${event.id} in one batch`)
     seen.add(event.id)
@@ -115,14 +130,13 @@ export function publishConnectorBatch(ctx: TribeContext, batch: ConnectorBatch):
     const rows = batch.events.map((event) => {
       const existing = ctx.db
         .query(
-          "SELECT content, summary, rowid AS seq FROM messages WHERE id = ? UNION ALL SELECT content, summary, seq FROM messages_archive WHERE id = ?",
+          "SELECT content, rowid AS seq FROM messages WHERE id = ? UNION ALL SELECT content, seq FROM messages_archive WHERE id = ?",
         )
-        .all(event.id, event.id) as Array<{ content: string; summary: string | null; seq: number }>
-      const hash = sha256(event.content)
-      return { event, hash, existing }
+        .all(event.id, event.id) as Array<{ content: string; seq: number }>
+      return { event, existing }
     })
     for (const row of rows) {
-      if (row.existing.some((existing) => existing.content !== row.event.content || existing.summary !== row.hash)) {
+      if (row.existing.some((existing) => existing.content !== row.event.content)) {
         return { kind: "payload-conflict", sourceId: batch.sourceId, eventId: row.event.id }
       }
     }
@@ -195,13 +209,13 @@ export function publishConnectorBatch(ctx: TribeContext, batch: ConnectorBatch):
         $bead_id: null,
         $ref: null,
         $ts: ts,
-        $delivery: "push",
-        $topic: null,
+        $delivery: "pull",
+        $topic: row.event.topic,
         $room_id: null,
         $request: null,
         $reply: null,
         $correlated_reply_requester: null,
-        $summary: row.hash,
+        $summary: row.event.summary,
         $attention_required: 0,
         $wakes_owner: 0,
         $is_incident: 0,

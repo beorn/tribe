@@ -210,6 +210,8 @@ async function decodeCommit(
     id: `git:v1:${hash(JSON.stringify([source.logicalSourceId, oid, objectFormat, "git.commit", source.contractVersion]))}`,
     kind: "git.commit",
     content: JSON.stringify(fact),
+    topic: "git:commit",
+    summary: `git ${oid.slice(0, 12)}: ${fact.subject}`,
   }
 }
 
@@ -217,6 +219,7 @@ async function decodeCommit(
 export async function observeGitSource(sourceInput: unknown, previousFrontier: string | null): Promise<GitObservation> {
   const source = GitSourceSchema.parse(sourceInput)
   const sourceId = source.logicalSourceId
+  const declarationDigest = hash(JSON.stringify(source))
   const decoderDigest = hash(JSON.stringify(source.decoder))
   const described = describeGitConnector({ version: 1, sources: [source] }).sources[sourceId]
   if (described === undefined) throw new Error(`Git source ${sourceId}: describe returned no schema`)
@@ -231,12 +234,15 @@ export async function observeGitSource(sourceInput: unknown, previousFrontier: s
     if (
       previous.sourceId !== sourceId ||
       previous.contractVersion !== source.contractVersion ||
-      previous.decoderDigest !== decoderDigest
+      previous.declarationDigest !== declarationDigest ||
+      previous.decoderDigest !== decoderDigest ||
+      previous.schemaDigest !== schemaDigest
     ) {
       return {
         kind: "source-gap",
         sourceId,
-        detail: "source identity, contract or decoder changed without an explicit replay policy",
+        detail:
+          "source declaration, identity, contract or decoder changed without a contract-version advance and explicit replay policy",
         previousFrontier,
       }
     }
@@ -316,7 +322,9 @@ export async function observeGitSource(sourceInput: unknown, previousFrontier: s
     version: 1,
     sourceId,
     contractVersion: source.contractVersion,
+    declarationDigest,
     decoderDigest,
+    schemaDigest,
     snapshotStamp: before.stamp,
     bindings: {},
   }

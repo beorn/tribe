@@ -244,6 +244,84 @@ describe("typed Git source observation", () => {
     }
   })
 
+  it("publishes a rewritten branch's new commit once without replaying its former tip", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-git-rewrite-"))
+    dirs.push(dir)
+    const repo = join(dir, "repo")
+    git(dir, "init", "-q", repo)
+    git(repo, "config", "user.name", "Connector Test")
+    git(repo, "config", "user.email", "connector@example.invalid")
+    const base = commit(repo, "baseline")
+    const branch = git(repo, "symbolic-ref", "--short", "HEAD")
+    const source = {
+      logicalSourceId: "code",
+      contractVersion: "git.commit.v1",
+      bindings: [{ id: "main", checkout: repo }],
+      selectedRefs: ["refs/heads/*"],
+      start: { kind: "baseline-now" },
+      decoder: { version: "1", trailers: { binds: ["Binds"], refs: ["Refs"], closes: ["Resolves"] } },
+    } as const
+    const baseline = await observeGitSource(source, null)
+    expect(baseline.kind).toBe("observed")
+    if (baseline.kind !== "observed") return
+
+    const formerTip = commit(repo, "former tip")
+    const first = await observeGitSource(source, baseline.frontier)
+    expect(first.kind).toBe("observed")
+    if (first.kind !== "observed") return
+    expect(first.events.map((event) => fact(event.content).oid)).toEqual([formerTip])
+
+    git(repo, "switch", "-q", "--detach", base)
+    const replacement = commit(repo, "replacement tip")
+    git(repo, "switch", "-q", branch)
+    git(repo, "update-ref", "-m", "rewrite branch", `refs/heads/${branch}`, replacement, formerTip)
+    const rewritten = await observeGitSource(source, first.frontier)
+    expect(rewritten.kind).toBe("observed")
+    if (rewritten.kind !== "observed") return
+    expect(rewritten.events.map((event) => fact(event.content).oid)).toEqual([replacement])
+    expect(rewritten.events[0]?.id).not.toBe(first.events[0]?.id)
+    expect(rewritten.frontier).not.toBe(first.frontier)
+
+    const replay = await observeGitSource(source, rewritten.frontier)
+    expect(replay.kind).toBe("observed")
+    if (replay.kind === "observed") {
+      expect(replay.events).toEqual([])
+      expect(replay.frontier).toBe(rewritten.frontier)
+    }
+  })
+
+  it("refuses a changed ref selection before reusing the old frontier", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-git-config-drift-"))
+    dirs.push(dir)
+    const repo = join(dir, "repo")
+    git(dir, "init", "-q", repo)
+    git(repo, "config", "user.name", "Connector Test")
+    git(repo, "config", "user.email", "connector@example.invalid")
+    commit(repo, "baseline")
+    const branch = git(repo, "symbolic-ref", "--short", "HEAD")
+    const source = {
+      logicalSourceId: "code",
+      contractVersion: "git.commit.v1",
+      bindings: [{ id: "main", checkout: repo }],
+      selectedRefs: [`refs/heads/${branch}`],
+      start: { kind: "baseline-now" },
+      decoder: { version: "1", trailers: { binds: ["Binds"], refs: ["Refs"], closes: ["Resolves"] } },
+    } as const
+    const baseline = await observeGitSource(source, null)
+    expect(baseline.kind).toBe("observed")
+    if (baseline.kind !== "observed") return
+
+    const changed = await observeGitSource({ ...source, selectedRefs: ["refs/heads/*"] }, baseline.frontier)
+    expect(changed).toMatchObject({ kind: "source-gap", sourceId: "code" })
+    if (changed.kind === "source-gap") expect(changed.detail).toMatch(/declaration.*replay policy/u)
+
+    const changedSchema = { ...(JSON.parse(baseline.frontier) as Record<string, unknown>), schemaDigest: "new-schema" }
+    expect(await observeGitSource(source, JSON.stringify(changedSchema))).toMatchObject({
+      kind: "source-gap",
+      sourceId: "code",
+    })
+  })
+
   it("recovers a created-and-deleted branch commit from the declared checkout's retained HEAD reflog", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-git-deleted-ref-"))
     dirs.push(dir)
