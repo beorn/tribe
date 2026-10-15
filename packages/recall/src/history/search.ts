@@ -456,8 +456,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       )
     }
 
-    // Hook mode searches live project knowledge without a time filter, as the
-    // normal project's content phase does. Normal search uses that phase directly.
+    // Hook mode and an explicitly selected phase search live project knowledge
+    // without a time filter. Default exact search uses the project content phase.
     const sessionContentOpts: ContentSearchOptions = {
       limit: limit * 2,
       projectFilter,
@@ -468,7 +468,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
 
     const contentStart = Date.now()
     const sessionContentResults: ReturnType<typeof searchAll> =
-      hook && runs("session_content")
+      runs("session_content") && (hook || options.phases !== undefined)
         ? phase("session_content", () => searchAll(db, query, sessionContentOpts))
         : { results: [], total: null }
     const sessionMs = Date.now() - contentStart
@@ -483,9 +483,10 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       mode,
     }
 
-    const projectContentResults: ReturnType<typeof searchAll> = hook
-      ? { results: [], total: null }
-      : phase("project_content", () => searchAll(db, query, projectContentOpts))
+    const projectContentResults: ReturnType<typeof searchAll> =
+      hook || options.phases !== undefined
+        ? { results: [], total: null }
+        : phase("project_content", () => searchAll(db, query, projectContentOpts))
     const projectMs = Date.now() - projectStart
 
     // Vault FTS — opt-in: searches the km tree db (.km/state.db) the call names (options.vaultDb, its only binding:
@@ -510,7 +511,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     let synonymMsgCount = 0
     let synonymContentCount = 0
 
-    if (queryVariants) {
+    if (queryVariants && options.phases === undefined) {
       log(`query expansion: "${query}" → ${queryVariants.length} variants`)
       // Collect IDs already found to avoid duplicates
       const seenMsgIds = new Set(messageResults.results.map((r) => r.id))
