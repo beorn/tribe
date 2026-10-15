@@ -102,4 +102,17 @@ describe("deriveVaultAnchor: the vault query is identifier-first, else the first
   test("a prompt with no identifier and no content word has no anchor", async () => {
     expect(await anchorFor("ok do it now", vaultWith(VAULT))).toBeNull()
   })
+
+  // @failure The glossary recorded the vault path before opening it, so a missing vault threw once and then read as
+  // "no vault" for the life of the process: the anchor lost its root scopes silently (@dev/review2 20a9302c).
+  test("a vault that cannot be opened refuses on every call in one process, never cached as no vault", async () => {
+    vi.resetModules()
+    const { deriveVaultAnchor } = await import("../../src/history/vault-glossary.ts")
+    const missing = join(realpathSync(tmpdir()), "recall-vault-anchor-missing", "state.db")
+    for (const attempt of [1, 2]) {
+      expect(() => deriveVaultAnchor("ag status quota", missing), `attempt ${attempt}`).toThrowError(
+        `Vault index ${missing} (bound by --vault-db) does not exist`,
+      )
+    }
+  })
 })

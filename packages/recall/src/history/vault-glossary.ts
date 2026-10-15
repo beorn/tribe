@@ -71,11 +71,11 @@ const PROJECT_DIRS: ReadonlyArray<string> = ["vendor/", "apps/", "packages/", "h
 
 function buildGlossary(vaultDb: string): Set<string> | null {
   if (glossaryPath === vaultDb) return glossarySet
+  // Opened before the path is recorded: a vault that cannot be opened refuses on every call, never cached as none.
+  const db = openVaultDb(vaultDb)
   glossaryPath = vaultDb
   glossarySet = null
   rootScopeSet = null
-
-  const db = openVaultDb(vaultDb)
 
   const out = new Set<string>(EXPLICIT_ALIASES.map((s) => s.toLowerCase()))
 
