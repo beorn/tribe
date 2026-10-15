@@ -969,20 +969,50 @@ export function searchAll(
   `
 
   const searchQuery = `
-    SELECT c.*,
-           snippet(content_fts, 1, '>>>', '<<<', '...', ${snippetTokens}) as snippet,
-           bm25(content_fts, 2.0, 10.0) as rank
+    SELECT f.rowid as id, bm25(content_fts, 2.0, 10.0) as rank
     FROM content_fts f
-    JOIN content c ON f.rowid = c.id
-    WHERE content_fts MATCH ?${availabilityClause}${typeClause}${projectClause}${timeClause}
+    WHERE content_fts MATCH ?${availabilityClause}
+      AND EXISTS (
+        SELECT 1 FROM content c
+        WHERE c.id >= f.rowid AND c.id <= f.rowid${typeClause}${projectClause}${timeClause}
+      )
     ORDER BY rank
     LIMIT ? OFFSET ?
   `
+  // The range is deliberate: integer ids make it equal to rowid equality,
+  // but SQLite can use the covering type index instead of wide record seeks.
+  // Frozen cold reads fell from 1.088 GB to 20 MB; the stats-aware contract is
+  // "type-filtered ranking avoids wide records" in fanout.test.ts.
 
   const searchParams = types?.length ? [ftsQuery, ...types, ...params.slice(1)] : params
-  const results = db
-    .prepare(assertSingleStatement(searchQuery))
-    .all(...searchParams, limit, offset) as ContentSearchHit[]
+  const results = db.transaction(() => {
+    const selected = db.prepare(assertSingleStatement(searchQuery)).all(...searchParams, limit, offset) as {
+      id: number
+      rank: number
+    }[]
+    if (selected.length === 0) return []
+    const payloadQuery = `
+      SELECT c.*, snippet(content_fts, 1, '>>>', '<<<', '...', ${snippetTokens}) as snippet
+      FROM content_fts f
+      JOIN content c ON f.rowid = c.id
+      WHERE content_fts MATCH ? AND f.rowid IN (SELECT value FROM json_each(?))
+    `
+    const payloads = db
+      .prepare(assertSingleStatement(payloadQuery))
+      .all(ftsQuery, JSON.stringify(selected.map((row) => row.id))) as Omit<ContentSearchHit, "rank">[]
+    const byId = new Map(payloads.map((row) => [row.id, row]))
+    const ordered: ContentSearchHit[] = []
+    const missing: number[] = []
+    for (const row of selected) {
+      const payload = byId.get(row.id)
+      if (payload) ordered.push({ ...payload, rank: row.rank })
+      else missing.push(row.id)
+    }
+    if (missing.length > 0) {
+      throw new Error(`Recall content payload for query "${query}" is missing selected IDs: ${missing.join(", ")}`)
+    }
+    return ordered
+  })()
   if (mode === "hook") return { results, total: null }
   const totalRow = db.prepare(assertSingleStatement(countQuery)).get(...params) as { total: number }
   return { results, total: totalRow.total }

@@ -61,6 +61,50 @@ function insertContent(
 // ============================================================================
 
 describe("content search eligibility and work", () => {
+  test.each([false, true])("type-filtered ranking avoids wide records with analyzed=%s", (analyzed) => {
+    // Positive results alone miss the cold metadata reads. Exercise the real
+    // owner, then inspect its native program with and without indexer stats.
+    const db = makeDb()
+    for (let i = 0; i < 128; i++) {
+      insertContent(db, i % 2 ? "doc" : "project_memory", `rank-${i}`, "budget", "budget needle body", i)
+    }
+    if (analyzed) db.exec("ANALYZE")
+    const prepare = vi.spyOn(db, "prepare")
+    let query: string
+    try {
+      const result = searchAll(db, "budget", { types: ["project_memory"], mode: "hook", limit: 5 })
+      expect(result.results).toHaveLength(5)
+      query = prepare.mock.calls.map(([sql]) => String(sql)).find((sql) => sql.includes("bm25(content_fts"))!
+    } finally {
+      prepare.mockRestore()
+    }
+    try {
+      const bindings = [
+        toFts5Query("budget"),
+        ...Array((query!.match(/\?/g)?.length ?? 0) - 3).fill("project_memory"),
+        5,
+        0,
+      ]
+      type Instruction = { opcode: string; p1: number; p2: number }
+      const vm = db.prepare(assertSingleStatement(`EXPLAIN ${query!}`)).all(...bindings) as Instruction[]
+      const roots = db
+        .prepare("SELECT name,rootpage FROM sqlite_schema WHERE name IN ('content','idx_content_type')")
+        .all() as { name: string; rootpage: number }[]
+      const contentRoot = roots.find((row) => row.name === "content")!.rootpage
+      const typeRoot = roots.find((row) => row.name === "idx_content_type")!.rootpage
+      expect(
+        vm.some((op) => op.opcode === "OpenRead" && op.p2 === typeRoot),
+        "eligibility uses the existing covering type index",
+      ).toBe(true)
+      expect(
+        vm.filter((op) => op.opcode === "OpenRead" && op.p2 === contentRoot),
+        "ranking does not open wide content records",
+      ).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
+
   test.each([
     { types: ["project_memory"] as const, seedDoc: true },
     { types: ["doc", "llm_research", "project_memory", "claude_md"] as const, seedDoc: false },
@@ -102,16 +146,18 @@ describe("content search eligibility and work", () => {
           const matches = vm.filter((op) => op.opcode === "VFilter" && /M\d/.test(op.p4 ?? ""))
           expect(matches).toHaveLength(1)
           const match = matches[0]!
-          const content = vm.find((op) => op.opcode === "OpenRead" && op.p2 === root.rootpage)!
-          const seek = vm.find((op) => op.opcode === "SeekRowid" && op.p1 === content.p1)!
-          const gate = vm.find((op) => op.opcode === "IfNot" && op.addr > match.addr && op.addr < seek.addr)
+          const content = vm.find((op) => op.opcode === "OpenRead" && op.p2 === root.rootpage)
+          const seek = content && vm.find((op) => op.opcode === "SeekRowid" && op.p1 === content.p1)
+          const gate = vm.find((op) => op.opcode === "IfNot" && op.addr > match.addr && (!seek || op.addr < seek.addr))
           expect(gate).toBeDefined()
-          expect(gate!.p2).toBeGreaterThan(seek.addr)
+          expect(gate!.p2).toBeGreaterThan(seek?.addr ?? gate!.addr)
           expect(vm.some((op) => op.opcode === "Once" && op.addr > match.addr && op.addr < gate!.addr)).toBe(true)
           expect(vm.some((op) => op.opcode === "OpenRead" && op.p2 === typeRoot.rootpage && op.addr < gate!.addr)).toBe(
             true,
           )
-          expect(vm.filter((op) => op.opcode === "Column" && op.p1 === content.p1 && op.addr < gate!.addr)).toEqual([])
+          expect(
+            content ? vm.filter((op) => op.opcode === "Column" && op.p1 === content.p1 && op.addr < gate!.addr) : [],
+          ).toEqual([])
         }
       } finally {
         db.close()
