@@ -1632,9 +1632,7 @@ function maybeProgressReplyNote(
     $recipient: owner,
   }) as { request_id: string } | null
   if (open !== null) {
-    return (
-      `${type} does not settle ball ${reply}; it stays open (settle it with --type response or verdict)` + tail
-    )
+    return `${type} does not settle ball ${reply}; it stays open (settle it with --type response or verdict)` + tail
   }
   const cause = pendingCloseCause(ctx, reply, owner)
   if (cause.kind === "never-tracked") {
