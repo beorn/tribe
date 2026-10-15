@@ -195,6 +195,29 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     }
   })
 
+  // @ag/tribe/29512: a reply id that was never a ball must not be reported as a ball left open.
+  it("names a never-tracked reply id as no ball, never as a ball left open", () => {
+    const neverTracked = randomUUID()
+    const untracked = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        {
+          to: "@chief",
+          message: "taking; nothing of mine is owed on this id",
+          summary: "taking an untracked id",
+          type: "status",
+          reply: neverTracked,
+        },
+        makeOpts(["sess-chief", "sess-agent-1"]),
+      ),
+    )
+    expect(untracked.sent).toBe(true)
+    expect(untracked.warning).toContain(`no ball was ever opened for it to @agent/1`)
+    expect(untracked.warning).not.toContain("it stays open")
+    expect(untracked.reply_close_failed).toBeUndefined()
+  })
+
   it("keeps an explicit ref when non-final reply also names a ball", () => {
     const opts = makeOpts(["sess-chief", "sess-agent-1"])
     parseToolJson(

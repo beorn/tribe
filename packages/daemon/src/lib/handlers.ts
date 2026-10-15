@@ -1134,7 +1134,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(summaryDerived),
     maybeTruncationWarning(truncation),
-    maybeProgressReplyNote(msgType, replyId, a.ref as string | undefined),
+    maybeProgressReplyNote(ctx, sender, msgType, replyId, a.ref as string | undefined),
     replyReport.warning,
     maybeUntrackedDeliveryNote(msgType, recipients, willTrack, transport),
   )
@@ -1295,7 +1295,7 @@ function handleMultiSend(input: {
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(input.summaryDerived),
     maybeTruncationWarning(input.truncation),
-    maybeProgressReplyNote(input.msgType, input.replyId, input.args.ref as string | undefined),
+    maybeProgressReplyNote(input.ctx, input.sender, input.msgType, input.replyId, input.args.ref as string | undefined),
     replyReport.warning,
     maybeUntrackedDeliveryNote(input.msgType, input.recipients, input.willTrack, input.transport),
   )
@@ -1614,12 +1614,36 @@ function maybeUntrackedDeliveryNote(
   return `delivery note — ${parts.join(" ")}`
 }
 
-function maybeProgressReplyNote(type: string, reply: string | null, ref?: string): string | undefined {
+function maybeProgressReplyNote(
+  ctx: TribeContext,
+  owner: string,
+  type: string,
+  reply: string | null,
+  ref?: string,
+): string | undefined {
   if (reply === null || type === "response" || type === "verdict") return undefined
-  return (
-    `${type} does not settle ball ${reply}; it stays open (settle it with --type response or verdict)` +
-    (ref === undefined ? "" : `; reply ${reply} was not recorded; ref ${ref} kept`)
-  )
+  const tail = ref === undefined ? "" : `; reply ${reply} was not recorded; ref ${ref} kept`
+  // @ag/tribe/29512: "it stays open" is a claim about the tracker, so it is made only
+  // when an open ball of this owner backs it. A reply id with no open ball settles
+  // nothing, and telling its sender it stays open sends them to settle a
+  // non-existent obligation: name what the tracker holds instead.
+  const open = ctx.stmts.selectPendingForReplyRecipient.get({
+    $reply_id: reply,
+    $recipient: owner,
+  }) as { request_id: string } | null
+  if (open !== null) {
+    return (
+      `${type} does not settle ball ${reply}; it stays open (settle it with --type response or verdict)` + tail
+    )
+  }
+  const cause = pendingCloseCause(ctx, reply, owner)
+  if (cause.kind === "never-tracked") {
+    return (
+      `${type} settles nothing: no ball was ever opened for it to ${owner} ` +
+      `(check the id against tribe pending --owner ${owner})${tail}`
+    )
+  }
+  return `${type} settles nothing: ${formatPendingCloseCause(cause, reply, owner)}${tail}`
 }
 
 type Tracker = {
