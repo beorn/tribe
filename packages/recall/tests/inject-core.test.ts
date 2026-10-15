@@ -376,21 +376,25 @@ describe("runInjectDelta — V2 gates", () => {
   })
 
   test("default limit is 1 — multi-hit recall emits only the best match", async () => {
+    // Distinct ranks express relevance; per-hit clock ticks must not choose the winner.
     mockRecall([
       {
         sessionId: "sess-best",
+        rank: -30,
         sessionTitle: "best",
         type: "message",
         snippet: "First match — strong, descriptive, clearly the best result for this query.",
       },
       {
         sessionId: "sess-okay",
+        rank: -20,
         sessionTitle: "okay",
         type: "message",
         snippet: "Second match — also relevant but lower-priority among the FTS hits.",
       },
       {
         sessionId: "sess-third",
+        rank: -10,
         sessionTitle: "third",
         type: "message",
         snippet: "Third match — should not appear when default limit is 1.",
