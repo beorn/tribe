@@ -2367,6 +2367,26 @@ async function callInboxWaitChunk(
   }
 }
 
+/** The human line a terminal timeout prints.
+ *
+ *  29535 (@cto ruling): the terminal status and exit code stay exactly as they
+ *  were — no wake fired, and scripts switch on both, with `timed_out` beside
+ *  `unread_count` in the JSON. What must change is this line, which said "no
+ *  unanswered actionables" while the payload beside it carried unread rows
+ *  that simply do not wake this wait. Attention is wider than waking by design
+ *  (27735), so a timeout with rows in hand has to name them. */
+export function formatInboxWaitTimeoutLine(result: InboxWaitResult, timeoutMs: number): string {
+  if (result.unread_count > 0) {
+    const n = result.unread_count
+    return (
+      `${result.session}: timed out after ${Math.round(result.waited_ms / 1000)}s; ${n} unread attention ` +
+      `item${n === 1 ? "" : "s"} that do${n === 1 ? "es" : ""} not wake this wait ` +
+      `(oldest ${result.oldest_unread_age_min}min) — read ${n === 1 ? "it" : "them"} with \`tribe inbox\`.`
+    )
+  }
+  return `${result.session}: no unanswered actionables within ${Math.round(timeoutMs / 1000)}s.`
+}
+
 async function cmdInboxWait(opts: {
   session?: string
   timeoutMs?: number
@@ -2410,7 +2430,7 @@ async function cmdInboxWait(opts: {
     return
   }
   if (result.timed_out) {
-    console.log(`${result.session}: no unanswered actionables within ${Math.round(controls.timeoutMs / 1000)}s.`)
+    console.log(formatInboxWaitTimeoutLine(result, controls.timeoutMs))
     process.exitCode = 64
     return
   }

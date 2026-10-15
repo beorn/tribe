@@ -566,7 +566,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.inbox.wait",
     title: "Inbox Wait",
     description:
-      "Long-poll the actionable inbox for a session until a direct request/query/assign/verdict, an incident opened or changed (its summary), or an owned tracked actionable broadcast arrives, or the timeout elapses. MCP requests at or above the measured host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
+      "Long-poll the actionable inbox for a session until a direct request/query/assign/verdict, an incident opened or changed (its summary), or an owned tracked actionable broadcast arrives, or the timeout elapses. MCP requests at or above the measured host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into a validated reply settlement to one of their own tracked requests, or a direct status or response whose ref names an open ball they requested. Defaults to the caller's session.",
     lifetime: "live-session",
     mcpList: "listed",
     mcp: {
@@ -583,7 +583,9 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           wake_on_correlated_reply: {
             type: "boolean",
-            description: "Also wake on a response that settles one of this seat's tracked requests (default false).",
+            description:
+              "Also wake on a validated reply settlement to one of this seat's tracked requests, or a direct status " +
+              "or response whose ref names an open ball this seat requested (default false).",
           },
         },
       },
@@ -667,7 +669,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "inbox-wait",
       description:
-        "Long-poll until unanswered actionable attention exists or the timeout elapses. This is the steady-state bounded-wait rail. Direct request/query/verdict/assign rows, an incident opened or changed (its summary), and owned tracked actionable broadcasts wake it; notify/status/response rows do not wake by default. Callers may opt into reply settlements correlated to their own tracked requests. Defaults to the daemon-resolved launch identity.",
+        "Long-poll until unanswered actionable attention exists or the timeout elapses. This is the steady-state bounded-wait rail. Direct request/query/verdict/assign rows, an incident opened or changed (its summary), and owned tracked actionable broadcasts wake it; notify/status/response rows do not wake by default. Callers may opt into a validated reply settlement to one of their own tracked requests, or a direct status or response whose ref names an open ball they requested. Defaults to the daemon-resolved launch identity.",
       lifetime: "one-shot",
       mapsToMcp: "inbox.wait",
       options: [
@@ -687,7 +689,9 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "wake-on-correlated-reply",
           flags: "--wake-on-correlated-reply",
-          description: "Also wake on a validated reply settlement to one of this session's tracked requests",
+          description:
+            "Also wake on a validated reply settlement to one of this session's tracked requests, or on a direct " +
+            "status or response whose ref names an open ball this session requested",
           mapsTo: "wake_on_correlated_reply",
         },
         { name: "json", flags: "--json", description: "Emit machine-readable JSON (for hooks)" },
