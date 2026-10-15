@@ -636,7 +636,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           TRIBE_PLUGIN_ADAPTER_CHILD: "",
           // A managed plugin wrapper preserves its explicit provider parent;
           // direct adapters ignore stale provenance without the child marker.
-          TRIBE_PLUGIN_PROVIDER_PARENT_PID: opts.throughPluginSupervisor ? String(process.pid) : "1",
+          // The test plays the provider, so the harness it declares is its own
+          // parent: a harness starts the provider, which starts the wrapper (29567).
+          TRIBE_PLUGIN_PROVIDER_PARENT_PID: opts.throughPluginSupervisor ? String(process.ppid) : "1",
           // Explicit, never the runner's own. A launch carries its own token, as hab gives every launch one: since 3d-2
           // an adapter reads its launch from the token's sid alone. An empty token is a launch without one (25074 3b).
           HAB_ID_TOKEN: opts.idToken ?? (launchId ? launchToken(launchId, name) : ""),
@@ -2460,9 +2462,10 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       .map(({ logPath }) => (existsSync(logPath) ? readFileSync(logPath, "utf8") : ""))
       .join("\n--- plugin adapter ---\n")
     expect([first.child.exitCode, second.child.exitCode, third.child.exitCode], logs).toEqual([null, null, null])
+    // The test plays the native provider; the harness its supervisors declare is the test's own parent (29567).
     expect(member).toMatchObject({
       launch_id: `${launchId}::${encodeURIComponent(NAME)}`,
-      launch_parent_pid: process.pid,
+      launch_parent_pid: process.ppid,
     })
     expect(member?.transport_pids).toHaveLength(3)
     expect(readFileSync(join(tmpDir, "daemon.log"), "utf8")).not.toContain(
