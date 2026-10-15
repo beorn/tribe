@@ -29,7 +29,7 @@
  */
 
 import { Command, CommanderError, int, uint } from "@silvery/commander"
-import { DEFAULT_SYNTHESIS_TIMEOUT_MS } from "./history/recall-shared"
+import { DEFAULT_PLAN_TIMEOUT_MS, DEFAULT_SYNTHESIS_TIMEOUT_MS } from "./history/recall-shared"
 import { cmdSearch, type SearchOptions } from "./lib/search"
 import { resolveVaultDbFlag } from "./lib/vault-db"
 import { bindVaultDb } from "./history/vault-fts"
@@ -114,7 +114,7 @@ program
   .option("--round2 <mode>", "Round 2 mode: auto|wider|deeper|off (default auto)")
   .option("--max-rounds <n>", "Cap agent rounds (1 or 2, default 2)", int)
   .option("--debug-plan", "Print full planner output each round (implies --agent)")
-  .option("--plan-timeout <ms>", "Planner per-call timeout (default 2500)", uint)
+  .option("--plan-timeout <ms>", `One planner attempt's deadline in ms (default: ${DEFAULT_PLAN_TIMEOUT_MS})`, uint)
   .option("--no-speculative-synth", "Disable speculative synthesis on round-1 (runs synth only after round 2 merge)")
   .option(
     "--no-refresh",

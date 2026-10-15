@@ -387,6 +387,47 @@ describe("planQuery provider fallback", () => {
     }
   })
 
+  // @failure The daemon's plan-only call names no deadline, so it took planQuery's own 2500 ms default: under a
+  // third of deepseek-chat's measured p50 of 9.4 s, so that path could almost never plan (@ag/llm/29473).
+  test("with no deadline named, an attempt answering at deepseek-chat's measured p95 still plans", async () => {
+    vi.useFakeTimers()
+    const deepseek: LlmModel = { provider: "openrouter", modelId: "deepseek/deepseek-chat" }
+    const llm = {
+      queryModel: async ({ abortSignal }) => {
+        const answered = await new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => resolve(true), 13_800)
+          abortSignal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer)
+              resolve(false)
+            },
+            { once: true },
+          )
+        })
+        if (!answered) return { response: { error: "attempt deadline reached" } }
+        return { response: { content: JSON.stringify({ keywords: ["p95answered"], phrases: [] }) } }
+      },
+      getModel: (id) => (id === deepseek.modelId ? deepseek : undefined),
+      budgetedModelIds: [deepseek.modelId],
+      getCheapModel: () => deepseek,
+      getCheapModels: () => [deepseek],
+      estimateCost: () => 0,
+      isProviderAvailable: () => true,
+    } satisfies LlmBackend
+
+    try {
+      const pending = planQuery("find prior work", emptyContext, { round: 1, llm })
+      await vi.advanceTimersByTimeAsync(13_800)
+      const result = await pending
+
+      expect(result.error).toBeUndefined()
+      expect(result.plan?.keywords).toEqual(["p95answered"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // @failure The planner tried Google first, served through the agy one-shot (2 to 4 s to start, 3.6 to 28 s to
   // answer), under the one 8 s deadline every later model shares; it aborted and the working fallback never ran, so
   // every planner call failed for two hours on 2026-10-15 (@ag/llm/29473, @cto 967ea2db).

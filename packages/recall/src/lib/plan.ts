@@ -12,7 +12,7 @@
 
 import { loadLlm, selectBudgetedModels, type LlmBackend, type LlmModel } from "./llm-backend.ts"
 import type { RecallSearchResult } from "../history/recall-shared.ts"
-import { log } from "../history/recall-shared.ts"
+import { DEFAULT_PLAN_TIMEOUT_MS, log } from "../history/recall-shared.ts"
 import type { QueryContext } from "./context.ts"
 import { renderContextPrompt } from "./context.ts"
 
@@ -135,7 +135,7 @@ export const PLANNER_ATTEMPT_CAP = 2
  * lexical recall.
  */
 export async function planQuery(query: string, context: QueryContext, options: PlanOptions): Promise<PlanCall> {
-  const { round, mode, priorPlan, priorResults = [], priorVariants = [], timeoutMs = 2500 } = options
+  const { round, mode, priorPlan, priorResults = [], priorVariants = [], timeoutMs = DEFAULT_PLAN_TIMEOUT_MS } = options
   const startedAt = Date.now()
 
   const llm = options.llm ?? (await loadLlm())

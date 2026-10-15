@@ -17,7 +17,7 @@
 import { getDb, closeDb } from "../history/db.ts"
 import { parseTimeToMs, recall, synthesisDiagnosticsFromError } from "../history/search.ts"
 import { synthesizeResults, type SynthesisResult } from "../history/synthesize.ts"
-import { DEFAULT_SYNTHESIS_TIMEOUT_MS, log, THIRTY_DAYS_MS } from "../history/recall-shared.ts"
+import { DEFAULT_PLAN_TIMEOUT_MS, DEFAULT_SYNTHESIS_TIMEOUT_MS, log, THIRTY_DAYS_MS } from "../history/recall-shared.ts"
 import type { RecallOptions, RecallResult, RecallSearchResult, SynthesisDiagnostics } from "../history/recall-shared.ts"
 import { buildQueryContext, renderContextPrompt, type QueryContext } from "./context.ts"
 import { planQuery, planVariants, type PlanCall } from "./plan.ts"
@@ -34,7 +34,7 @@ export interface AgentRecallOptions extends RecallOptions {
   round2?: "auto" | "wider" | "deeper" | "off"
   /** Cap on rounds (default 2). Useful for eval runs. */
   maxRounds?: 1 | 2
-  /** Planner per-call timeout in ms (default 2500). */
+  /** One planner attempt's deadline in ms (default DEFAULT_PLAN_TIMEOUT_MS); the planner stops at PLANNER_ATTEMPT_CAP of them. */
   planTimeoutMs?: number
   /** Debug-plan mode — callers render the returned trace themselves. */
   debugPlan?: boolean
@@ -79,7 +79,6 @@ export interface AgentRecallResult extends RecallResult {
 // Constants
 // ============================================================================
 
-const DEFAULT_PLAN_TIMEOUT_MS = 8000
 const DEFAULT_LIMIT = 10
 
 // Round-2 decision thresholds
