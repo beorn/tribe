@@ -104,6 +104,78 @@ afterEach(() => {
   setRecallLogging(false)
 })
 
+/** @failure Late SQLite failures became apparently successful recall hits; syntax rejection needs a receipt.
+ * @level l1 @consumer recall(): the real SQLite boundary fails after the primary search collected a hit.
+ */
+test.each([
+  { phase: "synonym_project_content", failure: "database", table: "content_fts", anchor: "authentication" },
+  { phase: "corroboration", failure: "database", table: "messages_fts", anchor: "auth" },
+  { phase: "synonym_messages", failure: "syntax", table: "messages_fts", anchor: "authentication" },
+  { phase: "synonym_project_content", failure: "syntax", table: "content_fts", anchor: "authentication" },
+  { phase: "corroboration", failure: "syntax", table: "messages_fts", anchor: "auth" },
+])("late $phase $failure preserves the public failure contract", async ({ phase, failure, table, anchor }) => {
+  seed([{ session: "kept", content: "auth authentication evidence", ageDays: 0 }])
+  const db = getDb()
+  const originalPrepare = db.prepare
+  const prepare = originalPrepare.bind(db)
+  let injected = false
+  let primaryHits = 0
+  let originalError: unknown
+
+  // Delegate every read to native SQLite. Fault only the selected late read,
+  // after the real primary query; a pre-call DROP would test a different catch.
+  db.prepare = ((sql: string) => {
+    const statement = prepare(sql)
+    const execute = statement.all.bind(statement)
+    statement.all = ((...params: Parameters<typeof statement.all>) => {
+      const target =
+        phase === "corroboration"
+          ? sql.includes("GROUP BY m.session_id")
+          : sql.includes(table) && !sql.includes("GROUP BY") && params.includes('"authentication"')
+      const bindings = [...params]
+      if (target && !injected) {
+        injected = true
+        if (failure === "database") db.run(assertSingleStatement(`DROP TABLE ${table}`))
+        else bindings[bindings.indexOf(`"${anchor}"`)] = ""
+      }
+      try {
+        const rows = execute(...bindings)
+        if (sql.includes("messages_fts") && !sql.includes("GROUP BY") && params.includes('"auth"')) {
+          primaryHits += rows.length
+        }
+        return rows
+      } catch (error) {
+        if (target && originalError === undefined) originalError = error
+        throw error
+      }
+    }) as typeof statement.all
+    return statement
+  }) as typeof db.prepare
+
+  try {
+    const outcome = await recall("auth", { raw: true, excludeCurrentSession: true }).then(
+      (value) => ({ value, error: undefined }),
+      (error: unknown) => ({ value: undefined, error }),
+    )
+    expect(injected).toBe(true)
+    expect(primaryHits).toBeGreaterThan(0)
+    expect(originalError).toBeInstanceOf(Error)
+    if (failure === "database") {
+      expect((originalError as Error).message).toContain(`no such table: ${table}`)
+      expect(outcome.error).toBe(originalError)
+    } else {
+      expect((originalError as Error).message).toContain("fts5: syntax error")
+      expect(outcome.error).toBeUndefined()
+      expect(outcome.value?.results).toEqual(expect.arrayContaining([expect.objectContaining({ sessionId: "kept" })]))
+      expect(outcome.value?.skipped).toEqual([
+        { kind: "query-rejected", phase, anchor, message: expect.stringContaining((originalError as Error).message) },
+      ])
+    }
+  } finally {
+    db.prepare = originalPrepare
+  }
+})
+
 /** @failure The prompt hook queried the retired session types; project knowledge belongs to its vault phase. */
 test("hook phases prepare no content-table query", async () => {
   const db = getDb()

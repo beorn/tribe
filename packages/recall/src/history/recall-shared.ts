@@ -98,6 +98,18 @@ export interface RecallSkip {
   message: string
 }
 
+/** Return the existing syntax-rejection receipt; real failures keep their original thrown value. */
+export function rejectedQuerySkip(phase: string, anchor: string, error: unknown): RecallSkip {
+  const cause = error instanceof Error ? error.message : String(error)
+  if (!/fts5: (?:syntax error|unterminated string|unknown special query)/i.test(cause)) throw error
+  return {
+    kind: "query-rejected",
+    phase,
+    anchor,
+    message: `recall ${phase} query ${JSON.stringify(anchor)} skipped: ${cause}`,
+  }
+}
+
 /** How hook mode's message search went (@ag/tribe/25071 row 2). */
 export interface HookSearchSummary {
   /** The cap on ranked window matches: HOOK_CANDIDATE_LIMIT. */

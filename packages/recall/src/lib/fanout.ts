@@ -11,6 +11,7 @@ import type { Database } from "bun:sqlite"
 import { type MessageSearchOptions, type ContentSearchOptions } from "../history/db.ts"
 import type { ContentType } from "../history/types.ts"
 import type { RecallSearchResult, RecallSkip } from "../history/recall-shared.ts"
+import { rejectedQuerySkip } from "../history/recall-shared.ts"
 import { boostedRank, retrieveCandidates } from "../history/search.ts"
 
 // ============================================================================
@@ -96,18 +97,6 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
   let totalQueries = 0
   let rawHits = 0
   const skipped: RecallSkip[] = []
-  const rejectedQuery = (phase: string, anchor: string, error: unknown): void => {
-    const cause = error instanceof Error ? error.message : String(error)
-    // Only malformed FTS is a skipped query. A closed/corrupt/unavailable
-    // database is still a real failure, not an apparently empty search.
-    if (!/fts5: (?:syntax error|unterminated string|unknown special query)/i.test(cause)) throw error
-    skipped.push({
-      kind: "query-rejected",
-      phase,
-      anchor,
-      message: `recall ${phase} query ${JSON.stringify(anchor)} skipped: ${cause}`,
-    })
-  }
 
   const msgOpts: MessageSearchOptions = {
     limit: perVariantLimit,
@@ -160,7 +149,7 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
         })
       }
     } catch (error) {
-      rejectedQuery("messages", variant, error)
+      skipped.push(rejectedQuerySkip("messages", variant, error))
     }
 
     // Project knowledge (no time filter)
@@ -180,7 +169,7 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
         })
       }
     } catch (error) {
-      rejectedQuery("project_content", variant, error)
+      skipped.push(rejectedQuerySkip("project_content", variant, error))
     }
 
     if (totalQueries > queriesBefore) {

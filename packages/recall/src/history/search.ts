@@ -23,6 +23,7 @@ import {
   ONE_DAY_MS,
   THIRTY_DAYS_MS,
   SynthesisFailure,
+  rejectedQuerySkip,
 } from "./recall-shared.ts"
 import type {
   IndexProvenance,
@@ -543,32 +544,39 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       for (const variant of queryVariants.slice(0, 4)) {
         const began = performance.now()
         try {
-          const varMsgs = retrieveCandidates({ db, query: variant, messages: { ...messageOpts, limit } }).messages
-          for (const r of varMsgs.results) {
-            if (!seenMsgIds.has(r.id)) {
-              seenMsgIds.add(r.id)
-              r.rank += SYNONYM_RANK_PENALTY
-              messageResults.results.push(r)
-              synonymMsgCount++
+          try {
+            const varMsgs = retrieveCandidates({ db, query: variant, messages: { ...messageOpts, limit } }).messages
+            for (const r of varMsgs.results) {
+              if (!seenMsgIds.has(r.id)) {
+                seenMsgIds.add(r.id)
+                r.rank += SYNONYM_RANK_PENALTY
+                messageResults.results.push(r)
+                synonymMsgCount++
+              }
             }
+          } catch (error) {
+            skipped.push(rejectedQuerySkip("synonym_messages", variant, error))
+            continue
           }
 
           // Keep messages already found if the content leg rejects this variant.
-          const varProject = retrieveCandidates({
-            db,
-            query: variant,
-            projectContent: { ...projectContentOpts, limit },
-          }).projectContent
-          for (const r of varProject.results) {
-            if (!seenContentIds.has(r.id)) {
-              seenContentIds.add(r.id)
-              r.rank += SYNONYM_RANK_PENALTY
-              projectContentResults.results.push(r)
-              synonymContentCount++
+          try {
+            const varProject = retrieveCandidates({
+              db,
+              query: variant,
+              projectContent: { ...projectContentOpts, limit },
+            }).projectContent
+            for (const r of varProject.results) {
+              if (!seenContentIds.has(r.id)) {
+                seenContentIds.add(r.id)
+                r.rank += SYNONYM_RANK_PENALTY
+                projectContentResults.results.push(r)
+                synonymContentCount++
+              }
             }
+          } catch (error) {
+            skipped.push(rejectedQuerySkip("synonym_project_content", variant, error))
           }
-        } catch {
-          // Skip variants that fail FTS5 parsing
         } finally {
           phases.synonyms = (phases.synonyms ?? 0) + performance.now() - began
         }
@@ -610,8 +618,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         for (const r of depthRows) {
           sessionDepths.set(r.session_id, r.depth)
         }
-      } catch {
-        // FTS5 query parsing can fail for some edge cases — skip corroboration
+      } catch (error) {
+        skipped.push(rejectedQuerySkip("corroboration", query, error))
       }
     }
     phases.corroboration = performance.now() - corroborationBegan
