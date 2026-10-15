@@ -122,6 +122,22 @@ describe("fanoutSearch", () => {
     expect(types.has("bead")).toBe(true)
   })
 
+  /** @failure Fanout requested session-derived types that the index no longer writes. */
+  test("fanout requests the four live content types only", () => {
+    const now = Date.now()
+    for (const type of ["doc", "llm_research", "project_memory", "claude_md", "plan", "summary", "todo", "first_prompt"]) {
+      insertContent(db, type, type, type, "livecontentneedle", now)
+    }
+
+    const result = fanoutSearch(db, ["livecontentneedle"], { limit: 20, sinceTime: 0 })
+    expect(result.results.map((row) => row.type).sort()).toEqual([
+      "claude_md",
+      "doc",
+      "llm_research",
+      "project_memory",
+    ])
+  })
+
   test("survives FTS5-hostile queries without crashing", () => {
     const now = Date.now()
     insertSession(db, "sess-1", "t", now)
