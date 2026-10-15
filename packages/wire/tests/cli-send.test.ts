@@ -781,6 +781,14 @@ describe("registerSendCommands", () => {
     const socketPath = join(tmp, "tribe.sock")
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []
     let pendingOpen = true
+    // What a *read* of the pending list returns right now, kept deliberately separate
+    // from `pendingOpen` (which the close paths move): the CLI's pre-send note reads
+    // this list, and @ag/tribe/29512 needs a list that changes while `pendingOpen` does
+    // not. `pendingReadError` makes that read FAIL, which is neither absence nor openness.
+    let pendingListed: Array<{ request_id: string; message_id: string }> = [
+      { request_id: "req-123", message_id: "msg-123" },
+    ]
+    let pendingReadError = false
     const server = createServer((socket) => {
       let buffer = ""
       socket.on("data", (chunk) => {
@@ -799,17 +807,19 @@ describe("registerSendCommands", () => {
           calls.push({ method: request.method, params: request.params ?? {} })
           let result: unknown
           if (request.method === "tribe.pending" && request.params?.close === undefined) {
-            result = {
-              content: [
-                {
-                  text: JSON.stringify({
-                    owner: "@chief",
-                    count: pendingOpen ? 1 : 0,
-                    pending: pendingOpen ? [{ request_id: "req-123", message_id: "msg-123", sender: "@agent/3" }] : [],
-                  }),
-                },
-              ],
-            }
+            result = pendingReadError
+              ? { error: "pending store unavailable" }
+              : {
+                  content: [
+                    {
+                      text: JSON.stringify({
+                        owner: "@chief",
+                        count: pendingListed.length,
+                        pending: pendingListed.map((row) => ({ ...row, sender: "@agent/3" })),
+                      }),
+                    },
+                  ],
+                }
           } else if (request.method === "tribe.pending" && request.params?.close === "req-123") {
             const closed = pendingOpen ? 1 : 0
             pendingOpen = false
@@ -923,14 +933,36 @@ describe("registerSendCommands", () => {
         expect(progress.stdout).not.toContain("Closed ")
       }
 
-      // @ag/tribe/29512: with no pending row for the id, the post-send note must not claim
-      // openness — that is what sent its reader looking for a ball that does not exist.
-      pendingOpen = false
-      const neverTracked = await runCli(["send", "@agent/3", "taking", "--type", "status", "--reply", "req-123"])
-      expect(neverTracked).toMatchObject({ code: 0 })
-      expect(neverTracked.stdout).toContain("no ball was ever opened for it to @chief")
-      expect(neverTracked.stdout).not.toContain("it stays open")
-      expect(neverTracked.stderr).toContain("no pending request req-123 is currently owned by @chief")
+      // @ag/tribe/29512: the four sends above read req-123 as OPEN, so dropping the row
+      // now is precisely the "was open, no longer is" history the old note misreported as
+      // "never opened". The read establishes current absence, nothing more.
+      pendingListed = []
+      const noLongerOpen = await runCli(["send", "@agent/3", "taking", "--type", "status", "--reply", "req-123"])
+      expect(noLongerOpen).toMatchObject({ code: 0 })
+      expect(noLongerOpen.stdout).toContain("no open ball of @chief's currently matches req-123")
+      expect(noLongerOpen.stdout).not.toContain("it stays open")
+      expect(noLongerOpen.stdout).not.toContain("never opened")
+      expect(noLongerOpen.stderr).toContain("no pending request req-123 is currently owned by @chief")
+
+      // And the SAME sentence for an id this fixture never listed: current absence is all
+      // the read proves, so a settled id and a never-opened id are indistinguishable HERE.
+      const neverListed = await runCli(["send", "@agent/3", "taking", "--type", "status", "--reply", "req-never"])
+      expect(neverListed).toMatchObject({ code: 0 })
+      expect(neverListed.stdout).toContain("no open ball of @chief's currently matches req-never")
+      expect(neverListed.stdout).not.toContain("never opened")
+
+      // A read that FAILS is neither absence nor openness: the note says the settlement
+      // is unknown, and the message is still delivered.
+      pendingReadError = true
+      const readFailed = await runCli(["send", "@agent/3", "taking", "--type", "status", "--reply", "req-123"])
+      expect(readFailed).toMatchObject({ code: 0 })
+      expect(readFailed.stdout).toContain("whether ball req-123 is open for @chief could not be read")
+      expect(readFailed.stdout).toContain("its settlement is unknown")
+      expect(readFailed.stdout).not.toContain("it stays open")
+      expect(readFailed.stdout).toContain("Sent message to @agent/3")
+      expect(readFailed.stderr).toContain("cannot verify pending request req-123 for @chief")
+      pendingReadError = false
+      pendingListed = [{ request_id: "req-123", message_id: "msg-123" }]
 
       pendingOpen = true
       const byMessage = await runReply("by-message", "msg-123")
@@ -1004,7 +1036,7 @@ describe("registerSendCommands", () => {
           params: { owner: "@chief", close: "req-123", idToken: chiefToken },
         },
       ])
-      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(10)
+      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(12)
     } finally {
       server.close()
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })

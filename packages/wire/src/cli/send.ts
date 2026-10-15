@@ -475,6 +475,35 @@ async function warnPendingReplyOwner(owner: string, reply: string): Promise<bool
 }
 
 /**
+ * The post-send sentence for a `reply` id this non-settling send did not
+ * settle. Every clause is a claim about the tracker, so each is made only from
+ * evidence that backs it (@ag/tribe/29512):
+ *
+ * - `true` — the pre-send read found the id open for this owner: the only
+ *   result that supports "it stays open".
+ * - `false` — the read found no open row NOW. A settled id, an id opened for
+ *   another owner, and one never opened read identically here, so the note
+ *   names that current absence and claims no history. The daemon's own rail
+ *   can name the journal cause; this pre-delivery read cannot.
+ * - `undefined` — the read itself failed: say so rather than assert either way.
+ */
+function replyNotSettledNote(type: string, reply: string, owner: string, ballOpen: boolean | undefined): string {
+  if (ballOpen === true) {
+    return `${type} does not settle ball ${reply}; it stays open (settle it with --type response or verdict)`
+  }
+  if (ballOpen === false) {
+    return (
+      `${type} settles nothing: no open ball of ${owner}'s currently matches ${reply} — an id already settled, ` +
+      `or one opened for another owner, reads the same here (check the id against tribe pending --owner ${owner})`
+    )
+  }
+  return (
+    `${type} settles nothing: whether ball ${reply} is open for ${owner} could not be read — ` +
+    `the pending lookup failed before this send, so its settlement is unknown`
+  )
+}
+
+/**
  * Advisory only (22990): warn when a seat sends to someone who holds an open
  * ball THAT SEAT OWNS, without `--reply`.
  *
@@ -655,15 +684,8 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
       reportCommittedReplyTracker(caller.name, input.reply, result.tracker)
     } else {
       const tail = input.ref === undefined ? "" : `; reply ${input.reply} was not recorded; ref ${input.ref} kept`
-      console.log(
-        // "it stays open" is a claim about the tracker, so it is made only when the
-        // tracker backs it (@ag/tribe/29512); otherwise name what the tracker holds.
-        (replyBallOpen === false
-          ? `${type} settles nothing: no ball was ever opened for it to ${caller.name} ` +
-            `(check the id against tribe pending --owner ${caller.name})`
-          : `${type} does not settle ball ${input.reply}; it stays open (settle it with --type response or verdict)`) +
-          tail,
-      )
+      // @ag/tribe/29512: three outcomes, three sentences — see `replyNotSettledNote`.
+      console.log(replyNotSettledNote(type, input.reply, caller.name, replyBallOpen) + tail)
     }
   }
   if (result.delivery?.state === "bounced") {
