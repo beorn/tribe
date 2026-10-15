@@ -181,6 +181,21 @@ export interface HealthThresholds {
   reaperGraceSamples: number
 }
 
+/**
+ * A number read from the environment, refused at load when it is not one (29561 item 4). `parseInt("eighty", 10)` is
+ * NaN, and this plugin's own comparison `cpu <= NaN` is false, so a value the operator mistyped does not fail: it
+ * turns the CPU gate OFF and every bun/node row becomes a suspect. The refusal names the variable and the value it
+ * held, because a threshold nobody can read is not a threshold.
+ */
+function thresholdFromEnv(envVar: string, fallback: string): number {
+  const raw = process.env[envVar] ?? fallback
+  const value = raw.trim() === "" ? Number.NaN : Number(raw)
+  if (!Number.isFinite(value)) {
+    throw new Error(`${envVar} is not a number: ${JSON.stringify(raw)} (29561 item 4)`)
+  }
+  return value
+}
+
 export function defaultThresholds(): HealthThresholds {
   return {
     cpuWarningMultiplier: parseFloat(process.env.HEALTH_CPU_WARNING ?? "0.8"),
@@ -196,7 +211,7 @@ export function defaultThresholds(): HealthThresholds {
     // At 10s interval, 3 samples = 30s sustained
     sustainedSamples: 3,
     reaperEnabled: process.env.HEALTH_REAPER_ENABLED !== "0",
-    reaperCpuThreshold: parseInt(process.env.HEALTH_REAPER_CPU_THRESHOLD ?? "80", 10),
+    reaperCpuThreshold: thresholdFromEnv("HEALTH_REAPER_CPU_THRESHOLD", "80"),
     reaperAgeMinutes: parseInt(process.env.HEALTH_REAPER_AGE_MINUTES ?? "30", 10),
     reaperGraceSamples: parseInt(process.env.HEALTH_REAPER_GRACE_SAMPLES ?? "6", 10),
   }

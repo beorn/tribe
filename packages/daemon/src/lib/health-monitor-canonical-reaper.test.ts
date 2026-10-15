@@ -562,3 +562,30 @@ describe("canonical source conditions announce edges, not observations", () => {
     expect(sink.broadcasts.filter(({ message }) => message.includes("regressed"))).toHaveLength(1)
   })
 })
+
+describe("the reaper's CPU threshold is read strictly", () => {
+  const withThreshold = (value: string | undefined, run: () => void): void => {
+    const previous = process.env.HEALTH_REAPER_CPU_THRESHOLD
+    try {
+      if (value === undefined) delete process.env.HEALTH_REAPER_CPU_THRESHOLD
+      else process.env.HEALTH_REAPER_CPU_THRESHOLD = value
+      run()
+    } finally {
+      if (previous === undefined) delete process.env.HEALTH_REAPER_CPU_THRESHOLD
+      else process.env.HEALTH_REAPER_CPU_THRESHOLD = previous
+    }
+  }
+
+  it("refuses a value that is not a number instead of turning the CPU gate off", () => {
+    // parseInt("eighty", 10) is NaN, and the reaper's own gate is `cpu <= NaN`, which is false: a mistyped threshold
+    // did not fail, it admitted every bun/node row as a suspect and turned the gate off silently (29561 item 4).
+    withThreshold("eighty", () => {
+      expect(() => defaultThresholds()).toThrow(/HEALTH_REAPER_CPU_THRESHOLD.*"eighty"/u)
+    })
+  })
+
+  it("still reads the default, and a number the operator did set", () => {
+    withThreshold(undefined, () => expect(defaultThresholds().reaperCpuThreshold).toBe(80))
+    withThreshold("55", () => expect(defaultThresholds().reaperCpuThreshold).toBe(55))
+  })
+})
