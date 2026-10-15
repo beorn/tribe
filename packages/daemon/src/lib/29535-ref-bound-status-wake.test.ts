@@ -36,6 +36,8 @@ type Fixture = {
   stmts: TribeStatements
   requester: TribeContext
   peer: TribeContext
+  /** A session whose name carries no sigil: the classifier calls its rows ambient. */
+  relay: TribeContext
   manager: ReturnType<typeof createInboxWaitManager>
   /** Every info the insert path handed the manager, so a test can ask of the same
    *  object the questions its OTHER consumers ask (focus-mode push). */
@@ -108,7 +110,16 @@ function fixture(): Fixture {
         manager.onMessageInserted(info)
       },
     })
-  const built = { dir, db, stmts, requester: mk("requester", REQUESTER), peer: mk("peer", PEER), manager, inserted }
+  const built = {
+    dir,
+    db,
+    stmts,
+    requester: mk("requester", REQUESTER),
+    peer: mk("peer", PEER),
+    relay: mk("relay-session", "relay"),
+    manager,
+    inserted,
+  }
   opened.push(built)
   return built
 }
@@ -299,5 +310,54 @@ describe("29535 a ref-bound status wakes only its requester, and only under the 
     expect(
       shouldDeliver({ kind: "direct", type: "assign", replyHint: "no", topic: null, settlesOwnRequest: false }, focus),
     ).toBe(true)
+  })
+  // 29543: the wake arm asked only "does this ref name an open ball the waiter
+  // REQUESTED", while the insert path answering the same question ALSO requires
+  // the sender and recipient to be explicit personas ($between_personas). So a
+  // row its own classifier calls ambient could wake a wait — waking WIDER than
+  // attention, the one direction 29535 rests on ("attention is wider than
+  // waking"). The measured case is a bare-named sender: `relay` sends a direct
+  // status to @requester whose ref names @requester's open ball.
+  it("stays quiet for a bare-named sender whose own classifier calls the row ambient", async () => {
+    const f = fixture()
+    const ball = sendMessage(
+      f.requester,
+      PEER,
+      "please answer",
+      "request",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { request: BALL },
+    )
+
+    // The path that actually runs: parked FIRST, so any wake can only come from
+    // the insert-driven re-check. afterSeq pins the baseline to the ball's own
+    // row, as 29541's parked requester case does, so the fresh-wait shortcut on
+    // that actionable row cannot settle this one.
+    const parked = f.manager.wait(REQUESTER, "conn-bare", 500, {
+      wakeOnCorrelatedReply: true,
+      afterSeq: rowidOf(f, ball.id),
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const row = sendMessage(f.relay, REQUESTER, "a receipt from a bare name", "status", undefined, BALL)
+
+    // The classifier's own answer for this row, read back from the store.
+    const stored = f.db.prepare("SELECT attention_required FROM messages WHERE id = ?").get(row.id) as {
+      attention_required: number
+    }
+    expect(stored.attention_required).toBe(0)
+    expect(
+      readAttentionProjection(f.requester, REQUESTER, Date.now(), 0, makeOpts()).attention.actionable_unread.map(
+        (r) => r.id,
+      ),
+    ).not.toContain(row.id)
+
+    // The SQL half of the wake question, the JS half's input on the real
+    // inserted object, and the behaviour a seat actually feels.
+    expect(tailSeq(f.stmts, REQUESTER, true)).not.toBe(rowidOf(f, row.id))
+    expect(f.inserted.find((i) => i.id === row.id)?.refBoundOpenRequest ?? null).toBeNull()
+    expect((await parked).status).toBe("timeout")
   })
 })

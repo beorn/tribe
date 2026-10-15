@@ -703,16 +703,6 @@ export function sendMessage(
         : null
     const canonicalReplyId = pendingReply?.request_id ?? replyId
     const correlatedReply = pendingReply ? { requestId: pendingReply.request_id, requester: pendingReply.sender } : null
-    // 29541: the other way a row can answer a request — a progress status whose
-    // ref names the requester's still-open ball. Resolved from the SAME row
-    // match the SQL wake arm uses (refBoundOpenRequestMatchSql), so the
-    // insert-driven JS re-check and the SQL tail cannot answer differently.
-    const refBoundOpenRequest =
-      correlationRef === undefined || correlationRef === null
-        ? null
-        : (ctx.stmts.selectRefBoundOpenRequest.get({ $ref: correlationRef }) as {
-            requester: string
-          } | null)
     let tracker = canonicalReplyId ? { request_id: canonicalReplyId, closed: 0 } : undefined
     // 25662 P3 3: an incident send that opens its ball, or changes its condition (the summary), is an edge that wakes
     // the owner's inbox-wait. Decided here, in the same transaction as the upsert below, so a concurrent repeat
@@ -771,6 +761,18 @@ export function sendMessage(
       }
     }
     const rowid = Number(result.lastInsertRowid)
+    // 29541: the other way a row can answer a request — a progress status whose
+    // ref names the requester's still-open ball. Resolved from the SAME row
+    // match the SQL wake arm uses (refBoundOpenRequestMatchSql), so the
+    // insert-driven JS re-check and the SQL tail cannot answer differently.
+    // 29543: read FROM the row this insert just classified, so the arm asks the
+    // same attention question the classifier answered — a bare-named sender's
+    // row is ambient, and an ambient row must not wake a wait.
+    const refBoundOpenRow =
+      correlationRef === undefined || correlationRef === null
+        ? null
+        : (ctx.stmts.selectRefBoundOpenRequest.get({ $rowid: rowid }) as { requester: string | null } | null)
+    const refBoundOpenRequest = refBoundOpenRow?.requester == null ? null : { requester: refBoundOpenRow.requester }
     const redue = ballTracker.redue
     if (redue !== undefined) {
       const moved = ctx.stmts.updatePendingDue.run({

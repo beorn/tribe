@@ -2791,7 +2791,10 @@ export function createStatements(db: Database) {
             AND type IN (${CORRELATED_REPLY_TYPES_SQL})
             AND (
               correlated_reply_requester = $name
-              OR ${refBoundOpenRequestPredicateSql("m.ref", "$name", "requester")}
+              OR (
+                ${ATTENTION_PREDICATE_SQL}
+                AND ${refBoundOpenRequestPredicateSql("m.ref", "$name", "requester")}
+              )
             )
           )
         )
@@ -2804,18 +2807,27 @@ export function createStatements(db: Database) {
     `),
     ),
 
-    /** 29541 — the seat that requested the open request ball a ref names, so the
-     *  insert-driven JS path can answer the same question as the SQL wake arm
-     *  instead of restating it. Built from the same row match, so the two
-     *  halves cannot drift. Only the requester rides along: the owner is never
-     *  read, and a fanout-all ball has several, so carrying one would be a lie
-     *  the moment someone read it. */
+    /** 29541/29543 — the seat that REQUESTED the open request ball this row's
+     *  ref names, so the insert-driven JS path can answer the same question as
+     *  the SQL wake arm instead of restating it. Built from the same row match,
+     *  so the two halves cannot drift — and read FROM the inserted row, so the
+     *  classification that insert just wrote decides it too: a row the
+     *  classifier calls ambient cannot ride this arm — the same qualification
+     *  the SQL wake arm now states. Only the requester rides along: the owner is
+     *  never read, and a fanout-all ball has several, so carrying one would be a
+     *  lie the moment someone read it. */
     selectRefBoundOpenRequest: db.prepare(
       assertSingleStatement(`
-      SELECT sender AS requester
-      FROM pending_request
-      WHERE ${refBoundOpenRequestMatchSql("$ref", "pending_request")}
-      LIMIT 1
+      SELECT (
+        SELECT pending_request.sender
+        FROM pending_request
+        WHERE ${refBoundOpenRequestMatchSql("m.ref", "pending_request")}
+        LIMIT 1
+      ) AS requester
+      FROM messages AS m
+      WHERE m.rowid = $rowid
+        AND m.ref IS NOT NULL
+        AND ${ATTENTION_PREDICATE_SQL}
     `),
     ),
 
