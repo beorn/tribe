@@ -115,13 +115,10 @@ function hostOf(host: Host): Extract<HostEvent, { event: "host" }> | undefined {
   return host.events.find((row): row is Extract<HostEvent, { event: "host" }> => row.event === "host")
 }
 
+/** The supervisor holding the launch's claim. The claim is written to a temp file and renamed, so it is never torn. */
 function claimPid(): number | null {
   if (!existsSync(claimPath)) return null
-  try {
-    return (JSON.parse(readFileSync(claimPath, "utf8")) as { pid: number }).pid
-  } catch {
-    return null // a claim mid-write; the caller waits for a settled one
-  }
+  return (JSON.parse(readFileSync(claimPath, "utf8")) as { pid: number }).pid
 }
 
 function exitRows(): Array<Record<string, unknown>> {
@@ -170,8 +167,9 @@ afterEach(async () => {
   for (const host of hosts.splice(0)) {
     try {
       if (host.process.pid !== undefined) process.kill(-host.process.pid, "SIGKILL")
-    } catch {
-      // the group is already gone
+    } catch (error) {
+      // Only a group that is already gone is expected; anything else is a cleanup failure worth seeing.
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
     }
   }
   for (const socket of sockets) socket.destroy()

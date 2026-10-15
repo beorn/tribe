@@ -42,12 +42,9 @@ const claimPath = process.env.FIXTURE_CLAIM_PATH
 if (process.env.FIXTURE_SUPERVISORS === "2") {
   if (claimPath === undefined) throw new Error("provider-host fixture: FIXTURE_SUPERVISORS=2 needs FIXTURE_CLAIM_PATH")
   const wait = setInterval(() => {
+    // The claim is written to a temp file and renamed, so a read never sees it torn.
     if (!existsSync(claimPath)) return
-    try {
-      if ((JSON.parse(readFileSync(claimPath, "utf8")) as { pid?: unknown }).pid !== first.pid) return
-    } catch {
-      return // a claim mid-write is read again on the next tick
-    }
+    if ((JSON.parse(readFileSync(claimPath, "utf8")) as { pid?: unknown }).pid !== first.pid) return
     clearInterval(wait)
     start()
   }, 20)
