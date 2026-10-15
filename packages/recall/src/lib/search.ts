@@ -284,7 +284,9 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
 }
 
 async function runAgentSearch(query: string, options: SearchOptions, base: RecallOptions): Promise<void> {
+  fs.writeSync(2, `recall-phase ${performance.now().toFixed(1)} import.before ${query === "nohits-a" ? "a" : query === "nohits-b" ? "b" : "other"}\n`)
   const { recallAgent } = await import("./agent.ts")
+  fs.writeSync(2, `recall-phase ${performance.now().toFixed(1)} import.after ${query === "nohits-a" ? "a" : query === "nohits-b" ? "b" : "other"}\n`)
   const agentOpts: AgentRecallOptions = {
     ...base,
     round2: options.round2 ?? "auto",
