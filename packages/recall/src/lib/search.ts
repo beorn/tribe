@@ -436,7 +436,7 @@ function probeLiteralRawMatches(query: string, base: RecallOptions): { token: st
     const contentResults = searchAll(db, token, {
       limit,
       projectFilter,
-      types: ["project_memory", "doc", "claude_md", "llm_research"] as ContentType[],
+      types: ["bead", "session_memory", "project_memory", "doc", "claude_md", "llm_research"] as ContentType[],
     })
 
     const results: RecallSearchResult[] = [

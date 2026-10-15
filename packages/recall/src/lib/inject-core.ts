@@ -253,8 +253,8 @@ function recallNoticeItem(line: string): InjectedItem {
  * when B runs over the wall A's answer is still injected.
  */
 const VAULT_PHASES: readonly RecallPhase[] = ["vault"]
-const PROMPT_PHASES: readonly RecallPhase[] = ["messages", "session_content", "titles"]
-const PROMPT_PHASES_SAID = "messages, session_content and titles"
+const PROMPT_PHASES: readonly RecallPhase[] = ["messages", "titles"]
+const PROMPT_PHASES_SAID = "messages and titles"
 /** How many results the hook asks each call for, and keeps after joining them. */
 const HOOK_RECALL_LIMIT = 5
 

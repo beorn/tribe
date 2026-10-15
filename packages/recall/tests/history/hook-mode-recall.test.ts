@@ -104,8 +104,8 @@ afterEach(() => {
   setRecallLogging(false)
 })
 
-/** @failure The prompt hook requested four retired types and missed live project knowledge. */
-test("hook session_content searches only the four live content types", async () => {
+/** @failure The prompt hook queried the retired session types; project knowledge belongs to its vault phase. */
+test("hook phases prepare no content-table query", async () => {
   const db = getDb()
   const insert = db.prepare(
     `INSERT INTO content (content_type, source_id, project_path, title, content, timestamp)
@@ -124,22 +124,10 @@ test("hook session_content searches only the four live content types", async () 
     insert.run(type, type, "/test/km", type, "livehookneedle", Date.now() - 40 * DAY_MS)
   }
 
-  const result = await recall("livehookneedle", { mode: "hook", raw: true, limit: 20, phases: ["session_content"] })
-  expect(result.results.map((row) => row.type).sort()).toEqual(["claude_md", "doc", "llm_research", "project_memory"])
-})
-
-/** @failure An explicit exact-mode session_content phase silently returned content through project_content instead. */
-test("exact mode runs only the named session_content phase", async () => {
-  const db = getDb()
-  db.prepare(
-    `INSERT INTO content (content_type, source_id, project_path, title, content, timestamp)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run("doc", "explicit-phase-doc", "/test/km", "explicit-phase-doc", "exactphaseneedle", Date.now())
-
-  const result = await recall("exactphaseneedle", { raw: true, phases: ["session_content"] })
-  expect(result.results.map((row) => row.type).sort()).toEqual(["doc"])
-  expect(result.timing?.phases).toHaveProperty("session_content")
-  expect(result.timing?.phases).not.toHaveProperty("project_content")
+  const sql = await preparedSql(() =>
+    recall("livehookneedle", { mode: "hook", raw: true, limit: 20, phases: ["messages", "titles"] }),
+  )
+  expect(sql.some((statement) => /content_fts|FROM\s+content\b/i.test(statement))).toBe(false)
 })
 
 describe("25071 row 2 B1: hook mode counts nothing", () => {
@@ -335,13 +323,13 @@ describe("29482 B2: hook mode bounds eligible candidates before ranking", () => 
 })
 
 describe("Phase 3: hook mode runs the phases its caller names (@ag/recall/three-dark-search-paths, @cto 7f55e4f2)", () => {
-  test("with no phases named, hook mode times vault, messages, session_content and titles, and runs no project_content", async () => {
+  test("with no phases named, hook mode times vault, messages and titles, and runs no project_content", async () => {
     seed(recentWeak(20))
 
     const hook = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
 
     expect(Object.keys(hook.timing?.phases ?? {}).sort()).toEqual(
-      ["corroboration", "live_session", "messages", "proximity", "session_content", "titles", "vault"].sort(),
+      ["corroboration", "live_session", "messages", "proximity", "titles", "vault"].sort(),
     )
   })
 

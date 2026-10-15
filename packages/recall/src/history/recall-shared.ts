@@ -81,7 +81,7 @@ export interface RecallOptions {
 }
 
 /** A search phase one recall call may run (Phase 3). */
-export type RecallPhase = "vault" | "messages" | "session_content" | "titles"
+export type RecallPhase = "vault" | "messages" | "titles"
 
 /** How a search reaches FTS: every match ranked and counted, or the window's matches ranked under a cap (@ag/tribe/25071 row 2). */
 export type SearchMode = "exact" | "hook"

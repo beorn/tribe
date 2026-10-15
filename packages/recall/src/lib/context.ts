@@ -265,12 +265,12 @@ function loadRareVocabulary(db: Database, max: number): string[] {
 
   let rows: { content: string }[] = []
   try {
-    // Sample recent project knowledge to capture technical terminology.
+    // Sample recent live knowledge types to capture technical terminology.
     rows = db
       .prepare(
         `SELECT COALESCE(title, '') || ' ' || COALESCE(SUBSTR(content, 1, 1500), '') AS content
          FROM content
-         WHERE content_type IN ('doc','llm_research','project_memory','claude_md')
+         WHERE content_type IN ('bead','session_memory','project_memory','llm_research')
          ORDER BY timestamp DESC
          LIMIT ?`,
       )

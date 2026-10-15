@@ -58,7 +58,14 @@ export interface FanoutStats {
 // Constants
 // ============================================================================
 
-const PROJECT_CONTENT_TYPES: ContentType[] = ["project_memory", "doc", "claude_md", "llm_research"]
+const PROJECT_CONTENT_TYPES: ContentType[] = [
+  "bead",
+  "session_memory",
+  "project_memory",
+  "doc",
+  "claude_md",
+  "llm_research",
+]
 
 // ============================================================================
 // Public API

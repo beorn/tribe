@@ -456,30 +456,14 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       )
     }
 
-    // Hook mode and an explicitly selected phase search live project knowledge
-    // without a time filter. Default exact search uses the project content phase.
-    const sessionContentOpts: ContentSearchOptions = {
-      limit: limit * 2,
-      projectFilter,
-      snippetTokens,
-      types: ["doc", "llm_research", "project_memory", "claude_md"] as ContentType[],
-      mode,
-    }
-
-    const contentStart = Date.now()
-    const sessionContentResults: ReturnType<typeof searchAll> =
-      runs("session_content") && (hook || options.phases !== undefined)
-        ? phase("session_content", () => searchAll(db, query, sessionContentOpts))
-        : { results: [], total: null }
-    const sessionMs = Date.now() - contentStart
-
-    // Normal search uses the same live project knowledge types as the hook.
+    // Project knowledge is searched by normal mode. The hook's vault phase
+    // answers for beads and docs inside its wall.
     const projectStart = Date.now()
     const projectContentOpts: ContentSearchOptions = {
       limit: limit * 2,
       projectFilter,
       snippetTokens,
-      types: ["project_memory", "doc", "claude_md", "llm_research"] as ContentType[],
+      types: ["bead", "session_memory", "project_memory", "doc", "claude_md", "llm_research"] as ContentType[],
       mode,
     }
 
@@ -515,10 +499,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       log(`query expansion: "${query}" → ${queryVariants.length} variants`)
       // Collect IDs already found to avoid duplicates
       const seenMsgIds = new Set(messageResults.results.map((r) => r.id))
-      const seenContentIds = new Set([
-        ...sessionContentResults.results.map((r) => r.id),
-        ...projectContentResults.results.map((r) => r.id),
-      ])
+      const seenContentIds = new Set(projectContentResults.results.map((r) => r.id))
 
       for (const variant of queryVariants.slice(0, 4)) {
         const began = performance.now()
@@ -562,12 +543,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       }
     }
 
-    // Merge both content result sets
-    const contentResults = {
-      results: [...sessionContentResults.results, ...projectContentResults.results],
-    }
     const searchMs = Date.now() - searchStart
-    log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms session=${sessionMs}ms project=${projectMs}ms)`)
+    log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms project=${projectMs}ms)`)
 
     // Get session titles for enrichment
     const sessionTitles = runs("titles") ? phase("titles", () => getAllSessionTitles()) : new Map<string, string>()
@@ -654,7 +631,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       })
     }
 
-    for (const r of contentResults.results) {
+    for (const r of projectContentResults.results) {
       merged.push({
         type: r.content_type as RecallSearchResult["type"],
         sessionId: r.source_id,
