@@ -23,6 +23,7 @@ const {
   runInjectDelta: runInjectDeltaImpl,
   VAULT_UNBOUND_NOTICE,
 } = await import("../src/lib/inject-core.ts")
+const { RecallDeadlineError } = await import("../src/lib/recall-deadline.ts")
 
 const recallMock = vi.fn()
 const ensureProjectSourcesIndexedMock = vi.fn()
@@ -37,7 +38,8 @@ function runInjectDelta(
     deps: {
       recall: recallMock as unknown as typeof import("../src/history/search.ts").recall,
       ensureProjectSourcesIndexed: ensureProjectSourcesIndexedMock,
-      findGlossaryAnchor: () => null,
+      // No anchor by default, so only call B runs: the two-call rows name their anchor.
+      deriveVaultAnchor: () => null,
       // A bound vault by default: the unbound notice has its own describe below.
       getVaultDbPath: () => "/fixture/vault/.km/state.db",
       ...opts.deps,
@@ -153,21 +155,22 @@ describe("runInjectDelta — emit only when there's content to frame", () => {
     recallMock.mockReset()
   })
 
-  test("no recall results — skips entirely (no footer-only emission)", async () => {
-    // Behavior change: previously emitted the footer alone, but Claude Code
-    // renders all hook additionalContext as user-role turns. An always-on
-    // footer turned into mysterious "H:" scrollback. Now: no framed content
-    // → no emission. See emit.ts CONTEXT_PROTOCOL_FOOTER docstring.
+  // @failure A substantive prompt whose recall found nothing injected nothing, so "searched, found nothing" and
+  // "never searched" read the same (@ag/recall/three-dark-search-paths Phase 3: say what was searched, how long).
+  test("no recall results — one framed line names what was searched and how long it took", async () => {
     mockRecall([])
-    // Salient prompt (kebab-ID `km-storage-sync`) so V2 salience gate doesn't fire
-    // before recall — we want to test the no-results branch specifically.
     const result = await runInjectDelta("what is the status of km-storage-sync right now?", createMemorySeenStore())
-    expect(result.skipped).toBe(true)
-    if (!result.skipped) return
-    expect(result.reason).toBe("no_results")
+    if (result.skipped) throw new Error("expected the searched-nothing line")
+    expect(result.emptyRecallReason).toBe("no_results")
+    const items = parseInjectedContext(result.additionalContext)[0]?.items ?? []
+    expect(items.map((i) => i.body)).toEqual([
+      expect.stringMatching(
+        /^recall: nothing found; searched messages, session_content and titles for the prompt in \d+ ms \(25071\)$/,
+      ),
+    ])
   })
 
-  test("all results deduped — skips entirely (no footer-only emission)", async () => {
+  test("all results deduped — the line says each result was already shown", async () => {
     const store = createMemorySeenStore()
     mockRecall([
       {
@@ -181,9 +184,10 @@ describe("runInjectDelta — emit only when there's content to frame", () => {
     await runInjectDelta("what did we last do on km-board-state for the kanban work?", store)
     // Second call with same prompt — dedup kicks in, snippet is all_seen.
     const result = await runInjectDelta("what did we last do on km-board-state for the kanban work?", store)
-    expect(result.skipped).toBe(true)
-    if (!result.skipped) return
-    expect(result.reason).toBe("all_seen")
+    if (result.skipped) throw new Error("expected the all-seen line")
+    expect(result.emptyRecallReason).toBe("all_seen")
+    expect(result.newKeys).toEqual([])
+    expect(result.additionalContext).toMatch(/recall: 1 result, each already shown this session or filtered as noise;/)
   })
 
   test("new snippets — emits the chokepoint envelope followed by the footer", async () => {
@@ -287,12 +291,19 @@ describe("runInjectDelta — V2 gates", () => {
     recallMock.mockReset()
   })
 
-  test("low-salience meta-prompt (no IDs/paths/backticks) skips before recall fires", async () => {
-    const result = await runInjectDelta("how should we improve things?", createMemorySeenStore())
-    expect(result.skipped).toBe(true)
-    if (!result.skipped) return
-    expect(result.reason).toBe("low_salience")
+  test("a short statement with no identifier skips before recall fires", async () => {
+    const result = await runInjectDelta("improve things a little more", createMemorySeenStore())
+    expect(result).toEqual({ skipped: true, reason: "low_salience" })
     expect(recallMock).not.toHaveBeenCalled()
+  })
+
+  // @failure The operator's 51-character quota question (2026-10-14 22:42 PDT) was skipped low_salience in 51 ms with
+  // no search at all, while the vault held the answer (pair-041; @cto 7f55e4f2: the cure is to search).
+  test("a question is never skipped for lacking an identifier: it reaches recall", async () => {
+    mockRecall([])
+    const result = await runInjectDelta("what did we decide about ag status quota reporting?", createMemorySeenStore())
+    expect(recallMock).toHaveBeenCalled()
+    expect(result.skipped).toBe(false)
   })
 
   test("long substantive prompt bypasses salience gate even without IDs", async () => {
@@ -326,7 +337,7 @@ describe("runInjectDelta — V2 gates", () => {
     expect(result.skipped).toBe(false)
   })
 
-  test("low FTS rank is filtered out (low_quality skip)", async () => {
+  test("low FTS rank is filtered out, and the line says none was strong enough", async () => {
     mockRecall([
       {
         sessionId: "sess-weak",
@@ -338,9 +349,9 @@ describe("runInjectDelta — V2 gates", () => {
       },
     ])
     const result = await runInjectDelta("what about km-board-state kanban?", createMemorySeenStore())
-    expect(result.skipped).toBe(true)
-    if (!result.skipped) return
-    expect(result.reason).toBe("low_quality")
+    if (result.skipped) throw new Error("expected the low-quality line")
+    expect(result.emptyRecallReason).toBe("low_quality")
+    expect(result.additionalContext).toMatch(/recall: 1 result, none strong enough to show; searched /)
   })
 
   test("snippet body matching rejected-signal pattern is dropped", async () => {
@@ -358,9 +369,9 @@ describe("runInjectDelta — V2 gates", () => {
     )
     // Filtered-out by content gate; was the only hit → all_seen path
     // (the rank gate passed, content gate didn't).
-    expect(result.skipped).toBe(true)
-    if (!result.skipped) return
-    expect(result.reason).toBe("all_seen")
+    if (result.skipped) throw new Error("expected the all-seen line")
+    expect(result.emptyRecallReason).toBe("all_seen")
+    expect(result.additionalContext).not.toContain("orthogonal")
   })
 
   test("default limit is 1 — multi-hit recall emits only the best match", async () => {
@@ -410,9 +421,9 @@ describe("runInjectDelta — V2 gates", () => {
     for (let i = 0; i < 50; i++) store.advanceTurn()
     // Same chunk would re-inject if TTL were 10 (V1); under V2 it must not
     const second = await runInjectDelta("status of km-tribe-recall-trigger please", store)
-    expect(second.skipped).toBe(true)
-    if (!second.skipped) return
-    expect(second.reason).toBe("all_seen")
+    if (second.skipped) throw new Error("expected the all-seen line")
+    expect(second.emptyRecallReason).toBe("all_seen")
+    expect(second.newKeys).toEqual([])
   })
 })
 
@@ -436,10 +447,10 @@ describe("runInjectDelta — dedup tracking still works", () => {
     expect(first.newKeys).toContain("sess-dedup001:message")
 
     const second = await runInjectDelta("tell me about km-board-state the refactor status please", store)
-    // Second call dedup → all_seen → skipped (was footerOnly emit, now skip).
-    expect(second.skipped).toBe(true)
-    if (!second.skipped) return
-    expect(second.reason).toBe("all_seen")
+    // Second call dedup → all_seen: the line, and no new key.
+    if (second.skipped) throw new Error("expected the all-seen line")
+    expect(second.emptyRecallReason).toBe("all_seen")
+    expect(second.newKeys).toEqual([])
   })
 })
 
@@ -503,7 +514,9 @@ describe("runInjectDelta — an unbound vault is said, once per session (25149)"
     expect(VAULT_UNBOUND_NOTICE).toContain("vault: not bound (pass --vault-db)")
 
     const second = await runInjectDelta("what is the status of km-storage-sync right now?", store, unbound)
-    expect(second).toEqual({ skipped: true, reason: "no_results" })
+    if (second.skipped) throw new Error("expected the searched-nothing line")
+    expect(second.emptyRecallReason).toBe("no_results")
+    expect(second.additionalContext).not.toContain("not bound")
   })
 
   // 25149 a1 re-cut over 25071 row 3: the notice replaces an empty injection, never the steps it skipped.
@@ -572,23 +585,23 @@ describe("runInjectDelta — per-step durations (@ag/tribe/25071 row 1)", () => 
 
     await runInjectDelta(salientPrompt, store, { steps })
 
-    expect(Object.keys(steps)).toEqual(expect.arrayContaining(["classify", "glossary", "advance_turn", "recall"]))
+    expect(Object.keys(steps)).toEqual(expect.arrayContaining(["classify", "anchor", "advance_turn", "recall"]))
     expect(steps.advance_turn).toBeGreaterThanOrEqual(55)
     expect(steps.recall).toBeGreaterThanOrEqual(35)
     expect(steps.classify).toBeLessThan(55)
   })
 
-  test("the glossary fallback is its own step, so a slow fallback is named apart from the first query", async () => {
-    ensureProjectSourcesIndexedMock.mockImplementation(() => {})
+  test("call A is its own step, recall_vault, so a slow vault call is named apart from call B", async () => {
     recallMock
-      .mockImplementationOnce(() => Promise.resolve({ results: [] }))
       .mockImplementationOnce(() => new Promise((resolve) => setTimeout(() => resolve({ results: [] }), 40)))
+      .mockImplementationOnce(() => Promise.resolve({ results: [] }))
     const steps: Record<string, number> = {}
+    const anchor = { query: "inject-core.ts stall", identifier: "inject-core.ts" }
 
-    await runInjectDelta(salientPrompt, createMemorySeenStore(), { steps, deps: { findGlossaryAnchor: () => "tribe" } })
+    await runInjectDelta(salientPrompt, createMemorySeenStore(), { steps, deps: { deriveVaultAnchor: () => anchor } })
 
     expect(recallMock).toHaveBeenCalledTimes(2)
-    expect(steps.recall_fallback).toBeGreaterThanOrEqual(35)
+    expect(steps.recall_vault).toBeGreaterThanOrEqual(35)
     expect(steps.recall).toBeLessThan(35)
   })
 
@@ -659,7 +672,7 @@ describe("runInjectDelta — 25158 B3: project sources are off the prompt hook",
 // 25071: the harness wraps what it hands a session in envelopes (Monitor events, tribe channel
 // messages, reminders). They are not the operator's words, yet their boilerplate picked the glossary
 // anchor "tribe", whose recall_fallback ran 3.1 s at p50 and 29.6 s at worst, against the 30 s kill.
-describe("25071: harness envelopes never reach salience, the glossary or recall", () => {
+describe("25071: harness envelopes never reach salience, the vault anchor or recall", () => {
   beforeEach(() => {
     recallMock.mockReset()
     ensureProjectSourcesIndexedMock.mockReset()
@@ -667,31 +680,31 @@ describe("25071: harness envelopes never reach salience, the glossary or recall"
 
   // The return reuses "low_salience" (no user text is salient): InjectSkipReason is public API. The
   // injection debug record names it "harness_envelope".
-  test("a prompt that is only harness envelopes skips without salience, glossary or recall", async () => {
-    const glossary = vi.fn(() => "tribe")
+  test("a prompt that is only harness envelopes skips without salience, the anchor or recall", async () => {
+    const anchor = vi.fn(() => ({ query: "tribe", identifier: "tribe" }))
     for (const prompt of [
       '<task-notification>\n<task-id>b1</task-id>\n<summary>Monitor event: "@dev/11 queue"</summary>\n<event>QUEUE: task/dev11-25229-agy-trust-home pending</event>\n</task-notification>',
       '<channel source="plugin:tribe:tribe" from="@chief" type="request" message_id="m1">\nplease look at km-storage-sync\n</channel>',
       "<system-reminder>\nwhat did we decide about km-board-state?\n</system-reminder>",
       '<agent-message from="a8e4e5faade7d267e">\n25186 evidence: km-storage-sync is green\n</agent-message>',
     ]) {
-      const result = await runInjectDelta(prompt, createMemorySeenStore(), { deps: { findGlossaryAnchor: glossary } })
+      const result = await runInjectDelta(prompt, createMemorySeenStore(), { deps: { deriveVaultAnchor: anchor } })
       expect(result, prompt.slice(0, 40)).toMatchObject({ skipped: true, reason: "low_salience" })
     }
-    expect(glossary).not.toHaveBeenCalled()
+    expect(anchor).not.toHaveBeenCalled()
     expect(recallMock).not.toHaveBeenCalled()
   })
 
-  test("typed text beside an envelope is all that salience and the glossary see", async () => {
-    const glossary = vi.fn(() => null)
+  test("typed text beside an envelope is all that salience and the anchor see", async () => {
+    const anchor = vi.fn(() => null)
     mockRecall([])
     const typed = "what did we decide about km-storage-sync layering?"
     await runInjectDelta(
       `<system-reminder>\nthe tribe hook said tribe\n</system-reminder>\n${typed}\n<task-notification>\n<event>x</event>\n</task-notification>`,
       createMemorySeenStore(),
-      { deps: { findGlossaryAnchor: glossary } },
+      { deps: { deriveVaultAnchor: anchor } },
     )
-    expect(glossary).toHaveBeenCalledWith(typed)
+    expect(anchor).toHaveBeenCalledWith(typed)
     expect(recallMock.mock.calls[0]?.[0]).toBe(typed)
   })
 })
@@ -704,38 +717,15 @@ describe("25071 row 2: the hook's recall runs in hook mode, inside the wall's bu
     ensureProjectSourcesIndexedMock.mockReset()
   })
 
-  test("recall is asked for hook mode, with the wall's deadline", async () => {
-    const { RECALL_WALL_MS } = await import("../src/history/recall-budget.ts")
+  test("recall is asked for hook mode, naming the bound vault on every call", async () => {
     recallMock.mockResolvedValue({ results: [] })
-    const before = Date.now()
 
     await runInjectDelta(salientPrompt, createMemorySeenStore())
 
-    const options = recallMock.mock.calls[0]?.[1] as { mode?: string; deadlineAt?: number }
+    const options = recallMock.mock.calls[0]?.[1] as { mode?: string; vaultDb?: string; deadlineAt?: number }
     expect(options.mode).toBe("hook")
-    expect(options.deadlineAt).toBeGreaterThanOrEqual(before + RECALL_WALL_MS)
-    expect(options.deadlineAt).toBeLessThanOrEqual(Date.now() + RECALL_WALL_MS)
-  })
-
-  test("the glossary fallback is skipped when the budget left cannot cover a candidate pass, and says so", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] })
-    try {
-      recallMock.mockImplementationOnce(() => {
-        vi.setSystemTime(Date.now() + 1200)
-        return Promise.resolve({ results: [] })
-      })
-
-      const result = await runInjectDelta(salientPrompt, createMemorySeenStore(), {
-        deps: { findGlossaryAnchor: () => "tribe" },
-      })
-
-      expect(recallMock).toHaveBeenCalledTimes(1)
-      expect(result.skippedSteps).toEqual({
-        recall_fallback: 'recall_fallback skipped: anchor "tribe", 300 ms left (25071)',
-      })
-    } finally {
-      vi.useRealTimers()
-    }
+    expect(options.vaultDb).toBe("/fixture/vault/.km/state.db")
+    expect(options.deadlineAt).toBeUndefined()
   })
 
   test("recall's per-phase times join the steps, and a phase recall skipped is said in skippedSteps", async () => {
@@ -769,5 +759,102 @@ describe("25071 row 2: the hook's recall runs in hook mode, inside the wall's bu
     expect(result.skippedSteps).toEqual({
       "recall.synonym": 'recall synonym skipped: anchor "tribe"; recall synonym skipped: anchor "wire"',
     })
+  })
+})
+
+describe("Phase 3: call A searches the vault on the anchor, call B the rest on the prompt (@cto 7f55e4f2)", () => {
+  const JEV = "how does the Jev memory system and smarter linting work?"
+  const anchor = { query: "Jev memory system", identifier: "Jev" }
+  const vaultHit = {
+    sessionId: "@i/20-search-and-memory/27897-memory-system.md",
+    sessionTitle: "Jev memory system",
+    type: "vault",
+    snippet: "The memory system bead: classifier map-reduce, smarter linting, and the Jev notes.",
+    rank: -4,
+    timestamp: Date.now(),
+  }
+  const messageHit = {
+    sessionId: "sess-linting",
+    sessionTitle: "linting",
+    type: "message",
+    snippet: "A long descriptive message about smarter linting rules and how they were measured.",
+    rank: -9,
+    timestamp: Date.now(),
+  }
+
+  beforeEach(() => {
+    recallMock.mockReset()
+  })
+
+  test("A is the anchor on the vault alone; B is the prompt on messages, session_content and titles", async () => {
+    recallMock.mockResolvedValue({ results: [] })
+
+    await runInjectDelta(JEV, createMemorySeenStore(), { deps: { deriveVaultAnchor: () => anchor } })
+
+    expect(recallMock.mock.calls.map(([query, options]) => [query, (options as { phases?: string[] }).phases])).toEqual(
+      [
+        ["Jev memory system", ["vault"]],
+        [JEV, ["messages", "session_content", "titles"]],
+      ],
+    )
+  })
+
+  test("with no vault bound, call A does not run", async () => {
+    recallMock.mockResolvedValue({ results: [] })
+
+    await runInjectDelta(JEV, createMemorySeenStore(), {
+      deps: { deriveVaultAnchor: () => anchor, getVaultDbPath: () => null },
+    })
+
+    expect(recallMock.mock.calls.map(([query]) => query)).toEqual([JEV])
+  })
+
+  test("the join never re-ranks: a vault hit whose boosted rank is worse than a message hit lands below it", async () => {
+    recallMock.mockResolvedValueOnce({ results: [vaultHit] }).mockResolvedValueOnce({ results: [messageHit] })
+
+    const result = await runInjectDelta(JEV, createMemorySeenStore(), {
+      limit: 5,
+      deps: { deriveVaultAnchor: () => anchor },
+    })
+
+    if (result.skipped) throw new Error("expected both hits injected")
+    expect(result.newKeys).toEqual(["sess-linting:message", `${vaultHit.sessionId}:vault`])
+  })
+
+  test("B over the wall: A's hits are injected with one line naming A's time and B's unfinished phases", async () => {
+    recallMock.mockResolvedValueOnce({ results: [vaultHit] }).mockRejectedValueOnce(new RecallDeadlineError(1500))
+
+    const result = await runInjectDelta(JEV, createMemorySeenStore(), { deps: { deriveVaultAnchor: () => anchor } })
+
+    if (result.skipped) throw new Error("expected A's answer")
+    const line =
+      /^recall partial: vault answered in \d+ ms; messages, session_content and titles did not finish inside the 1\.5 s wall \(25071\)$/
+    expect(result.skippedSteps?.recall).toMatch(line)
+    const items = parseInjectedContext(result.additionalContext)[0]?.items ?? []
+    expect(items.map((i) => i.body)).toEqual([expect.stringMatching(line), vaultHit.snippet])
+  })
+
+  test("A over the wall: nothing answered, and the hook says so as it always has", async () => {
+    recallMock.mockRejectedValueOnce(new RecallDeadlineError(1500))
+
+    const result = await runInjectDelta(JEV, createMemorySeenStore(), { deps: { deriveVaultAnchor: () => anchor } })
+
+    expect(recallMock).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({
+      skipped: false,
+      additionalContext: "recall skipped: over the 1.5 s wall (25071)",
+      skippedSteps: { recall_vault: "recall skipped: over the 1.5 s wall (25071)" },
+    })
+  })
+
+  test("nothing found names the vault anchor and both calls' times", async () => {
+    recallMock.mockResolvedValue({ results: [] })
+
+    const result = await runInjectDelta(JEV, createMemorySeenStore(), { deps: { deriveVaultAnchor: () => anchor } })
+
+    if (result.skipped) throw new Error("expected the searched-nothing line")
+    expect(parseInjectedContext(result.additionalContext)[0]?.items[0]?.body).toMatch(
+      /^recall: nothing found; searched the vault for "Jev memory system" in \d+ ms, and messages, session_content and titles for the prompt in \d+ ms \(25071\)$/,
+    )
   })
 })

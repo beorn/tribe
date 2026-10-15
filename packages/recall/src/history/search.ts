@@ -14,7 +14,6 @@ import {
   type ContentSearchOptions,
   type HookMessageSearch,
 } from "./db.ts"
-import { HOOK_CANDIDATE_PASS_MS, RECALL_WALL_MS } from "./recall-budget.ts"
 import type { ContentType } from "./types.ts"
 import { synthesizeResults } from "./synthesize.ts"
 import {
@@ -28,6 +27,7 @@ import {
 import type {
   IndexProvenance,
   RecallOptions,
+  RecallPhase,
   RecallResult,
   RecallSearchResult,
   RecallSkip,
@@ -36,7 +36,7 @@ import type {
 
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
-import { searchVault, getVaultDbPath } from "./vault-fts.ts"
+import { bindVaultDb, searchVault, getVaultDbPath } from "./vault-fts.ts"
 
 // Re-export shared items so existing internal imports continue to work
 export { setRecallLogging, log, ONE_HOUR_MS, ONE_DAY_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
@@ -44,6 +44,7 @@ export type {
   HookSearchSummary,
   IndexProvenance,
   RecallOptions,
+  RecallPhase,
   RecallResult,
   RecallSearchResult,
   RecallSkip,
@@ -192,6 +193,25 @@ export function boostedRank(rank: number, timestamp: number): number {
   const recencyFactor = 1 / (1 + daysAgo / 7)
   // rank is negative (bm25), so multiplying by recencyFactor (0..1) makes recent items more negative = better
   return rank * recencyFactor
+}
+
+/**
+ * Recall's one merge: sort by recency-boosted rank (lower is better), keep the best result per session and type, and
+ * cut at `limit`. recall() merges its phases with it, and the prompt hook joins its two calls with it, so the join
+ * never re-ranks (@ag/recall/three-dark-search-paths Phase 3, @cto 7f55e4f2).
+ */
+export function mergeRecallResults(results: readonly RecallSearchResult[], limit: number): RecallSearchResult[] {
+  const sorted = [...results].sort((a, b) => boostedRank(a.rank, a.timestamp) - boostedRank(b.rank, b.timestamp))
+  const seen = new Set<string>()
+  const merged: RecallSearchResult[] = []
+  for (const result of sorted) {
+    const key = `${result.sessionId}:${result.type}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(result)
+    if (merged.length >= limit) break
+  }
+  return merged
 }
 
 // ============================================================================
@@ -357,9 +377,12 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
   )
 
   // Hook mode (@ag/tribe/25071 row 2): the window's matches ranked under a cap instead of every match, no counts, and
-  // each budgeted phase (each synonym variant) only while more than one candidate pass is left before the wall.
+  // neither the project content nor the synonym variants (@ag/recall/three-dark-search-paths Phase 3).
   const hook = mode === "hook"
-  const deadlineAt = options.deadlineAt ?? startTime + RECALL_WALL_MS
+  // A phase outside `options.phases` is neither run nor timed; absent, every phase runs (Phase 3, @cto 7f55e4f2).
+  const runs = (name: RecallPhase): boolean => options.phases === undefined || options.phases.includes(name)
+  // The prompt hook's recall runs in a Worker its --vault-db never reached, so the call names the vault (Phase 3).
+  if (options.vaultDb !== undefined) bindVaultDb(options.vaultDb)
   const skipped: RecallSkip[] = []
   const phases: Record<string, number> = {}
   const phase = <T>(name: string, run: () => T): T => {
@@ -414,11 +437,15 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     }
 
     const searchStart = Date.now()
-    const messageResults = phase("messages", () => ftsSearchWithSnippet(db, query, messageOpts))
+    const messageResults: ReturnType<typeof ftsSearchWithSnippet> = runs("messages")
+      ? phase("messages", () => ftsSearchWithSnippet(db, query, messageOpts))
+      : { results: [], total: null }
     const msgMs = Date.now() - searchStart
     hookSearch = messageResults.hook
     if (hookSearch?.capped) skipped.push(hookSearch.capped)
-    if (hookSearch) {
+    if (!runs("messages")) {
+      log(`FTS5 messages: not run (phases ${String(options.phases?.join(","))})`)
+    } else if (hookSearch) {
       log(
         `FTS5 messages: total: not counted (hook mode), ${messageResults.results.length} returned (${msgMs}ms) ` +
           `[window matches ranked ${hookSearch.survivors}, cap ${hookSearch.candidateLimit}]`,
@@ -440,10 +467,13 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     }
 
     const contentStart = Date.now()
-    const sessionContentResults = phase("session_content", () => searchAll(db, query, sessionContentOpts))
+    const sessionContentResults: ReturnType<typeof searchAll> = runs("session_content")
+      ? phase("session_content", () => searchAll(db, query, sessionContentOpts))
+      : { results: [], total: null }
     const sessionMs = Date.now() - contentStart
 
-    // Search project knowledge sources (beads, memory, docs) WITHOUT time filter
+    // Search project knowledge sources (beads, memory, docs) WITHOUT time filter. Hook mode does not: the vault
+    // phase answers for beads and docs inside the hook's wall (Phase 3).
     const projectStart = Date.now()
     const projectContentOpts: ContentSearchOptions = {
       limit: limit * 2,
@@ -453,7 +483,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       mode,
     }
 
-    const projectContentResults = phase("project_content", () => searchAll(db, query, projectContentOpts))
+    const projectContentResults: ReturnType<typeof searchAll> = hook
+      ? { results: [], total: null }
+      : phase("project_content", () => searchAll(db, query, projectContentOpts))
     const projectMs = Date.now() - projectStart
 
     // Vault FTS — opt-in: searches the km tree db (.km/state.db) when bound.
@@ -461,7 +493,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // transcript fragments, so we boost vault hits with a strong negative
     // rank (more negative = better).
     const vaultStart = Date.now()
-    const vaultMatches = phase("vault", () => searchVault(query, limit * 2))
+    const vaultMatches = runs("vault") ? phase("vault", () => searchVault(query, limit * 2)) : []
     const vaultMs = Date.now() - vaultStart
     if (vaultMatches.length > 0) {
       log(`vault FTS: ${vaultMatches.length} matches (${vaultMs}ms) [${getVaultDbPath() ?? "?"}]`)
@@ -469,9 +501,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       log(`vault FTS: 0 matches (${vaultMs}ms)`)
     }
 
-    // Query expansion: search with synonym variants for broader recall
+    // Query expansion: search with synonym variants for broader recall. Not in hook mode (Phase 3).
     const SYNONYM_RANK_PENALTY = 5 // Penalize synonym matches to rank below exact matches
-    const queryVariants = expandQueryVariants(query)
+    const queryVariants = hook ? null : expandQueryVariants(query)
     let synonymMsgCount = 0
     let synonymContentCount = 0
 
@@ -485,17 +517,6 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       ])
 
       for (const variant of queryVariants.slice(0, 4)) {
-        if (hook) {
-          const left = deadlineAt - Date.now()
-          if (left <= HOOK_CANDIDATE_PASS_MS) {
-            skipped.push({
-              phase: "synonym",
-              anchor: variant,
-              message: `recall synonym skipped: anchor "${variant}", ${String(left)} ms left (25071)`,
-            })
-            continue
-          }
-        }
         const began = performance.now()
         try {
           // Search messages with variant
@@ -559,17 +580,18 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms session=${sessionMs}ms project=${projectMs}ms)`)
 
     // Get session titles for enrichment
-    const sessionTitles = phase("titles", () => getAllSessionTitles())
+    const sessionTitles = runs("titles") ? phase("titles", () => getAllSessionTitles()) : new Map<string, string>()
 
     // Session depth corroboration: sessions with more matching messages are more relevant.
     // A session with 10 messages about the topic is more authoritative than one with 1 passing mention.
     // Hook mode reads each session's depth from its candidate set, since this GROUP BY scans every all-time match
-    // (14.5 s on tribe*); that depth is within the candidates, not all-time (@cto 9665a0ec).
+    // (14.5 s on tribe*); that depth is within the candidates, not all-time (@cto 9665a0ec). Hook mode never runs
+    // the scan, even when its messages phase did not run and left no candidate set (Phase 3).
     const corroborationStart = Date.now()
     const corroborationBegan = performance.now()
     const ftsQuery = toFts5Query(query)
     const sessionDepths = hookSearch ? new Map(hookSearch.sessionDepths) : new Map<string, number>()
-    if (!hookSearch) {
+    if (!hook && runs("messages")) {
       try {
         const depthRows = db
           .prepare(
@@ -668,20 +690,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       })
     }
 
-    // Sort by recency-boosted rank (bm25 * recency_factor — lower is better)
-    merged.sort((a, b) => boostedRank(a.rank, a.timestamp) - boostedRank(b.rank, b.timestamp))
-
-    // Dedup: keep best result per session
-    const seen = new Set<string>()
-    const deduped: RecallSearchResult[] = []
-    for (const result of merged) {
-      const key = `${result.sessionId}:${result.type}`
-      if (!seen.has(key)) {
-        seen.add(key)
-        deduped.push(result)
-      }
-      if (deduped.length >= limit) break
-    }
+    const deduped = mergeRecallResults(merged, limit)
 
     const uniqueSessions = new Set(deduped.map((r) => r.sessionId)).size
     const dropMsg = droppedCurrent > 0 ? ` [dropped ${droppedCurrent} current-session]` : ""

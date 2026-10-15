@@ -6,14 +6,20 @@
  * @level     l2 — real Workers and a real child process; the recall inside the worker is a fixture that blocks.
  */
 import { spawnSync } from "node:child_process"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, test } from "vitest"
+
+import { makeKmVault } from "./helpers/km-vault.ts"
 
 const { createMemorySeenStore, runInjectDelta } = await import("../src/lib/inject-core.ts")
 const { createDeadlineRecall, RecallDeadlineError } = await import("../src/lib/recall-deadline.ts")
 const { RECALL_WALL_MS } = await import("../src/history/recall-budget.ts")
 
 const BLOCKS = new URL("./fixtures/recall-blocks.worker.ts", import.meta.url)
+const IN_MEMORY = new URL("./fixtures/recall-memory.worker.ts", import.meta.url)
 const SALIENT = "what did we decide about km-storage-sync layering?"
 
 describe("25071 stopgap: recall that outlives its deadline is skipped, loudly", () => {
@@ -27,7 +33,7 @@ describe("25071 stopgap: recall that outlives its deadline is skipped, loudly", 
     const started = performance.now()
     try {
       const result = await runInjectDelta(SALIENT, createMemorySeenStore(), {
-        deps: { recall, ensureProjectSourcesIndexed: () => {}, findGlossaryAnchor: () => null },
+        deps: { recall, ensureProjectSourcesIndexed: () => {}, deriveVaultAnchor: () => null },
       })
       expect(performance.now() - started).toBeLessThan(2500)
       expect(result).toMatchObject({
@@ -40,11 +46,11 @@ describe("25071 stopgap: recall that outlives its deadline is skipped, loudly", 
     }
   }, 15_000)
 
-  test("one deadline covers the first query and the glossary fallback together", async () => {
+  test("one deadline covers the hook's two calls together", async () => {
     const recall = createDeadlineRecall({ deadlineMs: 600, workerUrl: BLOCKS })
     const started = performance.now()
     try {
-      // The first query answers empty after 400 ms; the fallback then has only the 200 ms left, not a fresh 600.
+      // Call A answers empty after 400 ms; call B then has only the 200 ms left, not a fresh 600.
       await recall("400", {})
       await expect(recall("400", {})).rejects.toBeInstanceOf(RecallDeadlineError)
       expect(performance.now() - started).toBeLessThan(900)
@@ -52,6 +58,28 @@ describe("25071 stopgap: recall that outlives its deadline is skipped, loudly", 
       recall.close()
     }
   })
+
+  // @failure The vault binding lives on the hook's thread; the Worker never had it, so from tribe e1ecf2f0
+  // (2026-09-23) every hook recall searched no vault and said nothing (@ag/recall Phase 3, probe-worker-vault.log).
+  test("the real Worker searches the vault its caller names on the call", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "recall-deadline-vault-"))
+    const recall = createDeadlineRecall({ deadlineMs: 10_000, workerUrl: IN_MEMORY })
+    try {
+      const vaultDb = makeKmVault(dir, [
+        {
+          id: "@i/search/27897-memory-system",
+          fsPath: "@i/search/27897-memory-system.md",
+          title: "Jev memory system",
+          content: "Jev keeps the memory system's notes.",
+        },
+      ])
+      const result = await recall("Jev", { mode: "hook", raw: true, limit: 5, phases: ["vault"], vaultDb })
+      expect(result.results.map((r) => `${r.type}:${r.sessionId}`)).toEqual(["vault:@i/search/27897-memory-system.md"])
+    } finally {
+      recall.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
 
   test("a recall that answers inside the deadline is returned as it came", async () => {
     const recall = createDeadlineRecall({ deadlineMs: 5000, workerUrl: BLOCKS })

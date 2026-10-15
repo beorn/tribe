@@ -19,11 +19,3 @@ export const RECALL_WALL_MS = 1500
 
 /** Hook mode ranks at most this many window matches (the window first, then bm25; @cto re-ruling 516d4c10). */
 export const HOOK_CANDIDATE_LIMIT = 1000
-
-/**
- * The measured cost of one window-first candidate pass: the messages phase's median over the 25071 row 2 replay
- * (160 recalled prompts from 14 days, 492 ms; 25397). A budgeted phase (each synonym variant, the glossary fallback)
- * starts only while more than this is left before the wall. A synonym variant costs less (median 297 ms) and the
- * fallback, a whole recall, more (median 826 ms); the wall bounds either way.
- */
-export const HOOK_CANDIDATE_PASS_MS = 500

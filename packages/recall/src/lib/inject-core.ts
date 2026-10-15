@@ -28,11 +28,12 @@ import {
   stripHarnessEnvelopes,
   type InjectSkipReason,
 } from "./prompt-filter.ts"
-import { recall } from "../history/search.ts"
+import { mergeRecallResults, recall } from "../history/search.ts"
+import type { RecallOptions, RecallPhase, RecallResult } from "../history/recall-shared.ts"
 import { getVaultDbPath } from "../history/vault-fts.ts"
-import { findGlossaryAnchor } from "../history/vault-glossary.ts"
+import { deriveVaultAnchor } from "../history/vault-glossary.ts"
 import { RecallDeadlineError } from "./recall-deadline.ts"
-import { HOOK_CANDIDATE_PASS_MS, RECALL_WALL_MS } from "../history/recall-budget.ts"
+import { RECALL_WALL_MS } from "../history/recall-budget.ts"
 // Envelope framing primitives live in the shared library. Re-exported here so
 // existing callers (and the plugin's own tests) keep working without churn.
 // Relative import because plugins/ is not a declared workspace inside bearly
@@ -164,7 +165,7 @@ export interface RunInjectDeltaOptions {
   deps?: {
     recall?: typeof recall
     ensureProjectSourcesIndexed?: unknown
-    findGlossaryAnchor?: typeof findGlossaryAnchor
+    deriveVaultAnchor?: typeof deriveVaultAnchor
     getVaultDbPath?: typeof getVaultDbPath
   }
 }
@@ -207,8 +208,11 @@ export type RunInjectDeltaResult =
       turn: number
       /** True when only the protocol footer was emitted (no fresh recall snippets). */
       footerOnly?: boolean
-      /** Non-trivial reason the recall was empty (no_results | all_seen). */
-      emptyRecallReason?: Extract<InjectSkipReason, "no_results" | "all_seen">
+      /**
+       * Set when the recall had nothing to inject: the context is one line naming what was searched and how long it
+       * took (@ag/recall/three-dark-search-paths Phase 3).
+       */
+      emptyRecallReason?: Extract<InjectSkipReason, "no_results" | "all_seen" | "low_quality">
     }
 
 /** What an injection says, once per session, when no vault is bound (25149, @cto Q1). */
@@ -228,6 +232,22 @@ const VAULT_UNBOUND_NOTICE_KEY = "recall:vault-unbound-notice"
 function vaultNoticeItem(): InjectedItem {
   return { title: "vault notice", snippet: VAULT_UNBOUND_NOTICE, type: "notice" }
 }
+
+/** One line recall says about its own search, framed like the vault notice (25149). */
+function recallNoticeItem(line: string): InjectedItem {
+  return { title: "recall notice", snippet: line, type: "notice" }
+}
+
+/**
+ * The prompt hook's two recall calls on one deadline Worker (@ag/recall/three-dark-search-paths Phase 3, @cto
+ * 7f55e4f2): call A searches the vault on the anchor, call B the rest on the prompt. A finishes in milliseconds, so
+ * when B runs over the wall A's answer is still injected.
+ */
+const VAULT_PHASES: readonly RecallPhase[] = ["vault"]
+const PROMPT_PHASES: readonly RecallPhase[] = ["messages", "session_content", "titles"]
+const PROMPT_PHASES_SAID = "messages, session_content and titles"
+/** How many results the hook asks each call for, and keeps after joining them. */
+const HOOK_RECALL_LIMIT = 5
 
 /**
  * Adds `run`'s wall time to `steps[name]`, and records it even when `run` throws (@ag/tribe/25071 row 1). The sum is
@@ -275,9 +295,9 @@ export async function runInjectDelta(
   store: SeenStore,
   opts: RunInjectDeltaOptions = {},
 ): Promise<RunInjectDeltaResult> {
-  const vaultDbPath = opts.deps?.getVaultDbPath ?? getVaultDbPath
-  const notice = vaultDbPath() === null && store.get(VAULT_UNBOUND_NOTICE_KEY) === undefined
-  const result = await runRecallInjection(rawPrompt, store, opts, notice)
+  const vaultDb = (opts.deps?.getVaultDbPath ?? getVaultDbPath)()
+  const notice = vaultDb === null && store.get(VAULT_UNBOUND_NOTICE_KEY) === undefined
+  const result = await runRecallInjection(rawPrompt, store, opts, notice, vaultDb)
   if (!notice) return result
   store.set(VAULT_UNBOUND_NOTICE_KEY, Number.MAX_SAFE_INTEGER)
   store.flush?.()
@@ -302,16 +322,17 @@ async function runRecallInjection(
   store: SeenStore,
   opts: RunInjectDeltaOptions,
   notice: boolean,
+  vaultDb: string | null,
 ): Promise<RunInjectDeltaResult> {
   const limitSnippets = opts.limit ?? 1
   const ttlTurns = opts.ttlTurns ?? 100
   const minLength = opts.minSnippetLength ?? 20
   const snippetChars = opts.snippetChars ?? 300
   const minRank = opts.minRank ?? MIN_RANK_THRESHOLD
-  const findGlossaryAnchorImpl = opts.deps?.findGlossaryAnchor ?? findGlossaryAnchor
+  const deriveVaultAnchorImpl = opts.deps?.deriveVaultAnchor ?? deriveVaultAnchor
 
   const steps = opts.steps
-  // Only the operator's own words reach salience, the glossary and recall (25071).
+  // Only the operator's own words reach salience, the vault anchor and recall (25071).
   const prompt = stripHarnessEnvelopes(rawPrompt)
   if (prompt.length === 0 && rawPrompt.trim().length > 0) {
     emitInjectionDebugEvent({
@@ -360,27 +381,15 @@ async function runRecallInjection(
     return { skipped: true, reason: "low_salience" }
   }
 
-  // Glossary lookup is the salience-of-last-resort signal. Three cases:
-  //   1. Has regex salience          → use full prompt (don't override)
-  //   2. No salience, glossary hits  → seed recall with the anchor token
-  //   3. No salience, no glossary    → skip
-  // The fallback retry below covers a 4th case: prompt has BOTH a regex
-  // salience pattern AND a glossary anchor (e.g. "white-box ...
-  // createTestApp ..."). The full prompt runs first; if it returns no
-  // results, we retry with the glossary anchor before giving up.
+  // The vault anchor (vault-glossary.ts) is what call A searches the vault with: the first identifier the prompt
+  // names and the content words after it. A question always searches, identifier or not (@cto 7f55e4f2: the cure
+  // is to search, not to explain the skip); any other short prompt needs an identifier, by its regex shape
+  // (prompt-filter.ts) or by the anchor's.
   const promptHasSalience = timeStep(steps, "classify", () => hasSalience(prompt))
-  const glossaryHit = timeStep(steps, "glossary", () => findGlossaryAnchorImpl(prompt))
-  const recallQuerySeed: string | null = !promptHasSalience ? glossaryHit : null
-
-  // Question-shaped prompts get a more permissive bypass threshold:
-  // "which env vars do we flip on/off?" (102 chars) is genuinely a
-  // query against vault content even though it has no kebab/path
-  // anchor. Statements and directives need the full 120 to guard
-  // against false_emits on long meta-comments.
+  const anchor = timeStep(steps, "anchor", () => deriveVaultAnchorImpl(prompt))
   const questionShape = /[?]|^\s*(?:what|which|where|how|why|when|who)\b/i.test(prompt)
-  const bypassLength = questionShape ? 100 : LONG_PROMPT_BYPASS_LENGTH
 
-  if (prompt.length < bypassLength && !promptHasSalience && !glossaryHit) {
+  if (!questionShape && prompt.length < LONG_PROMPT_BYPASS_LENGTH && !promptHasSalience && !anchor?.identifier) {
     emitInjectionDebugEvent({
       source: "recall",
       action: "skip",
@@ -397,17 +406,9 @@ async function runRecallInjection(
 
   const turn = timeStep(steps, "advance_turn", () => store.advanceTurn())
 
-  // When salience came from a glossary anchor, use the anchor itself as
-  // the recall query — it's the highest-signal token in the prompt and
-  // produces a tightly-targeted result instead of broad lexical noise.
-  // Bounded: FTS cost grows super-linearly with query length (25071).
-  const recallQuery = recallQuerySeed ?? prompt.slice(0, MAX_RECALL_QUERY_CHARS)
-  // One budget for the first query and the fallback, the same one the hook's Worker wall enforces (25071 row 2).
-  const deadlineAt = Date.now() + RECALL_WALL_MS
-  const recallOpts = {
+  const recallOpts: RecallOptions = {
     mode: "hook",
-    deadlineAt,
-    limit: 5,
+    limit: HOOK_RECALL_LIMIT,
     raw: true,
     timeout: 2000,
     snippetTokens: 80,
@@ -417,69 +418,107 @@ async function runRecallInjection(
     // turn become "memory" for the next prompt. The CLI keeps default false
     // so users can still grep their live session explicitly.
     excludeCurrentSession: true,
-  } as const
+    // The hook's recall runs in a Worker its --vault-db never reached, so each call names the vault (Phase 3).
+    ...(vaultDb === null ? {} : { vaultDb }),
+  }
   // In-thread by default. The prompt hook, the one caller that exits, passes a deadline recall (@ag/tribe/25071
   // stopgap); a long-lived caller (the daemon, the plugin server) would stack queries a deadline abandons.
   const recallImpl = opts.deps?.recall ?? recall
-  let result: Awaited<ReturnType<typeof recall>>
   // Recall's own phases join the steps under the step's name, and a phase it skipped is said like a skipped step.
-  const absorb = (step: string, answer: Awaited<ReturnType<typeof recall>>): void => {
+  const absorb = (step: string, answer: RecallResult): void => {
     for (const [name, ms] of Object.entries(answer.timing?.phases ?? {})) {
       if (steps) steps[`${step}.${name}`] = (steps[`${step}.${name}`] ?? 0) + ms
     }
-    // Several skips of one phase (a skipped synonym variant per anchor) are all said, in order (25397).
+    // Several skips of one phase are all said, in order (25397).
     for (const skip of answer.skipped ?? []) {
       const key = `${step}.${skip.phase}`
       const said = skippedSteps[key]
       skippedSteps[key] = said === undefined ? skip.message : `${said}; ${skip.message}`
     }
   }
-  try {
-    result = await timeStepAsync(steps, "recall", () => recallImpl(recallQuery, recallOpts))
-    absorb("recall", result)
+  /** One recall call, timed as `step`, its phases absorbed; its own wall time comes back with its result. */
+  const call = async (step: string, query: string, phases: readonly RecallPhase[]) => {
+    const began = performance.now()
+    const result = await timeStepAsync(steps, step, () => recallImpl(query, { ...recallOpts, phases }))
+    absorb(step, result)
+    return { result, ms: Math.round(performance.now() - began) }
+  }
+  const wall = `the ${String(RECALL_WALL_MS / 1000)} s wall`
 
-    // Fallback: full-prompt FTS found nothing, but the prompt has a known
-    // project anchor (camelCase symbol, framework name) buried in generic
-    // English. Retry with the glossary anchor alone — this rescues prompts
-    // where the salient term is dominated by surrounding common words.
-    // It runs only while the budget left covers one candidate pass (25071 row 2).
-    if (result.results.length === 0 && glossaryHit && recallQuery !== glossaryHit) {
-      const left = deadlineAt - Date.now()
-      if (left > HOOK_CANDIDATE_PASS_MS) {
-        result = await timeStepAsync(steps, "recall_fallback", () => recallImpl(glossaryHit, recallOpts))
-        absorb("recall_fallback", result)
-      } else {
-        skippedSteps.recall_fallback = `recall_fallback skipped: anchor "${glossaryHit}", ${String(left)} ms left (25071)`
-      }
+  // Call A: the vault, on the anchor. It needs a vault and an anchor. If even A runs over the wall, nothing answered,
+  // and the hook says so as it always has (@cto 7f55e4f2 bound 4).
+  let vaultCall: Awaited<ReturnType<typeof call>> | null = null
+  if (anchor !== null && vaultDb !== null) {
+    try {
+      vaultCall = await call("recall_vault", anchor.query, VAULT_PHASES)
+    } catch (error) {
+      if (!(error instanceof RecallDeadlineError)) throw error
+      // Said in the hook output, not only its log: the turn runs without recall, and the reader should know why.
+      skippedSteps.recall_vault = error.message
+      return withSkippedSteps({ skipped: false, additionalContext: error.message, newKeys: [], turn })
     }
+  }
+
+  // Call B: the rest, on the prompt, bounded because FTS cost grows super-linearly with query length (25071). Over
+  // the wall, A's answer stays and one line names what did not finish.
+  let promptCall: Awaited<ReturnType<typeof call>> | null = null
+  let partial: string | null = null
+  try {
+    promptCall = await call("recall", prompt.slice(0, MAX_RECALL_QUERY_CHARS), PROMPT_PHASES)
   } catch (error) {
     if (!(error instanceof RecallDeadlineError)) throw error
-    // Said in the hook output, not only its log: the turn runs without recall, and the reader should know why.
-    skippedSteps.recall = error.message
-    return withSkippedSteps({ skipped: false, additionalContext: error.message, newKeys: [], turn })
+    if (vaultCall === null) {
+      skippedSteps.recall = error.message
+      return withSkippedSteps({ skipped: false, additionalContext: error.message, newKeys: [], turn })
+    }
+    partial = `recall partial: vault answered in ${String(vaultCall.ms)} ms; ${PROMPT_PHASES_SAID} did not finish inside ${wall} (25071)`
+    skippedSteps.recall = partial
   }
 
-  if (result.results.length === 0) {
-    // Substantive prompt but no recall hits — skip entirely. Previously we
-    // emitted the protocol footer alone here to keep the boundary visible
-    // every turn, but that turned into UI noise in Claude Code's scrollback
-    // (the harness renders all hook additionalContext as user-role content,
-    // so an always-on footer shows up as mysterious "H:" text). With no
-    // framed content, the footer has nothing to frame. See km-ambot and the
-    // emit.ts CONTEXT_PROTOCOL_FOOTER docstring.
-    emitInjectionDebugEvent({
+  // The join is recall's own merge, so it never re-ranks (@cto 7f55e4f2 bound 3).
+  const results = mergeRecallResults(
+    [...(vaultCall?.result.results ?? []), ...(promptCall?.result.results ?? [])],
+    HOOK_RECALL_LIMIT,
+  )
+  const frame = (framed: InjectedItem[]): string =>
+    wrapInjectedContext({
       source: "recall",
-      action: "skip",
-      reason: "no_results",
-      prompt: prompt.slice(0, 200),
+      mode: "snippet",
+      items: notice ? [vaultNoticeItem(), ...framed] : framed,
+      // Forward recall's snippet cap so the chokepoint does not re-cap at its own
+      // 300 default — a caller that set `snippetChars` above 300 would otherwise
+      // be truncated silently (28904 review).
+      snippetChars,
     })
-    return withSkippedSteps({ skipped: true, reason: "no_results" })
+  // Nothing to inject is said in one line naming what was searched and how long it took, never silence (Phase 3).
+  const searched = (): string =>
+    [
+      ...(vaultCall && anchor ? [`the vault for "${anchor.query}" in ${String(vaultCall.ms)} ms`] : []),
+      promptCall
+        ? `${PROMPT_PHASES_SAID} for the prompt in ${String(promptCall.ms)} ms`
+        : `${PROMPT_PHASES_SAID}, which did not finish inside ${wall}`,
+    ].join(", and ")
+  const sayEmpty = (
+    reason: Extract<InjectSkipReason, "no_results" | "all_seen" | "low_quality">,
+    outcome: string,
+  ): RunInjectDeltaResult => {
+    const line = `recall: ${outcome}; searched ${searched()} (25071)`
+    emitInjectionDebugEvent({ source: "recall", action: "skip", reason, prompt: prompt.slice(0, 200) })
+    return withSkippedSteps({
+      skipped: false,
+      additionalContext: frame([recallNoticeItem(line)]),
+      newKeys: [],
+      turn,
+      emptyRecallReason: reason,
+    })
   }
+
+  if (results.length === 0) return sayEmpty("no_results", "nothing found")
 
   const items: InjectedItem[] = []
   const newKeys: string[] = []
   let sawAnyAfterRankGate = false
-  for (const r of result.results) {
+  for (const r of results) {
     // V2 quality gate: drop weak FTS matches before any other work.
     if (r.rank > minRank) continue
     sawAnyAfterRankGate = true
@@ -518,34 +557,22 @@ async function runRecallInjection(
   store.flush?.()
 
   if (items.length === 0) {
-    // V2 distinguishes two empty-after-recall cases:
-    //   - low_quality: all results failed the rank/content gates (noise)
-    //   - all_seen:    everything surviving the gates was already injected
-    // Both result in no emit; the reason helps debugging which gate is firing.
-    const reason: InjectSkipReason = sawAnyAfterRankGate ? "all_seen" : "low_quality"
-    emitInjectionDebugEvent({
-      source: "recall",
-      action: "skip",
-      reason,
-      prompt: prompt.slice(0, 200),
-    })
-    return withSkippedSteps({ skipped: true, reason })
+    // Two empty-after-recall cases, each said with what was searched:
+    //   - low_quality: every result failed the rank gate (noise)
+    //   - all_seen:    everything past the rank gate was already injected, too short, or its own rejection
+    const found = `${String(results.length)} result${results.length === 1 ? "" : "s"}`
+    return sawAnyAfterRankGate
+      ? sayEmpty("all_seen", `${found}, each already shown this session or filtered as noise`)
+      : sayEmpty("low_quality", `${found}, none strong enough to show`)
   }
 
   // The recall emit path routes through the injection-envelope chokepoint, so
   // the `<injected_context>` envelope, its directive attributes, the imperative
   // rewrite, the `<item>` framing and the protocol footer all come from ONE
   // implementation shared with every other emitter. The legacy `<recall-memory>`
-  // / `<snippet>` markup disappears with this change (@km/bearly/14871).
-  const additionalContext = wrapInjectedContext({
-    source: "recall",
-    mode: "snippet",
-    items: notice ? [vaultNoticeItem(), ...items] : items,
-    // Forward recall's snippet cap so the chokepoint does not re-cap at its own
-    // 300 default — a caller that set `snippetChars` above 300 would otherwise
-    // be truncated silently (28904 review).
-    snippetChars,
-  })
+  // / `<snippet>` markup disappears with this change (@km/bearly/14871). A partial
+  // answer leads with the line naming what did not finish.
+  const additionalContext = frame(partial === null ? items : [recallNoticeItem(partial), ...items])
 
   emitInjectionDebugEvent({
     source: "recall",

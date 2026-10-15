@@ -27,7 +27,7 @@ vi.mock("../../../recall/src/history/search.ts", async (importOriginal) => ({
 }))
 vi.mock("../../../recall/src/history/vault-glossary.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../recall/src/history/vault-glossary.ts")>()),
-  findGlossaryAnchor: () => null,
+  deriveVaultAnchor: () => null,
 }))
 
 const base = mkdtempSync(join(realpathSync(tmpdir()), "recall-handlers-vault-"))

@@ -32,7 +32,7 @@ vi.mock("../../../recall/src/history/vault-fts.ts", async (importOriginal) => ({
 }))
 vi.mock("../../../recall/src/history/vault-glossary.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../recall/src/history/vault-glossary.ts")>()),
-  findGlossaryAnchor: () => null,
+  deriveVaultAnchor: () => null,
 }))
 
 const base = mkdtempSync(join(realpathSync(tmpdir()), "recall-handlers-skip-"))
@@ -40,7 +40,8 @@ afterAll(() => safeRemoveSync(base, { within: realpathSync(tmpdir()) }))
 
 describe("tribe.inject_delta carries a skipped step", () => {
   test.each([
-    ["no hits, so the prompt is skipped", [], true],
+    // No hits is said in one line naming what was searched, not skipped (@ag/recall/three-dark-search-paths Phase 3).
+    ["no hits, so the injection is the searched-nothing line", [], false],
     [
       "one hit, so the prompt is injected",
       [
@@ -58,13 +59,13 @@ describe("tribe.inject_delta carries a skipped step", () => {
   ])("%s: the result names the skipped recall phase", async (_case, results, skipped) => {
     fake.results = results
     const handlers = createRecallHandlers({
-      dbPath: join(base, `lore-${String(skipped)}.db`),
+      dbPath: join(base, `lore-${String(results.length)}.db`),
       socketPath: join(base, "lore.sock"),
       daemonVersion: "test",
     })
     try {
       const result = (await handlers.dispatch(
-        { sessionId: `s-${String(skipped)}`, claudePid: null },
+        { sessionId: `s-${String(results.length)}`, claudePid: null },
         TRIBE_METHODS.injectDelta,
         {
           prompt: "what did we decide about km-storage-sync layering?",

@@ -217,30 +217,17 @@ const PROBE_STOPWORDS = new Set([
   "ok",
 ])
 
+/** Whether a prompt token is a common English or chat word ("now", "this"), at any length. */
+export function isStopword(token: string): boolean {
+  return PROBE_STOPWORDS.has(token.toLowerCase())
+}
+
 /**
- * Extract the salient tokens from a prompt for vault-probe purposes.
- *
- * The full-prompt FTS query AND-joins every word — a rare project term
- * like "termless" gets diluted by the dozens of common words around it.
- * For the salience probe we want OR-of-rare-tokens: any rare token that
- * resolves against the vault is itself signal.
- *
- * Returns up to `max` candidate tokens. Empty when nothing rare survives.
+ * Whether a prompt token is a content word: four characters or more, not a stopword, not a bare number. The vault
+ * anchor (vault-glossary.ts deriveVaultAnchor) builds its query from these when the prompt names no identifier.
  */
-export function extractProbeTokens(prompt: string, max = 6): string[] {
-  const out = new Set<string>()
-  // Split on non-word chars but keep camelCase intact via the / / lowercase
-  // pass below; tokens like "createTestApp" survive as one chunk.
-  const raw = prompt.split(/[^A-Za-z0-9_-]+/)
-  for (const t of raw) {
-    if (t.length < 4) continue
-    const lower = t.toLowerCase()
-    if (PROBE_STOPWORDS.has(lower)) continue
-    if (/^\d+$/.test(t)) continue
-    out.add(lower)
-    if (out.size >= max) break
-  }
-  return [...out]
+export function isContentWord(token: string): boolean {
+  return token.length >= 4 && !isStopword(token) && !/^\d+$/.test(token)
 }
 
 /**
@@ -253,30 +240,15 @@ export function extractProbeTokens(prompt: string, max = 6): string[] {
  * This keeps nested markdown searchable without emitting opaque node IDs.
  * @i/20-search-and-memory/23189
  *
- * `mode` controls how the prompt is converted to an FTS query:
- *  - `"phrase"` (default): existing behavior — AND-join every token via
- *    toFts5Query. Best when the prompt is a tight question.
- *  - `"any-of-anchors"`: OR-join the rare tokens (extractProbeTokens).
- *    Best for salience probing — finds rare project vocab buried inside
- *    long sentences.
+ * The query is converted with toFts5Query, which AND-joins every token: the prompt hook passes the derived vault
+ * anchor (a few words), never the verbatim prompt.
  */
-export function searchVault(query: string, limit: number, mode: "phrase" | "any-of-anchors" = "phrase"): VaultMatch[] {
+export function searchVault(query: string, limit: number): VaultMatch[] {
   if (limit <= 0) return []
   const db = getVaultDb()
   if (!db) return []
 
-  let ftsQuery: string
-  if (mode === "any-of-anchors") {
-    const tokens = extractProbeTokens(query)
-    if (tokens.length === 0) return []
-    // Restrict to the `name` and `title` columns — body matches dilute
-    // every prompt to a "fires" verdict. Anchor-only matching catches
-    // prompts that name a real bead/path/alias and rejects prompts that
-    // merely happen to share a body token with the vault.
-    ftsQuery = `{name title} : (${tokens.map((t) => `${t}*`).join(" OR ")})`
-  } else {
-    ftsQuery = toFts5Query(query)
-  }
+  const ftsQuery = toFts5Query(query)
   if (!ftsQuery) return []
 
   try {
