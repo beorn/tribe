@@ -6,15 +6,47 @@
  * @level     l2 — real Workers and a real child process; the recall inside the worker is a fixture that blocks.
  */
 import { spawnSync } from "node:child_process"
+import { mkdtempSync, realpathSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { safeRemoveSync } from "removely"
 import { describe, expect, test } from "vitest"
+
+import { makeKmVault } from "./helpers/km-vault.ts"
 
 const { createMemorySeenStore, runInjectDelta } = await import("../src/lib/inject-core.ts")
 const { createDeadlineRecall, RecallDeadlineError } = await import("../src/lib/recall-deadline.ts")
 const { RECALL_WALL_MS } = await import("../src/history/recall-budget.ts")
 
 const BLOCKS = new URL("./fixtures/recall-blocks.worker.ts", import.meta.url)
+const IN_MEMORY = new URL("./fixtures/recall-memory.worker.ts", import.meta.url)
 const SALIENT = "what did we decide about km-storage-sync layering?"
+
+// @failure The vault binding was module state on the hook's thread; the deadline Worker never had it, so from tribe
+// e1ecf2f0 (2026-09-23) every hook recall searched no vault and said nothing (probe: 7 vault hits in-thread, 0
+// through the Worker). The vault now rides the call (@cto 456e6e77).
+describe("the vault rides the recall call, so the deadline Worker searches it", () => {
+  test("hook-mode recall through the real Worker returns the hit of the vault the call names", async () => {
+    const dir = mkdtempSync(join(realpathSync(tmpdir()), "recall-deadline-vault-"))
+    const recall = createDeadlineRecall({ deadlineMs: 10_000, workerUrl: IN_MEMORY })
+    try {
+      const vaultDb = makeKmVault(dir, [
+        {
+          id: "@i/search/27897-memory-system",
+          fsPath: "@i/search/27897-memory-system.md",
+          title: "Jev memory system",
+          content: "Jev keeps the memory system's notes.",
+        },
+      ])
+      const result = await recall("Jev", { mode: "hook", raw: true, limit: 5, vaultDb })
+      expect(result.results.map((r) => `${r.type}:${r.sessionId}`)).toEqual(["vault:@i/search/27897-memory-system.md"])
+    } finally {
+      recall.close()
+      safeRemoveSync(dir, { within: realpathSync(tmpdir()) })
+    }
+  }, 15_000)
+})
 
 describe("25071 stopgap: recall that outlives its deadline is skipped, loudly", () => {
   test("the deadline is the 1.5 s wall, and its skip says so (25071 row 2)", () => {
@@ -27,6 +59,7 @@ describe("25071 stopgap: recall that outlives its deadline is skipped, loudly", 
     const started = performance.now()
     try {
       const result = await runInjectDelta(SALIENT, createMemorySeenStore(), {
+        vaultDb: "/fixture/vault/.km/state.db",
         deps: { recall, ensureProjectSourcesIndexed: () => {}, findGlossaryAnchor: () => null },
       })
       expect(performance.now() - started).toBeLessThan(2500)

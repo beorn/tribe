@@ -38,7 +38,7 @@ import { TRIBE_METHODS, RECALL_PROTOCOL_VERSION } from "../../../../plugins/clau
 // activity log catches it (km-tribe.activity-log phase 2).
 import { emitHookJson as envelopeEmitHookJson } from "../../../injection-envelope/src/emit.ts"
 import { flushInjectionFileWriters } from "../../../injection-envelope/src/debug.ts"
-import { getVaultDb, searchVault } from "../history/vault-fts.ts"
+import { getVaultDb, getVaultDbPath, searchVault } from "../history/vault-fts.ts"
 import { runBoundedProcessCommand, type BoundedProcessBounds } from "./bounded-process.ts"
 
 /** The call-line vault binding (`tribe hook <event> --vault-db`), for the dispatcher that loads this by path (25149 a3). */
@@ -532,7 +532,10 @@ export async function cmdPreCompact(): Promise<void> {
     let trackingBead: string | null = null
     if (shortId.length > 0) {
       try {
-        const match = searchVault(shortId, 5).find((m) => m.fsPath !== null && m.fsPath.endsWith(".md"))
+        // Reads the bound path at this boundary: one of the two non-recall readers left on the binding (@cto 456e6e77).
+        const match = searchVault(shortId, 5, getVaultDbPath()).find(
+          (m) => m.fsPath !== null && m.fsPath.endsWith(".md"),
+        )
         trackingBead = match?.fsPath ?? null
       } catch (err) {
         preCompactLog.warn?.("pre-compact vault search failed", {

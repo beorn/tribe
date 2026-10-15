@@ -207,10 +207,11 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   } = options
   const project = resolveProjectScope(options.project)
 
-  // The vault is bound only explicitly (25149): the CLI's leading --vault-db.
-  // Nothing bound is said out loud, so an absent vault never
-  // reads as "no vault hits".
-  if (!regexMode && getVaultDbPath() === null) console.error("vault: not bound (pass --vault-db)")
+  // The vault is bound only explicitly (25149): the CLI's leading --vault-db, resolved here once at the command
+  // boundary into what every search below is handed (@cto 456e6e77). Nothing bound is said out loud, so an absent
+  // vault never reads as "no vault hits".
+  const vaultDb = getVaultDbPath()
+  if (!regexMode && vaultDb === null) console.error("vault: not bound (pass --vault-db)")
 
   // Search is a read path: classify the index without starting index work.
   // Lifecycle hints and the host scheduler own incremental indexing cadence.
@@ -249,6 +250,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
       project,
       provenance,
       provenanceDetail: freshness,
+      vaultDb,
       limit: limitStr ? parseInt(limitStr, 10) : 10,
     })
     return
@@ -268,6 +270,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     projectFilter: project,
     provenance,
     provenanceDetail: freshness,
+    vaultDb,
   }
 
   const agentEnabled = !!options.agent || !!options.debugPlan || process.env.RECALL_AGENT === "1"
@@ -816,11 +819,14 @@ interface RawSearchOptions extends Omit<SearchOptions, "limit"> {
   limit: number
   provenance: IndexProvenance
   provenanceDetail?: IndexFreshness
+  /** The vault the command boundary resolved, or null when none is bound. */
+  vaultDb: string | null
 }
 
 function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   const { include, question, response, tool, since, project, session, limit, json, provenance, provenanceDetail } =
     options
+  const { vaultDb } = options
 
   // Parse time filter
   let sinceTime: number | undefined
@@ -974,7 +980,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   // type, so omit it when those filters are active rather than returning
   // rows that cannot honor the caller's constraint.
   const vaultFilterActive = question || response || tool !== undefined || session !== undefined || include !== undefined
-  const vaultMatches: VaultMatch[] = query && !vaultFilterActive ? searchVault(query, limit) : []
+  const vaultMatches: VaultMatch[] = query && !vaultFilterActive ? searchVault(query, limit, vaultDb) : []
 
   const total = messageResults.total + contentResults.total + vaultMatches.length
   const duration = Date.now() - startTime

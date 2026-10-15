@@ -29,7 +29,6 @@ import {
   type InjectSkipReason,
 } from "./prompt-filter.ts"
 import { recall } from "../history/search.ts"
-import { getVaultDbPath } from "../history/vault-fts.ts"
 import { findGlossaryAnchor } from "../history/vault-glossary.ts"
 import { RecallDeadlineError } from "./recall-deadline.ts"
 import { HOOK_CANDIDATE_PASS_MS, RECALL_WALL_MS } from "../history/recall-budget.ts"
@@ -160,12 +159,17 @@ export interface RunInjectDeltaOptions {
    * Override for callers that want to see all results (e.g., debug tools).
    */
   minRank?: number
+  /**
+   * The vault every recall call of this injection searches, or null when none is bound: the caller resolves its
+   * `--vault-db` at its boundary. The unbound notice reads this, the option on the call, so a Worker the binding
+   * never reached can no longer search nothing silently (@cto 456e6e77).
+   */
+  vaultDb: string | null
   /** Test seam for isolating recall/project-source dependencies. */
   deps?: {
     recall?: typeof recall
     ensureProjectSourcesIndexed?: unknown
     findGlossaryAnchor?: typeof findGlossaryAnchor
-    getVaultDbPath?: typeof getVaultDbPath
   }
 }
 
@@ -273,10 +277,9 @@ export async function timeStepAsync<T>(
 export async function runInjectDelta(
   rawPrompt: string,
   store: SeenStore,
-  opts: RunInjectDeltaOptions = {},
+  opts: RunInjectDeltaOptions,
 ): Promise<RunInjectDeltaResult> {
-  const vaultDbPath = opts.deps?.getVaultDbPath ?? getVaultDbPath
-  const notice = vaultDbPath() === null && store.get(VAULT_UNBOUND_NOTICE_KEY) === undefined
+  const notice = opts.vaultDb === null && store.get(VAULT_UNBOUND_NOTICE_KEY) === undefined
   const result = await runRecallInjection(rawPrompt, store, opts, notice)
   if (!notice) return result
   store.set(VAULT_UNBOUND_NOTICE_KEY, Number.MAX_SAFE_INTEGER)
@@ -417,6 +420,8 @@ async function runRecallInjection(
     // turn become "memory" for the next prompt. The CLI keeps default false
     // so users can still grep their live session explicitly.
     excludeCurrentSession: true,
+    // The vault rides the call: the prompt hook's recall runs in a Worker its --vault-db never reached.
+    vaultDb: opts.vaultDb,
   } as const
   // In-thread by default. The prompt hook, the one caller that exits, passes a deadline recall (@ag/tribe/25071
   // stopgap); a long-lived caller (the daemon, the plugin server) would stack queries a deadline abandons.

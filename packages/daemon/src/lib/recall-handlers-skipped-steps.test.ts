@@ -6,6 +6,7 @@
  * @level     l2 — the real handler and the real in-repo engine; project sources, search and the glossary are
  *            mocked at their modules, so no index, vault or socket is touched.
  */
+import { Database } from "bun:sqlite"
 import { mkdtempSync, realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -24,18 +25,17 @@ vi.mock("../../../recall/src/history/search.ts", async (importOriginal) => ({
     skipped: [{ phase: "messages", anchor: "test", message: SKIPPED_MSG }],
   }),
 }))
-// A bound vault, so the first injection is not the unbound-vault notice (25149 a1): this suite asks about the
-// skipped step, and the notice's own carriage of it is pinned in inject-core's tests.
-vi.mock("../../../recall/src/history/vault-fts.ts", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../recall/src/history/vault-fts.ts")>()),
-  getVaultDbPath: () => "/bound/vault.db",
-}))
 vi.mock("../../../recall/src/history/vault-glossary.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../recall/src/history/vault-glossary.ts")>()),
   findGlossaryAnchor: () => null,
 }))
 
 const base = mkdtempSync(join(realpathSync(tmpdir()), "recall-handlers-skip-"))
+// A bound vault, so the first injection is not the unbound-vault notice (25149 a1): this suite asks about the
+// skipped step, and the notice's own carriage of it is pinned in inject-core's tests. The daemon hands it to each
+// recall call (@cto 456e6e77); recall itself is mocked, so the file only has to exist.
+const vaultDbPath = join(base, "state.db")
+new Database(vaultDbPath, { create: true }).close()
 afterAll(() => safeRemoveSync(base, { within: realpathSync(tmpdir()) }))
 
 describe("tribe.inject_delta carries a skipped step", () => {
@@ -61,6 +61,7 @@ describe("tribe.inject_delta carries a skipped step", () => {
       dbPath: join(base, `lore-${String(skipped)}.db`),
       socketPath: join(base, "lore.sock"),
       daemonVersion: "test",
+      vaultDbPath,
     })
     try {
       const result = (await handlers.dispatch(

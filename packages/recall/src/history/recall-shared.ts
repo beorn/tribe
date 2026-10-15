@@ -61,6 +61,12 @@ export interface RecallOptions {
   mode?: SearchMode
   /** Hook mode: when the budget runs out, as epoch ms. Defaults to the call's start plus RECALL_WALL_MS. */
   deadlineAt?: number
+  /**
+   * The vault database this call searches: recall()'s only vault binding (@cto 456e6e77). Absent or null, no vault
+   * is searched, and the entry point says so. Each entry point resolves `--vault-db` into it at its boundary, so a
+   * Worker the binding never reached (the prompt hook's) still searches the vault.
+   */
+  vaultDb?: string | null
 }
 
 /** How a search reaches FTS: every match ranked and counted, or the window's matches ranked under a cap (@ag/tribe/25071 row 2). */

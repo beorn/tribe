@@ -30,6 +30,7 @@ import { closeDb, acquireIndexWriter } from "../../src/history/db.ts"
 import { rebuildIndex, discoverProjectCwds, indexSessionFile } from "../../src/history/indexer.ts"
 import { indexCodexTranscripts } from "../../src/history/codex-indexer.ts"
 import { runInjectDelta, createMemorySeenStore } from "../../src/lib/inject-core.ts"
+import { makeKmVault } from "../helpers/km-vault.ts"
 
 describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", () => {
   let tempDir: string
@@ -452,12 +453,8 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
     const result = await runInjectDelta(
       "why does packages/recall/src/history/indexer.ts mention architectural invariants?",
       createMemorySeenStore(),
-      {
-        minRank: 0,
-        deps: {
-          getVaultDbPath: () => "/bound/vault.db",
-        },
-      },
+      // A real, empty vault: the call opens what it names, and this row is about the index writer lock.
+      { minRank: 0, vaultDb: makeKmVault(tempDir, []) },
     )
 
     expect(result.skipped).toBe(false)

@@ -36,7 +36,7 @@ import type {
 
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
-import { searchVault, getVaultDbPath } from "./vault-fts.ts"
+import { searchVault } from "./vault-fts.ts"
 
 // Re-export shared items so existing internal imports continue to work
 export { setRecallLogging, log, ONE_HOUR_MS, ONE_DAY_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
@@ -456,16 +456,17 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const projectContentResults = phase("project_content", () => searchAll(db, query, projectContentOpts))
     const projectMs = Date.now() - projectStart
 
-    // Vault FTS — opt-in: searches the km tree db (.km/state.db) when bound.
-    // Beads, design docs, CLAUDE.md, and hub/* docs are higher signal than
+    // Vault FTS — opt-in: searches the km tree db (.km/state.db) the call names (options.vaultDb, its only binding:
+    // @cto 456e6e77). Beads, design docs, CLAUDE.md, and hub/* docs are higher signal than
     // transcript fragments, so we boost vault hits with a strong negative
     // rank (more negative = better).
+    const vaultDb = options.vaultDb ?? null
     const vaultStart = Date.now()
-    const vaultMatches = phase("vault", () => searchVault(query, limit * 2))
+    const vaultMatches = phase("vault", () => searchVault(query, limit * 2, vaultDb))
     const vaultMs = Date.now() - vaultStart
     if (vaultMatches.length > 0) {
-      log(`vault FTS: ${vaultMatches.length} matches (${vaultMs}ms) [${getVaultDbPath() ?? "?"}]`)
-    } else if (getVaultDbPath()) {
+      log(`vault FTS: ${vaultMatches.length} matches (${vaultMs}ms) [${vaultDb ?? "?"}]`)
+    } else if (vaultDb !== null) {
       log(`vault FTS: 0 matches (${vaultMs}ms)`)
     }
 
