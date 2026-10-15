@@ -213,7 +213,8 @@ describe("planQuery provider fallback", () => {
           },
         }
       },
-      getModel: (id) => (id === denied.modelId ? denied : undefined),
+      getModel: (id) => [denied, selected].find((m) => m.modelId === id),
+      budgetedModelIds: [denied.modelId, selected.modelId],
       getCheapModel: () => denied,
       getCheapModels: () => [denied, selected],
       estimateCost: () => 0,
@@ -267,7 +268,8 @@ describe("planQuery provider fallback", () => {
           },
         }
       },
-      getModel: (id) => (id === gemini.modelId ? gemini : undefined),
+      getModel: (id) => [gemini, fallback].find((m) => m.modelId === id),
+      budgetedModelIds: [gemini.modelId, fallback.modelId],
       getCheapModel: () => anotherGemini,
       getCheapModels: () => [anotherGemini, fallback],
       estimateCost: () => 0,
@@ -294,7 +296,8 @@ describe("planQuery provider fallback", () => {
           ...(model.provider === "google" ? { usage: { promptTokens: 1, completionTokens: 1 } } : {}),
         },
       }),
-      getModel: (id) => (id === gemini.modelId ? gemini : undefined),
+      getModel: (id) => [gemini, fallback].find((m) => m.modelId === id),
+      budgetedModelIds: [gemini.modelId, fallback.modelId],
       getCheapModel: () => fallback,
       getCheapModels: () => [fallback],
       estimateCost: () => 0.25,
@@ -322,7 +325,8 @@ describe("planQuery provider fallback", () => {
         await new Promise<void>((resolve) => abortSignal.addEventListener("abort", () => resolve(), { once: true }))
         return { response: { error: "planner deadline reached" } }
       },
-      getModel: (id) => (id === gemini.modelId ? gemini : undefined),
+      getModel: (id) => [gemini, fallback].find((m) => m.modelId === id),
+      budgetedModelIds: [gemini.modelId, fallback.modelId],
       getCheapModel: () => fallback,
       getCheapModels: () => [fallback],
       estimateCost: () => 0,
@@ -340,6 +344,43 @@ describe("planQuery provider fallback", () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // @failure The planner tried Google first, served through the agy one-shot (2 to 4 s to start, 3.6 to 28 s to
+  // answer), under the one 8 s deadline every later model shares; it aborted and the working fallback never ran, so
+  // every planner call failed for two hours on 2026-10-15 (@ag/llm/29473, @cto 967ea2db).
+  test("the default list plans with deepseek-chat only: a Google model the registry leads with is never asked", async () => {
+    const gemini: LlmModel = { provider: "google", modelId: "gemini-2.0-flash-lite" }
+    const deepseek: LlmModel = { provider: "openrouter", modelId: "deepseek/deepseek-chat" }
+    const calls: string[] = []
+    const llm = {
+      queryModel: async ({ model }) => {
+        calls.push(model.modelId)
+        return {
+          response: {
+            content: JSON.stringify({
+              keywords: ["budgeted"],
+              phrases: [],
+              concepts: [],
+              paths: [],
+              errors: [],
+              bead_ids: [],
+              time_hint: null,
+            }),
+          },
+        }
+      },
+      getModel: (id) => [gemini, deepseek].find((m) => m.modelId === id),
+      getCheapModel: () => gemini,
+      getCheapModels: () => [gemini, deepseek],
+      estimateCost: () => 0,
+      isProviderAvailable: () => true,
+    } satisfies LlmBackend
+
+    const result = await planQuery("find prior work", emptyContext, { round: 1, llm })
+
+    expect(result.model).toBe(deepseek.modelId)
+    expect(calls).toEqual([deepseek.modelId])
   })
 
   test("keeps an explicitly selected planner model single-shot", async () => {

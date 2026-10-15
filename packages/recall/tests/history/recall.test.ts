@@ -504,6 +504,7 @@ describe("synthesizeResults", () => {
         return { response: { content: `answer from ${model.modelId}` } }
       },
       getModel: (id) => models.find((model) => model.modelId === id),
+      budgetedModelIds: models.map((model) => model.modelId),
       getCheapModel: () => models[0],
       getCheapModels: () => models,
       estimateCost: () => 0,
@@ -560,6 +561,7 @@ describe("synthesizeResults", () => {
         return { response: { content: `answer from ${model.modelId}` } }
       },
       getModel: (id) => models.find((model) => model.modelId === id),
+      budgetedModelIds: models.map((model) => model.modelId),
       getCheapModel: () => models[0],
       getCheapModels: (max = 2) => {
         requestedMax = max
@@ -585,9 +587,48 @@ describe("synthesizeResults", () => {
       llm,
     )
 
-    expect(requestedMax).toBeGreaterThan(2)
+    // The race reads only the budgeted list, never the registry's cheap models (@ag/llm/29473, @cto 967ea2db).
+    expect(requestedMax).toBe(0)
     expect(queried).toEqual(["xai-cheap", "openrouter-cheap"])
     expect(result.text).toMatch(/^answer from (xai|openrouter)-cheap$/)
+  })
+
+  // @failure Synthesis raced Google through the agy one-shot, which needs 2 to 4 s to start and 3.6 to 28 s to answer,
+  // and timed out at its 20 s budget on 2026-10-15 (@ag/llm/29473, @cto 967ea2db).
+  test("the default list races deepseek-chat only: a Google model the registry leads with never races", async () => {
+    const gemini: LlmModel = { provider: "google", modelId: "gemini-2.5-flash" }
+    const deepseek: LlmModel = { provider: "openrouter", modelId: "deepseek/deepseek-chat" }
+    const queried: string[] = []
+    const llm: LlmBackend = {
+      queryModel: async ({ model }) => {
+        queried.push(model.modelId)
+        return { response: { content: "answer from " + model.modelId } }
+      },
+      getModel: (id) => [gemini, deepseek].find((model) => model.modelId === id),
+      getCheapModel: () => gemini,
+      getCheapModels: () => [gemini, deepseek],
+      estimateCost: () => 0,
+      isProviderAvailable: () => true,
+    }
+
+    const result = await synthesizeResults(
+      "budgeted race",
+      [
+        {
+          type: "message",
+          sessionId: "session-a",
+          sessionTitle: "Session A",
+          timestamp: Date.now(),
+          snippet: "budgeted race evidence",
+          rank: 1,
+        },
+      ],
+      1_000,
+      llm,
+    )
+
+    expect(queried).toEqual([deepseek.modelId])
+    expect(result.text).toBe("answer from deepseek/deepseek-chat")
   })
 
   test("reports provider errors when every synthesis model fails", async () => {
@@ -598,6 +639,7 @@ describe("synthesizeResults", () => {
     const llm: LlmBackend = {
       queryModel: async ({ model }) => ({ response: { error: `${model.provider} quota exhausted` } }),
       getModel: (id) => models.find((model) => model.modelId === id),
+      budgetedModelIds: models.map((model) => model.modelId),
       getCheapModel: () => models[0],
       getCheapModels: () => models,
       estimateCost: () => 0,
@@ -652,6 +694,7 @@ describe("synthesizeResults", () => {
         return { response: { error: `${model.provider} unavailable` } }
       },
       getModel: (id) => models.find((model) => model.modelId === id),
+      budgetedModelIds: models.map((model) => model.modelId),
       getCheapModel: () => models[0],
       getCheapModels: () => models,
       estimateCost: () => 0,
@@ -709,6 +752,7 @@ describe("synthesizeResults", () => {
         })
       },
       getModel: (id) => models.find((model) => model.modelId === id),
+      budgetedModelIds: models.map((model) => model.modelId),
       getCheapModel: () => models[0],
       getCheapModels: () => models,
       estimateCost: () => 0,

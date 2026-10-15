@@ -5,7 +5,14 @@
 
 import * as fs from "fs"
 import * as path from "path"
-import { loadLlm, requireLlm, selectAvailableCheapModels, type LlmBackend, type LlmModel } from "../lib/llm-backend.ts"
+import {
+  loadLlm,
+  requireLlm,
+  selectAvailableCheapModels,
+  selectBudgetedModels,
+  type LlmBackend,
+  type LlmModel,
+} from "../lib/llm-backend.ts"
 import { log, SynthesisFailure, suggestRetryTimeoutMs } from "./recall-shared.ts"
 import type {
   RecallSearchResult,
@@ -221,11 +228,9 @@ export async function synthesizeResults(
   // Use the same shared fact + policy selector as every other Recall caller.
   // The legacy boolean intentionally remains a credential-presence check, so
   // filtering it here would silently discard explicit selector exclusions and
-  // fresh refusing observations before the user-visible synthesis race.
-  const selection = selectAvailableCheapModels(llm, {
-    limit: Number.MAX_SAFE_INTEGER,
-    order: "registry",
-  })
+  // fresh refusing observations before the user-visible synthesis race. The
+  // race runs only models measured inside its budget (@cto 967ea2db, @ag/llm/29473).
+  const selection = selectBudgetedModels(llm)
   const models = selection.models
   const excludedProviders: ExcludedProvider[] = selection.rejected.map((model) => ({
     provider: model.provider,

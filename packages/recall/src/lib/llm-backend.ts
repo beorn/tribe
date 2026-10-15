@@ -105,6 +105,12 @@ export type LlmBackend = {
    * timeout. Optional for the same reason as explainUnavailable above.
    */
   formatProviderError?: (model: LlmModel, error: unknown) => string
+  /**
+   * The model ids the budgeted calls (planner, synthesis race) may use. Bearly's backend never sets it, so recall
+   * uses {@link BUDGETED_MODEL_IDS}; a hand-built backend names its own models to exercise the race and the
+   * fallback, the same reason explainUnavailable is optional.
+   */
+  budgetedModelIds?: readonly string[]
 }
 
 export type CheapModelSelectionOrder = "preferred" | "registry"
@@ -230,6 +236,29 @@ export function selectAvailableCheapModels(
             .join("; ")}`
 
   return { models, rejected, order, failure }
+}
+
+/**
+ * The models recall's budgeted LLM calls may use, the planner (8 s) and the synthesis race (20 s): only routes whose
+ * latency was measured inside those budgets (@cto 967ea2db, @ag/llm/29473). deepseek-chat through OpenRouter planned in
+ * 3.9 to 8.2 s on 2026-10-15. Google stays out until @ag/code/29456 fixes its route: through the agy one-shot it takes
+ * 2 to 4 s to start and 3.6 to 28 s to answer. A list edited by hand, never a runtime latency selector.
+ */
+export const BUDGETED_MODEL_IDS: readonly string[] = ["deepseek/deepseek-chat"]
+
+/** {@link selectAvailableCheapModels} over {@link BUDGETED_MODEL_IDS} only: no registry fallback adds a model. */
+export function selectBudgetedModels(llm: LlmBackend): CheapModelSelection {
+  const candidates = (llm.budgetedModelIds ?? BUDGETED_MODEL_IDS).map((id) => {
+    const model = llm.getModel(id)
+    if (!model) throw new Error(`recall's budgeted model ${id} is not in the LLM registry (@ag/llm/29473)`)
+    return model
+  })
+  return selectAvailableCheapModels(llm, {
+    candidates,
+    includeRegistryFallback: false,
+    limit: Number.MAX_SAFE_INTEGER,
+    order: "registry",
+  })
 }
 
 /** Single-model projection shared by session, daily, and weekly summaries. */
