@@ -132,7 +132,7 @@ test.each([
       const target =
         phase === "corroboration"
           ? sql.includes("GROUP BY m.session_id")
-          : sql.includes(table) && !sql.includes("GROUP BY") && params.includes('"authentication"')
+          : sql.includes(table) && !sql.includes("GROUP BY") && params.some((param) => param === '"authentication"')
       const bindings = [...params]
       if (target && !injected) {
         injected = true
@@ -141,7 +141,7 @@ test.each([
       }
       try {
         const rows = execute(...bindings)
-        if (sql.includes("messages_fts") && !sql.includes("GROUP BY") && params.includes('"auth"')) {
+        if (sql.includes("messages_fts") && !sql.includes("GROUP BY") && params.some((param) => param === '"auth"')) {
           primaryHits += rows.length
         }
         return rows
