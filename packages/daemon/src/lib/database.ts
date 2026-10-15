@@ -1955,7 +1955,8 @@ export function createStatements(db: Database) {
      * A closed ball's row is deleted, so its ref no longer counts; watchers,
      * anonymous senders and broadcasts carry no sigil and stay ambient.
      */
-    insertMessage: db.prepare(`
+    insertMessage: db.prepare(
+      assertSingleStatement(`
 		INSERT OR IGNORE INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
 			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id, sender_authority,
 			wakes_owner, is_incident, incident_data, attention_required)
@@ -1976,6 +1977,7 @@ export function createStatements(db: Database) {
 				ELSE 0
 			END)
 	`),
+    ),
 
     selectMessageById: db.prepare(`SELECT rowid, ts FROM messages WHERE id = $id
       UNION ALL SELECT seq AS rowid, ts FROM messages_archive WHERE id = $id LIMIT 1`),
