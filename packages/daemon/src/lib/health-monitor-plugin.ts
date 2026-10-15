@@ -15,7 +15,8 @@
  *   HEALTH_GH_RATELIMIT_WARNING — GitHub API remaining % for warning (default: 20)
  *   HEALTH_FD_WARNING      — fd usage % for warning (default: 70)
  *   HEALTH_REAPER_ENABLED     — enable process reaper (default: "1")
- *   HEALTH_REAPER_CPU_THRESHOLD — CPU % threshold for suspect (default: 80)
+ *   HEALTH_REAPER_CPU_THRESHOLD — CPU % threshold for suspect (default: 80). Must read as a finite number above 0:
+ *     a refused value turns the reaper OFF and pages once, with every other check still running (29561 item 4).
  *   HEALTH_REAPER_AGE_MINUTES  — minimum process age in minutes (default: 30)
  *   HEALTH_REAPER_GRACE_SAMPLES — samples to wait after asking before kill (default: 6)
  */
@@ -179,10 +180,64 @@ export interface HealthThresholds {
   reaperAgeMinutes: number
   /** Reaper: samples to wait after asking before escalating (default: 6, i.e. 60s at 10s interval) */
   reaperGraceSamples: number
+  /**
+   * Why the reaper CPU threshold was refused, when it was: the reaper is off, and start() pages once about it.
+   * A refusal rides beside the field it explains rather than throwing (29561 item 4).
+   */
+  reaperCpuRefusal?: ReaperCpuThresholdRefusal
 }
 
+/**
+ * Why the reaper's CPU threshold could not be read (29561 item 4). `Number("eighty")` is NaN and a value at or below
+ * zero fails the same way: this plugin's own gate is `cpu > threshold`, so either one admits EVERY bun/node row as a
+ * suspect instead of refusing to.
+ */
+export type ReaperCpuThresholdRefusal = {
+  /** The variable the operator set. */
+  readonly envVar: string
+  /** The value it held, quoted as the operator typed it. */
+  readonly raw: string
+  /** `not-a-number` when Number() could not read it; `not-positive` when it read as a finite value at or below 0. */
+  readonly reason: "not-a-number" | "not-positive"
+}
+
+/**
+ * The reaper's CPU threshold, or the refusal that names it (29561 item 4).
+ *
+ * A throw here would not stay here: `defaultThresholds()` runs inside this plugin's own `start()`, and the plugin
+ * loader disables any plugin whose start throws, so a loud refusal at load would have switched off the disk checks,
+ * the bridge-lost paging and the reaper together, behind one log line nobody reads (@cto, 2026-10-15). The refusal is
+ * contained instead: the reaper is turned OFF, the caller announces it through the monitor's ordinary alert path, and
+ * every other check keeps running.
+ */
+function readReaperCpuThreshold(
+  envVar: string,
+  fallback: string,
+): { readonly value: number; readonly refusal?: ReaperCpuThresholdRefusal } {
+  const raw = process.env[envVar] ?? fallback
+  const value = raw.trim() === "" ? Number.NaN : Number(raw)
+  if (!Number.isFinite(value)) return { refusal: { envVar, raw, reason: "not-a-number" }, value: Number(fallback) }
+  if (value <= 0) return { refusal: { envVar, raw, reason: "not-positive" }, value: Number(fallback) }
+  return { value }
+}
+
+/** The one line that names a refused reaper threshold: the variable, the value it held, and that the reaper is off. */
+export function formatReaperThresholdRefusal(refusal: ReaperCpuThresholdRefusal): string {
+  const why = refusal.reason === "not-a-number" ? "is not a number" : "is not above zero"
+  return `${refusal.envVar} ${why}: ${JSON.stringify(refusal.raw)} — the process reaper is OFF, every other health check is still running, and HEALTH_REAPER_ENABLED=0 is the declared way to switch the reaper off (29561 item 4)`
+}
+
+/**
+ * The thresholds, with the reaper-CPU refusal riding beside the field it explains when there is one (29561 item 4).
+ *
+ * One reader, never two: a caller that can act on the refusal (this plugin's own `start()`) reads it off the result and
+ * pages once, and a caller that only needs numbers is unaffected. The refusal never throws on its way back to the
+ * plugin loader, because that loader disables the whole plugin whose start throws.
+ */
 export function defaultThresholds(): HealthThresholds {
+  const reaperCpu = readReaperCpuThreshold("HEALTH_REAPER_CPU_THRESHOLD", "80")
   return {
+    ...(reaperCpu.refusal === undefined ? {} : { reaperCpuRefusal: reaperCpu.refusal }),
     cpuWarningMultiplier: parseFloat(process.env.HEALTH_CPU_WARNING ?? "0.8"),
     cpuCriticalMultiplier: parseFloat(process.env.HEALTH_CPU_CRITICAL ?? "1.5"),
     memWarningPercent: parseInt(process.env.HEALTH_MEM_WARNING ?? "85", 10),
@@ -195,8 +250,9 @@ export function defaultThresholds(): HealthThresholds {
     ghRateLimitWarning: parseInt(process.env.HEALTH_GH_RATELIMIT_WARNING ?? "20", 10),
     // At 10s interval, 3 samples = 30s sustained
     sustainedSamples: 3,
-    reaperEnabled: process.env.HEALTH_REAPER_ENABLED !== "0",
-    reaperCpuThreshold: parseInt(process.env.HEALTH_REAPER_CPU_THRESHOLD ?? "80", 10),
+    reaperEnabled: process.env.HEALTH_REAPER_ENABLED !== "0" && reaperCpu.refusal === undefined,
+    // Inert while a refusal is present: the reaper is off, and the refusal is what a reader acts on.
+    reaperCpuThreshold: reaperCpu.value,
     reaperAgeMinutes: parseInt(process.env.HEALTH_REAPER_AGE_MINUTES ?? "30", 10),
     reaperGraceSamples: parseInt(process.env.HEALTH_REAPER_GRACE_SAMPLES ?? "6", 10),
   }
@@ -2581,6 +2637,15 @@ export const healthMonitorPlugin: TribePluginApi = {
       parseInt(process.env.HEALTH_POLL_INTERVAL ?? String(DEFAULT_HEALTH_POLL_INTERVAL_SEC), 10) ||
       DEFAULT_HEALTH_POLL_INTERVAL_SEC
     const thresholds = defaultThresholds()
+    // 29561 item 4: a refused reaper threshold turns the reaper OFF and says so ONCE, here, rather than throwing out
+    // of start(). A throw would have made the plugin loader disable this whole plugin - disk, bridge-lost paging and
+    // the reaper together - behind one log line (@cto, 2026-10-15). Severity critical because the page is the point:
+    // it broadcasts (push) through the monitor's ordinary alert path with every other check still running.
+    if (thresholds.reaperCpuRefusal !== undefined) {
+      const refusalMessage = formatReaperThresholdRefusal(thresholds.reaperCpuRefusal)
+      log.error?.(refusalMessage)
+      deliverHealthAlert(api, { severity: "critical", type: "reaper" }, refusalMessage, new Set(), true)
+    }
     const alertState = createAlertState()
     const processSource = createHealthProcessSource()
 

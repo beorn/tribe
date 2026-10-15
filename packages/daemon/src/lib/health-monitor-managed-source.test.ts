@@ -224,6 +224,78 @@ describe("health monitor managed process source", () => {
     }
   })
 
+  it("keeps the monitor running, with the reaper off and ONE page, when the CPU threshold is refused (#29561 item 4)", async () => {
+    // @cto, 2026-10-15: the refusal must not throw out of start(). defaultThresholds() runs inside start(), and the
+    // plugin loader DISABLES any plugin whose start throws, so a throw would have taken the disk checks, the
+    // bridge-lost paging and the reaper off together, behind one log line nobody reads. Rows: "eighty", "0" and "-5"
+    // each keep the plugin running, with the reaper off and one page naming the value; the readable rows live beside
+    // this one in health-monitor-canonical-reaper.test.ts.
+    for (const raw of ["eighty", "0", "-5"]) {
+      // The refusal is deliberately loud (one log.error line BESIDE the page this row asserts), and the shared harness
+      // fails any test that prints: capture console.error here rather than suppressing the log in production.
+      vi.spyOn(console, "error").mockImplementation(() => {})
+      vi.useFakeTimers()
+      vi.stubEnv("HEALTH_REAPER_CPU_THRESHOLD", raw)
+      const source = managed({ ...observation(), processes: [] })
+      sampler.source = source
+      sampler.runner = undefined
+      const broadcast = vi.fn()
+      const api = {
+        broadcast,
+        send: vi.fn(),
+        getActiveSessions: vi.fn(() => [{ name: "@cto", pid: 42, role: "member" }]),
+        getUnreadDms: vi.fn(() => ({ count: 0, oldestTs: Date.now() })),
+        getSeatTransportFacts: vi.fn(() => ({
+          missing: [],
+          connected: new Set(["@cto"]),
+          exited: new Map(),
+          unreachable: new Map(),
+        })),
+        listOpenIncidents: vi.fn(() => []),
+        getExpectedMemberCount: () => 2,
+      } as unknown as TribeClientApi
+      vi.spyOn(Bun, "spawn").mockImplementation((argv) => {
+        if (!Array.isArray(argv) || argv.join(" ") !== "git worktree list") {
+          throw new Error(`Unexpected sampler subprocess: ${JSON.stringify(argv)}`)
+        }
+        return {
+          exited: Promise.resolve(0),
+          stdout: new Response("/fixture branch\n").body,
+          stderr: new Response("").body,
+        } as unknown as ReturnType<typeof Bun.spawn>
+      })
+      let stop: (() => void) | undefined
+      try {
+        // The plugin STARTS. A throw here is exactly the wider failure this row exists to catch.
+        stop = healthMonitorPlugin.start(api) as () => void
+        const runner = registeredSampler()
+        expect(runner).toBeDefined()
+        if (!runner) throw new Error("health plugin did not register its sample callback")
+        runner.tick()
+        await runner.settled()
+        // Every other check still ran its tick, so the monitor is running, not disabled.
+        expect(runner.stats()).toMatchObject({ completed: 1, failed: 0 })
+        if (source.kind !== "managed") throw new Error("fixture must use canonical managed reads")
+        expect(source.read).toHaveBeenCalledTimes(1)
+        // ONE page, naming the variable, the value it held, and that the reaper is off - and it is a page (push).
+        const refusedPages = broadcast.mock.calls.filter(([, topic]) => topic === "health:reaper:critical")
+        expect(refusedPages).toHaveLength(1)
+        const [message, , , options] = refusedPages[0] as [string, string, undefined, { delivery?: string }]
+        expect(message).toContain("HEALTH_REAPER_CPU_THRESHOLD")
+        expect(message).toContain(JSON.stringify(raw))
+        expect(message).toContain("reaper is OFF")
+        expect(options).toMatchObject({ delivery: "push" })
+      } finally {
+        stop?.()
+        sampler.source = undefined
+        sampler.runner = undefined
+        vi.restoreAllMocks()
+        vi.unstubAllEnvs()
+        vi.useRealTimers()
+      }
+    }
+  })
+
   it("maps canonical host scalars and never invokes standalone OS acquisition", async () => {
     const spawn = stubPeripheralCommands()
     const osSampler = vi.fn(() => {
