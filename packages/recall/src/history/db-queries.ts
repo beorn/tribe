@@ -283,20 +283,16 @@ export function insertWrite(
 // ============================================================================
 
 /**
- * Escape a token for FTS5 query syntax.
- * FTS5 treats certain characters specially (e.g., . is column selector).
- * Every token is quoted as an exact phrase, including tokens without special characters.
+ * One token as an FTS5 exact phrase: quoted, so no character in it is FTS syntax (`.` would select a column), with
+ * trailing punctuation dropped and internal double quotes doubled. Never a prefix term: FTS5 reads `"tok"*` only
+ * outside quotes, and every token is quoted.
  */
-function escapeToken(token: string): { text: string; quoted: boolean } {
-  // Strip trailing punctuation that would confuse FTS5
+export function ftsPhrase(token: string): string {
   const cleaned = token.replace(/[?!.,;]+$/, "")
-  if (cleaned.length === 0) return { text: '""', quoted: true }
-  // Always quote as phrase — bulletproof against any FTS5 special chars.
-  // Only need to escape internal double quotes by doubling them.
-  return { text: `"${cleaned.replace(/"/g, '""')}"`, quoted: true }
+  return `"${cleaned.replace(/"/g, '""')}"`
 }
 
-// Convert search query to FTS5 syntax
+/** A query as FTS5 syntax: each token an exact phrase, a `"quoted phrase"` kept whole, `-term` a NOT; all AND-joined. */
 export function toFts5Query(query: string): string {
   // Handle quoted phrases
   const phrases: string[] = []
@@ -319,16 +315,9 @@ export function toFts5Query(query: string): string {
         parts.push(`"${phrase}"`)
       }
     } else if (token.startsWith("-")) {
-      // Negation: NOT term
-      const term = token.slice(1)
-      const escaped = escapeToken(term)
-      // Quoted phrases can't use prefix matching
-      parts.push(`NOT ${escaped.text}${escaped.quoted ? "" : "*"}`)
+      parts.push(`NOT ${ftsPhrase(token.slice(1))}`)
     } else {
-      // escapeToken currently quotes every token: these are exact phrases,
-      // not prefix queries. Document frequency must follow the emitted syntax.
-      const escaped = escapeToken(token)
-      parts.push(`${escaped.text}${escaped.quoted ? "" : "*"}`)
+      parts.push(ftsPhrase(token))
     }
   }
 
