@@ -360,7 +360,7 @@ describe("createInboxWaitManager", () => {
     await expect(wait).resolves.toMatchObject({ unread_count: 1, timed_out: false, aborted: false })
   })
 
-  it("keeps replies quiet by default and opt-in wakes only on a validated tracked-request reply", async () => {
+  it("keeps replies quiet by default and the opt-in wakes only the requester, on a status or a settling reply", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-reply-"))
     const db = openDatabase(join(tmpDir, "tribe.db"))
     const stmts = createStatements(db)
@@ -414,7 +414,12 @@ describe("createInboxWaitManager", () => {
         })
         sendReply(type, requestId)
         await Promise.resolve()
-        expect(progressSettled).toBe(false)
+        // 29541: under the opt-in, a progress `status` whose ref names the ball its
+        // sender REQUESTED now wakes — 29535's ruling (option b, requester side only),
+        // which a wait that starts after the row already honoured; the parked path now
+        // agrees with it. A `notify` rides the same ref but is not a correlated reply
+        // type, so it stays quiet. Neither type settles the ball.
+        expect(progressSettled).toBe(type === "status")
         expect(db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get(requestId)).toEqual(pending)
         manager.cancelConnection(connId)
         await progressWait

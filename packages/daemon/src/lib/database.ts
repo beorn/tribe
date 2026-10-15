@@ -1827,18 +1827,30 @@ function takingStatusForOpenRequestMatchSql(
  *  Attention is wider than waking, deliberately: a row can be counted without
  *  costing a model turn. The wake arm is reached only under
  *  `$include_correlated_replies`, so this widens no default wake class. */
+/** The one spelling of "this ref names an open request ball" — the row match,
+ *  shared by {@link refBoundOpenRequestPredicateSql} and the statement that
+ *  resolves the ball's two sides for the insert-driven JS path (29541). */
+export function refBoundOpenRequestMatchSql(refExpr: string, alias: string): string {
+  return `(${alias}.request_id = ${refExpr} OR ${alias}.message_id = ${refExpr})
+							AND ${alias}.request_kind = 'request'`
+}
+
+/** The one spelling of "…whose holder is `party` on `side`". */
+export function refBoundOpenRequestPartySql(partyExpr: string, side: "either" | "requester", alias: string): string {
+  return side === "requester"
+    ? `${alias}.sender = ${partyExpr}`
+    : `(${alias}.recipient = ${partyExpr} OR ${alias}.sender = ${partyExpr})`
+}
+
 export function refBoundOpenRequestPredicateSql(
   refExpr: string,
   partyExpr: string,
   side: "either" | "requester",
 ): string {
-  const partyMatch =
-    side === "requester" ? `sender = ${partyExpr}` : `(recipient = ${partyExpr} OR sender = ${partyExpr})`
   return `${refExpr} IS NOT NULL AND EXISTS (
 						SELECT 1 FROM pending_request
-						WHERE (request_id = ${refExpr} OR message_id = ${refExpr})
-							AND request_kind = 'request'
-							AND ${partyMatch}
+						WHERE ${refBoundOpenRequestMatchSql(refExpr, "pending_request")}
+							AND ${refBoundOpenRequestPartySql(partyExpr, side, "pending_request")}
 					)`
 }
 
@@ -2789,6 +2801,19 @@ export function createStatements(db: Database) {
           OR m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
         )
       ORDER BY m.rowid DESC
+      LIMIT 1
+    `),
+    ),
+
+    /** 29541 — who holds each side of the open request ball a ref names, so the
+     *  insert-driven JS path can answer the same question as the SQL wake arm
+     *  instead of restating it. Built from the same row match, so the two
+     *  halves cannot drift. */
+    selectRefBoundOpenRequest: db.prepare(
+      assertSingleStatement(`
+      SELECT sender AS requester, recipient AS owner
+      FROM pending_request
+      WHERE ${refBoundOpenRequestMatchSql("$ref", "pending_request")}
       LIMIT 1
     `),
     ),

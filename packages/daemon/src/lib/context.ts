@@ -54,16 +54,26 @@ export type MessageInsertedInfo = {
   /** Canonical tracked-request correlation, present only when this message
    *  closed a still-open reply target owned by `requester`. */
   correlatedReply: { requestId: string; requester: string } | null
+  /** 29541 — the open request ball this row's ref names, with whoever holds
+   *  each side of it, present only when the ref names one. The JS half of
+   *  {@link refBoundOpenRequestPredicateSql}: same row match, same question, so
+   *  the insert-driven re-check cannot answer differently from the SQL arm. */
+  refBoundOpenRequest?: { requester: string; owner: string } | null
 }
 
-/** True when this message settles a tracked request that `session` opened. The
- *  one answer to "is this the reply I asked for?", shared by inbox.wait's opt-in
- *  wake and focus-mode push. */
+/** True when this message answers a request that `session` opened. The one
+ *  answer to "is this the reply I asked for?", shared by inbox.wait's opt-in
+ *  wake and focus-mode push, over both ways a row can answer one: a structured
+ *  reply that settled a tracked request (`correlatedReply`), and a progress
+ *  status whose ref names the requester's still-open ball (29541). The second
+ *  is the `requester` side of {@link refBoundOpenRequestPredicateSql} — the
+ *  owner-side precision stays quiet, exactly as in the SQL arm. */
 export function settlesRequestOpenedBy(
-  info: Pick<MessageInsertedInfo, "type" | "correlatedReply">,
+  info: Pick<MessageInsertedInfo, "type" | "correlatedReply" | "refBoundOpenRequest">,
   session: string,
 ): boolean {
-  return CORRELATED_REPLY_TYPES_SET.has(info.type) && info.correlatedReply?.requester === session
+  if (!CORRELATED_REPLY_TYPES_SET.has(info.type)) return false
+  return info.correlatedReply?.requester === session || info.refBoundOpenRequest?.requester === session
 }
 
 export type TribeContext = {

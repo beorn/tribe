@@ -72,8 +72,14 @@ function fixture(): Fixture {
     oldest_unread_ts: 0,
   })
   const reader = createTribeContext({
-    db, stmts, sessionId: "attention-reader", sessionRole: "member",
-    initialName: "@attention-reader", domains: [], claudeSessionId: null, claudeSessionName: null,
+    db,
+    stmts,
+    sessionId: "attention-reader",
+    sessionRole: "member",
+    initialName: "@attention-reader",
+    domains: [],
+    claudeSessionId: null,
+    claudeSessionName: null,
   })
   const manager = createInboxWaitManager(
     status,
@@ -83,8 +89,15 @@ function fixture(): Fixture {
   )
   const mk = (id: string, name: string) =>
     createTribeContext({
-      db, stmts, sessionId: id, sessionRole: "member", initialName: name, domains: [],
-      claudeSessionId: null, claudeSessionName: null, onMessageInserted: manager.onMessageInserted,
+      db,
+      stmts,
+      sessionId: id,
+      sessionRole: "member",
+      initialName: name,
+      domains: [],
+      claudeSessionId: null,
+      claudeSessionName: null,
+      onMessageInserted: manager.onMessageInserted,
     })
   const built = { dir, db, stmts, requester: mk("requester", REQUESTER), peer: mk("peer", PEER), manager }
   opened.push(built)
@@ -109,7 +122,17 @@ function openBallAndReply(
   sender: TribeContext = f.peer,
   to: string = REQUESTER,
 ): { ball: ReturnType<typeof sendMessage>; row: ReturnType<typeof sendMessage> } {
-  const ball = sendMessage(f.requester, PEER, "please answer", "request", undefined, undefined, "direct", {}, { request: BALL })
+  const ball = sendMessage(
+    f.requester,
+    PEER,
+    "please answer",
+    "request",
+    undefined,
+    undefined,
+    "direct",
+    {},
+    { request: BALL },
+  )
   const row = sendMessage(sender, to, "a receipt on your ball", type, undefined, BALL)
   return { ball, row }
 }
@@ -142,6 +165,26 @@ describe("29535 a ref-bound status wakes only its requester, and only under the 
     expect(quiet.attention.actionable_unread.length).toBeGreaterThan(0)
   })
 
+  // 29541: the same row, but the wait is ALREADY PARKED when it lands. The case
+  // above starts its wait after the row exists, so it only ever reads the
+  // wait-start snapshot the SQL tail feeds; a live `tribe inbox-wait` is parked
+  // first and must be woken by the INSERT, which is the path the daemon drives
+  // through onMessageInserted. The reported bug was this shape, not that one.
+  it("wakes a wait that is already parked when the ref-bound status arrives", async () => {
+    const f = fixture()
+    sendMessage(f.requester, PEER, "please answer", "request", undefined, undefined, "direct", {}, { request: BALL })
+
+    const parked = f.manager.wait(REQUESTER, "conn-parked", 2_000, { wakeOnCorrelatedReply: true })
+    // Let the wait register before anything is inserted, so the wake can only
+    // come from the insert-driven re-check.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const row = sendMessage(f.peer, REQUESTER, "a receipt arriving mid-wait", "status", undefined, BALL)
+
+    const woken = await parked
+    expect(woken.status).toBe("woken")
+    expect(woken.attention.actionable_unread.map((r) => r.id)).toContain(row.id)
+  })
+
   it("stays quiet on the owner side, on a notify, and on a closed ball", () => {
     // Owner side: the PEER opens the ball, so @requester is its OWNER, and the
     // ball's requester sends the precision INTO the waiter's mailbox. The row
@@ -149,7 +192,17 @@ describe("29535 a ref-bound status wakes only its requester, and only under the 
     // it: the opt-in arm asks only the requester side. Flip side to "either"
     // in the wake arm and this assertion is the one that fails.
     const ownerCase = fixture()
-    sendMessage(ownerCase.peer, REQUESTER, "please answer", "request", undefined, undefined, "direct", {}, { request: BALL })
+    sendMessage(
+      ownerCase.peer,
+      REQUESTER,
+      "please answer",
+      "request",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { request: BALL },
+    )
     const precision = sendMessage(ownerCase.peer, REQUESTER, "a precision on your ball", "status", undefined, BALL)
     const ownerAttention = readAttentionProjection(ownerCase.requester, REQUESTER, Date.now(), 0, makeOpts()).attention
     expect(ownerAttention.actionable_unread.map((r) => r.id)).toContain(precision.id)
