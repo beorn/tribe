@@ -503,7 +503,7 @@ describe("vault-fts fail-closed guards", () => {
       expect(getVaultDbPath()).toBeNull()
 
       const result = searchVault("termless", 5, getVaultDbPath())
-      expect(result).toEqual({ form: "all", terms: ["termless"], unmatched: [], matches: [] })
+      expect(result).toEqual({ form: "all", terms: ["termless"], unmatched: [], matched: 0, matches: [] })
     } finally {
       rmSync(isolated, { recursive: true, force: true })
     }

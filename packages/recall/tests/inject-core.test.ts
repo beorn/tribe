@@ -609,7 +609,7 @@ describe("runInjectDelta — per-step durations (@ag/tribe/25071 row 1)", () => 
   // 29487: the hook's log row names how call A searched the vault, so a run whose vault found nothing says which
   // terms it tried and which no node holds.
   test("call A's vault receipt rides the result, also when nothing was found", async () => {
-    const vaultQuery = { form: "any", terms: ["inject-core.ts", "stall"], unmatched: ["stall"] }
+    const vaultQuery = { form: "any", terms: ["inject-core.ts", "stall"], unmatched: ["stall"], matched: 12 }
     recallMock.mockResolvedValueOnce({ results: [], vaultQuery }).mockResolvedValueOnce({ results: [] })
     const anchor = { query: "inject-core.ts stall", identifier: "inject-core.ts" }
 

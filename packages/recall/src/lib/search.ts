@@ -1063,7 +1063,14 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
           durationMs: duration,
           results: unprovenEmpty ? null : allResults,
           ...(vault !== null && vaultDb !== null
-            ? { vaultQuery: { form: vault.form, terms: vault.terms, unmatched: vault.unmatched } }
+            ? {
+                vaultQuery: {
+                  form: vault.form,
+                  terms: vault.terms,
+                  unmatched: vault.unmatched,
+                  matched: vault.matched,
+                },
+              }
             : {}),
         },
         null,

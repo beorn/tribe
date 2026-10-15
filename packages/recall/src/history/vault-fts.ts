@@ -107,6 +107,11 @@ export interface VaultQuery {
   terms: string[]
   /** Terms no vault node holds. */
   unmatched: string[]
+  /**
+   * Nodes the form that ran matched, before the window and before nodes join by source: a count far above the window
+   * says a generic term swamps it (silvery matched 11,891 vault nodes, @cto 03d64a82).
+   */
+  matched: number
 }
 
 export interface VaultSearch extends VaultQuery {
@@ -304,22 +309,22 @@ export function searchVault(query: string, limit: number, vaultDb: string | null
   const asWritten = FTS_SYNTAX.test(query)
   const terms = asWritten ? [] : vaultTerms(query)
   const form = asWritten ? "as-written" : terms.length === 0 ? "none" : "all"
-  const none: VaultSearch = { form, terms, unmatched: [], matches: [] }
+  const none: VaultSearch = { form, terms, unmatched: [], matched: 0, matches: [] }
   if (limit <= 0 || vaultDb === null) return none
   const db = openVaultDb(vaultDb)
 
   try {
     if (asWritten) {
       const ftsQuery = toFts5Query(query)
-      return { ...none, matches: ftsQuery ? matchVault(db, ftsQuery, limit) : [] }
+      return ftsQuery ? { ...none, ...matchVault(db, ftsQuery, limit) } : none
     }
     if (terms.length === 0) return none
     const phrases = terms.map(ftsPhrase)
     const all = matchVault(db, phrases.join(" "), limit)
-    if (all.length > 0) return { ...none, matches: all }
+    if (all.matched > 0) return { ...none, ...all }
     const unmatched = terms.filter((_, i) => !holds(db, phrases[i] ?? ""))
     if (terms.length === 1) return { ...none, unmatched }
-    return { form: "any", terms, unmatched, matches: matchVault(db, phrases.join(" OR "), limit) }
+    return { form: "any", terms, unmatched, ...matchVault(db, phrases.join(" OR "), limit) }
   } catch (error) {
     throw vaultDbError(vaultDb, `FTS query failed (${errorMessage(error)})`)
   }
@@ -330,8 +335,12 @@ function holds(db: Database, phrase: string): boolean {
   return db.prepare("SELECT 1 FROM nodes_fts WHERE nodes_fts MATCH ? LIMIT 1").get(phrase) !== null
 }
 
-/** One FTS query's matches, attributed to their nearest file-backed source, best rank per source, best first. */
-function matchVault(db: Database, ftsQuery: string, limit: number): VaultMatch[] {
+/**
+ * One FTS query's matches, attributed to their nearest file-backed source, best rank per source, best first, with the
+ * count of rows the query matched before its window. The count is its own statement: FTS5 refuses bm25() and snippet()
+ * beside a window function, and the count reads no rank or snippet.
+ */
+function matchVault(db: Database, ftsQuery: string, limit: number): { matches: VaultMatch[]; matched: number } {
   const rows = db
     .prepare(
       `SELECT n.id,
@@ -398,7 +407,12 @@ function matchVault(db: Database, ftsQuery: string, limit: number): VaultMatch[]
     const current = bestBySource.get(sourceKey)
     if (!current || match.rank < current.rank) bestBySource.set(sourceKey, match)
   }
-  return [...bestBySource.values()].sort((a, b) => a.rank - b.rank).slice(0, limit)
+  const matches = [...bestBySource.values()].sort((a, b) => a.rank - b.rank).slice(0, limit)
+  const matched =
+    rows.length === 0
+      ? 0
+      : (db.prepare("SELECT count(*) AS n FROM nodes_fts WHERE nodes_fts MATCH ?").get(ftsQuery) as { n: number }).n
+  return { matches, matched }
 }
 
 function errorMessage(error: unknown): string {

@@ -498,9 +498,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const vaultMatches = vault?.matches ?? []
     const vaultMs = Date.now() - vaultStart
     if (vault !== null && vaultDb !== null) {
-      vaultQuery = { form: vault.form, terms: vault.terms, unmatched: vault.unmatched }
+      vaultQuery = { form: vault.form, terms: vault.terms, unmatched: vault.unmatched, matched: vault.matched }
       log(
-        `vault FTS: ${vaultMatches.length} matches, ${vault.form} of [${vault.terms.join(", ")}]${vault.unmatched.length > 0 ? `, unmatched [${vault.unmatched.join(", ")}]` : ""} (${vaultMs}ms) [${vaultDb}]`,
+        `vault FTS: ${vaultMatches.length} of ${vault.matched} matched, ${vault.form} of [${vault.terms.join(", ")}]${vault.unmatched.length > 0 ? `, unmatched [${vault.unmatched.join(", ")}]` : ""} (${vaultMs}ms) [${vaultDb}]`,
       )
     }
 
