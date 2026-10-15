@@ -15,8 +15,9 @@
 
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
-import { resolve } from "node:path"
+import { dirname, resolve } from "node:path"
 import { createLogger } from "loggily"
+import { HAB_CLI_BIN_ENV } from "tribe-wire/lib/hab-session-env"
 import { createTimers } from "./timers.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
 
@@ -155,23 +156,41 @@ export const accountlyPlugin: TribePluginApi = {
       }
 
       try {
-        const agBin = Bun.which("ag")
-        if (!agBin) {
+        // Hab supplies a stable current-release pointer for its CLI. Ag is the sibling executable in that release;
+        // resolve it at each poll so a shared-main update cannot move this child ahead of promotion (29513).
+        const habCliPointer = process.env[HAB_CLI_BIN_ENV]?.trim()
+        if (!habCliPointer || !existsSync(habCliPointer)) {
+          const missing = habCliPointer
+            ? `${HAB_CLI_BIN_ENV}: ${habCliPointer} does not exist`
+            : `${HAB_CLI_BIN_ENV}: unset`
+          const message = `${missing}; accountly skipped the Ag status poll because its promoted-release pointer is unavailable`
+          log.warn?.(message)
           if (api.claimDedup("accountly:cli-missing")) {
-            api.broadcast(
-              "accountly plugin: `ag` not found on PATH, auto-rotation disabled",
-              "health:account:error",
-              undefined,
-              {
-                delivery: "pull",
-                topic: "health:account:error",
-              },
-            )
+            api.broadcast(message, "health:account:error", undefined, {
+              delivery: "pull",
+              topic: "health:account:error",
+            })
+          }
+          return nextInterval
+        }
+
+        const agBin = Bun.which("ag", { PATH: dirname(habCliPointer) })
+        if (!agBin) {
+          const message = `Ag CLI: no executable beside ${HAB_CLI_BIN_ENV} ${habCliPointer}; accountly skipped the status poll`
+          log.warn?.(message)
+          if (api.claimDedup("accountly:cli-missing")) {
+            api.broadcast(message, "health:account:error", undefined, {
+              delivery: "pull",
+              topic: "health:account:error",
+            })
           }
           return nextInterval
         }
 
         // Check quotas via the `ag` account CLI
+        log.info?.(
+          `Ag CLI: accountly spawn argv ${JSON.stringify([agBin, "status", "--json"])} from ${HAB_CLI_BIN_ENV} ${habCliPointer}`,
+        )
         const proc = Bun.spawn([agBin, "status", "--json"], {
           cwd: process.cwd(),
           stdout: "pipe",
