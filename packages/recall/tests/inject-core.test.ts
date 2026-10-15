@@ -864,17 +864,16 @@ describe("Phase 3: call A searches the vault on the anchor, call B the rest on t
     expect(items.map((i) => i.body)).toEqual([expect.stringMatching(line), vaultHit.snippet])
   })
 
-  test("A over the wall: nothing answered, and the hook says so as it always has", async () => {
+  // @cto's Phase 3 follow-up 1 (29480): the line names the call the wall cut, after the deadline's own words.
+  test("A over the wall: nothing answered, and the hook says which search did not finish", async () => {
     recallMock.mockRejectedValueOnce(new RecallDeadlineError(1500))
 
     const result = await runInjectDelta(JEV, createMemorySeenStore(), { deps: { deriveVaultAnchor: () => anchor } })
 
+    const line =
+      'recall skipped: over the 1.5 s wall (25071): the vault search for "Jev memory system" did not finish, so nothing was searched after it'
     expect(recallMock).toHaveBeenCalledTimes(1)
-    expect(result).toMatchObject({
-      skipped: false,
-      additionalContext: "recall skipped: over the 1.5 s wall (25071)",
-      skippedSteps: { recall_vault: "recall skipped: over the 1.5 s wall (25071)" },
-    })
+    expect(result).toMatchObject({ skipped: false, additionalContext: line, skippedSteps: { recall_vault: line } })
   })
 
   test("nothing found names the vault anchor and both calls' times", async () => {

@@ -23,7 +23,7 @@ import { loadLlm, selectAvailableCheapModels } from "../lib/llm-backend.ts"
 import { log, THIRTY_DAYS_MS } from "./recall-shared.ts"
 import { describeFreshness, judgeIndexFreshness, type IndexFreshness } from "../lib/staleness.ts"
 import type { RecallSearchResult } from "./recall-shared.ts"
-import { runInjectDelta, createTmpfileSeenStore, timeStep } from "../lib/inject-core.ts"
+import { runInjectDelta, createTmpfileSeenStore, timeStep, type RunInjectDeltaResult } from "../lib/inject-core.ts"
 import { recall, parseTimeToMs } from "./search.ts"
 import { getVaultDbPath } from "./vault-fts.ts"
 import { SYNTHESIS_PROMPT, raceLlmModels, formatResultsForLlm, type LlmRaceModelResult } from "./synthesize.ts"
@@ -92,6 +92,9 @@ export interface HookResult {
   reason?: import("../lib/prompt-filter.ts").InjectSkipReason
   /** Each step skipped rather than waited on, and why (@ag/tribe/25071). Absent when nothing was skipped. */
   skippedSteps?: Record<string, string>
+  /** Why nothing was injected after a search, and what was searched in how long (29480). */
+  emptyReason?: Extract<import("../lib/prompt-filter.ts").InjectSkipReason, "no_results" | "all_seen" | "low_quality">
+  searched?: string
   /** How the vault was searched, when it was: the hook's log row carries it (29487). */
   vaultQuery?: import("./vault-fts.ts").VaultQuery
   hookOutput?: {
@@ -121,11 +124,18 @@ export async function hookRecall(
     vaultDb: getVaultDbPath(),
     ...(opts.recall === undefined ? {} : { deps: { recall: opts.recall } }),
   })
+  return hookResultFromCore(core)
+}
+
+/** The hook's result from one injection decision, carrying what its own log row says about it (29480). */
+export function hookResultFromCore(core: RunInjectDeltaResult): HookResult {
   const skipped = core.skippedSteps ? { skippedSteps: core.skippedSteps } : {}
   if (core.skipped) return { skipped: true, reason: core.reason, ...skipped }
   return {
     skipped: false,
     ...skipped,
+    ...(core.emptyRecallReason === undefined ? {} : { emptyReason: core.emptyRecallReason }),
+    ...(core.searched === undefined ? {} : { searched: core.searched }),
     ...(core.vaultQuery === undefined ? {} : { vaultQuery: core.vaultQuery }),
     hookOutput: {
       hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: core.additionalContext },

@@ -155,6 +155,9 @@ function parseHookLogEntry(line: string): ParsedHookEntry | null {
     return null
   }
 
+  // On purpose: the hook's own recall:hook:prompt rows are the authoritative, timed ones, and since 29480 they carry
+  // why nothing was injected (empty_reason) and which call the wall cut (wall_cut). The envelope's injection:skip rows
+  // are its untimed debug stream.
   if (!parsed || typeof parsed !== "object" || parsed.namespace !== "recall:hook:prompt") {
     return null
   }

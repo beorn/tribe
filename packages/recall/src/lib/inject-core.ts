@@ -220,6 +220,8 @@ export type RunInjectDeltaResult =
        * took (@ag/recall/three-dark-search-paths Phase 3).
        */
       emptyRecallReason?: Extract<InjectSkipReason, "no_results" | "all_seen" | "low_quality">
+      /** With emptyRecallReason: what was searched and how long each call took, for the hook's own row (29480). */
+      searched?: string
     }
 
 /** What an injection says, once per session, when no vault is bound (25149, @cto Q1). */
@@ -460,9 +462,11 @@ async function runRecallInjection(
       vaultCall = await call("recall_vault", anchor.query, VAULT_PHASES)
     } catch (error) {
       if (!(error instanceof RecallDeadlineError)) throw error
-      // Said in the hook output, not only its log: the turn runs without recall, and the reader should know why.
-      skippedSteps.recall_vault = error.message
-      return withSkippedSteps({ skipped: false, additionalContext: error.message, newKeys: [], turn })
+      // Said in the hook output, not only its log: the turn runs without recall, and the reader should know why. The
+      // line keeps the deadline's own words first, the prefix the eval's reader keys on (tools/recall-eval-hook.ts).
+      const line = `${error.message}: the vault search for "${anchor.query}" did not finish, so nothing was searched after it`
+      skippedSteps.recall_vault = line
+      return withSkippedSteps({ skipped: false, additionalContext: line, newKeys: [], turn })
     }
   }
 
@@ -512,7 +516,9 @@ async function runRecallInjection(
     reason: Extract<InjectSkipReason, "no_results" | "all_seen" | "low_quality">,
     outcome: string,
   ): RunInjectDeltaResult => {
-    const line = `recall: ${outcome}; searched ${searched()} (25071)`
+    const said = searched()
+    const line = `recall: ${outcome}; searched ${said} (25071)`
+    // The envelope's debug stream; the authoritative row for this decision is the hook's own, timed one (29480).
     emitInjectionDebugEvent({ source: "recall", action: "skip", reason, prompt: prompt.slice(0, 200) })
     return withSkippedSteps({
       skipped: false,
@@ -520,6 +526,7 @@ async function runRecallInjection(
       newKeys: [],
       turn,
       emptyRecallReason: reason,
+      searched: said,
       ...vaultReceipt,
     })
   }

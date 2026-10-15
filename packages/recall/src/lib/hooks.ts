@@ -27,7 +27,7 @@ import * as path from "path"
 import * as os from "os"
 import * as fs from "fs"
 import { createLogger, drainOutput } from "loggily"
-import { hookRecall } from "../history/recall"
+import { hookRecall, type HookResult } from "../history/recall"
 import { summarizeUnprocessedDays } from "./summarize-daily"
 import { roundSteps, timeStepAsync } from "./inject-core"
 import { createDeadlineRecall } from "./recall-deadline.ts"
@@ -283,6 +283,25 @@ export async function readStdin(): Promise<string> {
  * A step skipped rather than waited on is said out loud, never silent (@ag/tribe/25071): today the project-source
  * refresh, when the index writer or SQLite's write lock is held. Recall ran on the library path.
  */
+/** The recall calls a wall can cut (inject-core.ts): call A on the vault, call B on the prompt. */
+const WALL_CUT_STEPS = ["recall_vault", "recall"] as const
+
+/**
+ * What the hook's own row says about one decision (29480): why nothing was injected, what was searched in how long,
+ * and which recall call the wall cut. This timed recall:hook:prompt row is the authoritative one; the envelope's
+ * injection:skip event is its debug stream, untimed.
+ */
+export function hookDecisionFields(result: HookResult): Record<string, unknown> {
+  const skippedSteps = result.skippedSteps ?? {}
+  const wallCut = WALL_CUT_STEPS.filter((step) => skippedSteps[step] !== undefined)
+  return {
+    ...(result.emptyReason === undefined ? {} : { empty_reason: result.emptyReason }),
+    ...(result.searched === undefined ? {} : { searched: result.searched }),
+    ...(wallCut.length === 0 ? {} : { wall_cut: wallCut }),
+    ...(Object.keys(skippedSteps).length === 0 ? {} : { skipped_steps: skippedSteps }),
+  }
+}
+
 function warnSkippedSteps(
   skippedSteps: Record<string, string> | undefined,
   path: "library",
@@ -390,6 +409,7 @@ export async function cmdHook(): Promise<void> {
       hookLog.info?.("library skipped", {
         session: sessionId,
         reason: result.reason,
+        ...hookDecisionFields(result),
         elapsed_ms: elapsed,
         steps: roundSteps(steps),
         prompt_preview: prompt.slice(0, 60),
@@ -401,6 +421,7 @@ export async function cmdHook(): Promise<void> {
     hookLog.info?.("library ok", {
       session: sessionId,
       context_len: additionalContext.length,
+      ...hookDecisionFields(result),
       ...(result.vaultQuery === undefined ? {} : { vault_query: result.vaultQuery }),
       elapsed_ms: elapsed,
       steps: roundSteps(steps),
