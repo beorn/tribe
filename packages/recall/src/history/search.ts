@@ -543,13 +543,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       for (const variant of queryVariants.slice(0, 4)) {
         const began = performance.now()
         try {
-          const variantCandidates = retrieveCandidates({
-            db,
-            query: variant,
-            messages: { ...messageOpts, limit },
-            projectContent: { ...projectContentOpts, limit },
-          })
-          const varMsgs = variantCandidates.messages
+          const varMsgs = retrieveCandidates({ db, query: variant, messages: { ...messageOpts, limit } }).messages
           for (const r of varMsgs.results) {
             if (!seenMsgIds.has(r.id)) {
               seenMsgIds.add(r.id)
@@ -559,7 +553,12 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
             }
           }
 
-          const varProject = variantCandidates.projectContent
+          // Keep messages already found if the content leg rejects this variant.
+          const varProject = retrieveCandidates({
+            db,
+            query: variant,
+            projectContent: { ...projectContentOpts, limit },
+          }).projectContent
           for (const r of varProject.results) {
             if (!seenContentIds.has(r.id)) {
               seenContentIds.add(r.id)
