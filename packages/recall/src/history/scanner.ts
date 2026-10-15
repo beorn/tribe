@@ -249,6 +249,11 @@ export interface ReviewOptions {
    * "skipped" recommendation — never a zero result read as an empty index.
    */
   skipSearchBenchmarks?: boolean
+  /**
+   * The vault the live recall test searches: `--vault-db`, resolved by the caller at its boundary; null searches none.
+   * recall() reads no binding of its own (@cto 456e6e77).
+   */
+  vaultDb: string | null
 }
 
 /**
@@ -291,7 +296,7 @@ export function getBlockedRebuildInfo(projectRoot?: string): BlockedRebuildInfo 
   return null
 }
 
-export async function reviewMemorySystem(projectRoot: string, opts: ReviewOptions = {}): Promise<ReviewResult> {
+export async function reviewMemorySystem(projectRoot: string, opts: ReviewOptions): Promise<ReviewResult> {
   const startTime = Date.now()
   const skipLlm = opts.skipLlm ?? false
   const skipSearchBenchmarks = opts.skipSearchBenchmarks ?? false
@@ -458,6 +463,7 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
       const result = await recall(testQuery, {
         limit: 5,
         timeout: 8000,
+        vaultDb: opts.vaultDb,
       })
       const durationMs = Date.now() - startTime
       const uniqueSessions = new Set(result.results.map((r) => r.sessionId)).size

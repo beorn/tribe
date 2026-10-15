@@ -8,6 +8,7 @@ import * as os from "os"
 import type { Database } from "bun:sqlite"
 import { getDb, closeDb, DB_PATH, getActiveSessionsInWindow, getActivitySummary, getIndexMeta } from "../history/db"
 import { reviewMemorySystem } from "../history/recall"
+import { getVaultDbPath } from "../history/vault-fts.ts"
 import { formatCost } from "./llm-backend.ts"
 import { discoverActiveSession, renderDiscoveryDiagnostics } from "./session-discovery.ts"
 import { resolveHostProjectRoot } from "./project-root.ts"
@@ -61,6 +62,8 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   // The four FTS search benchmarks are gated by the same flag but skip independently (27712).
   const skipLlm = !opts.bench
   const skipSearchBenchmarks = !opts.bench
+  // The leading --vault-db, resolved at this command's boundary for the review's live recall test (@cto 456e6e77).
+  const vaultDb = getVaultDbPath()
 
   // Active-session discovery diagnostics (@km/bearly/19943): a bounded
   // filesystem scan (mtime-windowed, codex-inspect-capped) — NO LLM. Makes the
@@ -70,7 +73,7 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   const sessionDiscovery = discoverActiveSession({ cwd: process.cwd() }).diagnostics
 
   if (opts.json) {
-    const review = await reviewMemorySystem(projectRoot, { skipLlm, skipSearchBenchmarks })
+    const review = await reviewMemorySystem(projectRoot, { skipLlm, skipSearchBenchmarks, vaultDb })
     console.log(JSON.stringify({ ...review, sessionDiscovery }, null, 2))
     return
   }
@@ -302,7 +305,7 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   }
 
   // ── Hook Configuration ──────────────────────────────────────────────
-  const review = await reviewMemorySystem(projectRoot, { skipLlm, skipSearchBenchmarks })
+  const review = await reviewMemorySystem(projectRoot, { skipLlm, skipSearchBenchmarks, vaultDb })
   const hk = review.hookConfig
 
   console.log(`${BOLD}Hook Configuration${RESET}`)

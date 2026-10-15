@@ -174,7 +174,7 @@ describe("search and status cannot disagree about one stamp", () => {
   test("a stamp inside the window reads complete and not stale, in both instruments", async () => {
     setIndexMeta(getDb(), "last_rebuild", stampAgedBy(60_000))
     const search = readIndexProvenance({})
-    const review = await reviewMemorySystem(process.cwd(), { skipLlm: true, skipSearchBenchmarks: true })
+    const review = await reviewMemorySystem(process.cwd(), { skipLlm: true, skipSearchBenchmarks: true, vaultDb: null })
     expect(search).toBe("complete")
     expect(review.indexHealth.freshness.provenance).toBe(search)
     expect(review.indexHealth.isStale).toBe(false)
@@ -183,7 +183,7 @@ describe("search and status cannot disagree about one stamp", () => {
   test("a stamp past the window reads stale and IS stale, in both instruments", async () => {
     setIndexMeta(getDb(), "last_rebuild", stampAgedBy(80 * 60 * 1000))
     const search = readIndexProvenance({})
-    const review = await reviewMemorySystem(process.cwd(), { skipLlm: true, skipSearchBenchmarks: true })
+    const review = await reviewMemorySystem(process.cwd(), { skipLlm: true, skipSearchBenchmarks: true, vaultDb: null })
     // The defect @ag/recall/27930 was this pair reading "stale" beside
     // isStale:false, because status judged a 1h window while search judged 5m.
     expect(search).toBe("stale")
