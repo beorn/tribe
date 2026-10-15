@@ -174,7 +174,8 @@ export async function planQuery(query: string, context: QueryContext, options: P
     lastModel = model
 
     const attempt = new AbortController()
-    const timer = setTimeout(() => attempt.abort(), Math.min(timeoutMs, left))
+    const budgetMs = Math.min(timeoutMs, left)
+    const timer = setTimeout(() => attempt.abort(), budgetMs)
     let result
     try {
       result = await llm.queryModel({
@@ -184,7 +185,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
         abortSignal: attempt.signal,
       })
     } catch (error) {
-      const message = providerError(llm, model, error)
+      const message = attemptFailure(llm, model, error, attempt.signal, budgetMs)
       log(`planner: ${model.modelId} failed (${message})`)
       failures.push({ modelId: model.modelId, error: message })
       continue
@@ -197,7 +198,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
       cost = (cost ?? 0) + llm.estimateCost(model, usage.promptTokens, usage.completionTokens)
     }
     if (result.response.error) {
-      const message = providerError(llm, model, result.response.error)
+      const message = attemptFailure(llm, model, result.response.error, attempt.signal, budgetMs)
       log(`planner: ${model.modelId} failed (${message})`)
       failures.push({ modelId: model.modelId, error: message })
       continue
@@ -273,6 +274,21 @@ export function planVariants(plan: QueryPlan): string[] {
 // the one deadline with every later one, so a Google call through the agy one-shot starved the fallback.
 function plannerModels(llm: LlmBackend): LlmModel[] {
   return selectBudgetedModels(llm).models
+}
+
+/**
+ * One failed attempt's cause. When the planner's own deadline aborted it, that is the cause, whatever words the
+ * provider wrapped around the abort ("dispatch failed … matched none of the known failure classes", 29473 receipt).
+ */
+function attemptFailure(
+  llm: LlmBackend,
+  model: LlmModel,
+  error: unknown,
+  signal: AbortSignal,
+  budgetMs: number,
+): string {
+  if (signal.aborted) return `no answer within its ${budgetMs} ms attempt deadline`
+  return providerError(llm, model, error)
 }
 
 function providerError(llm: LlmBackend, model: LlmModel, error: unknown): string {

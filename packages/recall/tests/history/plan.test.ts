@@ -351,7 +351,10 @@ describe("planQuery provider fallback", () => {
     }
   })
 
-  test("the total cap ends the loop: no model starts after two attempt deadlines", async () => {
+  // @failure The 29473 corpus receipt's pair-026 was cut by its own 14 s attempt deadline, and the row read "OpenRouter
+  // dispatch failed … no HTTP status; its error matched none of the known failure classes": the provider's words for
+  // an abort the planner itself sent.
+  test("the total cap ends the loop: no model starts after two attempt deadlines, each named as the cause", async () => {
     vi.useFakeTimers()
     const models: LlmModel[] = [
       { provider: "google", modelId: "slow-1" },
@@ -364,7 +367,11 @@ describe("planQuery provider fallback", () => {
         calls.push(model.modelId)
         if (!abortSignal) throw new Error("planner did not pass its deadline signal")
         await new Promise<void>((resolve) => abortSignal.addEventListener("abort", () => resolve(), { once: true }))
-        return { response: { error: "attempt deadline reached" } }
+        return {
+          response: {
+            error: `OpenRouter dispatch failed for model ${model.modelId} with no HTTP status; its error matched none of the known failure classes (auth, quota, model, transport).`,
+          },
+        }
       },
       getModel: (id) => models.find((m) => m.modelId === id),
       budgetedModelIds: models.map((m) => m.modelId),
@@ -381,7 +388,9 @@ describe("planQuery provider fallback", () => {
 
       expect(result.plan).toBeNull()
       expect(calls).toEqual(["slow-1", "slow-2"])
-      expect(result.error).toBe("slow-1: attempt deadline reached; slow-2: attempt deadline reached")
+      expect(result.error).toBe(
+        "slow-1: no answer within its 25 ms attempt deadline; slow-2: no answer within its 25 ms attempt deadline",
+      )
     } finally {
       vi.useRealTimers()
     }
