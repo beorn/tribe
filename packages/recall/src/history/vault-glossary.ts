@@ -71,11 +71,9 @@ const PROJECT_DIRS: ReadonlyArray<string> = ["vendor/", "apps/", "packages/", "h
 
 function buildGlossary(vaultDb: string): Set<string> | null {
   if (glossaryPath === vaultDb) return glossarySet
-  // Opened before the path is recorded: a vault that cannot be opened refuses on every call, never cached as none.
+  // A vault that cannot be opened refuses here on every call. The handle is openVaultDb's kept one, so a failed query
+  // below leaves it open for the next call rather than closing it.
   const db = openVaultDb(vaultDb)
-  glossaryPath = vaultDb
-  glossarySet = null
-  rootScopeSet = null
 
   const out = new Set<string>(EXPLICIT_ALIASES.map((s) => s.toLowerCase()))
 
@@ -143,12 +141,17 @@ function buildGlossary(vaultDb: string): Set<string> | null {
       }
     }
 
+    // Recorded together, and only once both queries answered: a failure is never cached, so the next call tries again.
+    glossaryPath = vaultDb
     glossarySet = out
     rootScopeSet = roots
     return out
-  } catch {
-    // silent-fallback-allow: unavailable vault glossary only disables anchor-term boosting.
-    return null
+  } catch (error) {
+    // A query that fails on an open vault is a broken store, not an unavailable boost: it says so and names the vault,
+    // which SQLite's own message does not (@cto 159a5acb).
+    throw new Error(`vault glossary ${vaultDb}: ${error instanceof Error ? error.message : String(error)}`, {
+      cause: error,
+    })
   }
 }
 

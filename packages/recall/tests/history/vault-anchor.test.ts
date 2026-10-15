@@ -43,6 +43,17 @@ afterEach(() => {
   for (const root of roots.splice(0)) safeRemoveSync(root, { within: realpathSync(tmpdir()) })
 })
 
+/** A vault store whose schema lacks the nodes table the glossary reads. */
+function vaultWithoutNodes(): string {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "recall-vault-anchor-"))
+  roots.push(root)
+  const dbPath = join(root, "state.db")
+  const db = new Database(dbPath)
+  db.exec(assertSingleStatement("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);"))
+  db.close()
+  return dbPath
+}
+
 const VAULT = [
   "@ag/code/29456-ag-quota-one-typed-reader-per-provider.md",
   "@i/20-search-and-memory/27897-memory-system.md",
@@ -114,5 +125,30 @@ describe("deriveVaultAnchor: the vault query is identifier-first, else the first
         `Vault index ${missing} (bound by --vault-db) does not exist`,
       )
     }
+  })
+})
+
+describe("a glossary query that fails on an open vault refuses, naming the vault, and caches nothing", () => {
+  test("it throws on every call until the store answers, then builds", async () => {
+    vi.resetModules()
+    const { deriveVaultAnchor } = await import("../../src/history/vault-glossary.ts")
+    const vault = vaultWithoutNodes()
+    const refusal = `vault glossary ${vault}: no such table: nodes`
+
+    expect(() => deriveVaultAnchor("what did we decide about ag status quota reporting?", vault)).toThrow(refusal)
+    expect(() => deriveVaultAnchor("what did we decide about ag status quota reporting?", vault)).toThrow(refusal)
+
+    const db = new Database(vault)
+    db.exec(
+      assertSingleStatement(
+        "CREATE TABLE nodes (rowid INTEGER PRIMARY KEY, id TEXT, parent_id TEXT, fs_path TEXT, name TEXT, title TEXT, content TEXT);",
+      ),
+    )
+    db.prepare("INSERT INTO nodes (id, fs_path) VALUES (?, ?)").run("q", "@ag/code/29456-quota.md")
+    db.close()
+    expect(deriveVaultAnchor("what did we decide about ag status quota reporting?", vault)).toEqual({
+      query: "ag status quota",
+      identifier: "ag",
+    })
   })
 })
