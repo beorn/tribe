@@ -41,6 +41,8 @@ export type {
   DiscoverOptions,
 } from "./lib/session-discovery.ts"
 export { writeTrace } from "./lib/trace.ts"
+// The models recall's budgeted calls may use: the eval runner names their providers' state in its receipt (29495).
+export { BUDGETED_MODEL_IDS } from "./lib/llm-backend.ts"
 
 export { analyzeQuality } from "./lib/quality-gate.ts"
 export type { QualityResult, QualitySignals } from "./lib/quality-gate.ts"
