@@ -903,6 +903,7 @@ describe("recall search output", () => {
       releaseOld()
       const oldResult = await oldImport
       // Temporary receipt only: the pre-replacement import's identity has no asserted policy.
+      stderrWriteSpy.mockRestore()
       process.stderr.write(`runner-replacement-old ${JSON.stringify({ old: Object.is(oldResult.recallAgent, oldAgent), current: Object.is(oldResult.recallAgent, newAgent) })}\n`)
       releaseNew()
       const replacement = await replacementImport
