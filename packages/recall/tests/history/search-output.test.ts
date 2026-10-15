@@ -487,27 +487,21 @@ describe("recall search output", () => {
   })
 
   test("concurrent stale searches report unproven without starting index refreshes", async () => {
-    // Temporary diagnostic checkpoint only: preserve the cold concurrent import and every assertion.
     setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
 
-    mockAgent.result = async (query, options) => {
-      return zeroAgentResult(query, options) as never
-    }
+    mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
     const previousExitCode = process.exitCode
     process.exitCode = 0
 
     try {
       await Promise.all(
-        ["nohits-a", "nohits-b"].map((query) => {
-          const pending = cmdSearch(query, {
+        ["nohits-a", "nohits-b"].map((query) =>
+          cmdSearch(query, {
             agent: true,
             limit: "5",
             round2: "off",
-          })
-          return pending.then((value) => {
-            return value
-          })
-        }),
+          }),
+        ),
       )
 
       expect(mockRefreshSpawnCalls).toBe(0)
