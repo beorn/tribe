@@ -52,6 +52,13 @@ export interface PlanCall {
 // Prompts
 // ============================================================================
 
+const PLAN_BUCKET_KEYS = ["keywords", "phrases", "concepts", "paths", "errors", "bead_ids"] as const
+const PLAN_SHAPE = JSON.stringify({
+  ...Object.fromEntries(PLAN_BUCKET_KEYS.map((key) => [key, []])),
+  time_hint: null,
+  notes: "",
+})
+
 const SYSTEM_PROMPT_ROUND1 = `You are a FTS5 query planner for a Claude Code session-history search engine.
 Your job is to turn a vague user query into 10-20 FTS5-friendly search variants that will actually hit the indexed corpus.
 
@@ -64,7 +71,7 @@ dictionary-level alternatives.
 
 RULES:
 - Output ONLY a single JSON object (no markdown, no prose, no code fences).
-- Shape: { "keywords": [], "phrases": [], "concepts": [], "paths": [], "errors": [], "bead_ids": [], "time_hint": null, "notes": "" }
+- Shape: ${PLAN_SHAPE}
 - Across all buckets: aim for 10-20 variants total, not per bucket.
 - keywords: single technical tokens — camelCase, kebab-case, or domain nouns.
 - phrases: 2-4 word exact phrases likely to appear verbatim in transcripts.
@@ -88,7 +95,8 @@ is to widen the net: propose variants that round 1 missed. Look for:
 
 Avoid duplicating round-1 variants. Output fresh angles.
 
-Same JSON shape and budget as round 1 (10-20 variants total). Output ONLY the JSON object.`
+Shape: ${PLAN_SHAPE}
+Budget: 10-20 variants total. Output ONLY the JSON object.`
 
 const SYSTEM_PROMPT_ROUND2_DEEPER = `You are a FTS5 query planner running ROUND 2 in DEEPER mode.
 
@@ -105,7 +113,8 @@ Extract from the round-1 top snippets:
 
 Avoid duplicating round-1 variants. Focus on precision over breadth.
 
-Same JSON shape and budget as round 1 (up to 15 variants). Output ONLY the JSON object.`
+Shape: ${PLAN_SHAPE}
+Budget: up to 15 variants. Output ONLY the JSON object.`
 
 // ============================================================================
 // Public API
@@ -216,9 +225,9 @@ export async function planQuery(query: string, context: QueryContext, options: P
         rawResponse,
       }
     }
-    const reason = parsed.reason ?? "empty-plan"
-    log(`planner: ${model.modelId} returned no usable plan (${reason})`)
-    failures.push({ modelId: model.modelId, error: reason })
+    const error = parsed.error ?? parsed.reason
+    log(`planner: ${model.modelId} returned no usable plan (${error})`)
+    failures.push({ modelId: model.modelId, error })
   }
 
   return {
@@ -353,12 +362,14 @@ export type PlanParseReason = "empty-input" | "parse-failed" | "empty-plan"
 
 /**
  * Parse the planner response with a typed failure reason. Distinguishes:
- *  - `parse-failed`: JSON malformed or missing → planner output was broken
+ *  - `parse-failed`: JSON malformed, missing or without recognized buckets → planner output was broken
  *  - `empty-plan`: JSON parsed fine but all buckets were empty → planner had
  *    nothing new to add (legitimate in round 2 when everything useful was
  *    already tried in round 1)
  */
-export function parsePlanResult(raw: string): { plan: QueryPlan | null; reason?: PlanParseReason } {
+export function parsePlanResult(
+  raw: string,
+): { plan: QueryPlan } | { plan: null; reason: PlanParseReason; error?: string } {
   if (!raw) return { plan: null, reason: "empty-input" }
 
   // Strip code fences
@@ -380,6 +391,13 @@ export function parsePlanResult(raw: string): { plan: QueryPlan | null; reason?:
 
   if (!parsed || typeof parsed !== "object") return { plan: null, reason: "parse-failed" }
   const obj = parsed as Record<string, unknown>
+  if (!PLAN_BUCKET_KEYS.some((key) => Object.hasOwn(obj, key))) {
+    return {
+      plan: null,
+      reason: "parse-failed",
+      error: `parse-failed: planner response shape miss; expected bucket keys ${PLAN_BUCKET_KEYS.join(", ")}; saw keys: ${Object.keys(obj).join(", ") || "(none)"}`,
+    }
+  }
 
   const asStringArray = (v: unknown): string[] => {
     if (!Array.isArray(v)) return []

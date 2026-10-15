@@ -76,10 +76,19 @@ describe("parsePlanResult", () => {
   })
 
   test("rejects a plan with zero usable variants", () => {
-    const { plan } = parsePlanResult(
+    const result = parsePlanResult(
       '{"keywords": [], "phrases": [], "concepts": [], "paths": [], "errors": [], "bead_ids": []}',
     )
-    expect(plan).toBeNull()
+    expect(result).toEqual({ plan: null, reason: "empty-plan" })
+  })
+
+  // @failure A response in an unrelated shape was mistaken for a legitimate empty round-two plan (29570).
+  test("names a shape miss separately from known empty buckets", () => {
+    expect(parsePlanResult('{"variants": ["ag status"]}')).toMatchObject({
+      plan: null,
+      reason: "parse-failed",
+      error: expect.stringMatching(/shape.*variants/i),
+    })
   })
 
   test("rejects non-JSON garbage", () => {
@@ -187,6 +196,48 @@ describe("planQuery provider fallback", () => {
     setSuppressConsole(false)
     vi.unstubAllEnvs()
   })
+
+  // @failure Each fresh planner request needs the object shape, and a model's shape miss must reach its caller.
+  test.each(["round1", "wider", "deeper"] as const)(
+    "%s dispatch states the shape and preserves parse outcomes",
+    async (mode) => {
+      const model: LlmModel = { provider: "openrouter", modelId: "deepseek/deepseek-chat" }
+      const shape = {
+        keywords: [],
+        phrases: [],
+        concepts: [],
+        paths: [],
+        errors: [],
+        bead_ids: [],
+        time_hint: null,
+        notes: "",
+      }
+      let content = JSON.stringify({ ...shape, keywords: ["roundworked"] })
+      const prompts: string[] = []
+      const llm = {
+        queryModel: async ({ systemPrompt }) => {
+          prompts.push(systemPrompt ?? "")
+          return { response: { content } }
+        },
+        getModel: () => model,
+        getCheapModel: () => model,
+        getCheapModels: () => [model],
+        estimateCost: () => 0,
+        isProviderAvailable: () => true,
+      } satisfies LlmBackend
+      const options = mode === "round1" ? { round: 1 as const } : { round: 2 as const, mode }
+      const valid = await planQuery("ag status", emptyContext, { ...options, model, llm })
+      expect(valid.plan?.keywords).toEqual(["roundworked"])
+      const printedShape = prompts[0]?.match(/Shape:\s*(\{[^\n]+\})/)
+      expect(printedShape).not.toBeNull()
+      expect(JSON.parse(printedShape![1]!)).toEqual(shape)
+
+      content = '{"variants": ["ag status"]}'
+      const malformed = await planQuery("ag status", emptyContext, { ...options, model, llm })
+      expect(malformed.plan).toBeNull()
+      expect(malformed.error).toMatch(/parse-failed.*shape.*variants/i)
+    },
+  )
 
   test("uses the shared provider selector before dispatching a default planner model", async () => {
     const denied: LlmModel = { provider: "google", modelId: "gemini-2.0-flash-lite" }
