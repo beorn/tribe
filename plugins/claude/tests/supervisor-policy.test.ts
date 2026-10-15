@@ -4,6 +4,7 @@ import {
   evaluateAdapterRestart,
   REEXEC_BACKOFF_BASE_MS,
   REEXEC_BACKOFF_MAX_MS,
+  judgeSeatAncestry,
   LEGACY_PARENT_WARNING,
   PROVIDER_PARENT_REMEDY,
   resolveProviderParentPid,
@@ -13,6 +14,7 @@ import {
   PLUGIN_REEXEC_EXIT_CODE,
   PLUGIN_REEXEC_EXIT_CODE_ENV,
 } from "../supervisor-environment.ts"
+import { NESTED_HOST_REFUSED_DECISION } from "../supervisor-exit-record.ts"
 
 describe("Claude plugin adapter restart budget", () => {
   it("puts the re-exec value in the actual supervised child environment", () => {
@@ -117,5 +119,52 @@ describe("provider-parent provenance", () => {
       50,
     )
     expect(warnings).toEqual([LEGACY_PARENT_WARNING])
+  })
+})
+
+describe("seat ancestry (29567)", () => {
+  // The provider is this supervisor's parent (50); the launch declares its harness (4321), which started the provider.
+  const providerPid = 50
+  const harness = 4321
+  const parents = (table: Record<number, number | null>) => (pid: number) => table[pid] ?? null
+
+  it("a supervisor whose provider is a direct child of the declared harness is the seat's", () => {
+    expect(judgeSeatAncestry(harness, providerPid, parents({ [providerPid]: harness }))).toEqual({ kind: "seat" })
+  })
+
+  it("a supervisor one provider deeper is a nested host, refused with the three pids named", () => {
+    expect(judgeSeatAncestry(harness, providerPid, parents({ [providerPid]: 777 }))).toEqual({
+      kind: "nested",
+      reason:
+        "refused to act as this seat's supervisor: its provider 50 is not a direct child of the seat's harness 4321; " +
+        "the provider's parent is 777 (29567)",
+    })
+  })
+
+  it("the relation is exact: a supervisor whose own parent is the declared harness is refused too", () => {
+    expect(judgeSeatAncestry(providerPid, providerPid, parents({ [providerPid]: 9 })).kind).toBe("nested")
+  })
+
+  it("a launch that declares no harness is unchanged and reads no process", () => {
+    let reads = 0
+    const parentOf = () => {
+      reads += 1
+      return 777
+    }
+    expect(judgeSeatAncestry(null, providerPid, parentOf)).toEqual({ kind: "seat" })
+    expect(reads).toBe(0)
+  })
+
+  it("a provider whose parent cannot be read fails open with a named warning", () => {
+    expect(judgeSeatAncestry(harness, providerPid, parents({}))).toEqual({
+      kind: "unmeasured",
+      warning:
+        "tribe plugin supervisor: could not read the parent of provider 50; acting as this launch's supervisor " +
+        "without the nested-host check (29567)",
+    })
+  })
+
+  it("the refusal's exit-record decision is its own, never one of the seat adapter's", () => {
+    expect(NESTED_HOST_REFUSED_DECISION).toBe("nested-host-refused")
   })
 })

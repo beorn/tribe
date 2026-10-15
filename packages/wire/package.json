@@ -58,6 +58,7 @@
     "./lib/identity-token": "./src/lib/identity-token.ts",
     "./lib/credential-file": "./src/lib/credential-file.ts",
     "./lib/hab-session-env": "./src/lib/hab-session-env.ts",
+    "./lib/process-parent": "./src/lib/process-parent.ts",
     "./lib/session-identity-env": "./src/lib/session-identity-env.ts",
     "./lib/ag-host-env": "./src/lib/ag-host-env.ts",
     "./lib/daemon-environment": "./src/lib/daemon-environment.ts",
@@ -175,6 +176,10 @@
         "types": "./dist/lib/hab-session-env.d.mts",
         "import": "./dist/lib/hab-session-env.mjs"
       },
+      "./lib/process-parent": {
+        "types": "./dist/lib/process-parent.d.mts",
+        "import": "./dist/lib/process-parent.mjs"
+      },
       "./lib/session-identity-env": {
         "types": "./dist/lib/session-identity-env.d.mts",
         "import": "./dist/lib/session-identity-env.mjs"
@@ -252,6 +257,7 @@
       "src/lib/identity-token.ts",
       "src/lib/credential-file.ts",
       "src/lib/hab-session-env.ts",
+      "src/lib/process-parent.ts",
       "src/lib/session-identity-env.ts",
       "src/lib/ag-host-env.ts",
       "src/lib/daemon-environment.ts",

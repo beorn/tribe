@@ -12,13 +12,13 @@
 import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
-import { execSync } from "child_process"
 import {
   discoverActiveSession,
   renderDiscoveryDiagnostics,
   type SessionDiscoveryDiagnostics,
   type SessionFormat,
 } from "./session-discovery.ts"
+import { readParentPid } from "tribe-wire/lib/process-parent"
 import { CLAUDE_SESSION_ID_ENV } from "tribe-wire/lib/session-identity-env"
 
 // ============================================================================
@@ -429,8 +429,8 @@ function readSessionSentinel(home: string): SessionSentinelRead | null {
 }
 
 /**
- * Walk up the process tree, returning ancestor PIDs up to `maxDepth`.
- * Uses `ps` because macOS doesn't expose /proc. Returns empty on failure.
+ * Walk up the process tree, returning ancestor PIDs up to `maxDepth`. Each step is tribe's one parent reader
+ * (readParentPid: /proc on Linux, bounded `ps` elsewhere); an unreadable parent ends the walk.
  */
 function walkProcessAncestors(maxDepth: number): number[] {
   const pids: number[] = []
@@ -438,18 +438,9 @@ function walkProcessAncestors(maxDepth: number): number[] {
   for (let i = 0; i < maxDepth; i++) {
     if (!pid || pid === 1) break
     pids.push(pid)
-    try {
-      const out = execSync(`ps -o ppid= -p ${pid}`, {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 500,
-      }).trim()
-      const next = parseInt(out, 10)
-      if (!Number.isFinite(next) || next === pid) break
-      pid = next
-    } catch {
-      break
-    }
+    const next = readParentPid(pid)
+    if (next === null || next === pid) break
+    pid = next
   }
   return pids
 }

@@ -139,6 +139,44 @@ export const PROVIDER_PARENT_REMEDY =
 export const LEGACY_PARENT_WARNING =
   "tribe plugin wrapper: managed launch supplied no provider-parent PID; falling back to the wrapper's real provider parent. Relaunch the host session to restore full launch provenance."
 
+export type SeatAncestry =
+  | { readonly kind: "seat" }
+  | { readonly kind: "unmeasured"; readonly warning: string }
+  | { readonly kind: "nested"; readonly reason: string }
+
+/**
+ * Whether this supervisor is the one its launch started (29567, @cto 42880a68, 4dc25c38). A managed launch declares
+ * its harness PID, the harness starts the provider, and the provider starts this supervisor: the declared PID is the
+ * provider's parent, exactly, on all 48 live supervisors of claude, codex and muse (census 2026-10-15), and an exec'ing
+ * wrapper in between (every cmux wrapper, cursor-agent's launcher) keeps it so. A provider run INSIDE the seat, such as
+ * an agy one-shot from bearly, inherits the declaration one or more processes deeper; its supervisor used to take the
+ * seat's claim and make the seat's own supervisor yield, darkening the seat. A launch with no declared harness is
+ * unchanged, and a provider whose parent cannot be read fails open with a named warning, as it behaved before.
+ */
+export function judgeSeatAncestry(
+  declaredHarnessPid: number | null,
+  providerPid: number,
+  parentOf: (pid: number) => number | null,
+): SeatAncestry {
+  if (declaredHarnessPid === null) return { kind: "seat" }
+  const providerParent = parentOf(providerPid)
+  if (providerParent === null) {
+    return {
+      kind: "unmeasured",
+      warning:
+        `tribe plugin supervisor: could not read the parent of provider ${providerPid}; acting as this launch's ` +
+        "supervisor without the nested-host check (29567)",
+    }
+  }
+  if (providerParent === declaredHarnessPid) return { kind: "seat" }
+  return {
+    kind: "nested",
+    reason:
+      `refused to act as this seat's supervisor: its provider ${providerPid} is not a direct child of the seat's ` +
+      `harness ${declaredHarnessPid}; the provider's parent is ${providerParent} (29567)`,
+  }
+}
+
 /**
  * The provider parent this wrapper reports as its launch owner. A managed launch names itself by its HAB_ID_TOKEN
  * alone (25074 3c-2b, @cto def441bf; 3d-2: TRIBE_LAUNCH_ID is never read). An ABSENT parent PID is indistinguishable

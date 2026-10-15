@@ -17,6 +17,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs"
+import { parseProcStatLine } from "tribe-wire/lib/process-parent"
 
 export type TransportState = "connected" | "disconnected"
 export type OwnerState = "live" | "dead" | "unknown"
@@ -79,7 +80,8 @@ export type SessionTransportEvidence = SessionTransportProjection & {
 
 /**
  * A process's start time, the identity that tells a live pid from a reused one (24604 (a)): field 22 of
- * /proc/<pid>/stat, clock ticks since boot. "unsupported" when this platform has no /proc; null when the pid has no
+ * /proc/<pid>/stat (read by tribe-wire's parseProcStatLine, which readParentPid shares), clock ticks since boot.
+ * "unsupported" when this platform has no /proc; null when the pid has no
  * readable stat, which is a process that is gone.
  */
 export function readProcessStartTime(pid: number): string | null | "unsupported" {
@@ -95,9 +97,7 @@ export function readProcessStartTime(pid: number): string | null | "unsupported"
     }
     throw error
   }
-  // The command name (field 2) is parenthesised and may hold spaces or parentheses, so count from the last ")".
-  const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ")
-  return fields[19] ?? null
+  return parseProcStatLine(stat)?.startTime ?? null
 }
 
 /** Probe OS process existence without turning an unfamiliar error into death. */
