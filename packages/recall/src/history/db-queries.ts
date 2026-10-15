@@ -510,6 +510,9 @@ function hookMessageSearch(
   const held = candidates.slice(0, HOOK_CANDIDATE_LIMIT)
   const proseHeld = Math.min(prose.length, held.length)
   const toolsHeld = held.length - proseHeld
+  // Keep one MATCH cursor: a bare rowid IN becomes one xFilter per held ID,
+  // discarding BM25's cached global phrase frequencies each time. Unary +
+  // leaves integer membership intact but keeps it outside FTS's constraints.
   const survivors =
     held.length === 0
       ? []
@@ -520,7 +523,7 @@ function hookMessageSearch(
        JOIN messages m ON f.rowid = m.id
        JOIN sessions s ON m.session_id = s.id
        WHERE messages_fts MATCH ? AND ${filter.sql}
-         AND f.rowid IN (SELECT value FROM json_each(?))
+         AND +f.rowid IN (SELECT value FROM json_each(?))
        ORDER BY rank`),
           )
           .all(ftsQuery, ...filter.params, JSON.stringify(held.map((row) => row.id))) as (Candidate & {

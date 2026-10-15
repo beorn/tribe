@@ -2,13 +2,14 @@
  * The prompt hook's recall runs in hook mode, inside a stated budget (@ag/tribe/25071 row 2, @cto ruling 2026-09-23).
  *
  * B1: hook mode issues no COUNT, not the message total, the content total, or the session-depth corroboration.
- * B2: hook mode ranks the window first, like exact, capped at N ranked matches (@cto re-ruling 516d4c10: the all-time
- *     top-N candidate set was refuted by the real-prompt replay, where hook was slower than exact on 84 of 150).
+ * B2: hook mode selects eligible matching IDs before ranking; all window filters apply before the candidate cap.
+ *     Ranking uses one MATCH cursor so its global phrase-frequency setup is not repeated per held ID (29482).
  * Phase 3 (@ag/recall/three-dark-search-paths): hook mode runs the phases its caller names, and never the project
  *     content or the synonym variants.
  * Exact mode, the default and the CLI's, keeps every count.
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
+import { assertSingleStatement } from "@bearly/sqlite"
 
 process.env.RECALL_DB_PATH = ":memory:"
 
@@ -136,7 +137,32 @@ describe("25071 row 2 B1: hook mode counts nothing", () => {
   })
 })
 
-describe("25071 row 2 B2: hook mode ranks the window first (@cto re-ruling 516d4c10)", () => {
+describe("29482 B2: hook mode bounds eligible candidates before ranking", () => {
+  test("29482 ranking keeps one MATCH cursor instead of restarting global BM25 setup for every held ID", async () => {
+    // The accepted work bound includes BM25's global phrase-frequency setup.
+    // Hit/count fixtures pass even when SQLite repeats that setup per ID; its
+    // native VM exposes the repeat without a load-dependent timing assertion.
+    seed(recentWeak(20))
+    const { ftsSearchWithSnippet, toFts5Query } = await import("../../src/history/db-queries")
+    const db = getDb()
+    const statements = await preparedSql(async () => ftsSearchWithSnippet(db, ANCHOR, { mode: "hook", limit: 5 }))
+    const ranking = statements.find((sql) => sql.includes("bm25(messages_fts") && sql.includes("json_each"))
+    expect(ranking).toBeDefined()
+    type Instruction = { addr: number; opcode: string; p2: number; p4: string | null }
+    const vm = db
+      .prepare(assertSingleStatement(`EXPLAIN ${ranking!}`))
+      .all(toFts5Query(ANCHOR), "[1,2,3,4,5]") as Instruction[]
+    const matchFilters = vm.filter((op) => op.opcode === "VFilter" && /M\d/.test(op.p4 ?? ""))
+    expect(matchFilters).toHaveLength(1)
+    const match = matchFilters[0]!
+    const restartingLoops = vm.filter(
+      (op) => /^(Next|Prev)$/.test(op.opcode) && op.addr > match.addr && op.p2 <= match.addr,
+    )
+    expect(restartingLoops).toEqual([])
+    const rank = vm.find((op) => op.opcode === "Function" && op.p4?.startsWith("bm25("))!
+    expect(vm.some((op) => op.opcode === "NotFound" && op.addr > match.addr && op.addr < rank.addr)).toBe(true)
+  })
+
   test("29482 caps eligible candidates before ranking and reports the approximation", async () => {
     // A survivor LIMIT still returns the old strongest row; a pre-score ID cap
     // excludes it. Existing output-count cases cannot distinguish those paths.
@@ -228,7 +254,7 @@ describe("25071 row 2 B2: hook mode ranks the window first (@cto re-ruling 516d4
     expect(hook.results.every((r) => r.sessionId.startsWith("new-"))).toBe(true)
   }, 30_000)
 
-  test("N caps the ranked window matches, and says so: the one case where hook can differ from exact", async () => {
+  test("N caps eligible window matches before ranking and reports the approximation", async () => {
     seed([...unmatched(50), ...recentWeak(1003)])
 
     const hook = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
