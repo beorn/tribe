@@ -8,16 +8,10 @@
  */
 
 import type { Database } from "bun:sqlite"
-import {
-  ftsSearchWithSnippet,
-  searchAll,
-  getAllSessionTitles,
-  type MessageSearchOptions,
-  type ContentSearchOptions,
-} from "../history/db.ts"
+import { type MessageSearchOptions, type ContentSearchOptions } from "../history/db.ts"
 import type { ContentType } from "../history/types.ts"
 import type { RecallSearchResult, RecallSkip } from "../history/recall-shared.ts"
-import { boostedRank } from "../history/search.ts"
+import { boostedRank, retrieveCandidates } from "../history/search.ts"
 
 // ============================================================================
 // Types
@@ -91,7 +85,7 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
     perVariantLimit = Math.max(5, Math.ceil(limit / 2)),
   } = opts
 
-  const sessionTitles = getAllSessionTitles()
+  const sessionTitles = retrieveCandidates({ db, query: "", titles: true }).titles
 
   // doc-key → aggregated record. doc-key is `${type}:${sessionId}` to match
   // the existing dedup convention in lib/history/search.ts.
@@ -151,7 +145,7 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
 
     // Messages
     try {
-      const res = ftsSearchWithSnippet(db, variant, msgOpts)
+      const res = retrieveCandidates({ db, query: variant, messages: msgOpts }).messages
       if (res.hook?.capped) skipped.push(res.hook.capped)
       totalQueries++
       rawHits += res.results.length
@@ -171,7 +165,7 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
 
     // Project knowledge (no time filter)
     try {
-      const res = searchAll(db, variant, projectContentOpts)
+      const res = retrieveCandidates({ db, query: variant, projectContent: projectContentOpts }).projectContent
       totalQueries++
       rawHits += res.results.length
       for (const r of res.results) {
@@ -195,46 +189,11 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
     }
   }
 
-  // Coverage-first rerank: multi-variant hits dominate single-variant hits
-  // unconditionally. This is the core agent-mode opinion — breadth of match
-  // (query found this doc from multiple angles) is a stronger signal than
-  // single-term density. BM25 (recency-boosted) only breaks ties within a
-  // coverage tier.
-  const scored: ScoredDoc[] = []
-  for (const [key, agg] of docs) {
-    const hits = hitCounts.get(key) ?? 1
-    const finalRank = boostedRank(agg.bestRank, agg.timestamp)
-    scored.push({ key, agg, hits, finalRank })
-  }
-
-  scored.sort((a, b) => {
-    // Primary: coverage descending (more variant hits first)
-    if (a.hits !== b.hits) return b.hits - a.hits
-    // Tiebreaker: recency-boosted BM25 ascending (more negative = better)
-    return a.finalRank - b.finalRank
-  })
-
-  const results: RecallSearchResult[] = []
-  for (const s of scored) {
-    if (results.length >= limit) break
-    results.push({
-      type: s.agg.type,
-      sessionId: s.agg.sessionId,
-      sessionTitle: s.agg.sessionTitle,
-      timestamp: s.agg.timestamp,
-      snippet: s.agg.bestSnippet,
-      rank: s.finalRank,
-    })
-  }
-
-  // Stats
-  const coverages = [...hitCounts.values()].sort((a, b) => b - a)
-  const topCoverage = coverages[0] ?? 0
-  const medianCoverage = coverages.length > 0 ? coverages[Math.floor(coverages.length / 2)]! : 0
+  const ranked = rankFanout(docs, hitCounts, limit)
 
   return {
     variants: searchedVariants,
-    results,
+    results: ranked.results,
     hitCounts,
     variantHits,
     ...(skipped.length > 0 ? { skipped } : {}),
@@ -242,8 +201,8 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
       totalQueries,
       rawHits,
       uniqueDocs: docs.size,
-      topCoverage,
-      medianCoverage,
+      topCoverage: ranked.topCoverage,
+      medianCoverage: ranked.medianCoverage,
       msTotal: Date.now() - startedAt,
     },
   }
@@ -286,39 +245,12 @@ export function mergeFanouts(a: FanoutResult, b: FanoutResult, limit: number): F
   ingest(a)
   ingest(b)
 
-  // Same coverage-first rerank as fanoutSearch, with combined cross-round hit counts
-  const scored: ScoredDoc[] = []
-  for (const [key, agg] of docs) {
-    const hits = hitCounts.get(key) ?? 1
-    const finalRank = boostedRank(agg.bestRank, agg.timestamp)
-    scored.push({ key, agg, hits, finalRank })
-  }
-  scored.sort((x, y) => {
-    if (x.hits !== y.hits) return y.hits - x.hits
-    return x.finalRank - y.finalRank
-  })
-
-  const results: RecallSearchResult[] = []
-  for (const s of scored) {
-    if (results.length >= limit) break
-    results.push({
-      type: s.agg.type,
-      sessionId: s.agg.sessionId,
-      sessionTitle: s.agg.sessionTitle,
-      timestamp: s.agg.timestamp,
-      snippet: s.agg.bestSnippet,
-      rank: s.finalRank,
-    })
-  }
-
-  const coverages = [...hitCounts.values()].sort((x, y) => y - x)
-  const topCoverage = coverages[0] ?? 0
-  const medianCoverage = coverages.length > 0 ? coverages[Math.floor(coverages.length / 2)]! : 0
+  const ranked = rankFanout(docs, hitCounts, limit)
   const skipped = [...(a.skipped ?? []), ...(b.skipped ?? [])]
 
   return {
     variants: [...new Set([...a.variants, ...b.variants])],
-    results,
+    results: ranked.results,
     hitCounts,
     variantHits,
     ...(skipped.length > 0 ? { skipped } : {}),
@@ -326,8 +258,8 @@ export function mergeFanouts(a: FanoutResult, b: FanoutResult, limit: number): F
       totalQueries: a.stats.totalQueries + b.stats.totalQueries,
       rawHits: a.stats.rawHits + b.stats.rawHits,
       uniqueDocs: docs.size,
-      topCoverage,
-      medianCoverage,
+      topCoverage: ranked.topCoverage,
+      medianCoverage: ranked.medianCoverage,
       msTotal: a.stats.msTotal + b.stats.msTotal,
     },
   }
@@ -347,10 +279,32 @@ interface AggregatedDoc {
 }
 
 interface ScoredDoc {
-  key: string
   agg: AggregatedDoc
   hits: number
   finalRank: number
+}
+
+/** Agent mode's existing coverage-first order, shared by one round and round merges. */
+function rankFanout(docs: Map<string, AggregatedDoc>, hitCounts: Map<string, number>, limit: number) {
+  const scored: ScoredDoc[] = []
+  for (const [key, agg] of docs) {
+    scored.push({ agg, hits: hitCounts.get(key) ?? 1, finalRank: boostedRank(agg.bestRank, agg.timestamp) })
+  }
+  scored.sort((a, b) => (a.hits !== b.hits ? b.hits - a.hits : a.finalRank - b.finalRank))
+  const results: RecallSearchResult[] = scored.slice(0, limit).map(({ agg, finalRank }) => ({
+    type: agg.type,
+    sessionId: agg.sessionId,
+    sessionTitle: agg.sessionTitle,
+    timestamp: agg.timestamp,
+    snippet: agg.bestSnippet,
+    rank: finalRank,
+  }))
+  const coverages = [...hitCounts.values()].sort((a, b) => b - a)
+  return {
+    results,
+    topCoverage: coverages[0] ?? 0,
+    medianCoverage: coverages.length > 0 ? coverages[Math.floor(coverages.length / 2)]! : 0,
+  }
 }
 
 function updateDoc(
