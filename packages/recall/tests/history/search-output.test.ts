@@ -669,6 +669,52 @@ describe("recall search output", () => {
     }
   })
 
+  // @ag/recall/three-dark-search-paths (pair-042): a planner that fails falls through to the default recall. With no
+  // fall-through hits there is no synthesis to fail, so agent mode exited 0 with provenance complete — read by every
+  // caller as "searched, found nothing" (live: plannerError no-planner-model-available, 2026-10-14).
+  test("agent mode exits 3 when its planner failed, even when the fall-through search found nothing", async () => {
+    setIndexMeta(getDb(), "last_rebuild", new Date().toISOString())
+    const previousExitCode = process.exitCode
+    const fellThrough = (query: string, fell: boolean) => ({
+      ...zeroAgentResult(query, { provenance: "complete" }),
+      trace: {
+        rounds: [
+          {
+            round: 1,
+            mode: "off",
+            planner: { model: "mock", elapsedMs: 1, error: "no-planner-model-available" },
+            plan: null,
+            variants: [],
+            stats: { totalQueries: 0, rawHits: 0, uniqueDocs: 0, topCoverage: 0, medianCoverage: 0, msTotal: 0 },
+          },
+        ],
+        decision: { round2Mode: "off", reason: "test" },
+        contextChars: 0,
+      },
+      fellThrough: fell,
+    })
+
+    try {
+      // Control: the same empty result from a planned search is a clean, authoritative empty answer.
+      process.exitCode = 0
+      mockAgent.result = async (query) => fellThrough(query, false) as never
+      await cmdSearch("calleelocals frame", { agent: true, json: true, project: "*", round2: "off" })
+      expect(process.exitCode).toBe(0)
+
+      process.exitCode = 0
+      logSpy.mockClear()
+      mockAgent.result = async (query) => fellThrough(query, true) as never
+      await cmdSearch("calleelocals frame", { agent: true, json: true, project: "*", round2: "off" })
+      expect(jsonStdout<{ fellThrough?: boolean; results: unknown[] }>(logSpy)).toMatchObject({
+        fellThrough: true,
+        results: [],
+      })
+      expect(process.exitCode).toBe(3)
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
   test("the no-refresh compatibility flag preserves unknown provenance", async () => {
     mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
     const prevHome = process.env.HOME
