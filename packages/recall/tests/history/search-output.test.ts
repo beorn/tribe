@@ -859,4 +859,69 @@ describe("recall search output", () => {
       vi.resetModules()
     }
   })
+
+  test("replacing an in-flight async mock never publishes its old namespace", async () => {
+    // @failure An old factory continuation publishes after doMock invalidates the same module node.
+    // @level l1
+    // @consumer concurrent imports after public mock replacement
+    // The cold sibling case never replaces its registry instance, so it cannot detect this race.
+    let releaseOld!: () => void
+    let releaseNew!: () => void
+    let enteredOld!: () => void
+    let enteredNew!: () => void
+    const oldRelease = new Promise<void>((resolve) => { releaseOld = resolve })
+    const newRelease = new Promise<void>((resolve) => { releaseNew = resolve })
+    const oldEntered = new Promise<void>((resolve) => { enteredOld = resolve })
+    const newEntered = new Promise<void>((resolve) => { enteredNew = resolve })
+    const oldAgent = vi.fn()
+    const newAgent = vi.fn()
+    let oldFactoryCalls = 0
+    let newFactoryCalls = 0
+    const imports: Array<Promise<typeof import("../../src/lib/agent.ts")>> = []
+    vi.resetModules()
+    vi.doMock("../../src/lib/agent.ts", async () => {
+      oldFactoryCalls++
+      enteredOld()
+      await oldRelease
+      return { recallAgent: oldAgent }
+    })
+    try {
+      const oldImport = import("../../src/lib/agent.ts")
+      imports.push(oldImport)
+      await oldEntered
+      vi.doUnmock("../../src/lib/agent.ts")
+      vi.doMock("../../src/lib/agent.ts", async () => {
+        newFactoryCalls++
+        enteredNew()
+        await newRelease
+        return { recallAgent: newAgent }
+      })
+      const replacementImport = import("../../src/lib/agent.ts")
+      imports.push(replacementImport)
+      await newEntered
+      // New entry proves public invalidation ran; settle OLD while NEW is still held.
+      releaseOld()
+      await oldImport
+      releaseNew()
+      const replacement = await replacementImport
+      const later = await import("../../src/lib/agent.ts")
+      expect(oldFactoryCalls).toBe(1)
+      expect(newFactoryCalls).toBe(1)
+      expect({
+        replacementIsNew: Object.is(replacement.recallAgent, newAgent),
+        replacementIsOld: Object.is(replacement.recallAgent, oldAgent),
+        laterIsNew: Object.is(later.recallAgent, newAgent),
+        laterIsOld: Object.is(later.recallAgent, oldAgent),
+      }).toEqual({ replacementIsNew: true, replacementIsOld: false, laterIsNew: true, laterIsOld: false })
+      expect(Object.is(replacement, later), "replacement and later import share the new namespace").toBe(true)
+      expect(oldAgent).not.toHaveBeenCalled()
+      expect(newAgent).not.toHaveBeenCalled()
+    } finally {
+      releaseOld()
+      releaseNew()
+      await Promise.allSettled(imports)
+      vi.doMock("../../src/lib/agent.ts", makeAgentMock)
+      vi.resetModules()
+    }
+  })
 })
