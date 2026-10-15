@@ -13,7 +13,7 @@ import {
   createCanonicalReaperState,
   SOURCE_RECOVERY_SAMPLES,
 } from "./health-monitor-canonical-reaper.ts"
-import { defaultThresholds } from "./health-monitor-plugin.ts"
+import { defaultThresholds, readThresholdsFromEnv } from "./health-monitor-plugin.ts"
 
 function observation(
   attribution: ProcessRoutingAttribution,
@@ -563,7 +563,7 @@ describe("canonical source conditions announce edges, not observations", () => {
   })
 })
 
-describe("the reaper's CPU threshold is read strictly", () => {
+describe("the reaper's CPU threshold is read strictly, and a refusal stays inside the reaper", () => {
   const withThreshold = (value: string | undefined, run: () => void): void => {
     const previous = process.env.HEALTH_REAPER_CPU_THRESHOLD
     try {
@@ -576,16 +576,55 @@ describe("the reaper's CPU threshold is read strictly", () => {
     }
   }
 
-  it("refuses a value that is not a number instead of turning the CPU gate off", () => {
-    // parseInt("eighty", 10) is NaN, and the reaper's own gate is `cpu <= NaN`, which is false: a mistyped threshold
-    // did not fail, it admitted every bun/node row as a suspect and turned the gate off silently (29561 item 4).
+  it("returns the refusal instead of throwing, for a value that is not a number and for one not above zero", () => {
+    // Number("eighty") is NaN and the reaper's own gate is `cpu > threshold`, which reads FALSE for every row at NaN
+    // and at 0 or below, so a mistyped threshold did not fail: it admitted every bun/node row as a suspect and turned
+    // the gate off silently (29561 item 4). The refusal must NOT throw, because defaultThresholds() runs inside the
+    // plugin's start() and the loader disables any plugin whose start throws (@cto, 2026-10-15): it turns the reaper
+    // off, and start() pages once about it.
     withThreshold("eighty", () => {
-      expect(() => defaultThresholds()).toThrow(/HEALTH_REAPER_CPU_THRESHOLD.*"eighty"/u)
+      const read = readThresholdsFromEnv()
+      expect(read.reaperCpuRefusal).toEqual({
+        envVar: "HEALTH_REAPER_CPU_THRESHOLD",
+        raw: "eighty",
+        reason: "not-a-number",
+      })
+      expect(read.thresholds.reaperEnabled).toBe(false)
     })
+    // A finite value at or below zero fails exactly the way NaN does, so it is refused the same way.
+    withThreshold("0", () => {
+      expect(readThresholdsFromEnv().reaperCpuRefusal).toEqual({
+        envVar: "HEALTH_REAPER_CPU_THRESHOLD",
+        raw: "0",
+        reason: "not-positive",
+      })
+    })
+    withThreshold("-5", () => {
+      const read = readThresholdsFromEnv()
+      expect(read.reaperCpuRefusal).toEqual({
+        envVar: "HEALTH_REAPER_CPU_THRESHOLD",
+        raw: "-5",
+        reason: "not-positive",
+      })
+      expect(read.thresholds.reaperEnabled).toBe(false)
+    })
+    // And the old throw is gone, on every one of those values: this is the wider failure the revise removed.
+    for (const raw of ["eighty", "0", "-5"]) {
+      withThreshold(raw, () => expect(() => defaultThresholds()).not.toThrow())
+    }
   })
 
   it("still reads the default, and a number the operator did set", () => {
-    withThreshold(undefined, () => expect(defaultThresholds().reaperCpuThreshold).toBe(80))
-    withThreshold("55", () => expect(defaultThresholds().reaperCpuThreshold).toBe(55))
+    withThreshold(undefined, () => {
+      const read = readThresholdsFromEnv()
+      expect(read.reaperCpuRefusal).toBeUndefined()
+      expect(read.thresholds.reaperCpuThreshold).toBe(80)
+      expect(read.thresholds.reaperEnabled).toBe(true)
+    })
+    withThreshold("55", () => {
+      const read = readThresholdsFromEnv()
+      expect(read.reaperCpuRefusal).toBeUndefined()
+      expect(read.thresholds.reaperCpuThreshold).toBe(55)
+    })
   })
 })
