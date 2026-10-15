@@ -47,22 +47,16 @@ export default {
       // nothing at all) instead of wire's own answer. 25 s covers the CLI's worst case with headroom; a bound at or
       // above `intervalMs` is refused, and wire declares no interval.
       health: { command: "tribe health --json", timeoutMs: 25_000 },
-      // It runs from an immutable landing; the hab controller restarts it onto the promoted landing (26774,
-      // @cto 9e7a89d2).
-      // 28691 (one-version plan slice 1.1, @cto Q5): the closure-digest skip is RETIRED — wire restarts on EVERY
-      // promotion. The digest and the declared-pin comparison are both COMPONENT checks, and the week's two
-      // misses were undeclared dependencies (wire's spawned hab, its argv-named verifier), so "the release is
-      // the unit" means restart whenever the running release differs from current. 28921 (@cto c97b1bf3,
-      // e87d593d): identical compared pins coalesce — the owed restart waits up to 2 h for a newer landing to
-      // ride, never skipped — and the `ag` pin is GONE. Both undeclared dependencies now resolve at CALL time,
-      // not launch: wire spawns its hab through the HAB_CLI_BIN promotion pointer (28657) and the daemon SPAWNS
-      // its argv-named verifier per call from a pointer (28921), so ag's bytes never enter this process and an
-      // ag-only promotion needs no restart here.
-      // 27422: bearly and loggily load in process; the sdk escapes are install bytes the /3 install scope covers.
+      // 29498 (@cto 15092986): compare the loaded closure before restarting on a promotion. The 28691
+      // every-promotion rule covered spawned Hab and verifier dependencies that now follow call-time promotion
+      // pointers (28921). The controller restarts on a changed or unmeasured closure and on a moved unit definition.
+      // Bearly and Loggily are declared because Wire loads them in process; the /6 digest measures their reached
+      // paths and loaded install bytes. Accountly's spawned Ag is a separate call-time-pointer follow-up (29513).
       landingMigration: {
         mechanism: "restart-at-promotion" as const,
         additionalComponents: ["vendor/bearly", "vendor/loggily"] as const,
       },
+      sourceDigest: "bun-closure" as const,
     },
   },
 }
