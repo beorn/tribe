@@ -705,7 +705,7 @@ describe("25071: harness envelopes never reach salience, the vault anchor or rec
       createMemorySeenStore(),
       { deps: { deriveVaultAnchor: anchor } },
     )
-    expect(anchor).toHaveBeenCalledWith(typed)
+    expect(anchor).toHaveBeenCalledWith(typed, FIXTURE_VAULT)
     expect(recallMock.mock.calls[0]?.[0]).toBe(typed)
   })
 })
