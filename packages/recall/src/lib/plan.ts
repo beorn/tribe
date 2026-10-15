@@ -117,7 +117,7 @@ export interface PlanOptions {
   priorPlan?: QueryPlan
   priorResults?: RecallSearchResult[]
   priorVariants?: string[]
-  /** One attempt's deadline; the loop stops at {@link PLANNER_ATTEMPT_CAP} times it (@cto 19102a36). */
+  /** One attempt's deadline; no attempt starts after {@link PLANNER_ATTEMPT_CAP} times it (@cto 19102a36). */
   timeoutMs?: number
   /** Use a caller-selected planner model instead of the backend default. */
   model?: LlmModel
@@ -125,7 +125,7 @@ export interface PlanOptions {
   llm?: LlmBackend
 }
 
-/** The planner's total cap, in attempts: the loop stops at this many attempt deadlines (@cto 19102a36). */
+/** The planner's total cap: at most this many attempts, and none starts after this many attempt deadlines (@cto 19102a36, 57df9250). */
 export const PLANNER_ATTEMPT_CAP = 2
 
 /**
@@ -168,7 +168,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
   let lastModel: LlmModel | undefined
   const failures: Array<{ modelId: string; error: string }> = []
 
-  for (const model of models) {
+  for (const model of models.slice(0, PLANNER_ATTEMPT_CAP)) {
     const left = deadline - Date.now()
     if (left <= 0) break
     lastModel = model

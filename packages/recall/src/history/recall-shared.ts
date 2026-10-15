@@ -29,8 +29,8 @@ export const ONE_DAY_MS = 24 * ONE_HOUR_MS
 export const THIRTY_DAYS_MS = 30 * ONE_DAY_MS
 export const DEFAULT_SYNTHESIS_TIMEOUT_MS = 20_000
 /**
- * One planner attempt's deadline: deepseek-chat's measured p95, rounded up (@ag/llm/29473: 10 recall-eval
- * corpus queries on 2026-10-15 at host load 15-18, p50 9.4 s, p95 13.8 s). The planner stops at
+ * One planner attempt's deadline: deepseek-chat's measured p95, rounded up (@ag/llm/29473: 20 calls on the first 10
+ * recall-eval corpus queries, 2026-10-15, host load 11-18: p50 8.5 s, p95 13.5 s, max 13.8 s). The planner stops at
  * PLANNER_ATTEMPT_CAP attempts.
  */
 export const DEFAULT_PLAN_TIMEOUT_MS = 14_000

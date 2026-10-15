@@ -396,6 +396,44 @@ describe("planQuery provider fallback", () => {
     }
   })
 
+  // @failure Capped only in time, a first model that failed in a few ms left almost two attempt budgets, so a third
+  // model started under a cap named in attempts (@cto 57df9250, @ag/llm/29473).
+  test("the cap counts attempts: after a fast failure and one slow attempt, the third model is never asked", async () => {
+    vi.useFakeTimers()
+    const models: LlmModel[] = [
+      { provider: "google", modelId: "fast-fail" },
+      { provider: "openrouter", modelId: "slow" },
+      { provider: "xai", modelId: "never-started" },
+    ]
+    const calls: string[] = []
+    const llm = {
+      queryModel: async ({ model, abortSignal }) => {
+        calls.push(model.modelId)
+        if (!abortSignal) throw new Error("planner did not pass its deadline signal")
+        if (model.modelId === "fast-fail") return { response: { error: "provider refused the request" } }
+        await new Promise<void>((resolve) => abortSignal.addEventListener("abort", () => resolve(), { once: true }))
+        return { response: { error: "aborted" } }
+      },
+      getModel: (id) => models.find((m) => m.modelId === id),
+      budgetedModelIds: models.map((m) => m.modelId),
+      getCheapModel: () => models[0],
+      getCheapModels: () => models,
+      estimateCost: () => 0,
+      isProviderAvailable: () => true,
+    } satisfies LlmBackend
+
+    try {
+      const pending = planQuery("find prior work", emptyContext, { round: 1, llm, timeoutMs: 25 })
+      await vi.advanceTimersByTimeAsync(25 * PLANNER_ATTEMPT_CAP)
+      const result = await pending
+
+      expect(result.plan).toBeNull()
+      expect(calls).toEqual(["fast-fail", "slow"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // @failure The daemon's plan-only call names no deadline, so it took planQuery's own 2500 ms default: under a
   // third of deepseek-chat's measured p50 of 9.4 s, so that path could almost never plan (@ag/llm/29473).
   test("with no deadline named, an attempt answering at deepseek-chat's measured p95 still plans", async () => {

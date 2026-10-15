@@ -239,9 +239,10 @@ export function selectAvailableCheapModels(
 }
 
 /**
- * The models recall's budgeted LLM calls may use, the planner (8 s) and the synthesis race (20 s): only routes whose
- * latency was measured inside those budgets (@cto 967ea2db, @ag/llm/29473). deepseek-chat through OpenRouter planned in
- * 3.9 to 8.2 s on 2026-10-15. Google stays out until @ag/code/29456 fixes its route: through the agy one-shot it takes
+ * The models recall's budgeted LLM calls may use, the planner (DEFAULT_PLAN_TIMEOUT_MS per attempt) and the synthesis
+ * race (DEFAULT_SYNTHESIS_TIMEOUT_MS): only routes whose latency was measured inside those budgets (@cto 967ea2db,
+ * @ag/llm/29473). On 2026-10-15 deepseek-chat through OpenRouter planned in 5.6 to 13.8 s (20 calls) and synthesized in
+ * 4.3 to 11.4 s (10 calls). Google stays out until @ag/code/29456 fixes its route: through the agy one-shot it takes
  * 2 to 4 s to start and 3.6 to 28 s to answer. A list edited by hand, never a runtime latency selector.
  */
 export const BUDGETED_MODEL_IDS: readonly string[] = ["deepseek/deepseek-chat"]
