@@ -13,13 +13,18 @@ const mockAgent: {
 } = { result: null, options: null }
 let mockRefreshSpawnCalls = 0
 
-vi.mock("../../src/lib/agent.ts", () => ({
-  recallAgent: (query: string, options: unknown) => {
-    if (!mockAgent.result) throw new Error("Test did not install a mock recallAgent")
-    mockAgent.options = options
-    return mockAgent.result(query, options as never)
-  },
-}))
+function makeAgentMock() {
+  const exported = {
+    recallAgent: (query: string, options: unknown) => {
+      if (!mockAgent.result) throw new Error("Test did not install a mock recallAgent")
+      mockAgent.options = options
+      return mockAgent.result(query, options as never)
+    },
+  }
+  return exported
+}
+
+vi.mock("../../src/lib/agent.ts", () => makeAgentMock())
 
 // Regression seam for @i/20-search-and-memory/23189: search must never import
 // this query-refresh capability. If it is wired back in, the stale-search test
@@ -827,6 +832,277 @@ describe("recall search output", () => {
     } finally {
       process.chdir(prevCwd)
       rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test("cold sibling imports share one async manual factory and its mock namespace", async () => {
+    // The original search journey has a synchronous factory; it cannot prove pending-factory sharing.
+    // This public barrier witnesses both import calls initiated and the first factory entered,
+    // not the sibling's private loader entry. An internal-entry barrier would deadlock valid deduplication.
+    let releaseFactory!: () => void
+    let markFactoryEntered!: () => void
+    const release = new Promise<void>((resolve) => {
+      releaseFactory = resolve
+    })
+    const entered = new Promise<void>((resolve) => {
+      markFactoryEntered = resolve
+    })
+    const expectedAgent = vi.fn(async (query: string) => zeroAgentResult(query))
+    let factoryCalls = 0
+    const imports: Array<Promise<typeof import("../../src/lib/agent.ts")>> = []
+    vi.resetModules()
+    vi.doMock("../../src/lib/agent.ts", async () => {
+      factoryCalls++
+      markFactoryEntered()
+      await release
+      return { recallAgent: expectedAgent }
+    })
+    try {
+      imports.push(import("../../src/lib/agent.ts"))
+      imports.push(import("../../src/lib/agent.ts"))
+      await entered
+      releaseFactory()
+      const [first, second] = await Promise.all(imports)
+      // Establish both exact identities BEFORE invoking either export: the actual agent must never run.
+      expect(first!.recallAgent).toBe(expectedAgent)
+      expect(second!.recallAgent).toBe(expectedAgent)
+      expect(factoryCalls).toBe(1)
+      // Compare the boolean: proxy pretty-format reads missing exports and masks a namespace mismatch.
+      expect(Object.is(first, second), "concurrent imports share their mock namespace").toBe(true)
+      await first!.recallAgent("factory-a", {})
+      await second!.recallAgent("factory-b", {})
+      expect(expectedAgent).toHaveBeenCalledTimes(2)
+    } finally {
+      releaseFactory()
+      await Promise.allSettled(imports)
+      vi.doMock("../../src/lib/agent.ts", makeAgentMock)
+      vi.resetModules()
+    }
+  })
+
+  test("replacing an in-flight async mock never publishes its old namespace", async () => {
+    // @failure An old factory continuation publishes after doMock invalidates the same module node.
+    // @level l1
+    // @consumer concurrent imports after public mock replacement
+    // The cold sibling case never replaces its registry instance, so it cannot detect this race.
+    let releaseOld!: () => void
+    let releaseNew!: () => void
+    let enteredOld!: () => void
+    let enteredNew!: () => void
+    const oldRelease = new Promise<void>((resolve) => {
+      releaseOld = resolve
+    })
+    const newRelease = new Promise<void>((resolve) => {
+      releaseNew = resolve
+    })
+    const oldEntered = new Promise<void>((resolve) => {
+      enteredOld = resolve
+    })
+    const newEntered = new Promise<void>((resolve) => {
+      enteredNew = resolve
+    })
+    const oldAgent = vi.fn()
+    const newAgent = vi.fn()
+    let oldFactoryCalls = 0
+    let newFactoryCalls = 0
+    const imports: Array<Promise<typeof import("../../src/lib/agent.ts")>> = []
+    let releaseReset!: () => void
+    let enteredReset!: () => void
+    let releaseUnmock!: () => void
+    let enteredUnmock!: () => void
+    const resetRelease = new Promise<void>((resolve) => {
+      releaseReset = resolve
+    })
+    const resetEntered = new Promise<void>((resolve) => {
+      enteredReset = resolve
+    })
+    const unmockRelease = new Promise<void>((resolve) => {
+      releaseUnmock = resolve
+    })
+    const unmockEntered = new Promise<void>((resolve) => {
+      enteredUnmock = resolve
+    })
+    vi.resetModules()
+    try {
+      // Preservation phases run separately before replacement: doMock must not mask reset or unmock behavior.
+      const resetAgent = vi.fn()
+      let resetFactoryCalls = 0
+      vi.doMock("../../src/lib/agent.ts", async () => {
+        resetFactoryCalls++
+        enteredReset()
+        await resetRelease
+        return { recallAgent: resetAgent }
+      })
+      const resetImport = import("../../src/lib/agent.ts")
+      imports.push(resetImport)
+      await resetEntered
+      vi.resetModules()
+      releaseReset()
+      const resetResult = await resetImport
+      const afterReset = await import("../../src/lib/agent.ts")
+      expect(Object.is(resetResult.recallAgent, resetAgent)).toBe(true)
+      expect(Object.is(afterReset.recallAgent, resetAgent)).toBe(true)
+      expect(Object.is(resetResult, afterReset)).toBe(true)
+      expect(resetFactoryCalls).toBe(1)
+      expect(resetAgent).not.toHaveBeenCalled()
+
+      vi.resetModules()
+      const unmockAgent = vi.fn()
+      let unmockFactoryCalls = 0
+      vi.doMock("../../src/lib/agent.ts", async () => {
+        unmockFactoryCalls++
+        enteredUnmock()
+        await unmockRelease
+        return { recallAgent: unmockAgent }
+      })
+      const unmockImport = import("../../src/lib/agent.ts")
+      imports.push(unmockImport)
+      await unmockEntered
+      vi.doUnmock("../../src/lib/agent.ts")
+      const unmocked = await import("../../src/lib/agent.ts")
+      expect(typeof unmocked.recallAgent).toBe("function")
+      expect(vi.isMockFunction(unmocked.recallAgent)).toBe(false)
+      releaseUnmock()
+      await unmockImport
+      const afterUnmock = await import("../../src/lib/agent.ts")
+      expect(Object.is(afterUnmock.recallAgent, unmocked.recallAgent)).toBe(true)
+      expect(Object.is(afterUnmock, unmocked)).toBe(true)
+      expect(unmockFactoryCalls).toBe(1)
+      expect(unmockAgent).not.toHaveBeenCalled()
+
+      vi.resetModules()
+      vi.doMock("../../src/lib/agent.ts", async () => {
+        oldFactoryCalls++
+        enteredOld()
+        await oldRelease
+        return { recallAgent: oldAgent }
+      })
+      const oldImport = import("../../src/lib/agent.ts")
+      imports.push(oldImport)
+      await oldEntered
+      vi.doUnmock("../../src/lib/agent.ts")
+      vi.doMock("../../src/lib/agent.ts", async () => {
+        newFactoryCalls++
+        enteredNew()
+        await newRelease
+        return { recallAgent: newAgent }
+      })
+      const replacementImport = import("../../src/lib/agent.ts")
+      imports.push(replacementImport)
+      await newEntered
+      // New entry proves public invalidation ran; settle OLD while NEW is still held.
+      releaseOld()
+      await oldImport
+      releaseNew()
+      const replacement = await replacementImport
+      const later = await import("../../src/lib/agent.ts")
+      expect(oldFactoryCalls).toBe(1)
+      expect(newFactoryCalls).toBe(1)
+      expect({
+        replacementIsNew: Object.is(replacement.recallAgent, newAgent),
+        replacementIsOld: Object.is(replacement.recallAgent, oldAgent),
+        laterIsNew: Object.is(later.recallAgent, newAgent),
+        laterIsOld: Object.is(later.recallAgent, oldAgent),
+      }).toEqual({ replacementIsNew: true, replacementIsOld: false, laterIsNew: true, laterIsOld: false })
+      expect(Object.is(replacement, later), "replacement and later import share the new namespace").toBe(true)
+      expect(oldAgent).not.toHaveBeenCalled()
+      expect(newAgent).not.toHaveBeenCalled()
+    } finally {
+      releaseReset()
+      releaseUnmock()
+      releaseOld()
+      releaseNew()
+      await Promise.allSettled(imports)
+      vi.doMock("../../src/lib/agent.ts", makeAgentMock)
+      vi.resetModules()
+    }
+  })
+
+  test("async manual mock failures reject every waiter and allow factory retry", async () => {
+    // @failure A shared rejected or invalid-export factory stays pending and prevents a legitimate retry.
+    // @level l1
+    // @consumer concurrent manual imports and recovery after mock factory failure
+    // Existing success and replacement journeys cannot detect rejection or validation cleanup.
+    let releaseFailure!: () => void
+    let enteredFailure!: () => void
+    let releaseInvalid!: () => void
+    let enteredInvalid!: () => void
+    const failureRelease = new Promise<void>((resolve) => {
+      releaseFailure = resolve
+    })
+    const failureEntered = new Promise<void>((resolve) => {
+      enteredFailure = resolve
+    })
+    const invalidRelease = new Promise<void>((resolve) => {
+      releaseInvalid = resolve
+    })
+    const invalidEntered = new Promise<void>((resolve) => {
+      enteredInvalid = resolve
+    })
+    const imports: Array<Promise<typeof import("../../src/lib/agent.ts")>> = []
+    const retryAgent = vi.fn()
+    const failure = new Error("shared manual factory failure")
+    let rejectFactory = true
+    let factoryCalls = 0
+    let invalidExports = true
+    let validationFactoryCalls = 0
+    vi.resetModules()
+    try {
+      vi.doMock("../../src/lib/agent.ts", async () => {
+        factoryCalls++
+        enteredFailure()
+        await failureRelease
+        if (rejectFactory) throw failure
+        return { recallAgent: retryAgent }
+      })
+      const first = import("../../src/lib/agent.ts")
+      const second = import("../../src/lib/agent.ts")
+      imports.push(first, second)
+      await failureEntered
+      releaseFailure()
+      const rejected = await Promise.allSettled([first, second])
+      expect(rejected.map((result) => result.status)).toEqual(["rejected", "rejected"])
+      expect(factoryCalls).toBe(1)
+      for (const result of rejected) {
+        if (result.status !== "rejected") throw new Error("Every manual mock waiter must reject")
+        expect(result.reason.cause).toBe(failure)
+      }
+      rejectFactory = false
+      const retried = await import("../../src/lib/agent.ts")
+      expect(Object.is(retried.recallAgent, retryAgent)).toBe(true)
+      expect(factoryCalls).toBe(2)
+
+      vi.resetModules()
+      vi.doMock("../../src/lib/agent.ts", async () => {
+        validationFactoryCalls++
+        enteredInvalid()
+        await invalidRelease
+        // Deliberately malformed to exercise the public export-validation failure, not a test type error.
+        return invalidExports ? (null as unknown as { recallAgent: typeof retryAgent }) : { recallAgent: retryAgent }
+      })
+      const invalidFirst = import("../../src/lib/agent.ts")
+      const invalidSecond = import("../../src/lib/agent.ts")
+      imports.push(invalidFirst, invalidSecond)
+      await invalidEntered
+      releaseInvalid()
+      const invalid = await Promise.allSettled([invalidFirst, invalidSecond])
+      expect(invalid.map((result) => result.status)).toEqual(["rejected", "rejected"])
+      expect(validationFactoryCalls).toBe(1)
+      for (const result of invalid) {
+        if (result.status !== "rejected") throw new Error("Every invalid-export waiter must reject")
+        expect(result.reason.message).toContain("not returning an object")
+      }
+      invalidExports = false
+      const valid = await import("../../src/lib/agent.ts")
+      expect(Object.is(valid.recallAgent, retryAgent)).toBe(true)
+      expect(validationFactoryCalls).toBe(2)
+      expect(retryAgent).not.toHaveBeenCalled()
+    } finally {
+      releaseFailure()
+      releaseInvalid()
+      await Promise.allSettled(imports)
+      vi.doMock("../../src/lib/agent.ts", makeAgentMock)
+      vi.resetModules()
     }
   })
 })
