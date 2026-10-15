@@ -1180,7 +1180,9 @@ async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
     }
     try {
       try {
-        result = (await client.call("cli_health")) as typeof result
+        // Hab probes control-path liveness: an in-memory status RPC answers
+        // within the client bound without reading the diagnostic journal.
+        result = (await client.call("cli_status")) as typeof result
       } finally {
         client.close()
       }

@@ -4120,7 +4120,7 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
     now,
     connectedSessionNames: liveSessions.map((session) => session.name),
     ...(a.sessions === undefined ? {} : { requestedSessionNames: a.sessions as string[] }),
-    dbGrowthWarningBytes: parseDbGrowthWarningBytes(process.env.TRIBE_HEALTH_DB_GROWTH_WARN_BYTES),
+    dbGrowthWarning: parseDbGrowthWarningBytes(process.env.TRIBE_HEALTH_DB_GROWTH_WARN_BYTES),
   })
   const mailboxReadIssues = liveSessions.flatMap((session) => {
     // Connection-scoped tools and legacy diagnostic rows are not managed
