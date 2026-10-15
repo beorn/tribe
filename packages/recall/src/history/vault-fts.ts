@@ -100,9 +100,9 @@ export interface VaultQuery {
   /**
    * `all`: the rows hold every term. `any`: the terms together matched nothing, so these rows hold some of them,
    * ranked by bm25. `as-written`: the query was FTS syntax (a quoted phrase or a `-term`) and ran as the caller wrote
-   * it.
+   * it. `none`: the query has no term once the vault's stopwords go, so nothing was searched: not "found nothing".
    */
-  form: "all" | "any" | "as-written"
+  form: "all" | "any" | "as-written" | "none"
   /** The query's words less the vault's stopwords, in order, each searched as an exact token: no prefix, no stem. */
   terms: string[]
   /** Terms no vault node holds. */
@@ -303,7 +303,8 @@ const FTS_SYNTAX = /"|(?:^|\s)-\S/u
 export function searchVault(query: string, limit: number, vaultDb: string | null): VaultSearch {
   const asWritten = FTS_SYNTAX.test(query)
   const terms = asWritten ? [] : vaultTerms(query)
-  const none: VaultSearch = { form: asWritten ? "as-written" : "all", terms, unmatched: [], matches: [] }
+  const form = asWritten ? "as-written" : terms.length === 0 ? "none" : "all"
+  const none: VaultSearch = { form, terms, unmatched: [], matches: [] }
   if (limit <= 0 || vaultDb === null) return none
   const db = openVaultDb(vaultDb)
 

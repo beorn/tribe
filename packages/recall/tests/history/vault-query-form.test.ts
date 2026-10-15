@@ -78,6 +78,13 @@ describe("searchVault: content terms, conjunction first, then a bm25-ranked disj
     expect(result).toMatchObject({ form: "any", terms: ["quokka", "zebra"], unmatched: ["quokka", "zebra"] })
   })
 
+  test("a query with no term once the stopwords go searches nothing, and says so: a different fact from found nothing", async () => {
+    const result = await search("what is this")
+
+    expect(paths(result)).toEqual([])
+    expect(result).toMatchObject({ form: "none", terms: [], unmatched: [] })
+  })
+
   test("a query written in FTS syntax (a quoted phrase, a -negation) runs as written", async () => {
     const result = await search('"memory leak" -Jev')
 
