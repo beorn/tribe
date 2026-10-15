@@ -1,5 +1,5 @@
 import { assertSingleStatement } from "@bearly/sqlite"
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync, writeSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Database } from "bun:sqlite"
@@ -13,13 +13,17 @@ const mockAgent: {
 } = { result: null, options: null }
 let mockRefreshSpawnCalls = 0
 
-vi.mock("../../src/lib/agent.ts", () => ({
-  recallAgent: (query: string, options: unknown) => {
-    if (!mockAgent.result) throw new Error("Test did not install a mock recallAgent")
-    mockAgent.options = options
-    return mockAgent.result(query, options as never)
-  },
-}))
+vi.mock("../../src/lib/agent.ts", () => {
+  writeSync(2, `recall-phase ${performance.now().toFixed(1)} agent.factory\n`)
+  return {
+    recallAgent: (query: string, options: unknown) => {
+      writeSync(2, `recall-phase ${performance.now().toFixed(1)} agent.call ${query}\n`)
+      if (!mockAgent.result) throw new Error("Test did not install a mock recallAgent")
+      mockAgent.options = options
+      return mockAgent.result(query, options as never)
+    },
+  }
+})
 
 // Regression seam for @i/20-search-and-memory/23189: search must never import
 // this query-refresh capability. If it is wired back in, the stale-search test
@@ -57,11 +61,16 @@ let setIndexMeta: DbModule["setIndexMeta"]
 let bindVaultDb: VaultModule["bindVaultDb"]
 
 async function loadModules(): Promise<void> {
+  writeSync(2, `recall-phase ${performance.now().toFixed(1)} load.enter\n`)
   vi.resetModules()
+  writeSync(2, `recall-phase ${performance.now().toFixed(1)} load.reset.done\n`)
   const search = await import("../../src/lib/search")
+  writeSync(2, `recall-phase ${performance.now().toFixed(1)} load.search.ready\n`)
   // search.ts imports these, so the dynamic imports resolve the same instances.
   const db = await import("../../src/history/db")
+  writeSync(2, `recall-phase ${performance.now().toFixed(1)} load.db.ready\n`)
   const vault = await import("../../src/history/vault-fts.ts")
+  writeSync(2, `recall-phase ${performance.now().toFixed(1)} load.vault.ready\n`)
   cmdSearch = search.cmdSearch
   resolveProjectScope = search.resolveProjectScope
   closeDb = db.closeDb
@@ -241,6 +250,7 @@ describe("recall search output", () => {
   let stderrWriteSpy: ReturnType<typeof vi.spyOn>
 
   beforeEach(async () => {
+    writeSync(2, `recall-phase ${performance.now().toFixed(1)} setup.enter\n`)
     await loadModules()
     mockAgent.result = null
     mockAgent.options = null
@@ -248,13 +258,17 @@ describe("recall search output", () => {
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
     errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
     stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+    writeSync(2, `recall-phase ${performance.now().toFixed(1)} setup.done\n`)
   })
 
   afterEach(() => {
+    writeSync(2, `recall-phase ${performance.now().toFixed(1)} cleanup.enter\n`)
     logSpy.mockRestore()
     errSpy.mockRestore()
     stderrWriteSpy.mockRestore()
+    writeSync(2, `recall-phase ${performance.now().toFixed(1)} cleanup.spies.restored\n`)
     closeDb()
+    writeSync(2, `recall-phase ${performance.now().toFixed(1)} cleanup.db.closed\n`)
   })
 
   test("reports a loud tool-broken failure — with the lexical hits, clearly labeled, never silently dropped — when default synthesis is unavailable", async () => {
@@ -482,23 +496,38 @@ describe("recall search output", () => {
   })
 
   test("concurrent stale searches report unproven without starting index refreshes", async () => {
+    // Temporary diagnostic checkpoint only: preserve the cold concurrent import and every assertion.
+    writeSync(2, `recall-phase ${performance.now().toFixed(1)} case.enter\n`)
     setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+    writeSync(2, `recall-phase ${performance.now().toFixed(1)} seed.done\n`)
 
-    mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
+    mockAgent.result = async (query, options) => {
+      writeSync(2, `recall-phase ${performance.now().toFixed(1)} agent.result ${query}\n`)
+      return zeroAgentResult(query, options) as never
+    }
+    writeSync(2, `recall-phase ${performance.now().toFixed(1)} mock.ready\n`)
     const previousExitCode = process.exitCode
     process.exitCode = 0
 
     try {
       await Promise.all(
-        ["nohits-a", "nohits-b"].map((query) =>
-          cmdSearch(query, {
+        ["nohits-a", "nohits-b"].map((query) => {
+          writeSync(2, `recall-phase ${performance.now().toFixed(1)} search.start ${query}\n`)
+          const pending = cmdSearch(query, {
             agent: true,
             limit: "5",
             round2: "off",
-          }),
-        ),
+          })
+          writeSync(2, `recall-phase ${performance.now().toFixed(1)} search.promise ${query}\n`)
+          return pending.then((value) => {
+            writeSync(2, `recall-phase ${performance.now().toFixed(1)} search.done ${query}\n`)
+            return value
+          })
+        }),
       )
+      writeSync(2, `recall-phase ${performance.now().toFixed(1)} search.both.done\n`)
 
+      writeSync(2, `recall-phase ${performance.now().toFixed(1)} assertions.enter\n`)
       expect(mockRefreshSpawnCalls).toBe(0)
       expect(callsText(errSpy)).not.toContain("auto-refresh")
       // The stale answer names the root and window it judged (@ag/recall/27930);
@@ -510,7 +539,9 @@ describe("recall search output", () => {
         /0 results — UNPROVEN \(stale index: 2\.0h old vs \d+m window \(\w+\) on index_meta\.last_rebuild\) for "nohits-b"/,
       )
       expect(process.exitCode).toBe(3)
+      writeSync(2, `recall-phase ${performance.now().toFixed(1)} assertions.done\n`)
     } finally {
+      writeSync(2, `recall-phase ${performance.now().toFixed(1)} case.finally\n`)
       process.exitCode = previousExitCode
     }
   })
