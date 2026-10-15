@@ -12,8 +12,6 @@ import * as fs from "node:fs"
 export const CLAUDE_DIR = path.join(os.homedir(), ".claude")
 export const DB_PATH = process.env.RECALL_DB_PATH?.trim() || path.join(CLAUDE_DIR, "session-index.db")
 export const PROJECTS_DIR = path.join(CLAUDE_DIR, "projects")
-export const PLANS_DIR = path.join(CLAUDE_DIR, "plans")
-export const TODOS_DIR = path.join(CLAUDE_DIR, "todos")
 export const MAX_CONTENT_SIZE = 1024 * 1024 // 1MB - store content for files smaller than this
 
 // Schema includes:

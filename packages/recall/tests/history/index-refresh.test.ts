@@ -158,24 +158,6 @@ describe("Recall refresh completion", () => {
     expect(rows).toEqual([])
   })
 
-  test.each(["plan", "todo"])("a selected %s read failure cannot publish success", async (kind) => {
-    const file = join(root, `missing.${kind === "plan" ? "md" : "json"}`)
-    if (kind === "plan") corpus.plans = [file]
-    else corpus.todos = [file]
-    const prior = getIndexMeta(db, "last_rebuild")
-    await expect(rebuildIndex(db, { incremental: true })).rejects.toThrow(file)
-    expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
-  })
-
-  test("a malformed selected todo cannot publish success", async () => {
-    const file = join(root, "todo.json")
-    writeFileSync(file, "invalid JSON")
-    corpus.todos = [file]
-    const prior = getIndexMeta(db, "last_rebuild")
-    await expect(rebuildIndex(db, { incremental: true })).rejects.toThrow(file)
-    expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
-  })
-
   test("completion is published after every other metadata write", async () => {
     db.exec(
       "CREATE TRIGGER refuse_meta BEFORE INSERT ON index_meta WHEN NEW.key = 'total_files' BEGIN SELECT RAISE(ABORT, 'metadata failed'); END",

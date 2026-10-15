@@ -34,11 +34,8 @@ import {
   getSessionByPath,
   setIndexMeta,
   getIndexMeta,
-  getAllSessionEntries,
-  findPlanFiles,
-  findTodoFiles,
 } from "./db"
-import type { TodoItem, BeadRecord, JsonlRecord, ToolUse, ClaudeFailureRecord } from "./types"
+import type { BeadRecord, JsonlRecord, ToolUse, ClaudeFailureRecord } from "./types"
 import { formatBead, extractMarkdownTitle } from "./formatters"
 
 export interface IndexProgress {
@@ -786,10 +783,6 @@ export interface IndexResult {
   files: number
   messages: number
   writes: number
-  plans: number
-  todos: number
-  summaries: number
-  firstPrompts: number
   skippedOld: number
   beads: number
   sessionMemory: number
@@ -1077,10 +1070,6 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let totalFiles = 0
   let totalMessages = 0
   let totalWrites = 0
-  let totalPlans = 0
-  let totalTodos = 0
-  let totalSummaries = 0
-  let totalFirstPrompts = 0
   let skippedOld = 0
   let claudeSkipped = 0
   let claudeVanished = 0
@@ -1332,7 +1321,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     }
   }
 
-  // Index session summaries, plans, todos, and project sources only during corpus rebuilds
+  // Index project sources only during corpus rebuilds.
   const projectSourceResult = {
     beads: 0,
     sessionMemory: 0,
@@ -1343,94 +1332,6 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   }
 
   if (!options.path) {
-    const sessionEntries = getAllSessionEntries()
-    for (const entry of sessionEntries) {
-      if (entry.summary) {
-        upsertContent(
-          db,
-          "summary",
-          entry.sessionId,
-          entry.projectPath || null,
-          entry.customTitle || null,
-          entry.summary,
-          entry.modified ? new Date(entry.modified).getTime() : Date.now(),
-        )
-        totalSummaries++
-      }
-    }
-
-    // Index session first prompts (enables topic-level recall)
-    for (const entry of sessionEntries) {
-      if (entry.firstPrompt) {
-        upsertContent(
-          db,
-          "first_prompt",
-          entry.sessionId,
-          entry.projectPath || null,
-          entry.customTitle || null,
-          entry.firstPrompt,
-          entry.created ? new Date(entry.created).getTime() : Date.now(),
-        )
-        totalFirstPrompts++
-      }
-    }
-
-    // Index plan files
-    for (const planFile of findPlanFiles()) {
-      try {
-        const stats = fs.statSync(planFile)
-        const content = fs.readFileSync(planFile, "utf8")
-        const filename = path.basename(planFile, ".md")
-
-        // Extract title from first heading or filename
-        const titleMatch = content.match(/^#\s+(.+)$/m)
-        const title = titleMatch?.[1] ?? filename
-
-        upsertContent(
-          db,
-          "plan",
-          filename,
-          null, // Plans aren't project-specific
-          title,
-          content,
-          stats.mtime.getTime(),
-        )
-        totalPlans++
-      } catch (error) {
-        throw new Error(`Recall plan indexing failed: ${planFile}`, { cause: error })
-      }
-    }
-
-    // Index todo files
-    for (const todoFile of findTodoFiles()) {
-      try {
-        const stats = fs.statSync(todoFile)
-        const content = fs.readFileSync(todoFile, "utf8")
-        const todos = JSON.parse(content) as TodoItem[]
-        const filename = path.basename(todoFile, ".json")
-
-        // Combine all todos into searchable content
-        const todoContent = todos
-          .map((t) => `[${t.status}] ${t.content}${t.activeForm ? ` (${t.activeForm})` : ""}`)
-          .join("\n")
-
-        if (todoContent.trim()) {
-          upsertContent(
-            db,
-            "todo",
-            filename,
-            null,
-            `Todo list (${todos.length} items)`,
-            todoContent,
-            stats.mtime.getTime(),
-          )
-          totalTodos++
-        }
-      } catch (error) {
-        throw new Error(`Recall todo indexing failed: ${todoFile}`, { cause: error })
-      }
-    }
-
     // B3: Timer run indexes project sources for every project it discovers under the same writer
     const projectRootsToIndex = new Set<string>()
     if (options.projectRoot) {
@@ -1550,10 +1451,6 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     setIndexMeta(db, "rebuild_duration_ms", String(duration))
     setIndexMeta(db, "total_files", String(totalFiles))
     setIndexMeta(db, "total_messages", String(totalMessages))
-    setIndexMeta(db, "total_plans", String(totalPlans))
-    setIndexMeta(db, "total_todos", String(totalTodos))
-    setIndexMeta(db, "total_summaries", String(totalSummaries))
-    setIndexMeta(db, "total_first_prompts", String(totalFirstPrompts))
     setIndexMeta(db, "total_beads", String(projectSourceResult.beads))
     setIndexMeta(db, "total_session_memory", String(projectSourceResult.sessionMemory))
     setIndexMeta(db, "total_project_memory", String(projectSourceResult.projectMemory))
@@ -1577,10 +1474,6 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     files: totalFiles,
     messages: totalMessages,
     writes: totalWrites,
-    plans: totalPlans,
-    todos: totalTodos,
-    summaries: totalSummaries,
-    firstPrompts: totalFirstPrompts,
     skippedOld,
     codexSessions,
     codexMessages,

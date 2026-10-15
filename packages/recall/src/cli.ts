@@ -170,7 +170,7 @@ program
   .option("--json", "Output as JSON")
   .option(
     "--bench",
-    'Also run the four FTS search benchmarks ("bug fix", "inline edit", "test" (1d), plans only) plus the LLM synthesis test and multi-model race (slow)',
+    'Also run the four FTS search benchmarks ("bug fix", "inline edit", "test" (1d), project knowledge) plus the LLM synthesis test and multi-model race (slow)',
   )
   .action(async (opts: { json?: boolean; bench?: boolean }) => {
     await cmdStatus(opts)

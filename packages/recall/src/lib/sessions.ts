@@ -91,18 +91,6 @@ export async function cmdIndex(opts: {
     if (result.writes > 0) {
       console.log(`  ${result.writes.toLocaleString()} file writes`)
     }
-    if (result.summaries > 0) {
-      console.log(`  ${result.summaries.toLocaleString()} session summaries`)
-    }
-    if (result.firstPrompts > 0) {
-      console.log(`  ${result.firstPrompts.toLocaleString()} first prompts`)
-    }
-    if (result.plans > 0) {
-      console.log(`  ${result.plans.toLocaleString()} plan files`)
-    }
-    if (result.todos > 0) {
-      console.log(`  ${result.todos.toLocaleString()} todo lists`)
-    }
     if (result.beads > 0) {
       console.log(`  ${result.beads.toLocaleString()} beads (issues)`)
     }

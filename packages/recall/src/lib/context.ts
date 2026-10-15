@@ -1,4 +1,3 @@
-import { assertSingleStatement } from "@bearly/sqlite"
 /**
  * context.ts — Build a rich context bundle for the query planner.
  *
@@ -23,8 +22,6 @@ import { getCurrentSessionContext, renderSessionContextForPlanner, type SessionC
 export interface RecentSession {
   id: string
   title: string | null
-  firstPrompt: string | null
-  summary: string | null
   timestamp: number
   ageLabel: string
 }
@@ -176,8 +173,6 @@ export function renderContextPrompt(ctx: QueryContext, opts: { maxChars?: number
     for (const s of ctx.recentSessions) {
       const parts: string[] = []
       if (s.title) parts.push(`title: ${s.title}`)
-      if (s.firstPrompt) parts.push(`prompt: ${truncate(s.firstPrompt, 200)}`)
-      if (s.summary) parts.push(`summary: ${truncate(s.summary, 300)}`)
       lines.push(`  [${s.ageLabel}] ${parts.join(" | ")}`)
     }
     lines.push("")
@@ -210,60 +205,21 @@ function loadRecentSessions(db: Database, max: number): RecentSession[] {
   const titles = getAllSessionTitles()
   const now = Date.now()
 
-  // Pull recent sessions by update time. The message_count column isn't
-  // reliably populated across older sessions, so we don't filter on it —
-  // sessions without content will just show up with null firstPrompt/summary,
-  // which is harmless.
+  // Pull recent sessions by update time.
   const sessionRows = db
     .prepare(
-      `SELECT s.id, s.updated_at, s.message_count
+      `SELECT s.id, s.updated_at
        FROM sessions s
        ORDER BY s.updated_at DESC
        LIMIT ?`,
     )
-    .all(max) as { id: string; updated_at: number; message_count: number }[]
+    .all(max) as { id: string; updated_at: number }[]
 
   if (sessionRows.length === 0) return []
-
-  const ids = sessionRows.map((r) => r.id)
-  const placeholders = ids.map(() => "?").join(",")
-
-  const firstPrompts = new Map<string, string>()
-  const summaries = new Map<string, string>()
-
-  try {
-    const promptRows = db
-      .prepare(
-        assertSingleStatement(`SELECT source_id, content FROM content
-         WHERE content_type = 'first_prompt' AND source_id IN (${placeholders})`),
-      )
-      .all(...ids) as { source_id: string; content: string }[]
-    for (const r of promptRows) firstPrompts.set(r.source_id, r.content)
-  } catch {
-    // content table may not exist on older DBs — degrade silently
-  }
-
-  try {
-    const summaryRows = db
-      .prepare(
-        assertSingleStatement(`SELECT source_id, content, timestamp FROM content
-         WHERE content_type = 'summary' AND source_id IN (${placeholders})
-         ORDER BY timestamp DESC`),
-      )
-      .all(...ids) as { source_id: string; content: string; timestamp: number }[]
-    // First (newest) summary per session wins
-    for (const r of summaryRows) {
-      if (!summaries.has(r.source_id)) summaries.set(r.source_id, r.content)
-    }
-  } catch {
-    /* noop */
-  }
 
   return sessionRows.map((r) => ({
     id: r.id,
     title: titles.get(r.id) ?? null,
-    firstPrompt: firstPrompts.get(r.id) ?? null,
-    summary: summaries.get(r.id) ?? null,
     timestamp: r.updated_at,
     ageLabel: relativeAge(now - r.updated_at),
   }))
@@ -416,11 +372,6 @@ function safeStatMtime(p: string): number {
 
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10)
-}
-
-function truncate(s: string, n: number): string {
-  if (s.length <= n) return s
-  return s.slice(0, n - 1) + "…"
 }
 
 function relativeAge(ms: number): string {

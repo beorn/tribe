@@ -353,7 +353,7 @@ export function synthesisDiagnosticsFromError(err: unknown, timeoutMs: number): 
  * Search session history and optionally synthesize results via cheap LLM.
  *
  * Searches both the messages FTS table and the unified content table
- * (plans, summaries, todos), merges results by rank, deduplicates by session,
+ * (project knowledge), merges results by rank, deduplicates by session,
  * and optionally passes them through a cheap LLM for synthesis.
  */
 export async function recall(query: string, options: RecallOptions = {}): Promise<RecallResult> {
@@ -456,20 +456,22 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       )
     }
 
-    // Search session-scoped content (plans, summaries, todos, first_prompts) with time filter
+    // Hook mode searches live project knowledge within the prompt's time window.
+    // Normal search gets those rows from project_content without a time filter.
     const sessionContentOpts: ContentSearchOptions = {
       limit: limit * 2,
       sinceTime,
       projectFilter,
       snippetTokens,
-      types: ["plan", "summary", "todo", "first_prompt"] as ContentType[],
+      types: ["doc", "llm_research", "project_memory", "claude_md"] as ContentType[],
       mode,
     }
 
     const contentStart = Date.now()
-    const sessionContentResults: ReturnType<typeof searchAll> = runs("session_content")
-      ? phase("session_content", () => searchAll(db, query, sessionContentOpts))
-      : { results: [], total: null }
+    const sessionContentResults: ReturnType<typeof searchAll> =
+      hook && runs("session_content")
+        ? phase("session_content", () => searchAll(db, query, sessionContentOpts))
+        : { results: [], total: null }
     const sessionMs = Date.now() - contentStart
 
     // Search project knowledge sources (beads, memory, docs) WITHOUT time filter. Hook mode does not: the vault
@@ -479,7 +481,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       limit: limit * 2,
       projectFilter,
       snippetTokens,
-      types: ["bead", "session_memory", "project_memory", "doc", "claude_md", "llm_research"] as ContentType[],
+      types: ["project_memory", "doc", "claude_md", "llm_research"] as ContentType[],
       mode,
     }
 
@@ -533,20 +535,6 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
               r.rank += SYNONYM_RANK_PENALTY
               messageResults.results.push(r)
               synonymMsgCount++
-            }
-          }
-
-          // Search session content with variant
-          const varSession = searchAll(db, variant, {
-            ...sessionContentOpts,
-            limit: limit,
-          })
-          for (const r of varSession.results) {
-            if (!seenContentIds.has(r.id)) {
-              seenContentIds.add(r.id)
-              r.rank += SYNONYM_RANK_PENALTY
-              sessionContentResults.results.push(r)
-              synonymContentCount++
             }
           }
 
