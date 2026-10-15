@@ -29,6 +29,8 @@ let glossaryPath: string | null = null
 let glossarySet: Set<string> | null = null
 /** The vault's root scope names (`@ag/…` → `ag`), read in the glossary's pass: a short token naming one is an identifier. */
 let rootScopeSet: Set<string> | null = null
+/** The vault's top-level directories (`hub/…` → `hub`), read in the same pass: a slash token naming one is a path. */
+let vaultDirSet: Set<string> | null = null
 
 const EXPLICIT_ALIASES: ReadonlyArray<string> = [
   // camelCase code-symbol terms
@@ -71,11 +73,9 @@ const PROJECT_DIRS: ReadonlyArray<string> = ["vendor/", "apps/", "packages/", "h
 
 function buildGlossary(vaultDb: string): Set<string> | null {
   if (glossaryPath === vaultDb) return glossarySet
-  // Opened before the path is recorded: a vault that cannot be opened refuses on every call, never cached as none.
+  // A vault that cannot be opened refuses here on every call. The handle is openVaultDb's kept one, so a failed query
+  // below leaves it open for the next call rather than closing it.
   const db = openVaultDb(vaultDb)
-  glossaryPath = vaultDb
-  glossarySet = null
-  rootScopeSet = null
 
   const out = new Set<string>(EXPLICIT_ALIASES.map((s) => s.toLowerCase()))
 
@@ -84,7 +84,11 @@ function buildGlossary(vaultDb: string): Set<string> | null {
       fs_path: string
     }>
 
+    const dirs = new Set<string>()
     for (const { fs_path } of pathRows) {
+      const firstSlash = fs_path.indexOf("/")
+      if (firstSlash > 0 && !fs_path.startsWith("@")) dirs.add(fs_path.slice(0, firstSlash).toLowerCase())
+
       // Direct file basenames (strict — only when the file looks like a
       // dotfile-or-readme variant; full lowercase basenames are too noisy
       // to whitelist wholesale).
@@ -143,12 +147,18 @@ function buildGlossary(vaultDb: string): Set<string> | null {
       }
     }
 
+    // Recorded together, and only once both queries answered: a failure is never cached, so the next call tries again.
+    glossaryPath = vaultDb
     glossarySet = out
     rootScopeSet = roots
+    vaultDirSet = dirs
     return out
-  } catch {
-    // silent-fallback-allow: unavailable vault glossary only disables anchor-term boosting.
-    return null
+  } catch (error) {
+    // A query that fails on an open vault is a broken store, not an unavailable boost: it says so and names the vault,
+    // which SQLite's own message does not (@cto 159a5acb).
+    throw new Error(`vault glossary ${vaultDb}: ${error instanceof Error ? error.message : String(error)}`, {
+      cause: error,
+    })
   }
 }
 
@@ -162,6 +172,8 @@ export interface VaultAnchor {
 const ANCHOR_WORDS = 3
 const AT_REF = /^@[A-Za-z0-9][\w.-]*(?:\/[\w.-]+)*$/u
 const PATH = /^[\w.-]+\/[\w./-]+$/u
+const FILE_EXTENSION = /\.[A-Za-z0-9]{1,6}$/u
+const NON_LETTER = /[\d_.-]/u
 const KEBAB = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$/u
 const CAMEL = /^(?:[a-z]+[A-Z]|[A-Z][a-z0-9]+[A-Z])[A-Za-z0-9]*$/u
 const BEAD_NUMBER = /^\d{4,6}$/u
@@ -178,10 +190,23 @@ const PROPER = /^[A-Z][a-z]+$/u
 export function deriveVaultAnchor(prompt: string, vaultDb: string | null): VaultAnchor | null {
   const glossary = vaultDb === null ? null : buildGlossary(vaultDb)
   const roots = glossary === null ? null : rootScopeSet
+  const dirs = glossary === null ? null : vaultDirSet
   const words = promptWords(prompt)
+  // A slash token is a path, not a prose pair like "and/or" or "A/B" (@cto 159a5acb, rule D measured on 20,000
+  // operator prompts): it has a file extension, or a segment with a digit, `-`, `_` or `.`, or a segment that names a
+  // vault root scope or a directory the vault holds. With no vault, the shape arm alone.
+  const isPath = (token: string): boolean =>
+    PATH.test(token) &&
+    (FILE_EXTENSION.test(token) ||
+      token
+        .split("/")
+        .some(
+          (segment) =>
+            NON_LETTER.test(segment) || roots?.has(segment.toLowerCase()) || dirs?.has(segment.toLowerCase()),
+        ))
   const isIdentifier = ({ token, opensSentence }: PromptWord): boolean => {
     const lower = token.toLowerCase()
-    if ([AT_REF, PATH, KEBAB, CAMEL, BEAD_NUMBER].some((shape) => shape.test(token))) return true
+    if (isPath(token) || [AT_REF, KEBAB, CAMEL, BEAD_NUMBER].some((shape) => shape.test(token))) return true
     if (roots?.has(lower) || glossary?.has(lower) || SHORT_EXPLICIT_ALIASES.has(lower)) return true
     return !opensSentence && PROPER.test(token) && !isStopword(lower)
   }
