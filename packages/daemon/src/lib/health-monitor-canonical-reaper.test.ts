@@ -13,7 +13,7 @@ import {
   createCanonicalReaperState,
   SOURCE_RECOVERY_SAMPLES,
 } from "./health-monitor-canonical-reaper.ts"
-import { defaultThresholds, readThresholdsFromEnv } from "./health-monitor-plugin.ts"
+import { defaultThresholds } from "./health-monitor-plugin.ts"
 
 function observation(
   attribution: ProcessRoutingAttribution,
@@ -583,30 +583,30 @@ describe("the reaper's CPU threshold is read strictly, and a refusal stays insid
     // plugin's start() and the loader disables any plugin whose start throws (@cto, 2026-10-15): it turns the reaper
     // off, and start() pages once about it.
     withThreshold("eighty", () => {
-      const read = readThresholdsFromEnv()
+      const read = defaultThresholds()
       expect(read.reaperCpuRefusal).toEqual({
         envVar: "HEALTH_REAPER_CPU_THRESHOLD",
         raw: "eighty",
         reason: "not-a-number",
       })
-      expect(read.thresholds.reaperEnabled).toBe(false)
+      expect(read.reaperEnabled).toBe(false)
     })
     // A finite value at or below zero fails exactly the way NaN does, so it is refused the same way.
     withThreshold("0", () => {
-      expect(readThresholdsFromEnv().reaperCpuRefusal).toEqual({
+      expect(defaultThresholds().reaperCpuRefusal).toEqual({
         envVar: "HEALTH_REAPER_CPU_THRESHOLD",
         raw: "0",
         reason: "not-positive",
       })
     })
     withThreshold("-5", () => {
-      const read = readThresholdsFromEnv()
+      const read = defaultThresholds()
       expect(read.reaperCpuRefusal).toEqual({
         envVar: "HEALTH_REAPER_CPU_THRESHOLD",
         raw: "-5",
         reason: "not-positive",
       })
-      expect(read.thresholds.reaperEnabled).toBe(false)
+      expect(read.reaperEnabled).toBe(false)
     })
     // And the old throw is gone, on every one of those values: this is the wider failure the revise removed.
     for (const raw of ["eighty", "0", "-5"]) {
@@ -616,15 +616,15 @@ describe("the reaper's CPU threshold is read strictly, and a refusal stays insid
 
   it("still reads the default, and a number the operator did set", () => {
     withThreshold(undefined, () => {
-      const read = readThresholdsFromEnv()
+      const read = defaultThresholds()
       expect(read.reaperCpuRefusal).toBeUndefined()
-      expect(read.thresholds.reaperCpuThreshold).toBe(80)
-      expect(read.thresholds.reaperEnabled).toBe(true)
+      expect(read.reaperCpuThreshold).toBe(80)
+      expect(read.reaperEnabled).toBe(true)
     })
     withThreshold("55", () => {
-      const read = readThresholdsFromEnv()
+      const read = defaultThresholds()
       expect(read.reaperCpuRefusal).toBeUndefined()
-      expect(read.thresholds.reaperCpuThreshold).toBe(55)
+      expect(read.reaperCpuThreshold).toBe(55)
     })
   })
 })

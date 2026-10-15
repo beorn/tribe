@@ -231,6 +231,9 @@ describe("health monitor managed process source", () => {
     // each keep the plugin running, with the reaper off and one page naming the value; the readable rows live beside
     // this one in health-monitor-canonical-reaper.test.ts.
     for (const raw of ["eighty", "0", "-5"]) {
+      // The refusal is deliberately loud (one log.error line BESIDE the page this row asserts), and the shared harness
+      // fails any test that prints: capture console.error here rather than suppressing the log in production.
+      vi.spyOn(console, "error").mockImplementation(() => {})
       vi.useFakeTimers()
       vi.stubEnv("HEALTH_REAPER_CPU_THRESHOLD", raw)
       const source = managed({ ...observation(), processes: [] })
