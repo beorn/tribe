@@ -36,6 +36,7 @@ import type {
 
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
+import type { Database } from "bun:sqlite"
 import { searchVault, type VaultQuery } from "./vault-fts.ts"
 
 // Re-export shared items so existing internal imports continue to work
@@ -345,6 +346,45 @@ export function synthesisDiagnosticsFromError(err: unknown, timeoutMs: number): 
   }
 }
 
+/** The indexed and vault sources behind one lexical candidate request. */
+export type CandidateLeg = "messages" | "project_content" | "vault" | "titles"
+
+export interface CandidateRequest {
+  db: Database
+  query: string
+  messages?: MessageSearchOptions
+  projectContent?: ContentSearchOptions
+  vault?: { limit: number; dbPath: string | null }
+  titles?: boolean
+  /** Retain the caller's phase accounting without a second query path. */
+  measure?: <T>(leg: CandidateLeg, run: () => T) => T
+}
+
+/** One read-only query boundary for Recall's normal, raw and planned variants. */
+export function retrieveCandidates(request: CandidateRequest) {
+  const legs: CandidateLeg[] = []
+  const run = <T>(leg: CandidateLeg, query: () => T): T => {
+    legs.push(leg)
+    return request.measure ? request.measure(leg, query) : query()
+  }
+  const messageOptions = request.messages
+  const contentOptions = request.projectContent
+  const vaultOptions = request.vault
+  const messages = messageOptions
+    ? run("messages", () => ftsSearchWithSnippet(request.db, request.query, messageOptions))
+    : { results: [], total: null }
+  const projectContent = contentOptions
+    ? run("project_content", () => searchAll(request.db, request.query, contentOptions))
+    : { results: [], total: null }
+  const vault = vaultOptions
+    ? run("vault", () => searchVault(request.query, vaultOptions.limit, vaultOptions.dbPath))
+    : null
+  const titles = request.titles ? run("titles", getAllSessionTitles) : new Map<string, string>()
+  return { messages, projectContent, vault, titles, legs }
+}
+
+export type CandidateSet = ReturnType<typeof retrieveCandidates>
+
 // ============================================================================
 // Core recall function
 // ============================================================================
@@ -436,11 +476,30 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       mode,
     }
 
+    // Project knowledge is searched by normal mode. The hook's vault phase
+    // answers for beads and docs inside its wall.
+    const projectContentOpts: ContentSearchOptions = {
+      limit: limit * 2,
+      projectFilter,
+      snippetTokens,
+      types: ["bead", "session_memory", "project_memory", "doc", "claude_md", "llm_research"] as ContentType[],
+      mode,
+    }
+    const vaultDb = options.vaultDb ?? null
     const searchStart = Date.now()
-    const messageResults: ReturnType<typeof ftsSearchWithSnippet> = runs("messages")
-      ? phase("messages", () => ftsSearchWithSnippet(db, query, messageOpts))
-      : { results: [], total: null }
-    const msgMs = Date.now() - searchStart
+    const candidates = retrieveCandidates({
+      db,
+      query,
+      ...(runs("messages") ? { messages: messageOpts } : {}),
+      ...(!hook && options.phases === undefined ? { projectContent: projectContentOpts } : {}),
+      ...(runs("vault") ? { vault: { limit: limit * 2, dbPath: vaultDb } } : {}),
+      measure: phase,
+    })
+    const messageResults = candidates.messages
+    const projectContentResults = candidates.projectContent
+    const vault = candidates.vault
+    const vaultMatches = vault?.matches ?? []
+    const msgMs = phases.messages ?? 0
     hookSearch = messageResults.hook
     if (hookSearch?.capped) skipped.push(hookSearch.capped)
     if (!runs("messages")) {
@@ -456,32 +515,12 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       )
     }
 
-    // Project knowledge is searched by normal mode. The hook's vault phase
-    // answers for beads and docs inside its wall.
-    const projectStart = Date.now()
-    const projectContentOpts: ContentSearchOptions = {
-      limit: limit * 2,
-      projectFilter,
-      snippetTokens,
-      types: ["bead", "session_memory", "project_memory", "doc", "claude_md", "llm_research"] as ContentType[],
-      mode,
-    }
-
-    const projectContentResults: ReturnType<typeof searchAll> =
-      hook || options.phases !== undefined
-        ? { results: [], total: null }
-        : phase("project_content", () => searchAll(db, query, projectContentOpts))
-    const projectMs = Date.now() - projectStart
-
     // Vault FTS — opt-in: searches the km tree db (.km/state.db) the call names (options.vaultDb, its only binding:
     // @cto 456e6e77). Beads, design docs, CLAUDE.md, and hub/* docs are higher signal than
     // transcript fragments, so we boost vault hits with a strong negative
     // rank (more negative = better).
-    const vaultDb = options.vaultDb ?? null
-    const vaultStart = Date.now()
-    const vault = runs("vault") ? phase("vault", () => searchVault(query, limit * 2, vaultDb)) : null
-    const vaultMatches = vault?.matches ?? []
-    const vaultMs = Date.now() - vaultStart
+    const projectMs = phases.project_content ?? 0
+    const vaultMs = phases.vault ?? 0
     if (vault !== null && vaultDb !== null) {
       vaultQuery = { form: vault.form, terms: vault.terms, unmatched: vault.unmatched, matched: vault.matched }
       log(
@@ -504,11 +543,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       for (const variant of queryVariants.slice(0, 4)) {
         const began = performance.now()
         try {
-          // Search messages with variant
-          const varMsgs = ftsSearchWithSnippet(db, variant, {
-            ...messageOpts,
-            limit: limit,
-          })
+          const varMsgs = retrieveCandidates({ db, query: variant, messages: { ...messageOpts, limit } }).messages
           for (const r of varMsgs.results) {
             if (!seenMsgIds.has(r.id)) {
               seenMsgIds.add(r.id)
@@ -518,11 +553,12 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
             }
           }
 
-          // Search project content with variant
-          const varProject = searchAll(db, variant, {
-            ...projectContentOpts,
-            limit: limit,
-          })
+          // Keep messages already found if the content leg rejects this variant.
+          const varProject = retrieveCandidates({
+            db,
+            query: variant,
+            projectContent: { ...projectContentOpts, limit },
+          }).projectContent
           for (const r of varProject.results) {
             if (!seenContentIds.has(r.id)) {
               seenContentIds.add(r.id)
@@ -546,8 +582,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const searchMs = Date.now() - searchStart
     log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms project=${projectMs}ms)`)
 
-    // Get session titles for enrichment
-    const sessionTitles = runs("titles") ? phase("titles", () => getAllSessionTitles()) : new Map<string, string>()
+    // Title enrichment follows the lexical and synonym reads, as before.
+    const sessionTitles = retrieveCandidates({ db, query: "", titles: runs("titles"), measure: phase }).titles
 
     // Session depth corroboration: sessions with more matching messages are more relevant.
     // A session with 10 messages about the topic is more authoritative than one with 1 passing mention.

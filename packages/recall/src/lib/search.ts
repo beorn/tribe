@@ -5,16 +5,7 @@ import { assertSingleStatement } from "@bearly/sqlite"
 
 import * as path from "path"
 import * as fs from "fs"
-import {
-  getDb,
-  closeDb,
-  getIndexMeta,
-  PROJECTS_DIR,
-  ftsSearchWithSnippet,
-  searchAll,
-  getAllSessionTitles,
-  type MessageSearchOptions,
-} from "../history/db"
+import { getDb, closeDb, getIndexMeta, PROJECTS_DIR, type MessageSearchOptions } from "../history/db"
 import {
   recall,
   suggestRetryTimeoutMs,
@@ -27,8 +18,8 @@ import {
 import { DEFAULT_SYNTHESIS_TIMEOUT_MS } from "../history/recall-shared.ts"
 import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
-import { searchLiveSession } from "../history/search"
-import { bindVaultDb, getVaultDbPath, searchVault, type VaultMatch } from "../history/vault-fts.ts"
+import { retrieveCandidates, searchLiveSession } from "../history/search"
+import { bindVaultDb, getVaultDbPath, type VaultMatch } from "../history/vault-fts.ts"
 import { findSessionFiles, extractTextContent, parseSessionPath } from "../history/indexer"
 import type { ContentType, ContentRecord, MessageRecord, JsonlRecord } from "../history/types"
 import {
@@ -420,23 +411,22 @@ function probeLiteralRawMatches(query: string, base: RecallOptions): { token: st
   if (tokens.length === 0) return null
 
   const db = getDb()
-  const sessionTitles = getAllSessionTitles()
+  const sessionTitles = retrieveCandidates({ db, query: "", titles: true }).titles
   const limit = base.limit ?? 10
   const sinceTime = base.since ? parseTime(base.since) : Date.now() - THIRTY_DAYS_MS
   const projectFilter = base.projectFilter
 
   for (const token of tokens) {
     const start = Date.now()
-    const messageResults = ftsSearchWithSnippet(db, token, {
-      limit,
-      sinceTime,
-      projectFilter,
-      snippetTokens: 200,
-    })
-    const contentResults = searchAll(db, token, {
-      limit,
-      projectFilter,
-      types: ["bead", "session_memory", "project_memory", "doc", "claude_md", "llm_research"] as ContentType[],
+    const { messages: messageResults, projectContent: contentResults } = retrieveCandidates({
+      db,
+      query: token,
+      messages: { limit, sinceTime, projectFilter, snippetTokens: 200 },
+      projectContent: {
+        limit,
+        projectFilter,
+        types: ["bead", "session_memory", "project_memory", "doc", "claude_md", "llm_research"] as ContentType[],
+      },
     })
 
     const results: RecallSearchResult[] = [
@@ -852,12 +842,6 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   const messageType: "user" | "assistant" | undefined =
     question && response ? undefined : question ? "user" : response ? "assistant" : undefined
 
-  // Allow searching without query if filters are provided
-  if (!query && !question && !response && !tool && !since) {
-    console.error("Usage: recall <query> [options]")
-    process.exit(1)
-  }
-
   // Build search description
   const searchDesc: string[] = []
   if (query) searchDesc.push(`"${query}"`)
@@ -885,6 +869,11 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   const contentTypes = types?.filter((t) => t !== "message") as ContentType[] | undefined
   // Content rows have no message role, including when both roles are selected.
   const searchContent = !question && !response && (!types || (contentTypes && contentTypes.length > 0))
+  // Project source types are persistent knowledge and ignore the raw time filter.
+  const projectSourceTypes = new Set(["bead", "session_memory", "project_memory", "doc", "claude_md"])
+  const contentSinceTime = contentTypes?.every((t) => projectSourceTypes.has(t)) ? undefined : sinceTime
+  // A vault row cannot honor message role/tool/session or Recall content-type filters.
+  const vaultFilterActive = question || response || tool !== undefined || session !== undefined || include !== undefined
 
   // Build search options
   const messageOpts: MessageSearchOptions & { mode?: "exact" } = {
@@ -899,6 +888,26 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     messageOpts.projectFilter = project.replace(/\*/g, "")
   }
 
+  const candidates = query
+    ? retrieveCandidates({
+        db,
+        query,
+        ...(searchMessages ? { messages: messageOpts } : {}),
+        ...(searchContent && contentTypes?.length !== 0
+          ? {
+              projectContent: {
+                limit,
+                projectFilter: project?.replace(/\*/g, ""),
+                types: contentTypes,
+                sinceTime: contentSinceTime,
+              },
+            }
+          : {}),
+        ...(!vaultFilterActive ? { vault: { limit, dbPath: vaultDb } } : {}),
+        titles: true,
+      })
+    : retrieveCandidates({ db, query: "", titles: true })
+
   // Search messages table if needed
   let messageResults: {
     results: (MessageRecord & {
@@ -910,7 +919,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     total: number
   } = { results: [], total: 0 }
   if (searchMessages && query) {
-    messageResults = ftsSearchWithSnippet(db, query, messageOpts)
+    messageResults = { results: candidates.messages.results, total: candidates.messages.total ?? 0 }
   } else if (searchMessages && !query) {
     const recentQuery = `
       SELECT m.*, s.project_path, s.cwd,
@@ -952,36 +961,20 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     messageResults = { results, total: results.length }
   }
 
-  // Search content table if needed
-  // Project source types (bead, session_memory, project_memory, doc, claude_md)
-  // are not time-filtered — they represent persistent project knowledge
-  const PROJECT_SOURCE_TYPES = new Set(["bead", "session_memory", "project_memory", "doc", "claude_md"])
-  const hasOnlyProjectTypes = contentTypes?.every((t) => PROJECT_SOURCE_TYPES.has(t))
-  const contentSinceTime = hasOnlyProjectTypes ? undefined : sinceTime
-
-  let contentResults: {
-    results: (ContentRecord & { snippet: string; rank: number })[]
-    total: number
-  } = { results: [], total: 0 }
-  if (searchContent && contentTypes?.length !== 0 && query) {
-    contentResults = searchAll(db, query, {
-      limit,
-      projectFilter: project?.replace(/\*/g, ""),
-      types: contentTypes,
-      sinceTime: contentSinceTime,
-    })
+  const contentResults: { results: (ContentRecord & { snippet: string; rank: number })[]; total: number } = {
+    results: candidates.projectContent.results,
+    total: candidates.projectContent.total ?? 0,
   }
 
   // The vault has no message role/tool/session metadata or Recall content
   // type, so omit it when those filters are active rather than returning
   // rows that cannot honor the caller's constraint.
-  const vaultFilterActive = question || response || tool !== undefined || session !== undefined || include !== undefined
-  const vault = query && !vaultFilterActive ? searchVault(query, limit, vaultDb) : null
+  const vault = candidates.vault
   const vaultMatches: VaultMatch[] = vault?.matches ?? []
 
   const total = messageResults.total + contentResults.total + vaultMatches.length
   const duration = Date.now() - startTime
-  const sessionTitles = getAllSessionTitles()
+  const sessionTitles = candidates.titles
 
   const typeIcons: Record<string, string> = {
     message: "\u{1F4AC}",
