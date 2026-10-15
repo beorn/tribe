@@ -12,8 +12,6 @@ import * as fs from "node:fs"
 export const CLAUDE_DIR = path.join(os.homedir(), ".claude")
 export const DB_PATH = process.env.RECALL_DB_PATH?.trim() || path.join(CLAUDE_DIR, "session-index.db")
 export const PROJECTS_DIR = path.join(CLAUDE_DIR, "projects")
-export const PLANS_DIR = path.join(CLAUDE_DIR, "plans")
-export const TODOS_DIR = path.join(CLAUDE_DIR, "todos")
 export const MAX_CONTENT_SIZE = 1024 * 1024 // 1MB - store content for files smaller than this
 
 // Schema includes:
@@ -127,8 +125,8 @@ CREATE TABLE IF NOT EXISTS index_meta (
 -- Unified content table for searching everything
 CREATE TABLE IF NOT EXISTS content (
   id INTEGER PRIMARY KEY,
-  content_type TEXT NOT NULL,  -- message, plan, summary, todo
-  source_id TEXT NOT NULL,     -- session_id, plan filename, todo filename
+  content_type TEXT NOT NULL,  -- project knowledge type
+  source_id TEXT NOT NULL,     -- source identifier within that type
   project_path TEXT,
   title TEXT,
   content TEXT NOT NULL,

@@ -48,8 +48,6 @@ export interface SessionRecord {
 export interface SessionIndexEntry {
   sessionId: string
   customTitle?: string
-  firstPrompt?: string
-  summary?: string
   fileMtime?: number
   messageCount?: number
   created?: string
@@ -61,10 +59,6 @@ export interface SessionIndexEntry {
 // Content types for unified search
 export type ContentType =
   | "message"
-  | "plan"
-  | "summary"
-  | "todo"
-  | "first_prompt"
   | "bead"
   | "session_memory"
   | "project_memory"
@@ -94,26 +88,11 @@ export interface BeadRecord {
 export interface ContentRecord {
   id: number
   content_type: ContentType
-  source_id: string // session_id, plan filename, or todo id
+  source_id: string
   project_path: string | null
   title: string | null
   content: string
   timestamp: number
-}
-
-// Plan file metadata
-export interface PlanRecord {
-  filename: string
-  path: string
-  content: string
-  mtime: number
-}
-
-// Todo item
-export interface TodoItem {
-  content: string
-  status: "pending" | "completed"
-  activeForm?: string
 }
 
 export interface MessageRecord {

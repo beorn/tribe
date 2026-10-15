@@ -157,10 +157,6 @@ export interface ReviewResult {
   indexHealth: {
     sessions: number
     messages: number
-    plans: number
-    summaries: number
-    firstPrompts: number
-    todos: number
     beads: number
     sessionMemory: number
     projectMemory: number
@@ -256,7 +252,7 @@ export interface ReviewOptions {
   skipLlm?: boolean
   /**
    * Skip the four FTS search benchmarks (the `"bug fix"`, `"inline edit"`,
-   * `"test" (1d)` and `plans only` searches). Independent of {@link skipLlm}:
+   * `"test" (1d)` and `project knowledge` searches). Independent of {@link skipLlm}:
    * a caller that wants index/hook diagnostics but not the search probes sets
    * this. Skipping yields an EMPTY `searchBenchmarks` plus one explicit
    * "skipped" recommendation — never a zero result read as an empty index.
@@ -331,10 +327,6 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
     }[]
     const countByType = new Map(contentCounts.map((r) => [r.content_type, r.n]))
 
-    const plans = countByType.get("plan") ?? 0
-    const summaries = countByType.get("summary") ?? 0
-    const firstPrompts = countByType.get("first_prompt") ?? 0
-    const todos = countByType.get("todo") ?? 0
     const beads = countByType.get("bead") ?? 0
     const sessionMemory = countByType.get("session_memory") ?? 0
     const projectMemory = countByType.get("project_memory") ?? 0
@@ -363,10 +355,6 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
     indexHealth = {
       sessions,
       messages,
-      plans,
-      summaries,
-      firstPrompts,
-      todos,
       beads,
       sessionMemory,
       projectMemory,
@@ -387,12 +375,6 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
         : "run `bun recall index --incremental`"
       recommendations.push(`Index is stale (${describeFreshness(freshness)}) — ${remedy}`)
     }
-    if (firstPrompts === 0) {
-      recommendations.push("No first_prompt content indexed — run full index rebuild: `bun recall index`")
-    }
-    if (plans === 0) {
-      recommendations.push("No plans indexed — no plan files found in ~/.claude/plans/")
-    }
     if (sessions === 0) {
       recommendations.push("No sessions indexed — run `bun recall index` to build the index")
     }
@@ -401,7 +383,7 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
   }
 
   log(
-    `review: index has ${indexHealth.sessions} sessions, ${indexHealth.messages} messages, ${indexHealth.plans} plans, ${indexHealth.firstPrompts} first_prompts, ${indexHealth.beads} beads, ${indexHealth.docs} docs`,
+    `review: index has ${indexHealth.sessions} sessions, ${indexHealth.messages} messages, ${indexHealth.beads} beads, ${indexHealth.docs} docs`,
   )
 
   // ── Hook Configuration ────────────────────────────────────────────────
@@ -415,8 +397,8 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
     { query: "test", label: '"test" (1d)', since: "1d" },
     {
       query: "refactor",
-      label: "plans only",
-      types: ["plan", "summary"] as ContentType[],
+      label: "project knowledge",
+      types: ["doc", "llm_research", "project_memory", "claude_md"] as ContentType[],
     },
   ]
 

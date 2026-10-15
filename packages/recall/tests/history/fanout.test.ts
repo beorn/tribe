@@ -106,10 +106,10 @@ describe("fanoutSearch", () => {
     insertSession(db, "sess-1", "Recall design", now)
     insertMessage(db, "sess-1", "discussion about recall agents", now)
 
-    // A bead in content table
+    // A document in the content table
     insertContent(
       db,
-      "bead",
+      "doc",
       "km-bearly.recall-llm-agent",
       "Recall: LLM-driven multi-query search agent",
       "Make the recall CLI use a fast LLM to plan FTS queries",
@@ -119,7 +119,36 @@ describe("fanoutSearch", () => {
     const result = fanoutSearch(db, ["recall"], { limit: 10, sinceTime: 0 })
     const types = new Set(result.results.map((r) => r.type))
     expect(types.has("message")).toBe(true)
-    expect(types.has("bead")).toBe(true)
+    expect(types.has("doc")).toBe(true)
+  })
+
+  /** @failure Fanout requested session-derived types that the index no longer writes. */
+  test("fanout retains written project types and excludes four retired session types", () => {
+    const now = Date.now()
+    for (const type of [
+      "doc",
+      "llm_research",
+      "project_memory",
+      "claude_md",
+      "bead",
+      "session_memory",
+      "plan",
+      "summary",
+      "todo",
+      "first_prompt",
+    ]) {
+      insertContent(db, type, type, type, "livecontentneedle", now)
+    }
+
+    const result = fanoutSearch(db, ["livecontentneedle"], { limit: 20, sinceTime: 0 })
+    expect(result.results.map((row) => row.type).sort()).toEqual([
+      "bead",
+      "claude_md",
+      "doc",
+      "llm_research",
+      "project_memory",
+      "session_memory",
+    ])
   })
 
   test("survives FTS5-hostile queries without crashing", () => {
@@ -162,8 +191,8 @@ describe("fanoutSearch", () => {
     db.transaction(() => {
       for (let i = 0; i < 1003; i++) insertMessage(db, "dense", "zebracorn boundedneedle", now - i)
     })()
-    insertContent(db, "plan", "dense-plan", "Session plan", "zebracorn boundedneedle", now)
-    insertContent(db, "bead", "dense-bead", "Project record", "zebracorn boundedneedle", now - 3600_000)
+    insertContent(db, "llm_research", "dense-research", "Research", "zebracorn boundedneedle", now)
+    insertContent(db, "doc", "dense-doc", "Project record", "zebracorn boundedneedle", now - 3600_000)
     const prepare = vi.spyOn(db, "prepare")
     try {
       const first = fanoutSearch(db, ["zebracorn"], { limit: 5, sinceTime: 0 })
@@ -180,17 +209,17 @@ describe("fanoutSearch", () => {
       expect(merged.skipped).toEqual([...(first.skipped ?? []), ...(second.skipped ?? [])])
       expect(merged.variants).toEqual(["zebracorn", "boundedneedle"])
       expect(merged.hitCounts.get("message:dense")).toBe(2)
-      expect(merged.hitCounts.get("plan:dense-plan")).toBe(2)
-      expect(merged.hitCounts.get("bead:dense-bead")).toBe(2)
-      expect(first.results.map((r) => r.type).sort()).toEqual(["bead", "message", "plan"])
+      expect(merged.hitCounts.get("llm_research:dense-research")).toBe(2)
+      expect(merged.hitCounts.get("doc:dense-doc")).toBe(2)
+      expect(first.results.map((r) => r.type).sort()).toEqual(["doc", "llm_research", "message"])
       const countedQueries = prepare.mock.calls
         .map(([sql]) => String(sql))
         .filter((sql) => /(?:messages|content)_fts/.test(sql) && /\bCOUNT\s*\(/i.test(sql))
       expect(countedQueries).toEqual([])
       prepare.mockClear()
-      const exact = searchAll(db, "zebracorn", { types: ["plan"], sinceTime: 0, limit: 5 })
+      const exact = searchAll(db, "zebracorn", { types: ["llm_research"], sinceTime: 0, limit: 5 })
       expect(exact.total).toBe(1)
-      expect(exact.results.map((r) => r.source_id)).toEqual(["dense-plan"])
+      expect(exact.results.map((r) => r.source_id)).toEqual(["dense-research"])
       expect(
         prepare.mock.calls.some(([sql]) => /content_fts/.test(String(sql)) && /\bCOUNT\s*\(/i.test(String(sql))),
       ).toBe(true)
@@ -206,12 +235,6 @@ describe("fanoutSearch", () => {
       expect.objectContaining({
         kind: "query-rejected",
         phase: "messages",
-        anchor: "",
-        message: expect.stringMatching(/fts5.*syntax error/i),
-      }),
-      expect.objectContaining({
-        kind: "query-rejected",
-        phase: "session_content",
         anchor: "",
         message: expect.stringMatching(/fts5.*syntax error/i),
       }),

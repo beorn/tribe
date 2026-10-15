@@ -353,7 +353,7 @@ export function synthesisDiagnosticsFromError(err: unknown, timeoutMs: number): 
  * Search session history and optionally synthesize results via cheap LLM.
  *
  * Searches both the messages FTS table and the unified content table
- * (plans, summaries, todos), merges results by rank, deduplicates by session,
+ * (project knowledge), merges results by rank, deduplicates by session,
  * and optionally passes them through a cheap LLM for synthesis.
  */
 export async function recall(query: string, options: RecallOptions = {}): Promise<RecallResult> {
@@ -456,24 +456,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       )
     }
 
-    // Search session-scoped content (plans, summaries, todos, first_prompts) with time filter
-    const sessionContentOpts: ContentSearchOptions = {
-      limit: limit * 2,
-      sinceTime,
-      projectFilter,
-      snippetTokens,
-      types: ["plan", "summary", "todo", "first_prompt"] as ContentType[],
-      mode,
-    }
-
-    const contentStart = Date.now()
-    const sessionContentResults: ReturnType<typeof searchAll> = runs("session_content")
-      ? phase("session_content", () => searchAll(db, query, sessionContentOpts))
-      : { results: [], total: null }
-    const sessionMs = Date.now() - contentStart
-
-    // Search project knowledge sources (beads, memory, docs) WITHOUT time filter. Hook mode does not: the vault
-    // phase answers for beads and docs inside the hook's wall (Phase 3).
+    // Project knowledge is searched by normal mode. The hook's vault phase
+    // answers for beads and docs inside its wall.
     const projectStart = Date.now()
     const projectContentOpts: ContentSearchOptions = {
       limit: limit * 2,
@@ -483,9 +467,10 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       mode,
     }
 
-    const projectContentResults: ReturnType<typeof searchAll> = hook
-      ? { results: [], total: null }
-      : phase("project_content", () => searchAll(db, query, projectContentOpts))
+    const projectContentResults: ReturnType<typeof searchAll> =
+      hook || options.phases !== undefined
+        ? { results: [], total: null }
+        : phase("project_content", () => searchAll(db, query, projectContentOpts))
     const projectMs = Date.now() - projectStart
 
     // Vault FTS — opt-in: searches the km tree db (.km/state.db) the call names (options.vaultDb, its only binding:
@@ -510,14 +495,11 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     let synonymMsgCount = 0
     let synonymContentCount = 0
 
-    if (queryVariants) {
+    if (queryVariants && options.phases === undefined) {
       log(`query expansion: "${query}" → ${queryVariants.length} variants`)
       // Collect IDs already found to avoid duplicates
       const seenMsgIds = new Set(messageResults.results.map((r) => r.id))
-      const seenContentIds = new Set([
-        ...sessionContentResults.results.map((r) => r.id),
-        ...projectContentResults.results.map((r) => r.id),
-      ])
+      const seenContentIds = new Set(projectContentResults.results.map((r) => r.id))
 
       for (const variant of queryVariants.slice(0, 4)) {
         const began = performance.now()
@@ -533,20 +515,6 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
               r.rank += SYNONYM_RANK_PENALTY
               messageResults.results.push(r)
               synonymMsgCount++
-            }
-          }
-
-          // Search session content with variant
-          const varSession = searchAll(db, variant, {
-            ...sessionContentOpts,
-            limit: limit,
-          })
-          for (const r of varSession.results) {
-            if (!seenContentIds.has(r.id)) {
-              seenContentIds.add(r.id)
-              r.rank += SYNONYM_RANK_PENALTY
-              sessionContentResults.results.push(r)
-              synonymContentCount++
             }
           }
 
@@ -575,12 +543,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       }
     }
 
-    // Merge both content result sets
-    const contentResults = {
-      results: [...sessionContentResults.results, ...projectContentResults.results],
-    }
     const searchMs = Date.now() - searchStart
-    log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms session=${sessionMs}ms project=${projectMs}ms)`)
+    log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms project=${projectMs}ms)`)
 
     // Get session titles for enrichment
     const sessionTitles = runs("titles") ? phase("titles", () => getAllSessionTitles()) : new Map<string, string>()
@@ -667,7 +631,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       })
     }
 
-    for (const r of contentResults.results) {
+    for (const r of projectContentResults.results) {
       merged.push({
         type: r.content_type as RecallSearchResult["type"],
         sessionId: r.source_id,

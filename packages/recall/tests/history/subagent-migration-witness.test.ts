@@ -11,15 +11,12 @@ import * as path from "path"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { fileURLToPath } from "node:url"
 
-const corpus = vi.hoisted(() => ({ projects: "", plans: [] as string[], todos: [] as string[] }))
+const corpus = vi.hoisted(() => ({ projects: "" }))
 vi.mock("../../src/history/db", async (original) => ({
   ...(await original<typeof import("../../src/history/db")>()),
   get PROJECTS_DIR() {
     return corpus.projects
   },
-  getAllSessionEntries: () => [],
-  findPlanFiles: () => corpus.plans,
-  findTodoFiles: () => corpus.todos,
 }))
 
 const { rebuildIndex, indexSessionFile } = await import("../../src/history/indexer")
@@ -36,8 +33,6 @@ let dbPath: string
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(fs.realpathSync(require("os").tmpdir()), "recall-migration-witness-"))
   corpus.projects = path.join(root, "projects")
-  corpus.plans = []
-  corpus.todos = []
 
   // Recreate the project layout matching the legacy fixture's project path: "test-legacy-proj"
   const projDir = path.join(corpus.projects, "test-legacy-proj")

@@ -436,18 +436,7 @@ function probeLiteralRawMatches(query: string, base: RecallOptions): { token: st
     const contentResults = searchAll(db, token, {
       limit,
       projectFilter,
-      types: [
-        "plan",
-        "summary",
-        "todo",
-        "first_prompt",
-        "bead",
-        "session_memory",
-        "project_memory",
-        "doc",
-        "claude_md",
-        "llm_research",
-      ] as ContentType[],
+      types: ["bead", "session_memory", "project_memory", "doc", "claude_md", "llm_research"] as ContentType[],
     })
 
     const results: RecallSearchResult[] = [
@@ -801,14 +790,6 @@ function formatType(type: string): string {
   switch (type) {
     case "message":
       return `${CYAN}[msg]${RESET}`
-    case "plan":
-      return `${GREEN}[plan]${RESET}`
-    case "summary":
-      return `${YELLOW}[summary]${RESET}`
-    case "todo":
-      return `${YELLOW}[todo]${RESET}`
-    case "first_prompt":
-      return `${CYAN}[prompt]${RESET}`
     case "bead":
       return `${MAGENTA}[bead]${RESET}`
     case "session_memory":
@@ -860,7 +841,9 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     types = parseInclude(include)
     if (types.length === 0) {
       console.error(`Invalid include types: ${include}`)
-      console.error("Valid types: p,m,s,t or plans,messages,summaries,todos")
+      console.error(
+        "Valid types: m,b,e,d,c or messages,beads,session_memory,project_memory,docs,claude_md,llm_research",
+      )
       process.exit(1)
     }
   }
@@ -1004,9 +987,6 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     message: "\u{1F4AC}",
     user: "\u{1F464}",
     assistant: "\u{1F916}",
-    plan: "\u{1F4CB}",
-    summary: "\u{1F4DD}",
-    todo: "\u2705",
     bead: "\u{1F41E}",
     session_memory: "\u{1F4A1}",
     project_memory: "\u{1F4A1}",
@@ -1017,9 +997,6 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     message: CYAN,
     user: CYAN,
     assistant: CYAN,
-    plan: GREEN,
-    summary: YELLOW,
-    todo: MAGENTA,
     bead: MAGENTA,
     session_memory: GREEN,
     project_memory: GREEN,

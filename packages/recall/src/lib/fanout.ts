@@ -58,7 +58,6 @@ export interface FanoutStats {
 // Constants
 // ============================================================================
 
-const SESSION_CONTENT_TYPES: ContentType[] = ["plan", "summary", "todo", "first_prompt"]
 const PROJECT_CONTENT_TYPES: ContentType[] = [
   "bead",
   "session_memory",
@@ -123,14 +122,6 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
     snippetTokens,
     mode: "hook",
   }
-  const sessionContentOpts: ContentSearchOptions = {
-    mode: "hook",
-    limit: perVariantLimit,
-    sinceTime,
-    projectFilter,
-    snippetTokens,
-    types: SESSION_CONTENT_TYPES,
-  }
   const projectContentOpts: ContentSearchOptions = {
     mode: "hook",
     limit: perVariantLimit,
@@ -176,26 +167,6 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
       }
     } catch (error) {
       rejectedQuery("messages", variant, error)
-    }
-
-    // Session-scoped content
-    try {
-      const res = searchAll(db, variant, sessionContentOpts)
-      totalQueries++
-      rawHits += res.results.length
-      for (const r of res.results) {
-        const docType = r.content_type as RecallSearchResult["type"]
-        ingest(`${docType}:${r.source_id}`, {
-          type: docType,
-          sessionId: r.source_id,
-          sessionTitle: r.title ?? sessionTitles.get(r.source_id) ?? null,
-          timestamp: Number(r.timestamp),
-          snippet: r.snippet || r.content.slice(0, 500),
-          rank: r.rank,
-        })
-      }
-    } catch (error) {
-      rejectedQuery("session_content", variant, error)
     }
 
     // Project knowledge (no time filter)

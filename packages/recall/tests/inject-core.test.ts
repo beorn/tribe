@@ -165,9 +165,7 @@ describe("runInjectDelta — emit only when there's content to frame", () => {
     expect(result.emptyRecallReason).toBe("no_results")
     const items = parseInjectedContext(result.additionalContext)[0]?.items ?? []
     expect(items.map((i) => i.body)).toEqual([
-      expect.stringMatching(
-        /^recall: nothing found; searched messages, session_content and titles for the prompt in \d+ ms \(25071\)$/,
-      ),
+      expect.stringMatching(/^recall: nothing found; searched messages and titles for the prompt in \d+ ms \(25071\)$/),
     ])
   })
 
@@ -819,7 +817,7 @@ describe("Phase 3: call A searches the vault on the anchor, call B the rest on t
     recallMock.mockReset()
   })
 
-  test("A is the anchor on the vault alone; B is the prompt on messages, session_content and titles", async () => {
+  test("A is the anchor on the vault alone; B is the prompt on messages and titles", async () => {
     recallMock.mockResolvedValue({ results: [] })
 
     await runInjectDelta(JEV, createMemorySeenStore(), { deps: { deriveVaultAnchor: () => anchor } })
@@ -827,7 +825,7 @@ describe("Phase 3: call A searches the vault on the anchor, call B the rest on t
     expect(recallMock.mock.calls.map(([query, options]) => [query, (options as { phases?: string[] }).phases])).toEqual(
       [
         ["Jev memory system", ["vault"]],
-        [JEV, ["messages", "session_content", "titles"]],
+        [JEV, ["messages", "titles"]],
       ],
     )
   })
@@ -862,7 +860,7 @@ describe("Phase 3: call A searches the vault on the anchor, call B the rest on t
 
     if (result.skipped) throw new Error("expected A's answer")
     const line =
-      /^recall partial: vault answered in \d+ ms; messages, session_content and titles did not finish inside the 1\.5 s wall \(25071\)$/
+      /^recall partial: vault answered in \d+ ms; messages and titles did not finish inside the 1\.5 s wall \(25071\)$/
     expect(result.skippedSteps?.recall).toMatch(line)
     const items = parseInjectedContext(result.additionalContext)[0]?.items ?? []
     expect(items.map((i) => i.body)).toEqual([expect.stringMatching(line), vaultHit.snippet])
@@ -887,7 +885,7 @@ describe("Phase 3: call A searches the vault on the anchor, call B the rest on t
 
     if (result.skipped) throw new Error("expected the searched-nothing line")
     expect(parseInjectedContext(result.additionalContext)[0]?.items[0]?.body).toMatch(
-      /^recall: nothing found; searched the vault for "Jev memory system" in \d+ ms, and messages, session_content and titles for the prompt in \d+ ms \(25071\)$/,
+      /^recall: nothing found; searched the vault for "Jev memory system" in \d+ ms, and messages and titles for the prompt in \d+ ms \(25071\)$/,
     )
   })
 })

@@ -120,8 +120,7 @@ export function formatSessionId(id: string, titleMap: Map<string, string>): stri
 
 /**
  * Parse include string to content types.
- * Short codes: p=plan, m=message, s=summary, t=todo, f=first_prompt,
- *              b=bead, e=session_memory, d=doc, c=claude_md
+ * Short codes: m=message, b=bead, e=session_memory, d=doc, c=claude_md
  */
 export function parseInclude(includeStr: string): ContentType[] {
   const types: ContentType[] = []
@@ -132,11 +131,7 @@ export function parseInclude(includeStr: string): ContentType[] {
     .filter(Boolean)
 
   const shortMap: Record<string, ContentType> = {
-    p: "plan",
     m: "message",
-    s: "summary",
-    t: "todo",
-    f: "first_prompt",
     b: "bead",
     e: "session_memory",
     d: "doc",
@@ -144,17 +139,8 @@ export function parseInclude(includeStr: string): ContentType[] {
   }
 
   const longMap: Record<string, ContentType> = {
-    plans: "plan",
-    plan: "plan",
     messages: "message",
     message: "message",
-    summaries: "summary",
-    summary: "summary",
-    todos: "todo",
-    todo: "todo",
-    first_prompt: "first_prompt",
-    first_prompts: "first_prompt",
-    prompts: "first_prompt",
     bead: "bead",
     beads: "bead",
     session_memory: "session_memory",
@@ -164,6 +150,7 @@ export function parseInclude(includeStr: string): ContentType[] {
     docs: "doc",
     claude_md: "claude_md",
     claude: "claude_md",
+    llm_research: "llm_research",
   }
 
   for (const part of parts) {

@@ -109,7 +109,7 @@ program
   .option("-r, --response", "Assistant messages only (implies --raw)")
   .option("-t, --tool <name>", "Tool filter: Write, Bash, etc. (implies --raw)")
   .option("--session <id>", "Specific session (implies --raw)")
-  .option("-i, --include <types>", "Content types: p,m,s,t,f,b,e,d,c (implies --raw)")
+  .option("-i, --include <types>", "Content types: m,b,e,d,c or long names (implies --raw)")
   .option("--agent", "LLM query-planner mode: plan → fan out → rerank → synthesize")
   .option("--round2 <mode>", "Round 2 mode: auto|wider|deeper|off (default auto)")
   .option("--max-rounds <n>", "Cap agent rounds (1 or 2, default 2)", int)
@@ -170,7 +170,7 @@ program
   .option("--json", "Output as JSON")
   .option(
     "--bench",
-    'Also run the four FTS search benchmarks ("bug fix", "inline edit", "test" (1d), plans only) plus the LLM synthesis test and multi-model race (slow)',
+    'Also run the four FTS search benchmarks ("bug fix", "inline edit", "test" (1d), project knowledge) plus the LLM synthesis test and multi-model race (slow)',
   )
   .action(async (opts: { json?: boolean; bench?: boolean }) => {
     await cmdStatus(opts)

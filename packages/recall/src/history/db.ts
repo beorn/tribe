@@ -14,7 +14,7 @@ import * as fs from "fs"
 import { DB_PATH, initSchema } from "./db-schema.ts"
 
 // Re-export constants from schema
-export { CLAUDE_DIR, DB_PATH, PROJECTS_DIR, PLANS_DIR, TODOS_DIR, MAX_CONTENT_SIZE } from "./db-schema.ts"
+export { CLAUDE_DIR, DB_PATH, PROJECTS_DIR, MAX_CONTENT_SIZE } from "./db-schema.ts"
 
 let dbInstance: Database | null = null
 
@@ -145,11 +145,6 @@ export {
   searchAll,
   // Session context
   getSessionContext,
-  // Session entries
-  getAllSessionEntries,
-  // File discovery
-  findPlanFiles,
-  findTodoFiles,
 } from "./db-queries.ts"
 
 // Re-export types

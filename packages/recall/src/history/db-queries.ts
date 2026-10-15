@@ -7,7 +7,7 @@ import { assertSingleStatement } from "@bearly/sqlite"
 import * as path from "path"
 import * as fs from "fs"
 import type { SessionRecord, MessageRecord, ContentType, ContentRecord, SessionIndexEntry } from "./types.ts"
-import { PROJECTS_DIR, PLANS_DIR, TODOS_DIR } from "./db-schema.ts"
+import { PROJECTS_DIR } from "./db-schema.ts"
 import { HOOK_CANDIDATE_LIMIT } from "./recall-budget.ts"
 import type { HookSearchSummary, RecallSkip, SearchMode } from "./recall-shared.ts"
 
@@ -1009,71 +1009,4 @@ export function getSessionContext(
     ORDER BY id
   `)
     .all(sessionId, closest.id - radius, closest.id + radius) as MessageRecord[]
-}
-
-// ============================================================================
-// Session entries
-// ============================================================================
-
-/**
- * Read all session entries from all sessions-index.json files
- */
-export function getAllSessionEntries(): SessionIndexEntry[] {
-  const entries: SessionIndexEntry[] = []
-
-  for (const indexPath of findSessionsIndexFiles()) {
-    try {
-      const content = fs.readFileSync(indexPath, "utf8")
-      const data = JSON.parse(content) as SessionsIndexFile
-      if (data.entries) {
-        entries.push(...data.entries)
-      }
-    } catch {
-      // Ignore errors
-    }
-  }
-
-  return entries
-}
-
-// ============================================================================
-// File discovery
-// ============================================================================
-
-/**
- * Find all plan files
- */
-export function findPlanFiles(): string[] {
-  if (!fs.existsSync(PLANS_DIR)) return []
-
-  const files: string[] = []
-  try {
-    for (const entry of fs.readdirSync(PLANS_DIR, { withFileTypes: true })) {
-      if (entry.isFile() && entry.name.endsWith(".md")) {
-        files.push(path.join(PLANS_DIR, entry.name))
-      }
-    }
-  } catch (error) {
-    throw new Error(`Recall plan directory cannot be read: ${PLANS_DIR}`, { cause: error })
-  }
-  return files
-}
-
-/**
- * Find all todo files
- */
-export function findTodoFiles(): string[] {
-  if (!fs.existsSync(TODOS_DIR)) return []
-
-  const files: string[] = []
-  try {
-    for (const entry of fs.readdirSync(TODOS_DIR, { withFileTypes: true })) {
-      if (entry.isFile() && entry.name.endsWith(".json")) {
-        files.push(path.join(TODOS_DIR, entry.name))
-      }
-    }
-  } catch (error) {
-    throw new Error(`Recall todo directory cannot be read: ${TODOS_DIR}`, { cause: error })
-  }
-  return files
 }

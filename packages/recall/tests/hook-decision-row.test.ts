@@ -52,7 +52,7 @@ describe("the hook's own row names why nothing was injected", () => {
 
     expect(await decisionRow()).toMatchObject({
       searched: expect.stringMatching(
-        /^the vault for "Jev memory system" in \d+ ms, and messages, session_content and titles for the prompt in \d+ ms$/,
+        /^the vault for "Jev memory system" in \d+ ms, and messages and titles for the prompt in \d+ ms$/,
       ),
     })
   })

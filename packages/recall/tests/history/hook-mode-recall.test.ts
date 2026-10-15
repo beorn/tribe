@@ -104,6 +104,32 @@ afterEach(() => {
   setRecallLogging(false)
 })
 
+/** @failure The prompt hook queried the retired session types; project knowledge belongs to its vault phase. */
+test("hook phases prepare no content-table query", async () => {
+  const db = getDb()
+  const insert = db.prepare(
+    `INSERT INTO content (content_type, source_id, project_path, title, content, timestamp)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  )
+  for (const type of [
+    "doc",
+    "llm_research",
+    "project_memory",
+    "claude_md",
+    "plan",
+    "summary",
+    "todo",
+    "first_prompt",
+  ]) {
+    insert.run(type, type, "/test/km", type, "livehookneedle", Date.now() - 40 * DAY_MS)
+  }
+
+  const sql = await preparedSql(() =>
+    recall("livehookneedle", { mode: "hook", raw: true, limit: 20, phases: ["messages", "titles"] }),
+  )
+  expect(sql.some((statement) => /content_fts|FROM\s+content\b/i.test(statement))).toBe(false)
+})
+
 describe("25071 row 2 B1: hook mode counts nothing", () => {
   test("the hook path prepares no COUNT; the exact path still counts (the control)", async () => {
     seed(recentWeak(20))
@@ -297,13 +323,13 @@ describe("29482 B2: hook mode bounds eligible candidates before ranking", () => 
 })
 
 describe("Phase 3: hook mode runs the phases its caller names (@ag/recall/three-dark-search-paths, @cto 7f55e4f2)", () => {
-  test("with no phases named, hook mode times vault, messages, session_content and titles, and runs no project_content", async () => {
+  test("with no phases named, hook mode times vault, messages and titles, and runs no project_content", async () => {
     seed(recentWeak(20))
 
     const hook = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
 
     expect(Object.keys(hook.timing?.phases ?? {}).sort()).toEqual(
-      ["corroboration", "live_session", "messages", "proximity", "session_content", "titles", "vault"].sort(),
+      ["corroboration", "live_session", "messages", "proximity", "titles", "vault"].sort(),
     )
   })
 

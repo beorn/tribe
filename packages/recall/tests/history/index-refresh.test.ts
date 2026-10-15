@@ -19,13 +19,18 @@ import { fileURLToPath } from "node:url"
 import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 
-const corpus = vi.hoisted(() => ({ projects: "", plans: [] as string[], todos: [] as string[] }))
+const corpus = vi.hoisted(() => ({
+  projects: "",
+  plans: [] as string[],
+  todos: [] as string[],
+  legacyEntries: [] as Array<{ sessionId: string; summary: string; firstPrompt: string }>,
+}))
 vi.mock("../../src/history/db", async (original) => ({
   ...(await original<typeof import("../../src/history/db")>()),
   get PROJECTS_DIR() {
     return corpus.projects
   },
-  getAllSessionEntries: () => [],
+  getAllSessionEntries: () => corpus.legacyEntries,
   findPlanFiles: () => corpus.plans,
   findTodoFiles: () => corpus.todos,
 }))
@@ -45,6 +50,7 @@ beforeEach(() => {
   mkdirSync(corpus.projects)
   corpus.plans = []
   corpus.todos = []
+  corpus.legacyEntries = []
   dbPath = join(root, "index.db")
   db = new Database(dbPath)
   initSchema(db)
@@ -137,22 +143,19 @@ describe("Recall refresh completion", () => {
     expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
   })
 
-  test.each(["plan", "todo"])("a selected %s read failure cannot publish success", async (kind) => {
-    const file = join(root, `missing.${kind === "plan" ? "md" : "json"}`)
-    if (kind === "plan") corpus.plans = [file]
-    else corpus.todos = [file]
-    const prior = getIndexMeta(db, "last_rebuild")
-    await expect(rebuildIndex(db, { incremental: true })).rejects.toThrow(file)
-    expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
-  })
+  /** @failure Retired Claude session sources silently repopulated dead content types. */
+  test("legacy session sources do not write retired content types", async () => {
+    corpus.legacyEntries = [{ sessionId: "legacy", summary: "legacy needle", firstPrompt: "legacy needle" }]
+    const plan = join(root, "legacy-plan.md")
+    const todo = join(root, "legacy-todo.json")
+    writeFileSync(plan, "# Legacy plan\nlegacy needle")
+    writeFileSync(todo, JSON.stringify([{ status: "pending", content: "legacy needle" }]))
+    corpus.plans = [plan]
+    corpus.todos = [todo]
 
-  test("a malformed selected todo cannot publish success", async () => {
-    const file = join(root, "todo.json")
-    writeFileSync(file, "invalid JSON")
-    corpus.todos = [file]
-    const prior = getIndexMeta(db, "last_rebuild")
-    await expect(rebuildIndex(db, { incremental: true })).rejects.toThrow(file)
-    expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
+    await rebuildIndex(db, { incremental: true })
+    const rows = db.prepare("SELECT content_type FROM content ORDER BY content_type").all()
+    expect(rows).toEqual([])
   })
 
   test("completion is published after every other metadata write", async () => {
