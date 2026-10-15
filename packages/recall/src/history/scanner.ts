@@ -92,6 +92,8 @@ export interface HookResult {
   reason?: import("../lib/prompt-filter.ts").InjectSkipReason
   /** Each step skipped rather than waited on, and why (@ag/tribe/25071). Absent when nothing was skipped. */
   skippedSteps?: Record<string, string>
+  /** How the vault was searched, when it was: the hook's log row carries it (29487). */
+  vaultQuery?: import("./vault-fts.ts").VaultQuery
   hookOutput?: {
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit"
@@ -124,6 +126,7 @@ export async function hookRecall(
   return {
     skipped: false,
     ...skipped,
+    ...(core.vaultQuery === undefined ? {} : { vaultQuery: core.vaultQuery }),
     hookOutput: {
       hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: core.additionalContext },
     },

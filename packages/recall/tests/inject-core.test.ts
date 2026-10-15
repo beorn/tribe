@@ -606,6 +606,20 @@ describe("runInjectDelta — per-step durations (@ag/tribe/25071 row 1)", () => 
     expect(steps.recall).toBeLessThan(35)
   })
 
+  // 29487: the hook's log row names how call A searched the vault, so a run whose vault found nothing says which
+  // terms it tried and which no node holds.
+  test("call A's vault receipt rides the result, also when nothing was found", async () => {
+    const vaultQuery = { form: "any", terms: ["inject-core.ts", "stall"], unmatched: ["stall"] }
+    recallMock.mockResolvedValueOnce({ results: [], vaultQuery }).mockResolvedValueOnce({ results: [] })
+    const anchor = { query: "inject-core.ts stall", identifier: "inject-core.ts" }
+
+    const result = await runInjectDelta(salientPrompt, createMemorySeenStore(), {
+      deps: { deriveVaultAnchor: () => anchor },
+    })
+
+    expect(result).toMatchObject({ skipped: false, emptyRecallReason: "no_results", vaultQuery })
+  })
+
   test("three 0.4 ms steps under one name read 1 ms on the row, not 0: sums stay raw until roundSteps", async () => {
     const { roundSteps, timeStep, timeStepAsync } = await import("../src/lib/inject-core.ts")
     let now = 0
