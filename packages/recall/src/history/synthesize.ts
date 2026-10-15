@@ -203,6 +203,11 @@ export interface SynthesisResult {
   text: string
   cost?: number
   aborted?: boolean
+  /** The model whose answer won the race. */
+  winner: string
+  /** Every attempt the race made, losers included, so an answer from the second racer still names what it covered. */
+  attempts: SynthesisAttempt[]
+  batches: SynthesisBatchAccounting[]
 }
 
 export async function synthesizeResults(
@@ -229,8 +234,8 @@ export async function synthesizeResults(
   // The legacy boolean intentionally remains a credential-presence check, so
   // filtering it here would silently discard explicit selector exclusions and
   // fresh refusing observations before the user-visible synthesis race. The
-  // race runs only models measured inside its budget (@cto 967ea2db, @ag/llm/29473).
-  const selection = selectBudgetedModels(llm)
+  // race runs only the synthesis models BUDGETED_MODEL_IDS declares (@cto 967ea2db, ba46468c).
+  const selection = selectBudgetedModels(llm, "synthesis")
   const models = selection.models
   const excludedProviders: ExcludedProvider[] = selection.rejected.map((model) => ({
     provider: model.provider,
@@ -307,7 +312,7 @@ export async function synthesizeResults(
 
     if (race.winner && race.text) {
       log(`LLM winner: ${race.winner} in ${race.totalMs}ms`)
-      return { text: race.text, cost: totalCost, aborted: false }
+      return { text: race.text, cost: totalCost, aborted: false, winner: race.winner, attempts, batches }
     }
 
     log(
