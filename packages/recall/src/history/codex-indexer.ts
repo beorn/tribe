@@ -98,6 +98,7 @@ export interface CodexIndexResult {
   ambiguous: number
   sessions: number
   rows: number
+  tools: number
   skipped: number
   unreadable: number
   errors: number
@@ -165,13 +166,51 @@ interface TranscriptExportRowRecord {
   duplicateOf: number | null
 }
 
+/**
+ * A tool event on the export wire (ag schema version 2). `text` is the call's
+ * arguments for a call and the output for an output; an output carries the name
+ * of the call it answers.
+ */
+interface TranscriptExportToolRecord {
+  kind: "tool"
+  sessionKey: string
+  line: number
+  phase: "call" | "output"
+  toolName: string | null
+  toolCallId: string | null
+  text: string
+  timestamp: string | null
+  recordKind: "event_msg" | "response_item"
+  duplicateOf: number | null
+}
+
 interface TranscriptExportEndRecord {
   kind: "end"
   nativeId: string
   keys: string[]
   rows: number
+  tools?: number
   skipped: number
   status: "complete" | "incomplete-tail" | "bad-header" | "unreadable"
+}
+
+/**
+ * File paths for a codex tool call come only from a structured argument field.
+ * A shell command string is never parsed; when the arguments are not JSON, or
+ * carry no `file_path`, the tool row keeps its text and stores no file path.
+ */
+function extractToolFilePathsFromArguments(argumentsText: string): string | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(argumentsText)
+  } catch {
+    // silent-fallback-allow: the tool row keeps its full text; only the structured
+    // file_path is absent when the call's arguments are not JSON.
+    return null
+  }
+  if (parsed === null || typeof parsed !== "object") return null
+  const filePath = (parsed as { file_path?: unknown }).file_path
+  return typeof filePath === "string" && filePath.length > 0 ? filePath : null
 }
 
 export function resolveAgBin(explicitBin?: string): string {
@@ -397,6 +436,7 @@ export async function indexCodexTranscripts(
       ambiguous: 0,
       sessions: 0,
       rows: 0,
+      tools: 0,
       skipped: 0,
       unreadable: 0,
       errors: 0,
@@ -562,6 +602,7 @@ export async function indexCodexTranscripts(
       ambiguous,
       sessions: 0,
       rows: 0,
+      tools: 0,
       skipped,
       unreadable: failures.filter((failure) => failure.kind === "unreadable").length,
       errors: failures.filter((failure) => failure.kind === "error").length,
@@ -581,6 +622,7 @@ export async function indexCodexTranscripts(
   const batchResult = await new Promise<{
     sessions: number
     rows: number
+    tools: number
     unreadable: number
     errors: number
     failures: CodexFailureRecord[]
@@ -598,12 +640,14 @@ export async function indexCodexTranscripts(
     const currentExistingCounts = new Map<string, number>()
     const currentRowCounts = new Map<string, number>()
     let totalRowsThisSession = 0
+    let totalToolsThisSession = 0
     let inTx = false
     let isFirstLine = true
     let doneRecord: Record<string, unknown> | null = null
     let stderr = ""
     let batchSessionCount = 0
     let batchRowCount = 0
+    let batchToolCount = 0
     let batchUnreadableCount = 0
     let batchErrorCount = 0
 
@@ -639,8 +683,10 @@ export async function indexCodexTranscripts(
 
       if (isFirstLine) {
         isFirstLine = false
-        if (record.kind !== "schema" || record.version !== 1) {
-          reject(new Error(`Unsupported ag transcript schema version: expected 1, got ${record.version ?? "unknown"}`))
+        if (record.kind !== "schema" || (record.version !== 1 && record.version !== 2)) {
+          reject(
+            new Error(`Unsupported ag transcript schema version: expected 1 or 2, got ${record.version ?? "unknown"}`),
+          )
           child.kill()
           return false
         }
@@ -698,6 +744,7 @@ export async function indexCodexTranscripts(
 
         currentRowCounts.clear()
         totalRowsThisSession = 0
+        totalToolsThisSession = 0
       } else if (record.kind === "row") {
         if (!currentSession || !inTx) {
           if (inTx) safeRollback(db)
@@ -734,6 +781,47 @@ export async function indexCodexTranscripts(
 
         currentRowCounts.set(key, (currentRowCounts.get(key) ?? 0) + 1)
         totalRowsThisSession++
+      } else if (record.kind === "tool") {
+        if (!currentSession || !inTx) {
+          if (inTx) safeRollback(db)
+          inTx = false
+          reject(new Error(`Protocol error: received tool record without active session transaction`))
+          child.kill()
+          return false
+        }
+        const tool = record as unknown as TranscriptExportToolRecord
+        const key = tool.sessionKey
+        const createdAtMs = currentSession.createdAt ? new Date(currentSession.createdAt).getTime() : Date.now()
+        const toolTimestamp = tool.timestamp ? new Date(tool.timestamp).getTime() : createdAtMs
+        const toolType = tool.phase === "call" ? "tool_use" : "tool_result"
+        const filePaths = tool.phase === "call" ? extractToolFilePathsFromArguments(tool.text) : null
+
+        try {
+          insertMessage(
+            db,
+            null,
+            key,
+            toolType,
+            tool.text,
+            tool.toolName ?? null,
+            filePaths,
+            toolTimestamp,
+            tool.duplicateOf ?? null,
+            tool.line ?? null,
+          )
+        } catch (err) {
+          safeRollback(db)
+          inTx = false
+          reject(err)
+          child.kill()
+          return false
+        }
+
+        // A stored tool event is a message; message_count is the count of stored
+        // messages for the session, and the wire's narration-only `rows` stays separate.
+        currentRowCounts.set(key, (currentRowCounts.get(key) ?? 0) + 1)
+        totalRowsThisSession++
+        totalToolsThisSession++
       } else if (record.kind === "skipped") {
         const reason = String(record.reason ?? "unknown-skip")
         reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
@@ -947,6 +1035,7 @@ export async function indexCodexTranscripts(
               db.run("COMMIT")
               inTx = false
               batchRowCount += totalRowsThisSession
+              batchToolCount += totalToolsThisSession
               batchSessionCount++
               batchIndexedSessionIds.push(...keys)
             } catch (err) {
@@ -1041,6 +1130,7 @@ export async function indexCodexTranscripts(
       resolve({
         sessions: batchSessionCount,
         rows: batchRowCount,
+        tools: batchToolCount,
         unreadable: batchUnreadableCount,
         errors: batchErrorCount,
         failures,
@@ -1057,6 +1147,7 @@ export async function indexCodexTranscripts(
     ambiguous,
     sessions: batchResult.sessions,
     rows: batchResult.rows,
+    tools: batchResult.tools,
     skipped,
     unreadable: batchResult.unreadable,
     errors: batchResult.errors,

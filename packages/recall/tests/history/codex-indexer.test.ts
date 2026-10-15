@@ -1425,6 +1425,132 @@ if (args.includes("list")) {
     })
   })
 
+  describe("29170: codex tool events reach the index", () => {
+    function makeToolProducer(opts: { version: number; tools: boolean }): string {
+      const toolLines = opts.tools
+        ? `
+const cmd = JSON.stringify({ cmd: "herdr pane list", workdir: "/hh" })
+for (const line of [2, 3]) {
+  console.log(JSON.stringify({
+    kind: "tool",
+    sessionKey: "codex:tool-test",
+    line,
+    phase: "call",
+    toolName: "exec_command",
+    toolCallId: "call_" + line,
+    text: cmd,
+    timestamp: "2026-04-30T19:06:26.965Z",
+    recordKind: "response_item",
+    duplicateOf: null
+  }))
+}
+console.log(JSON.stringify({
+  kind: "tool",
+  sessionKey: "codex:tool-test",
+  line: 4,
+  phase: "output",
+  toolName: "exec_command",
+  toolCallId: "call_2",
+  text: "Chunk ID: abc\\nWall time: 0.0 seconds\\nOutput:\\nhabitants",
+  timestamp: "2026-04-30T19:06:27.089Z",
+  recordKind: "response_item",
+  duplicateOf: null
+}))
+`
+        : ""
+      const endTools = opts.tools ? 3 : 0
+      return makeMockAg(`
+const args = process.argv.slice(2)
+const listSchema = JSON.stringify({ kind: "schema", version: 1, generator: "ag-transcript-list" })
+const exportSchema = JSON.stringify({ kind: "schema", version: ${opts.version}, generator: "ag-transcript-export" })
+if (args.includes("list")) {
+  console.log(listSchema)
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "tool-test",
+    canonicalPath: "/path/tool.jsonl",
+    copies: [{ path: "/path/tool.jsonl", account: null, sizeBytes: 300, mtimeMs: 1000, lastEventAtMs: 1000 }],
+    status: "canonical",
+    key: "codex:tool-test"
+  }))
+  console.log(JSON.stringify({ kind: "done", discovered: 1, canonical: 1 }))
+} else {
+  console.log(exportSchema)
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "tool-test",
+    sessionKey: "codex:tool-test",
+    path: "/path/tool.jsonl",
+    sizeBytes: 300,
+    mtimeMs: 1000,
+    lastEventAtMs: 1000,
+    keys: ["codex:tool-test"]
+  }))
+  console.log(JSON.stringify({
+    kind: "row",
+    sessionKey: "codex:tool-test",
+    line: 1,
+    role: "user",
+    text: "run the census twice",
+    timestamp: "2026-04-30T19:06:26.900Z",
+    recordKind: "event_msg",
+    duplicateOf: null
+  }))
+${toolLines}
+  console.log(JSON.stringify({
+    kind: "end",
+    nativeId: "tool-test",
+    keys: ["codex:tool-test"],
+    rows: 1,
+    tools: ${endTools},
+    skipped: 0,
+    status: "complete"
+  }))
+  console.log(JSON.stringify({ kind: "done", sessions: 1, rows: 1, tools: ${endTools}, errors: 0 }))
+}
+`)
+    }
+
+    test("stores codex tool calls and outputs, and a repeated-command count returns a number", async () => {
+      const res = await indexCodexTranscripts(db, { agBin: makeToolProducer({ version: 2, tools: true }) })
+      // rows is every stored message (narration + tool events); tools is the tool subset.
+      expect(res.rows).toBe(4)
+      expect(res.tools).toBe(3)
+
+      const rows = db
+        .prepare("SELECT type, tool_name, content, line FROM messages WHERE session_id = ? ORDER BY line")
+        .all("codex:tool-test") as {
+        type: string
+        tool_name: string | null
+        content: string | null
+        line: number
+      }[]
+
+      expect(rows.map((r) => r.type)).toEqual(["user", "tool_use", "tool_use", "tool_result"])
+      expect(rows.filter((r) => r.tool_name === "exec_command")).toHaveLength(3)
+      expect(rows[2]!.line).toBe(3)
+      expect(rows[3]!.content).toContain("Chunk ID")
+
+      const repeated = db
+        .prepare("SELECT count(*) AS n FROM messages WHERE session_id = ? AND type = 'tool_use' AND content = ?")
+        .get("codex:tool-test", JSON.stringify({ cmd: "herdr pane list", workdir: "/hh" })) as { n: number }
+      expect(repeated.n).toBe(2)
+    })
+
+    test("a version 1 stream still indexes narration and never synthesizes tool rows", async () => {
+      const res = await indexCodexTranscripts(db, { agBin: makeToolProducer({ version: 1, tools: false }) })
+      expect(res.rows).toBe(1)
+      expect(res.tools).toBe(0)
+
+      const toolRows = db
+        .prepare("SELECT count(*) AS n FROM messages WHERE session_id = ? AND tool_name IS NOT NULL")
+        .get("codex:tool-test") as { n: number }
+      expect(toolRows.n).toBe(0)
+    })
+  })
+
   describe("Chief Review Correction 1: Top-Level Clearing & Targeted Force", () => {
     test("throws fail-loud error if --force is used without explicit --path", async () => {
       await expect(rebuildIndex(db, { force: true, skipCodex: true })).rejects.toThrow(
