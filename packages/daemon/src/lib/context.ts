@@ -54,6 +54,13 @@ export type MessageInsertedInfo = {
   /** Canonical tracked-request correlation, present only when this message
    *  closed a still-open reply target owned by `requester`. */
   correlatedReply: { requestId: string; requester: string } | null
+  /** 29541 — the seat that REQUESTED the open request ball this row's ref
+   *  names, present only when the ref names one. Read ONLY by inbox-wait's
+   *  opt-in arm, from the same row match the SQL arm uses
+   *  ({@link refBoundOpenRequestPredicateSql}). Focus-mode push keeps asking the
+   *  settlement-only question, so this never reaches it — widening a default
+   *  wake class is not what 29535 ruled. */
+  refBoundOpenRequest?: { requester: string } | null
 }
 
 /** True when this message settles a tracked request that `session` opened. The

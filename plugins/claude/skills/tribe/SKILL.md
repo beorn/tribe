@@ -143,7 +143,7 @@ Every listed MCP tool is re-read by the model on every turn, so the tool descrip
 
 - `unread_count` is unread attention plus tracked actionable direct or broadcast messages without a later owner TAKING receipt, de-duplicated by message; incident balls are excluded. `timed_out` is true only when no qualifying row newer than the wait baseline arrived.
 - `woken_by.kind` is `message` (with `seq`, `message_id`, `type`, `sender`, `summary`, the ball it opened or moved as `request_id`, and for a correlated reply `settles_request_id`), `daemon-shutdown` (reconnect), or `row-retired` (only `seq`). `replay: true` means the wake re-presents an untaken ball the mailbox already passed, so it is not new and must not be re-acknowledged; `sent_at` keeps the original timestamp.
-- `wake_on_correlated_reply: true` also wakes on a response that settles one of this seat's tracked requests; verdicts already wake, and status/notify correlation never closes anything.
+- `wake_on_correlated_reply: true` also wakes on a validated reply settlement to one of this seat's tracked requests, and on a direct status or response whose ref names an open ball this seat requested; verdicts already wake, and status/notify correlation never closes anything.
 
 ### `fetch`
 
