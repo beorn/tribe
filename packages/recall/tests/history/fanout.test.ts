@@ -186,8 +186,16 @@ describe("fanoutSearch", () => {
     expect(result.variants).toEqual([])
     expect(result.skipped).toEqual([
       expect.objectContaining({ phase: "messages", anchor: "", message: expect.stringMatching(/fts5.*syntax error/i) }),
-      expect.objectContaining({ phase: "session_content", anchor: "", message: expect.stringMatching(/fts5.*syntax error/i) }),
-      expect.objectContaining({ phase: "project_content", anchor: "", message: expect.stringMatching(/fts5.*syntax error/i) }),
+      expect.objectContaining({
+        phase: "session_content",
+        anchor: "",
+        message: expect.stringMatching(/fts5.*syntax error/i),
+      }),
+      expect.objectContaining({
+        phase: "project_content",
+        anchor: "",
+        message: expect.stringMatching(/fts5.*syntax error/i),
+      }),
     ])
     db.close()
     expect(() => fanoutSearch(db, ["needle"], { limit: 5 })).toThrow()
