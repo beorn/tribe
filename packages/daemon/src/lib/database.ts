@@ -2805,13 +2805,15 @@ export function createStatements(db: Database) {
     `),
     ),
 
-    /** 29541 — who holds each side of the open request ball a ref names, so the
+    /** 29541 — the seat that requested the open request ball a ref names, so the
      *  insert-driven JS path can answer the same question as the SQL wake arm
      *  instead of restating it. Built from the same row match, so the two
-     *  halves cannot drift. */
+     *  halves cannot drift. Only the requester rides along: the owner is never
+     *  read, and a fanout-all ball has several, so carrying one would be a lie
+     *  the moment someone read it. */
     selectRefBoundOpenRequest: db.prepare(
       assertSingleStatement(`
-      SELECT sender AS requester, recipient AS owner
+      SELECT sender AS requester
       FROM pending_request
       WHERE ${refBoundOpenRequestMatchSql("$ref", "pending_request")}
       LIMIT 1

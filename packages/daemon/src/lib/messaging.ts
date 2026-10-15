@@ -712,7 +712,6 @@ export function sendMessage(
         ? null
         : (ctx.stmts.selectRefBoundOpenRequest.get({ $ref: correlationRef }) as {
             requester: string
-            owner: string
           } | null)
     let tracker = canonicalReplyId ? { request_id: canonicalReplyId, closed: 0 } : undefined
     // 25662 P3 3: an incident send that opens its ball, or changes its condition (the summary), is an edge that wakes

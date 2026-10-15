@@ -19,6 +19,8 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
+import { shouldDeliver } from "./compose/with-broadcast.ts"
+import { settlesRequestOpenedBy, type MessageInsertedInfo } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { readAttentionProjection, type HandlerOpts } from "./handlers.ts"
 import { createInboxWaitManager, type InboxStatus } from "./inbox-wait.ts"
@@ -35,6 +37,9 @@ type Fixture = {
   requester: TribeContext
   peer: TribeContext
   manager: ReturnType<typeof createInboxWaitManager>
+  /** Every info the insert path handed the manager, so a test can ask of the same
+   *  object the questions its OTHER consumers ask (focus-mode push). */
+  inserted: MessageInsertedInfo[]
 }
 const opened: Fixture[] = []
 
@@ -87,6 +92,7 @@ function fixture(): Fixture {
     (session, correlated) => tailSeq(stmts, session, correlated),
     (session, correlated) => tailSeq(stmts, session, correlated),
   )
+  const inserted: MessageInsertedInfo[] = []
   const mk = (id: string, name: string) =>
     createTribeContext({
       db,
@@ -97,9 +103,12 @@ function fixture(): Fixture {
       domains: [],
       claudeSessionId: null,
       claudeSessionName: null,
-      onMessageInserted: manager.onMessageInserted,
+      onMessageInserted: (info) => {
+        inserted.push(info)
+        manager.onMessageInserted(info)
+      },
     })
-  const built = { dir, db, stmts, requester: mk("requester", REQUESTER), peer: mk("peer", PEER), manager }
+  const built = { dir, db, stmts, requester: mk("requester", REQUESTER), peer: mk("peer", PEER), manager, inserted }
   opened.push(built)
   return built
 }
@@ -170,7 +179,7 @@ describe("29535 a ref-bound status wakes only its requester, and only under the 
   // wait-start snapshot the SQL tail feeds; a live `tribe inbox-wait` is parked
   // first and must be woken by the INSERT, which is the path the daemon drives
   // through onMessageInserted. The reported bug was this shape, not that one.
-  it("wakes a wait that is already parked when the ref-bound status arrives", async () => {
+  it("wakes a wait that is already parked when the ref-bound status arrives — requester only", async () => {
     const f = fixture()
     sendMessage(f.requester, PEER, "please answer", "request", undefined, undefined, "direct", {}, { request: BALL })
 
@@ -183,6 +192,35 @@ describe("29535 a ref-bound status wakes only its requester, and only under the 
     const woken = await parked
     expect(woken.status).toBe("woken")
     expect(woken.attention.actionable_unread.map((r) => r.id)).toContain(row.id)
+
+    // 29541 F3: the same parked path on the OWNER side stays quiet. The peer
+    // requests the ball, so @requester is its OWNER, and the seat that requested
+    // it (@responder) sends the precision into the parked wait's mailbox. The row
+    // is attention for the owner, but the opt-in arm asks only the requester side.
+    // The wait continues from the ball's own row (afterSeq), or the fresh-wait
+    // shortcut would settle it on that actionable request row before anything in
+    // this case is sent — a different wake, not the one under test.
+    const owner = fixture()
+    const ballRow = sendMessage(
+      owner.peer,
+      REQUESTER,
+      "please answer",
+      "request",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { request: BALL },
+    )
+    const ownerParked = owner.manager.wait(REQUESTER, "conn-owner", 400, {
+      wakeOnCorrelatedReply: true,
+      afterSeq: rowidOf(owner, ballRow.id),
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const precision = sendMessage(owner.peer, REQUESTER, "a precision arriving mid-wait", "status", undefined, BALL)
+    const quiet = await ownerParked
+    expect(quiet.status).toBe("timeout")
+    expect(quiet.attention.actionable_unread.map((r) => r.id)).toContain(precision.id)
   })
 
   it("stays quiet on the owner side, on a notify, and on a closed ball", () => {
@@ -224,5 +262,42 @@ describe("29535 a ref-bound status wakes only its requester, and only under the 
     expect(tailSeq(closedCase.stmts, REQUESTER, true)).toBe(statusRowid)
     closedCase.db.prepare("DELETE FROM pending_request WHERE request_id = ?").run(BALL)
     expect(tailSeq(closedCase.stmts, REQUESTER, true)).toBe(0)
+  })
+
+  // 29541 F1: the ref-bound arm belongs to inbox-wait's OPT-IN alone. Focus-mode
+  // push decides by settlesRequestOpenedBy, so widening that shared question
+  // would have woken a focus-mode seat on every TAKING-style status with no
+  // opt-in at all — a default wake class the 29535 ruling excluded ("attention
+  // is wider than waking"). Pin both halves, on the real inserted object.
+  it("keeps focus-mode push quiet on a ref-bound status while the opt-in wake sees it", () => {
+    const f = fixture()
+    const { row } = openBallAndReply(f, "status")
+    const info = f.inserted.find((i) => i.id === row.id)
+    expect(info).toBeDefined()
+
+    // The opt-in arm's question: yes, this ref names the ball the waiter requested.
+    expect(info?.refBoundOpenRequest?.requester).toBe(REQUESTER)
+
+    // Focus-mode push's question: no. It stays the settlement-only one.
+    expect(settlesRequestOpenedBy(info as MessageInsertedInfo, REQUESTER)).toBe(false)
+    const focus = { filter_mode: "focus", filter_mute: null, filter_until: null }
+    expect(
+      shouldDeliver(
+        {
+          kind: "direct",
+          type: (info as MessageInsertedInfo).type,
+          replyHint: "no",
+          topic: null,
+          settlesOwnRequest: settlesRequestOpenedBy(info as MessageInsertedInfo, REQUESTER),
+        },
+        focus,
+      ),
+    ).toBe(false)
+
+    // And focus mode has not simply gone deaf: the actionable class still lands,
+    // so the assertion above is about this class and not about the mode.
+    expect(
+      shouldDeliver({ kind: "direct", type: "assign", replyHint: "no", topic: null, settlesOwnRequest: false }, focus),
+    ).toBe(true)
   })
 })
