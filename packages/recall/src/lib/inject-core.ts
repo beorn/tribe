@@ -30,7 +30,6 @@ import {
 } from "./prompt-filter.ts"
 import { mergeRecallResults, recall } from "../history/search.ts"
 import type { RecallOptions, RecallPhase, RecallResult } from "../history/recall-shared.ts"
-import { getVaultDbPath } from "../history/vault-fts.ts"
 import { deriveVaultAnchor } from "../history/vault-glossary.ts"
 import { RecallDeadlineError } from "./recall-deadline.ts"
 import { RECALL_WALL_MS } from "../history/recall-budget.ts"
@@ -161,12 +160,17 @@ export interface RunInjectDeltaOptions {
    * Override for callers that want to see all results (e.g., debug tools).
    */
   minRank?: number
+  /**
+   * The vault every recall call of this injection searches, or null when none is bound: the caller resolves its
+   * `--vault-db` at its boundary. The unbound notice reads this, the option on the call, so a Worker the binding
+   * never reached can no longer search nothing silently (@cto 456e6e77).
+   */
+  vaultDb: string | null
   /** Test seam for isolating recall/project-source dependencies. */
   deps?: {
     recall?: typeof recall
     ensureProjectSourcesIndexed?: unknown
     deriveVaultAnchor?: typeof deriveVaultAnchor
-    getVaultDbPath?: typeof getVaultDbPath
   }
 }
 
@@ -293,9 +297,9 @@ export async function timeStepAsync<T>(
 export async function runInjectDelta(
   rawPrompt: string,
   store: SeenStore,
-  opts: RunInjectDeltaOptions = {},
+  opts: RunInjectDeltaOptions,
 ): Promise<RunInjectDeltaResult> {
-  const vaultDb = (opts.deps?.getVaultDbPath ?? getVaultDbPath)()
+  const vaultDb = opts.vaultDb
   const notice = vaultDb === null && store.get(VAULT_UNBOUND_NOTICE_KEY) === undefined
   const result = await runRecallInjection(rawPrompt, store, opts, notice, vaultDb)
   if (!notice) return result
@@ -386,7 +390,7 @@ async function runRecallInjection(
   // is to search, not to explain the skip); any other short prompt needs an identifier, by its regex shape
   // (prompt-filter.ts) or by the anchor's.
   const promptHasSalience = timeStep(steps, "classify", () => hasSalience(prompt))
-  const anchor = timeStep(steps, "anchor", () => deriveVaultAnchorImpl(prompt))
+  const anchor = timeStep(steps, "anchor", () => deriveVaultAnchorImpl(prompt, vaultDb))
   const questionShape = /[?]|^\s*(?:what|which|where|how|why|when|who)\b/i.test(prompt)
 
   if (!questionShape && prompt.length < LONG_PROMPT_BYPASS_LENGTH && !promptHasSalience && !anchor?.identifier) {
@@ -418,8 +422,8 @@ async function runRecallInjection(
     // turn become "memory" for the next prompt. The CLI keeps default false
     // so users can still grep their live session explicitly.
     excludeCurrentSession: true,
-    // The hook's recall runs in a Worker its --vault-db never reached, so each call names the vault (Phase 3).
-    ...(vaultDb === null ? {} : { vaultDb }),
+    // The vault rides the call: the prompt hook's recall runs in a Worker its --vault-db never reached.
+    vaultDb,
   }
   // In-thread by default. The prompt hook, the one caller that exits, passes a deadline recall (@ag/tribe/25071
   // stopgap); a long-lived caller (the daemon, the plugin server) would stack queries a deadline abandons.

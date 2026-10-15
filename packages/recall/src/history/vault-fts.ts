@@ -23,7 +23,6 @@ import { resolveVaultDbFlag } from "../lib/vault-db.ts"
 
 let cachedDb: Database | null = null
 let cachedPath: string | null = null
-let resolveAttempted = false
 let boundVaultDb: string | null = null
 
 /**
@@ -39,47 +38,41 @@ export function bindVaultDb(path: string): void {
   boundVaultDb = bound
 }
 
-function findVaultDb(): string | null {
-  const configured = boundVaultDb
-  if (configured === null) return null
-  if (!existsSync(configured)) {
-    throw vaultDbError(configured, "does not exist")
-  }
-  return configured
-}
-
-export function getVaultDb(): Database | null {
-  if (cachedDb) return cachedDb
-  if (resolveAttempted) return null
-
-  const path = findVaultDb()
-  if (!path) {
-    resolveAttempted = true
-    return null
-  }
-
+/**
+ * The vault database at `path`, opened read-only and kept while the same path is asked for. recall() and the vault
+ * anchor name their vault on each call (RecallOptions.vaultDb, @cto 456e6e77), so a thread the binding never reached
+ * still searches it.
+ */
+export function openVaultDb(path: string): Database {
+  if (cachedDb && cachedPath === path) return cachedDb
+  if (!existsSync(path)) throw vaultDbError(path, "does not exist")
+  resetVaultDbCache()
   try {
     const db = new Database(path, { readonly: true })
     db.run("PRAGMA query_only = ON")
     cachedDb = db
     cachedPath = path
-    resolveAttempted = true
     return db
   } catch (error) {
     throw vaultDbError(path, `could not be opened read-only (${errorMessage(error)})`)
   }
 }
 
+/**
+ * The bound vault, for the one reader outside recall() that still reads the binding: the pre-compact hook (its own
+ * later change, @ag/recall/three-dark-search-paths).
+ */
+export function getVaultDb(): Database | null {
+  return boundVaultDb === null ? null : openVaultDb(boundVaultDb)
+}
+
+/** The path `--vault-db` bound, or null: what an entry point resolves into RecallOptions.vaultDb at its boundary. */
 export function getVaultDbPath(): string | null {
-  if (!resolveAttempted) getVaultDb()
-  return cachedPath
+  return boundVaultDb
 }
 
 /**
- * Drop the memoized vault handle and resolution state. `bindVaultDb` calls this
- * whenever the bound path changes, because `getVaultDb()` memoizes both the
- * opened handle and the "already tried and failed" state — without it one
- * process could only ever resolve one vault.
+ * Close and drop the one kept vault handle: on a rebind, and before {@link openVaultDb} opens another path.
  */
 function resetVaultDbCache(): void {
   if (cachedDb) {
@@ -91,7 +84,6 @@ function resetVaultDbCache(): void {
   }
   cachedDb = null
   cachedPath = null
-  resolveAttempted = false
 }
 
 export interface VaultMatch {
@@ -242,11 +234,12 @@ export function isContentWord(token: string): boolean {
  *
  * The query is converted with toFts5Query, which AND-joins every token: the prompt hook passes the derived vault
  * anchor (a few words), never the verbatim prompt.
+ *
+ * `vaultDb` is the vault this search reads, named by the caller; null searches nothing, and the caller says so.
  */
-export function searchVault(query: string, limit: number): VaultMatch[] {
-  if (limit <= 0) return []
-  const db = getVaultDb()
-  if (!db) return []
+export function searchVault(query: string, limit: number, vaultDb: string | null): VaultMatch[] {
+  if (limit <= 0 || vaultDb === null) return []
+  const db = openVaultDb(vaultDb)
 
   const ftsQuery = toFts5Query(query)
   if (!ftsQuery) return []
@@ -320,7 +313,7 @@ export function searchVault(query: string, limit: number): VaultMatch[] {
     }
     return [...bestBySource.values()].sort((a, b) => a.rank - b.rank).slice(0, limit)
   } catch (error) {
-    throw vaultDbError(getVaultDbPath() ?? "unknown", `FTS query failed (${errorMessage(error)})`)
+    throw vaultDbError(vaultDb, `FTS query failed (${errorMessage(error)})`)
   }
 }
 

@@ -27,21 +27,22 @@ const { RecallDeadlineError } = await import("../src/lib/recall-deadline.ts")
 
 const recallMock = vi.fn()
 const ensureProjectSourcesIndexedMock = vi.fn()
+const FIXTURE_VAULT = "/fixture/vault/.km/state.db"
 
 function runInjectDelta(
   prompt: Parameters<typeof runInjectDeltaImpl>[0],
   store: Parameters<typeof runInjectDeltaImpl>[1],
-  opts: Parameters<typeof runInjectDeltaImpl>[2] = {},
+  opts: Partial<Parameters<typeof runInjectDeltaImpl>[2]> = {},
 ): ReturnType<typeof runInjectDeltaImpl> {
   return runInjectDeltaImpl(prompt, store, {
+    // A bound vault by default: the unbound notice has its own describe below.
+    vaultDb: FIXTURE_VAULT,
     ...opts,
     deps: {
       recall: recallMock as unknown as typeof import("../src/history/search.ts").recall,
       ensureProjectSourcesIndexed: ensureProjectSourcesIndexedMock,
       // No anchor by default, so only call B runs: the two-call rows name their anchor.
       deriveVaultAnchor: () => null,
-      // A bound vault by default: the unbound notice has its own describe below.
-      getVaultDbPath: () => "/fixture/vault/.km/state.db",
       ...opts.deps,
     },
   })
@@ -485,7 +486,7 @@ describe("runInjectDelta — recall query bound (@ag/tribe/25071)", () => {
 // The notice is framed like every injection: inside one <injected_context>
 // envelope and followed by the protocol footer, never as bare user-role text.
 describe("runInjectDelta — an unbound vault is said, once per session (25149)", () => {
-  const unbound = { deps: { getVaultDbPath: () => null } }
+  const unbound = { vaultDb: null }
 
   /** The envelope's inner text; throws if anything sits outside envelope + footer. */
   function framedInner(additionalContext: string, mode: string): string {
@@ -724,8 +725,22 @@ describe("25071 row 2: the hook's recall runs in hook mode, inside the wall's bu
 
     const options = recallMock.mock.calls[0]?.[1] as { mode?: string; vaultDb?: string; deadlineAt?: number }
     expect(options.mode).toBe("hook")
-    expect(options.vaultDb).toBe("/fixture/vault/.km/state.db")
+    expect(options.vaultDb).toBe(FIXTURE_VAULT)
     expect(options.deadlineAt).toBeUndefined()
+  })
+
+  // @failure The hook's recall runs in a Worker its --vault-db never reached, so from tribe e1ecf2f0 (2026-09-23) it
+  // searched no vault; the vault now rides each call (@cto 456e6e77).
+  test("every recall call carries the vault named on the injection; unbound, it carries null", async () => {
+    recallMock.mockResolvedValue({ results: [] })
+
+    await runInjectDelta(salientPrompt, createMemorySeenStore())
+    await runInjectDelta(salientPrompt, createMemorySeenStore(), { vaultDb: null })
+
+    expect(recallMock.mock.calls.map((call) => (call[1] as { vaultDb?: string | null }).vaultDb)).toEqual([
+      FIXTURE_VAULT,
+      null,
+    ])
   })
 
   test("recall's per-phase times join the steps, and a phase recall skipped is said in skippedSteps", async () => {
@@ -803,7 +818,8 @@ describe("Phase 3: call A searches the vault on the anchor, call B the rest on t
     recallMock.mockResolvedValue({ results: [] })
 
     await runInjectDelta(JEV, createMemorySeenStore(), {
-      deps: { deriveVaultAnchor: () => anchor, getVaultDbPath: () => null },
+      vaultDb: null,
+      deps: { deriveVaultAnchor: () => anchor },
     })
 
     expect(recallMock.mock.calls.map(([query]) => query)).toEqual([JEV])

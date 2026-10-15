@@ -66,10 +66,11 @@ export interface RecallOptions {
    */
   phases?: readonly RecallPhase[]
   /**
-   * The vault database this call searches, bound for it as `--vault-db` binds it. The prompt hook passes its own
-   * binding: its recall runs in a Worker, a thread its --vault-db never reached (Phase 3).
+   * The vault database this call searches: recall()'s only vault binding (@cto 456e6e77). Absent or null, no vault
+   * is searched, and the entry point says so. Each entry point resolves `--vault-db` into it at its boundary, so a
+   * Worker the binding never reached (the prompt hook's) still searches the vault.
    */
-  vaultDb?: string
+  vaultDb?: string | null
 }
 
 /** A search phase one recall call may run (Phase 3). */

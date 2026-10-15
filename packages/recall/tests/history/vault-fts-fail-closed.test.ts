@@ -364,7 +364,7 @@ describe("vault-fts fail-closed guards", () => {
       bindVaultDb(dbPath)
 
       // Search over the read-only handle still returns real hits.
-      const hits = searchVault("termless", 5)
+      const hits = searchVault("termless", 5, getVaultDbPath())
       expect(hits.length).toBeGreaterThan(0)
       expect(hits[0]!.name).toBe("12345-termless")
       expect(hits[0]!.fsPath).toBe("hub/@km/tribe/12345-termless.md")
@@ -420,7 +420,7 @@ describe("vault-fts fail-closed guards", () => {
 
       bindVaultDb(dbPath)
 
-      const hits = searchVault("vaultneedle", 5)
+      const hits = searchVault("vaultneedle", 5, getVaultDbPath())
       expect(hits).toHaveLength(1)
       expect(hits[0]?.id).toMatch(/^01VAULTNEEDLEBODYONLYROW[01]$/)
       expect(hits[0]?.fsPath).toBe("hub/@km/tribe/12345-termless.md")
@@ -441,7 +441,9 @@ describe("vault-fts fail-closed guards", () => {
 
       bindVaultDb(dbPath)
 
-      expect(() => searchVault("termless", 5)).toThrowError(/bound by --vault-db\).*Run 'km sync'.*drop the binding/)
+      expect(() => searchVault("termless", 5, getVaultDbPath())).toThrowError(
+        /bound by --vault-db\).*Run 'km sync'.*drop the binding/,
+      )
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -473,7 +475,7 @@ describe("vault-fts fail-closed guards", () => {
       expect(Object.keys(before)).toEqual(expect.arrayContaining(["state.db", "state.db-wal", "state.db-shm"]))
 
       bindVaultDb(dbPath)
-      expect(searchVault("termless", 5)).toHaveLength(1)
+      expect(searchVault("termless", 5, getVaultDbPath())).toHaveLength(1)
 
       // recall's read-only handle is still open here — only a fresh module graph
       // drops it, there is no public close. That is harmless for the pin: with
@@ -500,7 +502,7 @@ describe("vault-fts fail-closed guards", () => {
       expect(getVaultDb()).toBeNull()
       expect(getVaultDbPath()).toBeNull()
 
-      const result = searchVault("termless", 5)
+      const result = searchVault("termless", 5, getVaultDbPath())
       expect(Array.isArray(result)).toBe(true)
       expect(result).toEqual([])
     } finally {
@@ -517,7 +519,7 @@ describe("vault-fts fail-closed guards", () => {
     vi.spyOn(process, "cwd").mockReturnValue(deep)
     try {
       expect(getVaultDbPath()).toBeNull()
-      expect(searchVault("termless", 5)).toEqual([])
+      expect(searchVault("termless", 5, getVaultDbPath())).toEqual([])
     } finally {
       rmSync(vaultRoot, { recursive: true, force: true })
     }
@@ -531,7 +533,7 @@ describe("vault-fts fail-closed guards", () => {
 
       bindVaultDb(dbPath)
       expect(getVaultDbPath()).toBe(dbPath)
-      expect(searchVault("termless", 5)).toHaveLength(1)
+      expect(searchVault("termless", 5, getVaultDbPath())).toHaveLength(1)
       expect(() => bindVaultDb("")).toThrowError(/--vault-db is empty/)
     } finally {
       rmSync(dir, { recursive: true, force: true })

@@ -22,12 +22,13 @@
  * Past 200 entries is a smell; past 500 means we're indexing noise.
  */
 
-import { getVaultDb, isContentWord, isStopword } from "./vault-fts.ts"
+import { isContentWord, isStopword, openVaultDb } from "./vault-fts.ts"
 
+/** The vault the glossary below was read from: the caller names it, one glossary per path (@cto 456e6e77). */
+let glossaryPath: string | null = null
 let glossarySet: Set<string> | null = null
 /** The vault's root scope names (`@ag/…` → `ag`), read in the glossary's pass: a short token naming one is an identifier. */
 let rootScopeSet: Set<string> | null = null
-let buildAttempted = false
 
 const EXPLICIT_ALIASES: ReadonlyArray<string> = [
   // camelCase code-symbol terms
@@ -68,13 +69,13 @@ const SHORT_EXPLICIT_ALIASES: ReadonlySet<string> = new Set([
  */
 const PROJECT_DIRS: ReadonlyArray<string> = ["vendor/", "apps/", "packages/", "hub/"]
 
-function buildGlossary(): Set<string> | null {
-  if (glossarySet) return glossarySet
-  if (buildAttempted) return null
-  buildAttempted = true
+function buildGlossary(vaultDb: string): Set<string> | null {
+  if (glossaryPath === vaultDb) return glossarySet
+  glossaryPath = vaultDb
+  glossarySet = null
+  rootScopeSet = null
 
-  const db = getVaultDb()
-  if (!db) return null
+  const db = openVaultDb(vaultDb)
 
   const out = new Set<string>(EXPLICIT_ALIASES.map((s) => s.toLowerCase()))
 
@@ -189,15 +190,17 @@ function promptWords(prompt: string): PromptWord[] {
  * prompt names (an @ref, a path, kebab-case, camelCase, a bead number, a vault root scope such as `ag`, a glossary
  * term, or a proper noun mid-sentence such as `Jev`, however short) followed by the next content words, three tokens
  * in all; with no identifier, the first three content words. Null when the prompt has neither. A short query, never
- * the verbatim prompt: the vault's FTS AND-joins every token.
+ * the verbatim prompt: the vault's FTS AND-joins every token. `vaultDb` is the vault whose scopes and glossary count as
+ * identifiers, named by the caller; null, only the shapes and proper nouns do.
  */
-export function deriveVaultAnchor(prompt: string): VaultAnchor | null {
-  const glossary = buildGlossary()
+export function deriveVaultAnchor(prompt: string, vaultDb: string | null): VaultAnchor | null {
+  const glossary = vaultDb === null ? null : buildGlossary(vaultDb)
+  const roots = glossary === null ? null : rootScopeSet
   const words = promptWords(prompt)
   const isIdentifier = ({ token, opensSentence }: PromptWord): boolean => {
     const lower = token.toLowerCase()
     if ([AT_REF, PATH, KEBAB, CAMEL, BEAD_NUMBER].some((shape) => shape.test(token))) return true
-    if (rootScopeSet?.has(lower) || glossary?.has(lower) || SHORT_EXPLICIT_ALIASES.has(lower)) return true
+    if (roots?.has(lower) || glossary?.has(lower) || SHORT_EXPLICIT_ALIASES.has(lower)) return true
     return !opensSentence && PROPER.test(token) && !isStopword(lower)
   }
   const contentAfter = (from: number, count: number): string[] =>
@@ -214,9 +217,4 @@ export function deriveVaultAnchor(prompt: string): VaultAnchor | null {
   }
   const content = contentAfter(0, ANCHOR_WORDS)
   return content.length > 0 ? { query: content.join(" "), identifier: null } : null
-}
-
-export function glossarySize(): number {
-  const g = buildGlossary()
-  return g?.size ?? 0
 }

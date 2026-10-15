@@ -25,6 +25,7 @@ import { describeFreshness, judgeIndexFreshness, type IndexFreshness } from "../
 import type { RecallSearchResult } from "./recall-shared.ts"
 import { runInjectDelta, createTmpfileSeenStore, timeStep } from "../lib/inject-core.ts"
 import { recall, parseTimeToMs } from "./search.ts"
+import { getVaultDbPath } from "./vault-fts.ts"
 import { SYNTHESIS_PROMPT, raceLlmModels, formatResultsForLlm, type LlmRaceModelResult } from "./synthesize.ts"
 import { CLAUDE_SESSION_ID_ENV } from "tribe-wire/lib/session-identity-env"
 
@@ -113,6 +114,9 @@ export async function hookRecall(
   const store = timeStep(opts.steps, "seen_store", () => createTmpfileSeenStore(seenFile))
   const core = await runInjectDelta(prompt, store, {
     steps: opts.steps,
+    // The hook line's --vault-db, resolved here at the hook's boundary and handed to every recall call: its recall
+    // runs in a Worker the binding never reached (@cto 456e6e77).
+    vaultDb: getVaultDbPath(),
     ...(opts.recall === undefined ? {} : { deps: { recall: opts.recall } }),
   })
   const skipped = core.skippedSteps ? { skippedSteps: core.skippedSteps } : {}

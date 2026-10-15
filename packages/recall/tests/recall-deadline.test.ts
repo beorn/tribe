@@ -6,10 +6,11 @@
  * @level     l2 — real Workers and a real child process; the recall inside the worker is a fixture that blocks.
  */
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { safeRemoveSync } from "removely"
 import { describe, expect, test } from "vitest"
 
 import { makeKmVault } from "./helpers/km-vault.ts"
@@ -22,6 +23,31 @@ const BLOCKS = new URL("./fixtures/recall-blocks.worker.ts", import.meta.url)
 const IN_MEMORY = new URL("./fixtures/recall-memory.worker.ts", import.meta.url)
 const SALIENT = "what did we decide about km-storage-sync layering?"
 
+// @failure The vault binding was module state on the hook's thread; the deadline Worker never had it, so from tribe
+// e1ecf2f0 (2026-09-23) every hook recall searched no vault and said nothing (probe: 7 vault hits in-thread, 0
+// through the Worker). The vault now rides the call (@cto 456e6e77).
+describe("the vault rides the recall call, so the deadline Worker searches it", () => {
+  test("hook-mode recall through the real Worker returns the hit of the vault the call names", async () => {
+    const dir = mkdtempSync(join(realpathSync(tmpdir()), "recall-deadline-vault-"))
+    const recall = createDeadlineRecall({ deadlineMs: 10_000, workerUrl: IN_MEMORY })
+    try {
+      const vaultDb = makeKmVault(dir, [
+        {
+          id: "@i/search/27897-memory-system",
+          fsPath: "@i/search/27897-memory-system.md",
+          title: "Jev memory system",
+          content: "Jev keeps the memory system's notes.",
+        },
+      ])
+      const result = await recall("Jev", { mode: "hook", raw: true, limit: 5, vaultDb })
+      expect(result.results.map((r) => `${r.type}:${r.sessionId}`)).toEqual(["vault:@i/search/27897-memory-system.md"])
+    } finally {
+      recall.close()
+      safeRemoveSync(dir, { within: realpathSync(tmpdir()) })
+    }
+  }, 15_000)
+})
+
 describe("25071 stopgap: recall that outlives its deadline is skipped, loudly", () => {
   test("the deadline is the 1.5 s wall, and its skip says so (25071 row 2)", () => {
     expect(RECALL_WALL_MS).toBe(1500)
@@ -33,6 +59,7 @@ describe("25071 stopgap: recall that outlives its deadline is skipped, loudly", 
     const started = performance.now()
     try {
       const result = await runInjectDelta(SALIENT, createMemorySeenStore(), {
+        vaultDb: "/fixture/vault/.km/state.db",
         deps: { recall, ensureProjectSourcesIndexed: () => {}, deriveVaultAnchor: () => null },
       })
       expect(performance.now() - started).toBeLessThan(2500)
@@ -58,28 +85,6 @@ describe("25071 stopgap: recall that outlives its deadline is skipped, loudly", 
       recall.close()
     }
   })
-
-  // @failure The vault binding lives on the hook's thread; the Worker never had it, so from tribe e1ecf2f0
-  // (2026-09-23) every hook recall searched no vault and said nothing (@ag/recall Phase 3, probe-worker-vault.log).
-  test("the real Worker searches the vault its caller names on the call", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "recall-deadline-vault-"))
-    const recall = createDeadlineRecall({ deadlineMs: 10_000, workerUrl: IN_MEMORY })
-    try {
-      const vaultDb = makeKmVault(dir, [
-        {
-          id: "@i/search/27897-memory-system",
-          fsPath: "@i/search/27897-memory-system.md",
-          title: "Jev memory system",
-          content: "Jev keeps the memory system's notes.",
-        },
-      ])
-      const result = await recall("Jev", { mode: "hook", raw: true, limit: 5, phases: ["vault"], vaultDb })
-      expect(result.results.map((r) => `${r.type}:${r.sessionId}`)).toEqual(["vault:@i/search/27897-memory-system.md"])
-    } finally {
-      recall.close()
-      rmSync(dir, { recursive: true, force: true })
-    }
-  }, 15_000)
 
   test("a recall that answers inside the deadline is returned as it came", async () => {
     const recall = createDeadlineRecall({ deadlineMs: 5000, workerUrl: BLOCKS })

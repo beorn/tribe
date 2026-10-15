@@ -443,6 +443,8 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
     const core = await engine.runInjectDelta(params.prompt ?? "", store, {
       limit: params.limit,
       ttlTurns: params.ttlTurns,
+      // The vault rides each recall call (@cto 456e6e77); the binding above stays only for the glossary.
+      vaultDb: opts.vaultDbPath ?? null,
     })
     if (core.skipped) {
       return {

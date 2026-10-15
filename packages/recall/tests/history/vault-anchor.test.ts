@@ -8,16 +8,17 @@
  */
 import { assertSingleStatement } from "@bearly/sqlite"
 import { Database } from "bun:sqlite"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { safeRemoveSync } from "removely"
 import { afterEach, describe, expect, test, vi } from "vitest"
 
 const roots: string[] = []
 
 /** A km vault store holding the paths the anchor reads its root scopes and glossary from. */
 function vaultWith(paths: string[]): string {
-  const root = mkdtempSync(join(tmpdir(), "recall-vault-anchor-"))
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "recall-vault-anchor-"))
   roots.push(root)
   const dbPath = join(root, "state.db")
   const db = new Database(dbPath)
@@ -34,13 +35,12 @@ function vaultWith(paths: string[]): string {
 
 async function anchorFor(prompt: string, vault: string | null): Promise<unknown> {
   vi.resetModules()
-  if (vault !== null) (await import("../../src/history/vault-fts.ts")).bindVaultDb(vault)
   const { deriveVaultAnchor } = await import("../../src/history/vault-glossary.ts")
-  return deriveVaultAnchor(prompt)
+  return deriveVaultAnchor(prompt, vault)
 }
 
 afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  for (const root of roots.splice(0)) safeRemoveSync(root, { within: realpathSync(tmpdir()) })
 })
 
 const VAULT = [
