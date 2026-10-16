@@ -392,17 +392,6 @@ export function resolveLiveHealthRecipients(
   return resolved
 }
 
-function unresolvedHealthRecipients(
-  attributedSessions: ReadonlySet<string>,
-  sampledSessions: readonly HealthSession[],
-  liveSessions: readonly HealthSession[],
-): string[] {
-  return [...attributedSessions].filter(
-    (attributedName) =>
-      resolveLiveHealthRecipients(new Set([attributedName]), sampledSessions, liveSessions).size === 0,
-  )
-}
-
 /** Execute the delivery plan without per-client fleet fanout. */
 export function deliverHealthAlert(
   api: Pick<TribeClientApi, "send" | "broadcast" | "getActiveSessions">,
@@ -429,16 +418,6 @@ export function deliverHealthAlert(
   const recipients = [
     ...resolveLiveHealthRecipients(attributedSessions, sampledSessions ?? liveSessions, liveSessions),
   ].sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
-  const unresolved = unresolvedHealthRecipients(attributedSessions, sampledSessions ?? liveSessions, liveSessions)
-  if (unresolved.length > 0) {
-    api.broadcast(
-      `${message}. routing diagnostic: attributed owner(s) are not live Tribe recipients: ${unresolved.join(",")}`,
-      topic,
-      undefined,
-      { delivery: "push", topic },
-    )
-    return { kind: "broadcast" }
-  }
   for (const recipient of recipients) {
     api.send(recipient, message, topic, undefined, { delivery: "push", topic })
   }

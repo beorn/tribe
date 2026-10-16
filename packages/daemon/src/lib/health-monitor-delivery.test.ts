@@ -90,30 +90,24 @@ describe("health alert delivery", () => {
     expect(sends).toEqual(["@agent/7"])
   })
 
-  test("broadcasts one operator diagnostic when an attributed warning has no live recipient", () => {
+  test.each([
+    { label: "mixed live and service owners", owners: ["@dev/5", "habmod", "km-daemon"], recipients: ["@dev/5"] },
+    { label: "service owners only", owners: ["habmod", "km-daemon"], recipients: [] },
+  ])("sends only to resolvable warning recipients: $label", ({ owners, recipients }) => {
     const broadcasts: string[] = []
-    const sends: string[] = []
+    const sends: { recipient: string; message: string }[] = []
     const api = {
       broadcast: (message: string) => broadcasts.push(message),
-      getActiveSessions: () => [],
-      send: (recipient: string) => sends.push(recipient),
+      getActiveSessions: () => [{ name: "@dev/5", pid: 5005, role: "member" }],
+      send: (recipient: string, message: string) => sends.push({ recipient, message }),
     } as unknown as TribeClientApi
 
     expect(
-      deliverHealthAlert(
-        api,
-        { type: "cpu", severity: "warning" },
-        "CPU warning sample",
-        new Set(["yrd-runner"]),
-        false,
-        [],
-      ),
-    ).toEqual({ kind: "broadcast" })
+      deliverHealthAlert(api, { type: "cpu", severity: "warning" }, "CPU warning sample", new Set(owners), false),
+    ).toEqual({ kind: "direct", recipients })
 
-    expect(sends).toEqual([])
-    expect(broadcasts).toEqual([
-      "CPU warning sample. routing diagnostic: attributed owner(s) are not live Tribe recipients: yrd-runner",
-    ])
+    expect(sends).toEqual(recipients.map((recipient) => ({ recipient, message: "CPU warning sample" })))
+    expect(broadcasts).toEqual([])
   })
 
   test("rate-limits a repeated CPU episode after a brief below-threshold sample", () => {
