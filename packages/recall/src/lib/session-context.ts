@@ -438,7 +438,7 @@ function walkProcessAncestors(maxDepth: number): number[] {
   for (let i = 0; i < maxDepth; i++) {
     if (!pid || pid === 1) break
     pids.push(pid)
-    const next = readParentPid(pid)
+    const next = readParentPid(pid).ppid
     if (next === null || next === pid) break
     pid = next
   }

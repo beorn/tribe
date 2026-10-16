@@ -40,32 +40,39 @@ describe("parseProcStatLine", () => {
 
 describe("readParentPid", () => {
   test("this test process's parent is the one the runtime reports", () => {
-    expect(readParentPid(process.pid)).toBe(process.ppid)
+    expect(readParentPid(process.pid)).toEqual({ ppid: process.ppid })
   })
 
   test("a live child's parent is this process", () => {
     const child = spawn("sleep", ["5"], { stdio: "ignore" })
     try {
       expect(child.pid).toBeDefined()
-      expect(readParentPid(child.pid as number)).toBe(process.pid)
+      expect(readParentPid(child.pid as number)).toEqual({ ppid: process.pid })
     } finally {
       child.kill("SIGKILL")
     }
   })
 
-  test("a process that has exited reads as null, never a guess", () => {
+  test("a process that has exited has no parent, and the reading says why, never a guess", () => {
     const child = spawnSync("sh", ["-c", "echo $$"], { encoding: "utf8" })
     expect(child.status).toBe(0)
-    expect(readParentPid(Number(child.stdout.trim()))).toBeNull()
+    const pid = Number(child.stdout.trim())
+    expect(readParentPid(pid)).toEqual({ ppid: null, reason: `/proc/${pid}/stat is unreadable (ENOENT)` })
   })
 
-  test("a pid that cannot name a process reads as null", () => {
-    for (const pid of [0, -1, 1.5, Number.NaN, 2 ** 31]) expect(readParentPid(pid)).toBeNull()
+  test("a pid that cannot name a process has no parent, by name", () => {
+    for (const pid of [0, -1, 1.5, Number.NaN]) {
+      expect(readParentPid(pid)).toEqual({ ppid: null, reason: `${pid} is not a process id` })
+    }
+    expect(readParentPid(2 ** 31)).toEqual({ ppid: null, reason: `/proc/${2 ** 31}/stat is unreadable (ENOENT)` })
   })
 
-  test("the ps fallback agrees with the runtime where ps exists", () => {
+  test("the ps fallback agrees with the runtime where ps exists, and names its exit status for a missing pid", () => {
     if (!existsSync("/bin/ps") && !existsSync("/usr/bin/ps")) return
-    expect(readParentPidFromPs(process.pid)).toBe(process.ppid)
-    expect(readParentPidFromPs(2 ** 31)).toBeNull()
+    expect(readParentPidFromPs(process.pid)).toEqual({ ppid: process.ppid })
+    expect(readParentPidFromPs(2 ** 31)).toMatchObject({
+      ppid: null,
+      reason: expect.stringMatching(/^ps exited 1 for pid 2147483648/u),
+    })
   })
 })

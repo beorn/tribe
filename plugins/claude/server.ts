@@ -26,6 +26,7 @@ import {
   judgeSeatAncestry,
   PROVIDER_PARENT_REMEDY,
   resolveProviderParentPid,
+  type ProviderParent,
 } from "./supervisor-policy.ts"
 import {
   buildPluginAdapterEnvironment,
@@ -42,11 +43,7 @@ import {
   type SupervisorClaimWatch,
 } from "./supervisor-claim.ts"
 import { readParentPid } from "tribe-wire/lib/process-parent"
-import {
-  TRIBE_NAME_ENV,
-  TRIBE_PLUGIN_ADAPTER_CHILD_ENV,
-  TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV,
-} from "tribe-wire/lib/session-identity-env"
+import { TRIBE_NAME_ENV, TRIBE_PLUGIN_ADAPTER_CHILD_ENV } from "tribe-wire/lib/session-identity-env"
 
 const PLUGIN_CHILD = TRIBE_PLUGIN_ADAPTER_CHILD_ENV
 const REEXEC_EXIT_CODE = PLUGIN_REEXEC_EXIT_CODE
@@ -146,9 +143,9 @@ async function superviseAdapter(): Promise<void> {
   // the adapter. A managed Hab launch supplies the authoritative harness PID;
   // a standalone plugin uses the wrapper's actual provider parent. Capture the
   // resolved boundary once so every child/re-exec reports one logical owner.
-  let providerParentPid: number
+  let providerParent: ProviderParent
   try {
-    providerParentPid = resolveProviderParentPid(process.env, process, processExists, (line) =>
+    providerParent = resolveProviderParentPid(process.env, process, processExists, (line) =>
       process.stderr.write(`${line}\n`),
     )
   } catch (error) {
@@ -167,8 +164,7 @@ async function superviseAdapter(): Promise<void> {
   const exitRecord = resolveAdapterExitRecord(process.env)
   // 29567: a provider run inside this seat inherits the seat's launch declaration. Its supervisor must neither claim
   // the seat's slot nor connect as the seat, so it records its own row in the seat's exit record and exits.
-  const declaredHarnessPid = process.env[TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV]?.trim() ? providerParentPid : null
-  const ancestry = judgeSeatAncestry(declaredHarnessPid, process.ppid, readParentPid)
+  const ancestry = judgeSeatAncestry(providerParent.declared ? providerParent.pid : null, process.ppid, readParentPid)
   if (ancestry.kind === "unmeasured") process.stderr.write(`${ancestry.warning}\n`)
   if (ancestry.kind === "nested") {
     recordAdapterExit(exitRecord, {
@@ -268,7 +264,7 @@ async function superviseAdapter(): Promise<void> {
       stdio,
       env: buildPluginAdapterEnvironment(
         process.env,
-        providerParentPid,
+        providerParent.pid,
         canResumeJoined && resumeName !== undefined ? { name: resumeName } : undefined,
         exitRecord.path,
       ),

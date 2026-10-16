@@ -46,6 +46,8 @@ let socketPath: string
 let server: Server
 let sockets: Set<Socket>
 let connections: number
+/** Each accepted connection's request methods, in arrival order. */
+let connectionMethods: string[][]
 const hosts: Host[] = []
 
 /** A managed seat's environment: a launch token, the seat's state directory, and the declared harness PID. */
@@ -145,12 +147,16 @@ beforeEach(async () => {
   socketPath = join(dir, "tribe.sock")
   sockets = new Set()
   connections = 0
+  connectionMethods = []
   server = createServer((socket) => {
     // Accept and idle, answering cli_status with this checkout as the landing root (27531), as the takeover test does.
     connections += 1
+    const methods: string[] = []
+    connectionMethods.push(methods)
     sockets.add(socket)
     const parse = createLineParser((msg) => {
       if (!isRequest(msg)) return
+      methods.push(msg.method)
       if (msg.method === "cli_status") {
         socket.write(
           makeResponse(msg.id, { sessions: [], daemon: { code_identity: { cert: "test-cert", root: TRIBE_ROOT } } }),
@@ -181,7 +187,12 @@ afterEach(async () => {
 describe("a provider nested inside a managed seat (29567)", () => {
   it("is refused before it claims or connects, records one row of its own, and leaves the seat's supervisor holding the launch", async () => {
     const seat = await startSeat()
-    await waitFor(() => connections > 0, "the seat's adapter connection")
+    // The seat's supervisor first reads the landing root over a cli_status connection of its own (code-identity.ts),
+    // then its adapter connects: count only once the adapter's own connection has sent a request of its own.
+    await waitFor(
+      () => connectionMethods.some((methods) => methods.some((method) => method !== "cli_status")),
+      "the seat's adapter connection",
+    )
     const seatConnections = connections
 
     // The nested host inherits the seat's whole environment, declaration included, one process deeper.

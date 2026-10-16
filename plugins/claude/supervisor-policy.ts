@@ -2,6 +2,7 @@ import { decorrelatedJitter, type RandomUnit } from "@bearly/pacing"
 import { isAbsolute, join } from "node:path"
 import { HAB_ID_TOKEN_ENV, HAB_ID_TOKEN_FILE_ENV } from "tribe-wire/lib/hab-session-env"
 import { TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV } from "tribe-wire/lib/session-identity-env"
+import type { ParentPidReading } from "tribe-wire/lib/process-parent"
 
 /** Longer than the adapter's 60s fresh-daemon reconnect watchdog. */
 export const ADAPTER_STABLE_MS = 90_000
@@ -156,18 +157,19 @@ export type SeatAncestry =
 export function judgeSeatAncestry(
   declaredHarnessPid: number | null,
   providerPid: number,
-  parentOf: (pid: number) => number | null,
+  parentOf: (pid: number) => ParentPidReading,
 ): SeatAncestry {
   if (declaredHarnessPid === null) return { kind: "seat" }
-  const providerParent = parentOf(providerPid)
-  if (providerParent === null) {
+  const reading = parentOf(providerPid)
+  if (reading.ppid === null) {
     return {
       kind: "unmeasured",
       warning:
-        `tribe plugin supervisor: could not read the parent of provider ${providerPid}; acting as this launch's ` +
-        "supervisor without the nested-host check (29567)",
+        `tribe plugin supervisor: could not read the parent of provider ${providerPid} (${reading.reason}); acting ` +
+        "as this launch's supervisor without the nested-host check (29567)",
     }
   }
+  const providerParent = reading.ppid
   if (providerParent === declaredHarnessPid) return { kind: "seat" }
   return {
     kind: "nested",
@@ -176,6 +178,9 @@ export function judgeSeatAncestry(
       `harness ${declaredHarnessPid}; the provider's parent is ${providerParent} (29567)`,
   }
 }
+
+/** The provider parent this wrapper reports, and whether its launch declared it rather than the wrapper reading it. */
+export type ProviderParent = { readonly pid: number; readonly declared: boolean }
 
 /**
  * The provider parent this wrapper reports as its launch owner. A managed launch names itself by its HAB_ID_TOKEN
@@ -191,18 +196,18 @@ export function resolveProviderParentPid(
   self: { readonly pid: number; readonly ppid: number },
   processExists: (pid: number) => boolean,
   warn: (line: string) => void,
-): number {
+): ProviderParent {
   const raw = env[TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV]?.trim() ?? ""
   // Presence of EITHER name means a managed launch (27314 B1): after the producer cutover only the file path rides.
   const managed =
     (env[HAB_ID_TOKEN_ENV]?.trim() ?? "").length > 0 || (env[HAB_ID_TOKEN_FILE_ENV]?.trim() ?? "").length > 0
   if (raw.length === 0) {
     if (managed) warn(LEGACY_PARENT_WARNING)
-    return self.ppid
+    return { pid: self.ppid, declared: false }
   }
   const pid = Number(raw)
   if (!managed || !/^[1-9]\d*$/u.test(raw) || !Number.isSafeInteger(pid) || pid === self.pid || !processExists(pid)) {
     throw new Error(PROVIDER_PARENT_REMEDY)
   }
-  return pid
+  return { pid, declared: true }
 }
