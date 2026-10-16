@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -101,5 +102,100 @@ describe("qmd export boundary", () => {
     })
     expect(versionProbe.status, versionProbe.stderr).toBe(0)
     expect(versionProbe.stdout.trim()).toMatch(/^qmd 2\.8\.3(?:\s|$)/)
+  })
+})
+
+// @failure Interrupted QMD indexing repeats valid chunks or treats orphan metadata as complete.
+// @level l2 @consumer Recall's pinned offline QMD update/embed boundary
+// The real store/chunker/session and SQLite extension own progress. Only the external
+// tokenizer/inference is deterministic; actual native32/56/interruption proof is separate.
+describe("qmd embedding persistence contract", () => {
+  test("retains valid progress and repairs incomplete pairs across SDK resumes", () => {
+    const root = mkdtempSync(join(tmpdir(), "recall-qmd-store-"))
+    const qmdRoot = realpathSync(fileURLToPath(new URL("../node_modules/@tobilu/qmd/", import.meta.url)))
+    mkdirSync(join(root, "source"))
+    writeFileSync(join(root, "source", "fixture.md"), "# Fixture\n" + "x".repeat(2500))
+    try {
+      const probe = spawnSync(
+        "bun",
+        [
+          "--eval",
+          String.raw`
+        import { readFileSync, writeFileSync } from 'node:fs';
+        import { pathToFileURL } from 'node:url';
+        const packageRoot = process.env.QMD_TEST_PACKAGE;
+        const root = process.env.QMD_TEST_ROOT;
+        const { createStore } = await import(pathToFileURL(packageRoot + '/dist/index.js').href);
+        const { chunkDocumentByTokens, generateEmbeddings, getEmbeddingFingerprint, DEFAULT_EMBED_MODEL } = await import(pathToFileURL(packageRoot + '/dist/store.js').href);
+        const { setDefaultLlamaCpp } = await import(pathToFileURL(packageRoot + '/dist/llm.js').href);
+        const calls = [];
+        let delayBatch = false;
+        const model = {
+          embedModelName: DEFAULT_EMBED_MODEL,
+          tokenize: async text => Array.from(text),
+          detokenize: async tokens => tokens.join(''),
+          embed: async text => { calls.push(text); return { embedding: [1, 0, 0, 0] }; },
+          embedBatch: async texts => { if (delayBatch) await new Promise(resolve => setTimeout(resolve, 30)); return Promise.all(texts.map(text => model.embed(text))); },
+          dispose: async () => {},
+        };
+        setDefaultLlamaCpp(model);
+        const store = await createStore({ dbPath: root + '/index.sqlite', config: { collections: { contract: { path: root + '/source', pattern: '**/*.md' } } } });
+        store.internal.llm = model;
+        try {
+          if (typeof store.internal.db.prepare !== 'function') throw Error('pinned QMD InternalStore.db shape changed');
+          await store.update({ collections: ['contract'] });
+          const body = readFileSync(root + '/source/fixture.md', 'utf8');
+          const chunks = await chunkDocumentByTokens(body, undefined, undefined, undefined, 'fixture.md');
+          const hash = store.internal.db.prepare("SELECT hash FROM documents WHERE collection='contract' AND active=1").get().hash;
+          const fingerprint = getEmbeddingFingerprint(DEFAULT_EMBED_MODEL);
+          const originalTime = '2000-01-01T00:00:00.000Z';
+          store.internal.ensureVecTable(4);
+          store.internal.insertEmbedding(hash, 0, 0, new Float32Array([1, 0, 0, 0]), DEFAULT_EMBED_MODEL, originalTime, 4, fingerprint);
+          const first = await store.embed({ collection: 'contract' });
+          const retainedTime = store.internal.db.prepare('SELECT embedded_at FROM content_vectors WHERE hash=? AND seq=0').get(hash).embedded_at;
+          calls.length = 0;
+          const noop = await store.embed({ collection: 'contract' });
+          const noopCalls = calls.length;
+          let badInsertThrew = false;
+          try { store.internal.insertEmbedding(hash, 0, 0, new Float32Array([1, 0, 0]), DEFAULT_EMBED_MODEL, '2099-01-01T00:00:00.000Z', 4, fingerprint); }
+          catch { badInsertThrew = true; }
+          const afterBadInsertTime = store.internal.db.prepare('SELECT embedded_at FROM content_vectors WHERE hash=? AND seq=0').get(hash).embedded_at;
+          store.internal.db.prepare('DELETE FROM vectors_vec WHERE hash_seq=?').run(hash + '_2');
+          const orphanPending = store.internal.getHashesNeedingEmbedding(DEFAULT_EMBED_MODEL);
+          const repaired = await store.embed({ collection: 'contract' });
+          const paired = store.internal.db.prepare("SELECT count(*) AS n FROM content_vectors cv JOIN vectors_vec v ON v.hash_seq=cv.hash||'_'||cv.seq WHERE cv.hash=?").get(hash).n;
+          writeFileSync(root + '/source/fixture.md', '# Graceful\n' + 'y'.repeat(30000));
+          await store.update({ collections: ['contract'] });
+          const gracefulHash = store.internal.db.prepare("SELECT hash FROM documents WHERE collection='contract' AND active=1").get().hash;
+          const gracefulChunks = await chunkDocumentByTokens(readFileSync(root + '/source/fixture.md', 'utf8'), undefined, undefined, undefined, 'fixture.md');
+          delayBatch = true;
+          await generateEmbeddings(store.internal, { collection: 'contract', maxDurationMs: 10 });
+          const gracefulPersisted = store.internal.db.prepare('SELECT count(*) AS n FROM content_vectors WHERE hash=?').get(gracefulHash).n;
+          console.log(JSON.stringify({ fixtureChunks: chunks.length, generated: first.chunksEmbedded, retainedTime, noopGenerated: noop.chunksEmbedded, noopCalls, badInsertThrew, afterBadInsertTime, orphanPending, repairedGenerated: repaired.chunksEmbedded, paired, gracefulExpected: gracefulChunks.length, gracefulPersisted }));
+        } finally { await store.close(); setDefaultLlamaCpp(null); }
+      `,
+        ],
+        {
+          encoding: "utf8",
+          timeout: 30_000,
+          env: { ...process.env, QMD_TEST_ROOT: root, QMD_TEST_PACKAGE: qmdRoot },
+        },
+      )
+      expect(probe.status, probe.stderr).toBe(0)
+      const result = JSON.parse(probe.stdout.trim())
+      expect(result.fixtureChunks).toBe(4)
+      expect.soft(result.generated).toBe(3)
+      expect.soft(result.retainedTime).toBe("2000-01-01T00:00:00.000Z")
+      expect.soft(result.noopGenerated).toBe(0)
+      expect.soft(result.noopCalls).toBe(0)
+      expect.soft(result.badInsertThrew).toBe(true)
+      expect.soft(result.afterBadInsertTime).toBe("2000-01-01T00:00:00.000Z")
+      expect.soft(result.orphanPending).toBe(1)
+      expect.soft(result.paired).toBe(4)
+      expect(result.gracefulExpected).toBeGreaterThan(32)
+      expect.soft(result.gracefulPersisted).toBe(32)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
