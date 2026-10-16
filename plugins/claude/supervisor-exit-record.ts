@@ -34,7 +34,13 @@ export function resolveAdapterExitRecord(env: Readonly<NodeJS.ProcessEnv>): Adap
   return { path: join(stateDir, ADAPTER_EXIT_RECORD_FILE) }
 }
 
-export type AdapterExitDecision = "retry" | "stop" | "host-stop" | "clean-exit"
+/**
+ * A supervisor refused as a provider nested inside this seat (29567) records its own decision, so the row never reads
+ * as an exit of the seat's own adapter: nothing counts it as a host-stop or a clean exit.
+ */
+export const NESTED_HOST_REFUSED_DECISION = "nested-host-refused"
+
+export type AdapterExitDecision = "retry" | "stop" | "host-stop" | "clean-exit" | typeof NESTED_HOST_REFUSED_DECISION
 
 export interface AdapterExit {
   readonly adapterPid: number | undefined
