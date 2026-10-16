@@ -279,10 +279,10 @@ export function planVariants(plan: QueryPlan): string[] {
 // Internals
 // ============================================================================
 
-// The planner runs only models measured inside its budget (@cto 967ea2db, @ag/llm/29473): a slow first model shares
-// the one deadline with every later one, so a Google call through the agy one-shot starved the fallback.
+// The planner runs only the planner models BUDGETED_MODEL_IDS declares (@cto 967ea2db, ba46468c): a slow first model
+// shares the one deadline with every later one, so a Google call through the agy one-shot starved the fallback.
 function plannerModels(llm: LlmBackend): LlmModel[] {
-  return selectBudgetedModels(llm).models
+  return selectBudgetedModels(llm, "planner").models
 }
 
 /**

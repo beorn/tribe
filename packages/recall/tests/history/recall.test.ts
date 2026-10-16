@@ -7,7 +7,7 @@ import { parseTimeToMs, setRecallLogging, boostedRank, expandQueryVariants } fro
 import type { RecallResult } from "../../src/history/recall"
 import { synthesizeResults } from "../../src/history/synthesize"
 import { SynthesisFailure } from "../../src/history/recall-shared"
-import type { LlmBackend, LlmModel } from "../../src/lib/llm-backend"
+import { BUDGETED_MODEL_IDS, type LlmBackend, type LlmModel } from "../../src/lib/llm-backend"
 import { toFts5Query, closeDb, getDb } from "../../src/history/db"
 
 // Suppress verbose [recall] logging during tests
@@ -593,9 +593,14 @@ describe("synthesizeResults", () => {
     expect(result.text).toMatch(/^answer from (xai|openrouter)-cheap$/)
   })
 
-  // @failure Synthesis raced Google through the agy one-shot, which needs 2 to 4 s to start and 3.6 to 28 s to answer,
-  // and timed out at its 20 s budget on 2026-10-15 (@ag/llm/29473, @cto 967ea2db).
-  test("the default list races deepseek-chat only: a Google model the registry leads with never races", async () => {
+  // @failure Synthesis raced Google through the agy one-shot alone, which needs 2 to 4 s to start and 3.6 to 28 s to
+  // answer, and timed out at its 20 s budget on 2026-10-15 (@ag/llm/29473, @cto 967ea2db). Google now races only beside
+  // deepseek-chat, in one batch, where it cannot delay it (@cto ba46468c, @ag/llm/29520).
+  test("the synthesis race is one batch of exactly the two declared models; the planner keeps deepseek-chat alone", async () => {
+    expect(BUDGETED_MODEL_IDS).toEqual({
+      planner: ["deepseek/deepseek-chat"],
+      synthesis: ["deepseek/deepseek-chat", "gemini-2.5-flash"],
+    })
     const gemini: LlmModel = { provider: "google", modelId: "gemini-2.5-flash" }
     const deepseek: LlmModel = { provider: "openrouter", modelId: "deepseek/deepseek-chat" }
     const queried: string[] = []
@@ -627,8 +632,50 @@ describe("synthesizeResults", () => {
       llm,
     )
 
-    expect(queried).toEqual([deepseek.modelId])
-    expect(result.text).toBe("answer from deepseek/deepseek-chat")
+    expect(new Set(queried)).toEqual(new Set([deepseek.modelId, gemini.modelId]))
+    expect(result.batches).toHaveLength(1)
+    expect(new Set(result.batches[0]?.modelIds)).toEqual(new Set([deepseek.modelId, gemini.modelId]))
+  })
+
+  // @failure One OpenRouter 429 refuses every OpenRouter model for 10 minutes, and synthesis had no other route, so
+  // every recall in that window lost its answer (@ag/llm/29495).
+  test("an OpenRouter 429 still answers through Google, and the race names both attempts", async () => {
+    const gemini: LlmModel = { provider: "google", modelId: "gemini-2.5-flash" }
+    const deepseek: LlmModel = { provider: "openrouter", modelId: "deepseek/deepseek-chat" }
+    const llm: LlmBackend = {
+      queryModel: async ({ model }) =>
+        model.provider === "openrouter"
+          ? { response: { error: "openrouter HTTP 429: rate limit exceeded" } }
+          : { response: { content: "answer from " + model.modelId } },
+      getModel: (id) => [gemini, deepseek].find((model) => model.modelId === id),
+      getCheapModel: () => deepseek,
+      getCheapModels: () => [deepseek, gemini],
+      estimateCost: () => 0,
+      isProviderAvailable: () => true,
+    }
+
+    const result = await synthesizeResults(
+      "openrouter refused",
+      [
+        {
+          type: "message",
+          sessionId: "session-a",
+          sessionTitle: "Session A",
+          timestamp: Date.now(),
+          snippet: "openrouter refused evidence",
+          rank: 1,
+        },
+      ],
+      1_000,
+      llm,
+    )
+
+    expect(result.winner).toBe(gemini.modelId)
+    expect(result.text).toBe("answer from gemini-2.5-flash")
+    expect(result.attempts.map((attempt) => [attempt.modelId, attempt.status, attempt.error])).toEqual([
+      [deepseek.modelId, "error", "openrouter HTTP 429: rate limit exceeded"],
+      [gemini.modelId, "ok", undefined],
+    ])
   })
 
   test("reports provider errors when every synthesis model fails", async () => {
