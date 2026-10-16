@@ -10,6 +10,7 @@ import {
   type HealthMetrics,
 } from "./health-monitor-plugin.ts"
 import { createHealthProcessSource, SYSMON_COMMAND_TIMEOUT_MS } from "./health-process-source.ts"
+import { checkCanonicalReaper, createCanonicalReaperState } from "./health-monitor-canonical-reaper.ts"
 
 // The incident a reader actually receives when the census could not attribute.
 // @i/1-instruments/24962: today it reports a DESIGNED bound as an unexplained
@@ -207,6 +208,66 @@ describe("an unattributable incident carries its own explanation", () => {
     expect(message).toContain("latest exact process census with owner attribution")
     expect(message).toContain(SESSION_DIR)
     expect(message).toContain(EXCLUDED.join(","))
+  })
+
+  test("a reader-emitted process-attribution-unavailable reads as a FAILED census, names its scope, and kills nothing (29584)", async () => {
+    // 29584: modes 1 and 2 are both whole-census failures. The existing `process-fact-unavailable` case
+    // above already drives a reader-provided `unavailable` reason through read() and the reporter; this
+    // case additionally pins the specific reason `process-attribution-unavailable` as a failed reading
+    // (not an empty census) with queried/where/excluded, and proves it produces no kill decision.
+    const runCommand = vi.fn(async () => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: `${JSON.stringify({
+        diagnostic: {
+          excluded: EXCLUDED,
+          location: SESSION_DIR,
+          query: "latest exact process census with owner attribution",
+        },
+        kind: "unavailable",
+        reason: "process-attribution-unavailable",
+        schema: "process-observation/1",
+      })}\n`,
+    }))
+    const source = createHealthProcessSource({
+      env: {
+        HAB_SCALAR_JOURNAL_DIR: `${SESSION_DIR}/habmod`,
+        HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+        HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+      },
+      runCommand,
+    })
+    if (source.kind !== "managed") throw new Error("expected managed source")
+    const observation = await source.read()
+    expect(observation.kind).toBe("unavailable")
+    if (observation.kind !== "unavailable") throw new Error("unreachable")
+    expect(observation.reason).toBe("process-attribution-unavailable")
+
+    const message = formatCollectedHealthAlert(cpuCritical(), observation, new Map<number, number>(), [], 1).message
+    expect(message).toContain("process attribution unavailable (process-attribution-unavailable)")
+    expect(message).toContain("latest exact process census with owner attribution")
+    expect(message).toContain(SESSION_DIR)
+    expect(message).toContain(EXCLUDED.join(","))
+    // the census bound did NOT fire, so this must not claim it did
+    expect(message).not.toContain("2.5s")
+
+    // no kill decision: any unavailable census clears the watch
+    const state = createCanonicalReaperState()
+    const broadcasts: string[] = []
+    const client = {
+      broadcast: (_message: string, type: string) => broadcasts.push(type),
+      hasRecentMessage: () => false,
+      id: "test",
+      send: () => {},
+    } as never
+    checkCanonicalReaper(
+      observation,
+      { ...defaultThresholds(), reaperAgeMinutes: 0, reaperGraceSamples: 2 },
+      state,
+      client,
+      [],
+    )
+    expect(broadcasts).not.toContain("health:reaper:query")
   })
 })
 

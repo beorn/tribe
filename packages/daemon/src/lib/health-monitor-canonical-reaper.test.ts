@@ -364,6 +364,49 @@ describe("canonical managed reaper", () => {
     expect(sink.broadcasts.filter(({ type }) => type === "health:reaper:query")).toHaveLength(1)
   })
 
+  it("names an EMPTY-evidence unknown row (owner-probe-unavailable, leader-exited) and never kills it (29584)", () => {
+    // 29584: the per-row unknown tests above drive `owner-evidence-conflict`, which carries real
+    // evidence (`owners=@a,@b`). The two reasons the census emits with NO owner evidence —
+    // `owner-probe-unavailable` (the owner env could not be read) and `leader-exited` (a zombie leader
+    // that already left) — were never driven through the reaper, so nothing proved an empty-evidence
+    // unknown is still reported by name and kept off the kill path.
+    for (const reason of ["owner-probe-unavailable", "leader-exited"] as const) {
+      const state = createCanonicalReaperState()
+      const broadcasts: Array<{ message: string; type: string }> = []
+      const sends: string[] = []
+      const hasRecentMessage = vi.fn(() => false)
+      const client = {
+        broadcast: (message: string, type: string) => broadcasts.push({ message, type }),
+        hasRecentMessage,
+        id: "test",
+        send: (_recipient: string, _message: string, type: string) => sends.push(type),
+      } as unknown as TribeClientApi
+      const row: ProcessRoutingAttribution = {
+        evidence: { ownerCount: 0, ownerIds: [], vias: [] },
+        kind: "unknown",
+        reason,
+      }
+      for (let index = 0; index < 5; index++) {
+        checkCanonicalReaper(
+          observation(row, { observedAt: 1_000 + index * 30_000, sequence: 7 + index }),
+          thresholds,
+          state,
+          client,
+          sessions,
+        )
+      }
+      const types = broadcasts.map(({ type }) => type)
+      const diagnostic = broadcasts.find(({ type }) => type === "health:reaper:unknown")?.message
+      expect(diagnostic, reason).toContain(reason)
+      expect(diagnostic, reason).toContain("owners=none")
+      // never escalated to a kill: no query, no claim lookup, no direct send, no unclaimed broadcast
+      expect(types, reason).not.toContain("health:reaper:query")
+      expect(types, reason).not.toContain("health:reaper:unclaimed")
+      expect(hasRecentMessage, reason).not.toHaveBeenCalled()
+      expect(sends, reason).toEqual([])
+    }
+  })
+
   it("restarts age and samples after source unavailability", () => {
     const state = createCanonicalReaperState()
     const sink = api()
