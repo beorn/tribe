@@ -35,6 +35,8 @@ function spawnFakeDaemon(
         total: number
         oldest_age_ms: number
         truncated: boolean
+        /** The complete overdue id set the daemon sends BEFORE its preview cap. */
+        overdue_ids?: string[]
         withheld?: {
           total: number
           by_kind: { request: number; incident: number }
@@ -2144,6 +2146,74 @@ describe("stdio adapter delivery modes", () => {
     await drain("gap-7 newly overdue drain")
     await waitForCondition(() => countOf(grownText) >= 1, "gap-7 newly overdue summary")
     expect(countOf(summaryText)).toBe(1)
+  })
+
+  // wake removal 1 (29633, @dev/review2 REVISE): the ten-row `pending_balls`
+  // preview is a DISPLAY bound. With ten older overdue balls filling it, an
+  // eleventh ball that newly passes its due is withheld from the preview, so a
+  // decision that reads overdue identity from the preview alone stays silent.
+  // It must read the complete overdue set the daemon sends before the cap.
+  it("surfaces a newly due ball the ten-row preview withholds (29633 REVISE)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const oldOverdue = Array.from({ length: 10 }, (_, index) => `old-${index}`)
+    const fetchAttention = {
+      actionable_unread: [],
+      pending_balls_summary: {
+        total: 11,
+        oldest_age_ms: 600_000,
+        truncated: true,
+        overdue_ids: oldOverdue,
+      },
+      pending_balls: oldOverdue.map((request_id) => ({
+        request_id,
+        sender: "@chief",
+        age_ms: 600_000,
+        expires_at: new Date(Date.now() - 60_000).toISOString(),
+        summary: `Ball ${request_id}`,
+      })),
+    }
+    const env = {
+      ...process.env,
+      TRIBE_DELIVERY: "push",
+      TRIBE_NO_AUTOSTART: "1",
+      TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+      DEBUG_LOG: join(tmpDir, "adapter.log"),
+    }
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    const summaryLines = () =>
+      stdout
+        .filter((line) => line.method === "notifications/claude/channel")
+        .map((line) => JSON.stringify(line))
+        .filter((line) => line.includes("You own 11 balls"))
+    const drain = async (label: string) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients.at(-1)?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 200))
+    }
+
+    await drain("29633 first drain")
+    expect(summaryLines()).toHaveLength(1)
+    // The PREVIEW does not change; only the complete overdue set gains the
+    // withheld eleventh ball. RED before the fix: the preview-derived overdue
+    // set was identical, so no line fired and this read 1.
+    fetchAttention.pending_balls_summary.overdue_ids = [...oldOverdue, "new-11"]
+    await drain("29633 newly due beyond the preview")
+    await waitForCondition(() => summaryLines().length >= 2, "29633 out-of-preview newly due summary")
+    expect(summaryLines()).toHaveLength(2)
   })
 
   it("forwards each attention row once, keeping re-presented rows and ambient twins out (#27346)", async () => {

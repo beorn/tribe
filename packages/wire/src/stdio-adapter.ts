@@ -430,6 +430,10 @@ type TribeFetchResult = {
       total?: number
       oldest_age_ms?: number
       truncated?: boolean
+      /** Every owned ball overdue at projection time, before the 10-row preview
+       * cap (wake removal 1). The bounded `pending_balls` preview cannot carry a
+       * due transition for a ball outside it; the decision reads THIS set. */
+      overdue_ids?: string[]
       withheld?: {
         total?: number
         by_kind?: { request?: number; incident?: number }
@@ -1789,7 +1793,11 @@ function drainDaemonInbox(): void {
         // ball the seat owns newly passes its due (or once at adapter start);
         // a mere set change, and the old window re-send, are both gone.
         const pendingBallDecision = decidePendingBallSummary(
-          { balls: currentPendingBalls, summary: currentPendingBallSummary },
+          {
+            balls: currentPendingBalls,
+            summary: currentPendingBallSummary,
+            overdueIds: currentPendingBallSummary?.overdue_ids,
+          },
           { now: Date.now(), state: pendingBallSummaryState },
         )
         pendingBallSummaryState = pendingBallDecision.state

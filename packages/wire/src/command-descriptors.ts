@@ -117,12 +117,19 @@ const ATTENTION_SCHEMA = {
     },
     pending_balls_summary: {
       type: "object",
-      description: "Lossless size and oldest-age summary of the full pending-ball set.",
+      description:
+        "Lossless size, oldest-age and overdue-id summary of the full pending-ball set, taken before the 10-row preview cap.",
       required: ["total", "oldest_age_ms", "truncated"],
       properties: {
         total: { type: "number", description: "Open tracked requests this seat owns." },
         oldest_age_ms: { type: "number", description: "Age of the oldest, in milliseconds." },
         truncated: { type: "boolean", description: "True when pending_balls is a bounded preview." },
+        overdue_ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "request_ids of EVERY owned ball overdue at projection time, before the preview cap; a due transition outside the bounded preview is visible only here.",
+        },
         withheld: {
           type: "object",
           description: "When truncated: the omitted total and its request/incident split.",

@@ -1773,6 +1773,10 @@ type PendingBallSummary = {
   total: number
   oldest_age_ms: number
   truncated: boolean
+  /** Every owned ball overdue at projection time, before the 10-row preview cap
+   * (wake removal 1). The bounded `pending_balls` preview alone cannot tell the
+   * adapter that an out-of-preview ball newly passed its due. */
+  overdue_ids?: string[]
   withheld?: {
     total: number
     by_kind: {
@@ -4624,6 +4628,16 @@ export function readAttentionProjection(
   const withheld = prioritizedPendingBalls.slice(ATTENTION_PENDING_BALL_LIMIT)
   const withheldRequests = withheld.filter((ball) => ball.request_kind !== "incident").length
   const withheldIncidents = withheld.length - withheldRequests
+  // wake removal 1 (@cto 8daafaf6 item 1, @dev/review2 REVISE) — the bounded
+  // preview cannot carry a due transition for a ball outside it: with 10 older
+  // overdue balls filling the 10-row preview, an 11th ball that newly passes
+  // its due is withheld and its transition is silent. The adapter's new-due
+  // decision needs the COMPLETE overdue population, so it is derived HERE from
+  // the full owned set, before the cap. The preview stays a display bound.
+  const overdueOwnedBallIds = pendingBalls
+    .filter((ball) => ball.status === "expired")
+    .map((ball) => ball.request_id)
+    .sort()
   // 21757 — retention's prune notice rides every projection of this owner's
   // attention until a canonical read clears it (handleFetch, at the
   // touchMailboxAttentionRead site). A dormant seat that returns is told
@@ -4661,6 +4675,7 @@ export function readAttentionProjection(
         total: pendingBalls.length,
         oldest_age_ms: pendingBalls.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0),
         truncated: withheld.length > 0,
+        overdue_ids: overdueOwnedBallIds,
         ...(withheld.length === 0
           ? {}
           : {

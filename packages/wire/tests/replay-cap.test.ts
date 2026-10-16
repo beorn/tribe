@@ -282,6 +282,77 @@ describe("decidePendingBallSummary (27346 open-ball summary, wake removal 1)", (
     )
     expect(next.send).toBe(false)
   })
+
+  // @dev/review2 REVISE (29633): the 10-row preview is a DISPLAY bound. Reading
+  // overdue identity from it alone is wrong in two directions once more than
+  // ten balls are overdue. The daemon now ships the complete overdue set
+  // (pending_balls_summary.overdue_ids, before the cap); these pin both.
+  const authoredOverdueIds = (ids: readonly string[]) => [...ids].sort().join(",")
+
+  it("sends when an out-of-preview 11th ball newly passes its due", () => {
+    const tenOld = Array.from({ length: 10 }, (_, i) => `old-${i}`)
+    const oldOverdue = tenOld.map((id) => ball(id, overdue))
+    // Positive control (9 old overdue + the 11th newly due, all inside the
+    // preview): unchanged from the pre-fix behavior and still sends.
+    const nineOld = tenOld.slice(0, 9)
+    const control = decidePendingBallSummary(
+      {
+        balls: [...nineOld.map((id) => ball(id, overdue)), ball("new-11", overdue)],
+        summary: { total: 10 },
+        overdueIds: [...nineOld, "new-11"],
+      },
+      { now: NOW, state: { overdueIds: authoredOverdueIds(nineOld) } },
+    )
+    expect(control.send).toBe(true)
+    // The boundary: ten older overdue balls fill the preview, so the newly due
+    // eleventh is WITHHELD from `balls`. The complete set still names it.
+    const flips = decidePendingBallSummary(
+      {
+        balls: oldOverdue,
+        summary: { total: 11 },
+        overdueIds: [...tenOld, "new-11"],
+      },
+      { now: NOW, state: { overdueIds: authoredOverdueIds(tenOld) } },
+    )
+    expect(flips.send).toBe(true)
+    expect(flips.state).toEqual({ overdueIds: authoredOverdueIds([...tenOld, "new-11"]) })
+  })
+
+  it("does not read an exposed already-overdue hidden ball as a new due", () => {
+    // Settling a preview row exposes an already-overdue hidden row. Against the
+    // preview that reads as newly overdue (a spurious ping); the complete set
+    // is unchanged, so nothing sends.
+    const complete = ["a", "b", "c"]
+    const before = decidePendingBallSummary(
+      {
+        balls: [ball("a", overdue), ball("b", overdue)],
+        summary: { total: 3 },
+        overdueIds: complete,
+      },
+      { now: NOW, state: { overdueIds: authoredOverdueIds(complete) } },
+    )
+    expect(before.send).toBe(false)
+    const afterSettle = decidePendingBallSummary(
+      {
+        balls: [ball("b", overdue), ball("c", overdue)],
+        summary: { total: 3 },
+        overdueIds: complete,
+      },
+      { now: NOW + 1, state: before.state },
+    )
+    expect(afterSettle.send).toBe(false)
+    expect(afterSettle.state).toEqual(before.state)
+  })
+
+  it("falls back to the preview when the daemon sends no complete overdue set", () => {
+    // An older daemon returns no overdue_ids; behavior stays the pre-fix rule.
+    const start = decidePendingBallSummary(
+      { balls: [ball("r1", overdue), ball("r2", overdue)], summary: { total: 2 } },
+      { now: NOW, state: null },
+    )
+    expect(start.send).toBe(true)
+    expect(start.state).toEqual({ overdueIds: "r1,r2" })
+  })
 })
 
 // 27346 — the daemon's `replay` flag is cursor-based, and registration

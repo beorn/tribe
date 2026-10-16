@@ -49,6 +49,8 @@ type FetchJson = ToolJson & {
       total: number
       oldest_age_ms: number
       truncated: boolean
+      /** Every owned ball overdue at projection time, before the preview cap. */
+      overdue_ids?: string[]
       withheld?: { total: number; by_kind: { request: number; incident: number } }
     }
   }
@@ -714,6 +716,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       total,
       oldest_age_ms: expect.any(Number),
       truncated: true,
+      overdue_ids: [],
       withheld: {
         total: 310,
         by_kind: { request: 310, incident: 0 },
@@ -728,6 +731,36 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     }
     expect(explicit.count).toBe(total)
     expect(explicit.pending).toHaveLength(total)
+  })
+
+  it("sends the COMPLETE overdue id set so a withheld 11th newly overdue ball is not silent (29633 REVISE)", () => {
+    // wake removal 1; @dev/review2 REVISE. The ten-row preview is a display
+    // bound, so an eleventh owned ball that is overdue can be withheld. The
+    // adapter's new-due decision must read the complete overdue identity, which
+    // the projection derives before its cap.
+    const live = connectAs("sess-overdue-complete", NAME)
+    const now = Date.now()
+    for (let i = 0; i < 11; i++) {
+      stmts.openPendingRequest.run({
+        $request_id: `od-${i}`,
+        $recipient: NAME,
+        $sender: "@chief",
+        $opened_at: now - (11 - i) * 1_000,
+        $expires_at: now - 60_000,
+        $message_id: `od-message-${i}`,
+        $fanout: "first",
+      })
+    }
+
+    const fetched = fetchJson(live, opts).json
+    // The preview stays bounded to ten (the youngest overdue ball, od-10, is
+    // withheld), while the summary names every overdue ball.
+    expect(fetched.attention?.pending_balls).toHaveLength(10)
+    expect(fetched.attention?.pending_balls?.map((ball) => ball.request_id)).not.toContain("od-10")
+    expect(fetched.attention?.pending_balls_summary).toMatchObject({ total: 11, truncated: true })
+    expect(fetched.attention?.pending_balls_summary?.overdue_ids).toEqual(
+      Array.from({ length: 11 }, (_, i) => `od-${i}`).sort(),
+    )
   })
 
   it("26899: eleven open requests still wake and count a withheld andon in the events window", () => {
@@ -776,6 +809,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       total: 12,
       oldest_age_ms: expect.any(Number),
       truncated: true,
+      overdue_ids: [],
       withheld: {
         total: 2,
         by_kind: { request: 1, incident: 1 },
@@ -837,6 +871,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       total: 11,
       oldest_age_ms: expect.any(Number),
       truncated: true,
+      overdue_ids: [],
       withheld: {
         total: 1,
         by_kind: { request: 0, incident: 1 },

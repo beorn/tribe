@@ -334,6 +334,15 @@ export type PendingBallPreview = {
 
 export type PendingBallSummaryInput = {
   balls: readonly PendingBallPreview[]
+  /**
+   * The COMPLETE overdue id population, from the daemon projection BEFORE its
+   * 10-row preview cap (wake removal 1). Absent from an older daemon: the
+   * decision then falls back to the preview, its pre-fix behavior. When present
+   * it is authoritative — the preview alone cannot see a due transition for a
+   * ball outside it, so an 11th newly-due ball would be silent, and settling a
+   * preview row could expose an already-overdue hidden row as falsely new.
+   */
+  overdueIds?: readonly string[]
   summary?:
     | {
         total?: number
@@ -378,6 +387,15 @@ function overdueIdList(balls: readonly PendingBallPreview[], now: number): strin
     .join(",")
 }
 
+/** The daemon's complete overdue id list, normalised the same way: de-duped,
+ * id-less entries dropped, sorted. Kept beside overdueIdList so both identity
+ * rules stay one line apart and cannot drift. */
+function overdueIdListFromComplete(ids: readonly string[]): string {
+  return Array.from(new Set(ids.filter((id) => Boolean(id))))
+    .sort()
+    .join(",")
+}
+
 /**
  * 27346, wake removal 1 - the open-ball summary line re-surfaces ONLY when a
  * ball the seat owns NEWLY passes its due, plus once when the adapter starts.
@@ -402,7 +420,8 @@ export function decidePendingBallSummary(
     // not passed its due.
     return { send: false, state: opts.state === null ? null : { overdueIds: "" } }
   }
-  const overdueIds = overdueIdList(input.balls, opts.now)
+  const overdueIds =
+    input.overdueIds === undefined ? overdueIdList(input.balls, opts.now) : overdueIdListFromComplete(input.overdueIds)
   const previous = opts.state
   if (previous === null) {
     // Adapter start with a restored (or absent) ledger: the one non-overdue send.
