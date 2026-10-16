@@ -1565,6 +1565,11 @@ let drainInFlight = false
 let drainAgain = false
 // 27346 — in-memory only; the adapter process lifetime is the throttle scope.
 let pendingBallSummaryState: PendingBallSummaryState | null = null
+// wake removal 1 (@dev/review2 REVISE) — a daemon that does not report the
+// complete overdue set leaves the new-due reminder reading only the bounded
+// preview, where an out-of-preview ball that newly passes its due can be missed.
+// That coverage gap is NAMED once, never silently substituted.
+let pendingBallSummaryCoverageWarned = false
 // 27346 — rows THIS pane has already been handed, so a re-presented attention
 // row stops re-forwarding on every wakeup. Adapter-local by necessity: the
 // daemon's `replay` flag is cursor-based and a registration tail-reset makes a
@@ -1801,6 +1806,12 @@ function drainDaemonInbox(): void {
           { now: Date.now(), state: pendingBallSummaryState },
         )
         pendingBallSummaryState = pendingBallDecision.state
+        if (pendingBallDecision.coverage === "preview-only" && !pendingBallSummaryCoverageWarned) {
+          pendingBallSummaryCoverageWarned = true
+          log.warn?.(
+            "tribe drain: this daemon does not report the complete overdue ball set (pending_balls_summary.overdue_ids); the open-ball reminder reads only the bounded 10-row preview, so a ball outside it that newly passes its due may not be announced. Upgrade the daemon to restore complete coverage.",
+          )
+        }
         if (pendingBallDecision.send) forwardPendingBallSummary(currentPendingBalls, currentPendingBallSummary)
         const events = (result?.events ?? []).filter(
           (event) => isForwardableRow(event) && (!event.id || !attentionIds.has(event.id)),

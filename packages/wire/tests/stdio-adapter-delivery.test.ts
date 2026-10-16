@@ -2216,6 +2216,61 @@ describe("stdio adapter delivery modes", () => {
     expect(summaryLines()).toHaveLength(2)
   })
 
+  // wake removal 1 (29633, @dev/review2 REVISE): a daemon that does not report
+  // the complete overdue set leaves the reminder on the bounded preview, where
+  // an out-of-preview newly due ball can be missed. That gap must be NAMED, not
+  // silently presented as complete coverage.
+  it("names the coverage gap once when the daemon omits the complete overdue set (29633 REVISE)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const warnNeedle = "does not report the complete overdue ball set"
+    const fetchAttention = {
+      actionable_unread: [],
+      pending_balls_summary: { total: 1, oldest_age_ms: 60_000, truncated: false },
+      pending_balls: [
+        {
+          request_id: "no-cap-r1",
+          sender: "@chief",
+          age_ms: 60_000,
+          expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+          summary: "One ball",
+        },
+      ],
+    }
+    const env = {
+      ...process.env,
+      TRIBE_DELIVERY: "push",
+      TRIBE_NO_AUTOSTART: "1",
+      TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+      DEBUG_LOG: join(tmpDir, "adapter.log"),
+    }
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    collectStdoutJson(child)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+    const drain = async (label: string) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients.at(-1)?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 200))
+    }
+    const gapLines = () => readFileSync(join(tmpDir, "adapter.log"), "utf8").split(warnNeedle).length - 1
+
+    await drain("29633 coverage-gap first drain")
+    await waitForCondition(() => existsSync(join(tmpDir, "adapter.log")) && gapLines() >= 1, "29633 coverage-gap warn")
+    // Named once, not on every drain.
+    await drain("29633 coverage-gap second drain")
+    expect(gapLines()).toBe(1)
+  })
+
   it("forwards each attention row once, keeping re-presented rows and ambient twins out (#27346)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const recentTs = new Date().toISOString()

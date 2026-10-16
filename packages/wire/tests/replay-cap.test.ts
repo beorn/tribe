@@ -304,6 +304,7 @@ describe("decidePendingBallSummary (27346 open-ball summary, wake removal 1)", (
       { now: NOW, state: { overdueIds: authoredOverdueIds(nineOld) } },
     )
     expect(control.send).toBe(true)
+    expect(control.coverage).toBe("complete")
     // The boundary: ten older overdue balls fill the preview, so the newly due
     // eleventh is WITHHELD from `balls`. The complete set still names it.
     const flips = decidePendingBallSummary(
@@ -315,6 +316,7 @@ describe("decidePendingBallSummary (27346 open-ball summary, wake removal 1)", (
       { now: NOW, state: { overdueIds: authoredOverdueIds(tenOld) } },
     )
     expect(flips.send).toBe(true)
+    expect(flips.coverage).toBe("complete")
     expect(flips.state).toEqual({ overdueIds: authoredOverdueIds([...tenOld, "new-11"]) })
   })
 
@@ -351,6 +353,10 @@ describe("decidePendingBallSummary (27346 open-ball summary, wake removal 1)", (
       { now: NOW, state: null },
     )
     expect(start.send).toBe(true)
+    // ...and the fallback is NAMED, never silently presented as complete: the
+    // adapter warns once on this coverage so a missed out-of-preview due is a
+    // stated gap, not a clean result (@dev/review2 REVISE).
+    expect(start.coverage).toBe("preview-only")
     expect(start.state).toEqual({ overdueIds: "r1,r2" })
   })
 })

@@ -359,11 +359,23 @@ export type PendingBallSummaryState = {
   overdueIds: string
 }
 
+/**
+ * Coverage of the overdue identity the decision actually read. `complete` is the
+ * daemon's full overdue set, taken before its preview cap; `preview-only` is the
+ * bounded 10-row preview used when the daemon does not report the complete set,
+ * under which an out-of-preview ball that newly passes its due can be missed.
+ * The caller MUST treat `preview-only` as a named gap, never as a clean result
+ * (@dev/review2 REVISE, wake removal 1).
+ */
+export type PendingBallOverdueCoverage = "complete" | "preview-only"
+
 export type PendingBallSummaryDecision = {
   /** Whether the caller should forward the summary line this drain. */
   send: boolean
   /** State to retain; the overdue set carries across drains. */
   state: PendingBallSummaryState | null
+  /** Which overdue population this decision used. */
+  coverage: PendingBallOverdueCoverage
 }
 
 /** A ball is overdue when the daemon says so or its deadline has passed. */
@@ -413,23 +425,24 @@ export function decidePendingBallSummary(
   input: PendingBallSummaryInput,
   opts: { now: number; state: PendingBallSummaryState | null },
 ): PendingBallSummaryDecision {
+  const coverage: PendingBallOverdueCoverage = input.overdueIds === undefined ? "preview-only" : "complete"
   const total = input.summary?.total ?? input.balls.length
   if (total <= 0) {
     // Nothing to summarize. Keep the remembered set (empty), never reset to
     // null: a reset would make the NEXT ball a "first send" even though it has
     // not passed its due.
-    return { send: false, state: opts.state === null ? null : { overdueIds: "" } }
+    return { send: false, state: opts.state === null ? null : { overdueIds: "" }, coverage }
   }
   const overdueIds =
     input.overdueIds === undefined ? overdueIdList(input.balls, opts.now) : overdueIdListFromComplete(input.overdueIds)
   const previous = opts.state
   if (previous === null) {
     // Adapter start with a restored (or absent) ledger: the one non-overdue send.
-    return { send: true, state: { overdueIds } }
+    return { send: true, state: { overdueIds }, coverage }
   }
   const before = new Set(previous.overdueIds ? previous.overdueIds.split(",") : [])
   const newlyOverdue = overdueIds.split(",").some((id) => id && !before.has(id))
-  return { send: newlyOverdue, state: { overdueIds } }
+  return { send: newlyOverdue, state: { overdueIds }, coverage }
 }
 
 export type ConnectReplayGate = {
