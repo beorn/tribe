@@ -164,6 +164,16 @@ describe("qmd embedding persistence contract", () => {
           const orphanPending = store.internal.getHashesNeedingEmbedding(DEFAULT_EMBED_MODEL);
           const repaired = await store.embed({ collection: 'contract' });
           const paired = store.internal.db.prepare("SELECT count(*) AS n FROM content_vectors cv JOIN vectors_vec v ON v.hash_seq=cv.hash||'_'||cv.seq WHERE cv.hash=?").get(hash).n;
+          const mismatchGenerated = [];
+          for (const mutation of ['seq=-1', 'pos=9999', 'total_chunks=99']) {
+            store.internal.db.prepare('DELETE FROM vectors_vec WHERE hash_seq=?').run(hash + '_3');
+            store.internal.db.prepare('DELETE FROM content_vectors WHERE hash=? AND seq=3').run(hash);
+            store.internal.db.prepare('UPDATE content_vectors SET ' + mutation + ' WHERE hash=? AND seq=0').run(hash);
+            mismatchGenerated.push((await store.embed({ collection: 'contract' })).chunksEmbedded);
+          }
+          store.internal.db.prepare("UPDATE content_vectors SET embed_fingerprint='stale' WHERE hash=?").run(hash);
+          const fingerprintGenerated = (await store.embed({ collection: 'contract' })).chunksEmbedded;
+          const modelGenerated = (await store.embed({ collection: 'contract', model: 'contract-other-model' })).chunksEmbedded;
           writeFileSync(root + '/source/fixture.md', '# Graceful\n' + 'y'.repeat(30000));
           await store.update({ collections: ['contract'] });
           const gracefulHash = store.internal.db.prepare("SELECT hash FROM documents WHERE collection='contract' AND active=1").get().hash;
@@ -171,7 +181,7 @@ describe("qmd embedding persistence contract", () => {
           delayBatch = true;
           await generateEmbeddings(store.internal, { collection: 'contract', maxDurationMs: 10 });
           const gracefulPersisted = store.internal.db.prepare('SELECT count(*) AS n FROM content_vectors WHERE hash=?').get(gracefulHash).n;
-          console.log(JSON.stringify({ fixtureChunks: chunks.length, generated: first.chunksEmbedded, retainedTime, noopGenerated: noop.chunksEmbedded, noopCalls, badInsertThrew, afterBadInsertTime, orphanPending, repairedGenerated: repaired.chunksEmbedded, paired, gracefulExpected: gracefulChunks.length, gracefulPersisted }));
+          console.log(JSON.stringify({ fixtureChunks: chunks.length, generated: first.chunksEmbedded, retainedTime, noopGenerated: noop.chunksEmbedded, noopCalls, badInsertThrew, afterBadInsertTime, orphanPending, repairedGenerated: repaired.chunksEmbedded, paired, mismatchGenerated, fingerprintGenerated, modelGenerated, gracefulExpected: gracefulChunks.length, gracefulPersisted }));
         } finally { await store.close(); setDefaultLlamaCpp(null); }
       `,
         ],
@@ -182,7 +192,23 @@ describe("qmd embedding persistence contract", () => {
         },
       )
       expect(probe.status, probe.stderr).toBe(0)
-      const result = JSON.parse(probe.stdout.trim())
+      const result = JSON.parse(probe.stdout.trim()) as {
+        fixtureChunks: number
+        generated: number
+        retainedTime: string
+        noopGenerated: number
+        noopCalls: number
+        badInsertThrew: boolean
+        afterBadInsertTime: string
+        orphanPending: number
+        repairedGenerated: number
+        paired: number
+        mismatchGenerated: number[]
+        fingerprintGenerated: number
+        modelGenerated: number
+        gracefulExpected: number
+        gracefulPersisted: number
+      }
       expect(result.fixtureChunks).toBe(4)
       expect.soft(result.generated).toBe(3)
       expect.soft(result.retainedTime).toBe("2000-01-01T00:00:00.000Z")
@@ -191,7 +217,11 @@ describe("qmd embedding persistence contract", () => {
       expect.soft(result.badInsertThrew).toBe(true)
       expect.soft(result.afterBadInsertTime).toBe("2000-01-01T00:00:00.000Z")
       expect.soft(result.orphanPending).toBe(1)
+      expect.soft(result.repairedGenerated).toBe(1)
       expect.soft(result.paired).toBe(4)
+      expect.soft(result.mismatchGenerated).toEqual([4, 4, 4])
+      expect.soft(result.fingerprintGenerated).toBe(4)
+      expect.soft(result.modelGenerated).toBe(4)
       expect(result.gracefulExpected).toBeGreaterThan(32)
       expect.soft(result.gracefulPersisted).toBe(32)
     } finally {
