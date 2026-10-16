@@ -76,9 +76,14 @@ describe("connectTribeLaunch certifies the launch identity the daemon keyed (250
     const events: string[] = []
     let watchClosed = false
     let watchRegister: Record<string, unknown> | undefined
+    let exhaust:
+      | NonNullable<Parameters<NonNullable<TribeLaunchDeps["reconnect"]>>[0]["onReconnectExhausted"]>
+      | undefined
+    const exhausted = vi.fn()
     const deps: TribeLaunchDeps = {
       ...daemon.deps,
       reconnect: async (options) => {
+        exhaust = options.onReconnectExhausted
         const watchClient = {
           onNotification() {
             events.push("handler")
@@ -109,7 +114,7 @@ describe("connectTribeLaunch certifies the launch identity the daemon keyed (250
       },
     }
     const owner = await connectTribeLaunch({ ...REQUEST, idToken: "seat-token" }, deps)
-    await owner.attachWatch(() => {})
+    await owner.attachWatch(() => {}, exhausted)
     expect(owner.sessionId).toBe("session-7")
     expect(events).toEqual(["handler", "register", "unref"])
     expect(watchRegister).toMatchObject({
@@ -123,6 +128,19 @@ describe("connectTribeLaunch certifies the launch identity the daemon keyed (250
       idToken: "seat-token",
     })
     await owner.ensureRegistered()
+    expect(owner.isConnected()).toBe(true)
+    // 29568 AC2: the host needs the actual exhaustion cause/attempts while
+    // the certified owner remains live; reconnect wiring alone missed this.
+    const cause = new Error("watch socket unavailable")
+    const reported = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      exhaust?.(cause, 4)
+      expect(exhausted).toHaveBeenCalledExactlyOnceWith(cause, 4)
+      expect(reported.mock.calls.flat().join(" ")).toContain("could not reattach after 4 attempts")
+      expect(reported.mock.invocationCallOrder[0]).toBeLessThan(exhausted.mock.invocationCallOrder[0]!)
+    } finally {
+      reported.mockRestore()
+    }
     expect(owner.isConnected()).toBe(true)
     owner.close()
     expect(watchClosed).toBe(true)

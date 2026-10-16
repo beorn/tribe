@@ -63,6 +63,7 @@ export interface TribeLaunchConnection {
       params: Record<string, unknown> | undefined,
       reportOutcome: (outcome: SuccessorYieldOutcome) => Promise<void>,
     ) => void,
+    onReconnectExhausted?: ReconnectingClientOpts["onReconnectExhausted"],
   ): Promise<void>
   /** Disconnect the owner. Service authority expires; agents retain recovery semantics. */
   close(): void
@@ -169,7 +170,7 @@ export async function connectTribeLaunch(
         clearTimeout(hold)
       }
     },
-    async attachWatch(onNotification) {
+    async attachWatch(onNotification, onReconnectExhausted) {
       if (closed) throw new Error(`Tribe launch ${first.launchId} (${request.name}) was closed by its owner`)
       if (watch !== null) throw new Error(`Tribe watch already attached to ${request.name} launch ${first.launchId}`)
       if (request.idToken === undefined || first.sessionId === undefined) {
@@ -182,8 +183,10 @@ export async function connectTribeLaunch(
         socketPath: deps.socketPath(),
         noSpawn: true,
         onDisconnect: () => log.warn?.(`${request.name}'s launch watch disconnected; waiting to reattach`),
-        onReconnectExhausted: (error, attempts) =>
-          log.error?.(`${request.name}'s launch watch could not reattach after ${attempts} attempts: ${String(error)}`),
+        onReconnectExhausted: (error, attempts) => {
+          log.error?.(`${request.name}'s launch watch could not reattach after ${attempts} attempts: ${String(error)}`)
+          onReconnectExhausted?.(error, attempts)
+        },
         onConnect: async (client) => {
           // Install the handler before register's response exposes this watch to a competing successor.
           client.onNotification((method, params) => {
