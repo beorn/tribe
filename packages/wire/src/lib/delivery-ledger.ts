@@ -187,15 +187,21 @@ function zeroCounters(): DeliveryCounters {
 /**
  * #27459 gap-7 - a lenient read of the persisted open-ball state. Anything
  * unrecognisable is null (send the summary once); this is a reminder hint, so a
- * lost value costs one extra line, never a delivered row. A ledger written by
- * the pre-wake-removal shape has no `overdueIds`, so it reads null and the
- * upgraded adapter sends at most one extra line.
+ * lost value costs one extra line, never a delivered row.
+ *
+ * wake removal 1: the persisted value is now the overdue WATERMARK (a number, or
+ * null when no ball was overdue). A ledger written by the previous shape carried
+ * `overdueIds: string`, which reads null here, so an upgraded adapter sends at
+ * most one extra line at upgrade — the existing fail-open-toward-showing rule.
  */
 function parsePendingBallSummary(value: unknown): PendingBallSummaryState | null {
   if (typeof value !== "object" || value === null) return null
   const candidate = value as Record<string, unknown>
-  if (typeof candidate.overdueIds !== "string") return null
-  return { overdueIds: candidate.overdueIds }
+  const watermark = candidate.newestOverdueDueAt
+  // A missing, string, or otherwise non-null non-number value is the old shape
+  // (or corruption): unrecognised, so send once. Only `number | null` is ours.
+  if (watermark !== null && typeof watermark !== "number") return null
+  return { newestOverdueDueAt: typeof watermark === "number" ? watermark : null }
 }
 
 const COUNTER_KEYS: readonly (keyof DeliveryCounters)[] = [

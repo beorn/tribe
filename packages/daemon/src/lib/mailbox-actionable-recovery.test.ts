@@ -49,8 +49,8 @@ type FetchJson = ToolJson & {
       total: number
       oldest_age_ms: number
       truncated: boolean
-      /** Every owned ball overdue at projection time, before the preview cap. */
-      overdue_ids?: string[]
+      /** Latest overdue due time (epoch ms) over the full set, before the cap. */
+      newest_overdue_due_at?: number | null
       withheld?: { total: number; by_kind: { request: number; incident: number } }
     }
   }
@@ -716,7 +716,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       total,
       oldest_age_ms: expect.any(Number),
       truncated: true,
-      overdue_ids: [],
+      newest_overdue_due_at: null,
       withheld: {
         total: 310,
         by_kind: { request: 310, incident: 0 },
@@ -733,34 +733,45 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(explicit.pending).toHaveLength(total)
   })
 
-  it("sends the COMPLETE overdue id set so a withheld 11th newly overdue ball is not silent (29633 REVISE)", () => {
-    // wake removal 1; @dev/review2 REVISE. The ten-row preview is a display
-    // bound, so an eleventh owned ball that is overdue can be withheld. The
-    // adapter's new-due decision must read the complete overdue identity, which
-    // the projection derives before its cap.
+  it("sends the overdue WATERMARK so a withheld 11th newly-overdue ball is not silent (29633 REVISE)", () => {
+    // wake removal 1; @cto 4d3f3a83, @dev/review2 REVISE. The ten-row preview is
+    // a display bound, so an eleventh owned ball that is overdue can be withheld.
+    // The adapter's new-due decision reads ONE watermark the projection derives
+    // over the full set before the cap: the latest overdue due time.
     const live = connectAs("sess-overdue-complete", NAME)
     const now = Date.now()
-    for (let i = 0; i < 11; i++) {
+    const oldDue = now - 120_000
+    const newDue = now - 60_000
+    for (let i = 0; i < 10; i++) {
       stmts.openPendingRequest.run({
         $request_id: `od-${i}`,
         $recipient: NAME,
         $sender: "@chief",
         $opened_at: now - (11 - i) * 1_000,
-        $expires_at: now - 60_000,
+        $expires_at: oldDue,
         $message_id: `od-message-${i}`,
         $fanout: "first",
       })
     }
+    // The eleventh ball is the NEWEST — withheld from the oldest-first preview —
+    // and carries a LATER due; only the watermark can see it.
+    stmts.openPendingRequest.run({
+      $request_id: "od-10",
+      $recipient: NAME,
+      $sender: "@chief",
+      $opened_at: now,
+      $expires_at: newDue,
+      $message_id: "od-message-10",
+      $fanout: "first",
+    })
 
     const fetched = fetchJson(live, opts).json
-    // The preview stays bounded to ten (the youngest overdue ball, od-10, is
-    // withheld), while the summary names every overdue ball.
+    // The preview stays bounded to ten (the newest overdue ball, od-10, is
+    // withheld), while the watermark carries its due time.
     expect(fetched.attention?.pending_balls).toHaveLength(10)
     expect(fetched.attention?.pending_balls?.map((ball) => ball.request_id)).not.toContain("od-10")
     expect(fetched.attention?.pending_balls_summary).toMatchObject({ total: 11, truncated: true })
-    expect(fetched.attention?.pending_balls_summary?.overdue_ids).toEqual(
-      Array.from({ length: 11 }, (_, i) => `od-${i}`).sort(),
-    )
+    expect(fetched.attention?.pending_balls_summary?.newest_overdue_due_at).toBe(newDue)
   })
 
   it("26899: eleven open requests still wake and count a withheld andon in the events window", () => {
@@ -809,7 +820,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       total: 12,
       oldest_age_ms: expect.any(Number),
       truncated: true,
-      overdue_ids: [],
+      newest_overdue_due_at: null,
       withheld: {
         total: 2,
         by_kind: { request: 1, incident: 1 },
@@ -871,7 +882,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       total: 11,
       oldest_age_ms: expect.any(Number),
       truncated: true,
-      overdue_ids: [],
+      newest_overdue_due_at: null,
       withheld: {
         total: 1,
         by_kind: { request: 0, incident: 1 },

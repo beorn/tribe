@@ -430,10 +430,11 @@ type TribeFetchResult = {
       total?: number
       oldest_age_ms?: number
       truncated?: boolean
-      /** Every owned ball overdue at projection time, before the 10-row preview
-       * cap (wake removal 1). The bounded `pending_balls` preview cannot carry a
-       * due transition for a ball outside it; the decision reads THIS set. */
-      overdue_ids?: string[]
+      /** Latest overdue due time (epoch ms) over the FULL owned set before the
+       * 10-row preview cap, or null when none (wake removal 1). The bounded
+       * `pending_balls` preview cannot carry a due transition for a ball outside
+       * it; the decision reads THIS watermark. Absent on an older daemon. */
+      newest_overdue_due_at?: number | null
       withheld?: {
         total?: number
         by_kind?: { request?: number; incident?: number }
@@ -1565,11 +1566,12 @@ let drainInFlight = false
 let drainAgain = false
 // 27346 — in-memory only; the adapter process lifetime is the throttle scope.
 let pendingBallSummaryState: PendingBallSummaryState | null = null
-// wake removal 1 (@dev/review2 REVISE) — a daemon that does not report the
-// complete overdue set leaves the new-due reminder reading only the bounded
-// preview, where an out-of-preview ball that newly passes its due can be missed.
-// That coverage gap is NAMED once, never silently substituted.
-let pendingBallSummaryCoverageWarned = false
+// wake removal 1 (wake removal 1 @cto 4d3f3a83, @dev/review2 REVISE) — a daemon
+// that does not report `newest_overdue_due_at` leaves the new-due reminder
+// reading only the bounded preview, where an out-of-preview ball that newly
+// passes its due can be missed. That coverage gap is NAMED once (loud), never
+// silently substituted.
+let pendingBallSummaryPreviewWarned = false
 // 27346 — rows THIS pane has already been handed, so a re-presented attention
 // row stops re-forwarding on every wakeup. Adapter-local by necessity: the
 // daemon's `replay` flag is cursor-based and a registration tail-reset makes a
@@ -1801,15 +1803,16 @@ function drainDaemonInbox(): void {
           {
             balls: currentPendingBalls,
             summary: currentPendingBallSummary,
-            overdueIds: currentPendingBallSummary?.overdue_ids,
+            newestOverdueDueAt: currentPendingBallSummary?.newest_overdue_due_at,
           },
           { now: Date.now(), state: pendingBallSummaryState },
         )
         pendingBallSummaryState = pendingBallDecision.state
-        if (pendingBallDecision.coverage === "preview-only" && !pendingBallSummaryCoverageWarned) {
-          pendingBallSummaryCoverageWarned = true
+        if (pendingBallDecision.readFromPreview && !pendingBallSummaryPreviewWarned) {
+          pendingBallSummaryPreviewWarned = true
+          // Loud, once per adapter process, never per fetch (wake removal 1).
           log.warn?.(
-            "tribe drain: this daemon does not report the complete overdue ball set (pending_balls_summary.overdue_ids); the open-ball reminder reads only the bounded 10-row preview, so a ball outside it that newly passes its due may not be announced. Upgrade the daemon to restore complete coverage.",
+            "daemon summary lacks newest_overdue_due_at; new-due reminders read the 10-row preview until the daemon restarts",
           )
         }
         if (pendingBallDecision.send) forwardPendingBallSummary(currentPendingBalls, currentPendingBallSummary)

@@ -335,14 +335,16 @@ export type PendingBallPreview = {
 export type PendingBallSummaryInput = {
   balls: readonly PendingBallPreview[]
   /**
-   * The COMPLETE overdue id population, from the daemon projection BEFORE its
-   * 10-row preview cap (wake removal 1). Absent from an older daemon: the
-   * decision then falls back to the preview, its pre-fix behavior. When present
-   * it is authoritative — the preview alone cannot see a due transition for a
-   * ball outside it, so an 11th newly-due ball would be silent, and settling a
-   * preview row could expose an already-overdue hidden row as falsely new.
+   * The LATEST due time (epoch ms) among owned balls overdue at projection time,
+   * from the daemon projection BEFORE its 10-row preview cap, or null when none
+   * (wake removal 1). Absent from an older daemon: the decision then derives the
+   * watermark from the bounded preview, its pre-fix coverage, and the adapter
+   * names that gap once. When present it is authoritative — the preview alone
+   * cannot see a due transition for a ball outside it, so an 11th newly-due ball
+   * would be silent. One number, not the id list: this rides every model-facing
+   * fetch, so an owner of many overdue balls must not pay a UUID per turn.
    */
-  overdueIds?: readonly string[]
+  newestOverdueDueAt?: number | null
   summary?:
     | {
         total?: number
@@ -355,57 +357,56 @@ export type PendingBallSummaryInput = {
 
 /** In-memory adapter state for the open-ball summary. */
 export type PendingBallSummaryState = {
-  /** Sorted request_ids of the balls whose deadline had passed at the last drain. */
-  overdueIds: string
+  /** Latest overdue due time (epoch ms) seen at the last drain; the watermark
+   *  never decreases, so a settlement cannot make an already-overdue ball read
+   *  as newly due. Null before any ball has passed its due. */
+  newestOverdueDueAt: number | null
 }
-
-/**
- * Coverage of the overdue identity the decision actually read. `complete` is the
- * daemon's full overdue set, taken before its preview cap; `preview-only` is the
- * bounded 10-row preview used when the daemon does not report the complete set,
- * under which an out-of-preview ball that newly passes its due can be missed.
- * The caller MUST treat `preview-only` as a named gap, never as a clean result
- * (@dev/review2 REVISE, wake removal 1).
- */
-export type PendingBallOverdueCoverage = "complete" | "preview-only"
 
 export type PendingBallSummaryDecision = {
   /** Whether the caller should forward the summary line this drain. */
   send: boolean
-  /** State to retain; the overdue set carries across drains. */
+  /** State to retain; the watermark carries across drains. */
   state: PendingBallSummaryState | null
-  /** Which overdue population this decision used. */
-  coverage: PendingBallOverdueCoverage
+  /** True when the daemon did not report `newestOverdueDueAt`, so the watermark
+   *  was derived from the BOUNDED 10-row preview. That is a named coverage gap
+   *  the adapter surfaces once, never a clean result (@dev/review2 REVISE). */
+  readFromPreview: boolean
 }
 
-/** A ball is overdue when the daemon says so or its deadline has passed. */
-function ballIsOverdue(ball: PendingBallPreview, now: number): boolean {
-  if (ball.status === "expired") return true
-  if (!ball.expires_at) return false
+/** A preview ball's due time in epoch ms when it is overdue, else null. */
+function previewBallDueAt(ball: PendingBallPreview, now: number): number | null {
+  // The daemon's own verdict wins: a deadline-passed ball with an unparseable
+  // (or absent) deadline still counts, at `now` as the conservative watermark.
+  if (ball.status === "expired") {
+    if (ball.expires_at) {
+      const due = Date.parse(ball.expires_at)
+      if (Number.isFinite(due)) return due
+    }
+    return now
+  }
+  if (!ball.expires_at) return null
   const due = Date.parse(ball.expires_at)
-  return Number.isFinite(due) && due <= now
+  return Number.isFinite(due) && due <= now ? due : null
 }
 
-function overdueIdList(balls: readonly PendingBallPreview[], now: number): string {
-  return Array.from(
-    new Set(
-      balls
-        .filter((ball) => ballIsOverdue(ball, now))
-        .map((ball) => ball.request_id)
-        .filter((id): id is string => Boolean(id)),
-    ),
-  )
-    .sort()
-    .join(",")
+/** The preview-derived watermark: the latest overdue due time the bounded
+ *  10-row preview can see. Incomplete only when more than ten balls are
+ *  overdue — the case the adapter names once when the daemon field is absent. */
+function previewWatermark(balls: readonly PendingBallPreview[], now: number): number | null {
+  let latest: number | null = null
+  for (const ball of balls) {
+    const due = previewBallDueAt(ball, now)
+    if (due !== null && (latest === null || due > latest)) latest = due
+  }
+  return latest
 }
 
-/** The daemon's complete overdue id list, normalised the same way: de-duped,
- * id-less entries dropped, sorted. Kept beside overdueIdList so both identity
- * rules stay one line apart and cannot drift. */
-function overdueIdListFromComplete(ids: readonly string[]): string {
-  return Array.from(new Set(ids.filter((id) => Boolean(id))))
-    .sort()
-    .join(",")
+/** The larger of two watermarks, treating null as "none seen yet". */
+function maxWatermark(left: number | null, right: number | null): number | null {
+  if (left === null) return right
+  if (right === null) return left
+  return Math.max(left, right)
 }
 
 /**
@@ -425,24 +426,31 @@ export function decidePendingBallSummary(
   input: PendingBallSummaryInput,
   opts: { now: number; state: PendingBallSummaryState | null },
 ): PendingBallSummaryDecision {
-  const coverage: PendingBallOverdueCoverage = input.overdueIds === undefined ? "preview-only" : "complete"
+  const daemonWatermark = input.newestOverdueDueAt
+  const readFromPreview = daemonWatermark === undefined
+  const current: number | null = readFromPreview ? previewWatermark(input.balls, opts.now) : daemonWatermark
+  const previous = opts.state
+  // The watermark never decreases: any due time at or below the stored value was
+  // already overdue when that value was recorded, so settling a preview row
+  // cannot expose an already-overdue hidden row as falsely new.
+  const retained: PendingBallSummaryState = {
+    newestOverdueDueAt: maxWatermark(previous?.newestOverdueDueAt ?? null, current),
+  }
   const total = input.summary?.total ?? input.balls.length
   if (total <= 0) {
-    // Nothing to summarize. Keep the remembered set (empty), never reset to
-    // null: a reset would make the NEXT ball a "first send" even though it has
-    // not passed its due.
-    return { send: false, state: opts.state === null ? null : { overdueIds: "" }, coverage }
+    // Nothing to summarize. Keep the remembered floor, never reset to null: a
+    // reset would make the NEXT ball a "first send" though it never passed due.
+    return { send: false, state: previous === null ? null : retained, readFromPreview }
   }
-  const overdueIds =
-    input.overdueIds === undefined ? overdueIdList(input.balls, opts.now) : overdueIdListFromComplete(input.overdueIds)
-  const previous = opts.state
   if (previous === null) {
     // Adapter start with a restored (or absent) ledger: the one non-overdue send.
-    return { send: true, state: { overdueIds }, coverage }
+    return { send: true, state: retained, readFromPreview }
   }
-  const before = new Set(previous.overdueIds ? previous.overdueIds.split(",") : [])
-  const newlyOverdue = overdueIds.split(",").some((id) => id && !before.has(id))
-  return { send: newlyOverdue, state: { overdueIds }, coverage }
+  // Send only when the watermark RISES past what the adapter has already shown.
+  // A re-due by TAKING sets a later deadline, so it raises the watermark again
+  // even with no decision in between.
+  const send = current !== null && (previous.newestOverdueDueAt === null || current > previous.newestOverdueDueAt)
+  return { send, state: retained, readFromPreview }
 }
 
 export type ConnectReplayGate = {

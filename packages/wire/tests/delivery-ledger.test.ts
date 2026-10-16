@@ -224,10 +224,10 @@ describe("loadDeliveryLedger (#27459)", () => {
       pane: "@dev/luna6",
       now: NOW,
     })
-    state.pendingBallSummary = { overdueIds: "r1,r2" }
+    state.pendingBallSummary = { newestOverdueDueAt: NOW - 60_000 }
     saveDeliveryLedger(path, state)
     const loaded = loadDeliveryLedger(path)
-    expect(loaded.state?.pendingBallSummary).toEqual({ overdueIds: "r1,r2" })
+    expect(loaded.state?.pendingBallSummary).toEqual({ newestOverdueDueAt: NOW - 60_000 })
     rmSync(path, { force: true })
   })
 
@@ -338,7 +338,7 @@ describe("openDeliveryLedgerWindow (#27459)", () => {
   })
 
   it("carries the summary fingerprint across a restart and a 4h roll (#27459 gap-7)", () => {
-    const summary = { overdueIds: "r1" }
+    const summary = { newestOverdueDueAt: NOW - 30_000 }
     const existing: DeliveryLedgerState = {
       version: DELIVERY_LEDGER_VERSION,
       pane: "@dev/luna6",

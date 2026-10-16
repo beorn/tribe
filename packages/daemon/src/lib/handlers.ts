@@ -1773,10 +1773,14 @@ type PendingBallSummary = {
   total: number
   oldest_age_ms: number
   truncated: boolean
-  /** Every owned ball overdue at projection time, before the 10-row preview cap
-   * (wake removal 1). The bounded `pending_balls` preview alone cannot tell the
-   * adapter that an out-of-preview ball newly passed its due. */
-  overdue_ids?: string[]
+  /** The LATEST due time (epoch ms) among owned balls overdue at projection
+   * time, over the FULL set before the 10-row preview cap, or null when none
+   * (wake removal 1). ONE number, not the id list: this summary rides every
+   * model-facing fetch, so a seat owning dozens of overdue balls must not pay a
+   * UUID per turn. A monotone watermark — the adapter re-surfaces the open-ball
+   * reminder when it rises, and the bounded `pending_balls` preview alone cannot
+   * carry a due transition for a ball outside it. */
+  newest_overdue_due_at?: number | null
   withheld?: {
     total: number
     by_kind: {
@@ -4628,16 +4632,20 @@ export function readAttentionProjection(
   const withheld = prioritizedPendingBalls.slice(ATTENTION_PENDING_BALL_LIMIT)
   const withheldRequests = withheld.filter((ball) => ball.request_kind !== "incident").length
   const withheldIncidents = withheld.length - withheldRequests
-  // wake removal 1 (@cto 8daafaf6 item 1, @dev/review2 REVISE) — the bounded
+  // wake removal 1 (@cto 8daafaf6 item 1, then 4d3f3a83 REVISE) — the bounded
   // preview cannot carry a due transition for a ball outside it: with 10 older
   // overdue balls filling the 10-row preview, an 11th ball that newly passes
   // its due is withheld and its transition is silent. The adapter's new-due
-  // decision needs the COMPLETE overdue population, so it is derived HERE from
-  // the full owned set, before the cap. The preview stays a display bound.
-  const overdueOwnedBallIds = pendingBalls
-    .filter((ball) => ball.status === "expired")
-    .map((ball) => ball.request_id)
-    .sort()
+  // decision needs one fact over the COMPLETE owned set, before the cap: the
+  // LATEST overdue due time. A monotone watermark rises whenever any ball newly
+  // passes its due, and never falls, so settling a preview row cannot expose an
+  // already-overdue hidden row as falsely new. The preview stays a display bound.
+  const newestOverdueDueAt = pendingBalls.reduce<number | null>((latest, ball) => {
+    if (ball.status !== "expired" || ball.expires_at === null) return latest
+    const due = Date.parse(ball.expires_at)
+    if (!Number.isFinite(due)) return latest
+    return latest === null || due > latest ? due : latest
+  }, null)
   // 21757 — retention's prune notice rides every projection of this owner's
   // attention until a canonical read clears it (handleFetch, at the
   // touchMailboxAttentionRead site). A dormant seat that returns is told
@@ -4675,7 +4683,7 @@ export function readAttentionProjection(
         total: pendingBalls.length,
         oldest_age_ms: pendingBalls.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0),
         truncated: withheld.length > 0,
-        overdue_ids: overdueOwnedBallIds,
+        newest_overdue_due_at: newestOverdueDueAt,
         ...(withheld.length === 0
           ? {}
           : {

@@ -35,8 +35,8 @@ function spawnFakeDaemon(
         total: number
         oldest_age_ms: number
         truncated: boolean
-        /** The complete overdue id set the daemon sends BEFORE its preview cap. */
-        overdue_ids?: string[]
+        /** Latest overdue due time (epoch ms) the daemon sends BEFORE its preview cap. */
+        newest_overdue_due_at?: number | null
         withheld?: {
           total: number
           by_kind: { request: number; incident: number }
@@ -2148,13 +2148,15 @@ describe("stdio adapter delivery modes", () => {
     expect(countOf(summaryText)).toBe(1)
   })
 
-  // wake removal 1 (29633, @dev/review2 REVISE): the ten-row `pending_balls`
-  // preview is a DISPLAY bound. With ten older overdue balls filling it, an
-  // eleventh ball that newly passes its due is withheld from the preview, so a
-  // decision that reads overdue identity from the preview alone stays silent.
-  // It must read the complete overdue set the daemon sends before the cap.
+  // wake removal 1 (29633, @cto 4d3f3a83, @dev/review2 REVISE): the ten-row
+  // `pending_balls` preview is a DISPLAY bound. With ten older overdue balls
+  // filling it, an eleventh ball that newly passes its due is withheld from the
+  // preview, so a decision that reads overdue identity from the preview alone
+  // stays silent. It must read the WATERMARK the daemon sends before the cap.
   it("surfaces a newly due ball the ten-row preview withholds (29633 REVISE)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
+    const oldDue = Date.now() - 120_000
+    const newDue = Date.now() - 60_000
     const oldOverdue = Array.from({ length: 10 }, (_, index) => `old-${index}`)
     const fetchAttention = {
       actionable_unread: [],
@@ -2162,13 +2164,13 @@ describe("stdio adapter delivery modes", () => {
         total: 11,
         oldest_age_ms: 600_000,
         truncated: true,
-        overdue_ids: oldOverdue,
+        newest_overdue_due_at: oldDue,
       },
       pending_balls: oldOverdue.map((request_id) => ({
         request_id,
         sender: "@chief",
         age_ms: 600_000,
-        expires_at: new Date(Date.now() - 60_000).toISOString(),
+        expires_at: new Date(oldDue).toISOString(),
         summary: `Ball ${request_id}`,
       })),
     }
@@ -2207,22 +2209,22 @@ describe("stdio adapter delivery modes", () => {
 
     await drain("29633 first drain")
     expect(summaryLines()).toHaveLength(1)
-    // The PREVIEW does not change; only the complete overdue set gains the
-    // withheld eleventh ball. RED before the fix: the preview-derived overdue
-    // set was identical, so no line fired and this read 1.
-    fetchAttention.pending_balls_summary.overdue_ids = [...oldOverdue, "new-11"]
+    // The PREVIEW does not change; only the watermark the daemon sends over the
+    // full set rises — the withheld eleventh ball's LATER due. RED before the
+    // fix: a preview-derived watermark was identical, so no line fired.
+    fetchAttention.pending_balls_summary.newest_overdue_due_at = newDue
     await drain("29633 newly due beyond the preview")
     await waitForCondition(() => summaryLines().length >= 2, "29633 out-of-preview newly due summary")
     expect(summaryLines()).toHaveLength(2)
   })
 
-  // wake removal 1 (29633, @dev/review2 REVISE): a daemon that does not report
-  // the complete overdue set leaves the reminder on the bounded preview, where
-  // an out-of-preview newly due ball can be missed. That gap must be NAMED, not
-  // silently presented as complete coverage.
-  it("names the coverage gap once when the daemon omits the complete overdue set (29633 REVISE)", async () => {
+  // wake removal 1 (29633, @cto 4d3f3a83, @dev/review2 REVISE): a daemon that
+  // does not report the watermark leaves the reminder on the bounded preview,
+  // where an out-of-preview newly due ball can be missed. That gap must be
+  // NAMED, not silently presented as complete coverage.
+  it("names the coverage gap once when the daemon omits the watermark (29633 REVISE)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
-    const warnNeedle = "does not report the complete overdue ball set"
+    const warnNeedle = "lacks newest_overdue_due_at"
     const fetchAttention = {
       actionable_unread: [],
       pending_balls_summary: { total: 1, oldest_age_ms: 60_000, truncated: false },
