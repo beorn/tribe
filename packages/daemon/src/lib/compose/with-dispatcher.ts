@@ -363,6 +363,12 @@ export function withDispatcher<
     function readInboxStatus(sessionName: string): {
       session: string
       unread_count: number
+      /** The ids `unread_count` counts, in attention order (oldest first).
+       * Added for the Stop hook, which compares them against the per-pane
+       * delivery ledger instead of re-prompting for rows already handed to the
+       * pane. A count with no id list would make that comparison silent, so the
+       * ids travel with the count they explain (@cto e0b42a6e item 2). */
+      unread_ids: string[]
       oldest_unread_age_min: number
       oldest_unread_ts: number
       latest_actionable_seq: number | null
@@ -389,6 +395,7 @@ export function withDispatcher<
       return {
         session: sessionName,
         unread_count,
+        unread_ids: attentionRows.map((row) => row.id),
         oldest_unread_age_min,
         oldest_unread_ts,
         latest_actionable_seq: latest?.rowid ?? null,

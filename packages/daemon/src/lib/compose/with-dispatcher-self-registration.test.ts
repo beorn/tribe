@@ -1484,7 +1484,12 @@ describe("dispatcher bounded mailbox drain", () => {
     const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
     cleanup = harness.dispose
     const readStatus = async (id: string) =>
-      parseResult<{ unread_count: number; oldest_unread_age_min: number; oldest_unread_ts: number }>(
+      parseResult<{
+        unread_count: number
+        unread_ids: string[]
+        oldest_unread_age_min: number
+        oldest_unread_ts: number
+      }>(
         await harness.dispatcher.handleRequest(
           { jsonrpc: "2.0", id, method: "cli_inbox_status", params: { session: "@chief" } },
           "conn-drain",
@@ -1502,7 +1507,15 @@ describe("dispatcher bounded mailbox drain", () => {
     harness.setPendingOpenedAt("fourth-request", 4_000)
 
     harness.sendTakingStatus("@dev/2", firstRequest.id)
-    expect((await readStatus("wrong-owner-status")).unread_count).toBe(4)
+    const wrongOwner = await readStatus("wrong-owner-status")
+    expect(wrongOwner.unread_count).toBe(4)
+    // The ids travel WITH the count they explain (the Stop hook compares them
+    // against the per-pane delivery ledger). Assert set membership, not order:
+    // the projection's order is a display concern this field does not carry.
+    expect(wrongOwner.unread_ids).toEqual(
+      expect.arrayContaining([firstRequest.id, secondRequest.id, thirdRequest.id, fourthRequest.id]),
+    )
+    expect(wrongOwner.unread_ids).toHaveLength(4)
     harness.sendTakingStatus("@chief", firstRequest.id)
     expect(await readStatus("taken-oldest-is-not-actionable")).toMatchObject({
       unread_count: 3,

@@ -1928,6 +1928,10 @@ async function cmdDoctor(
 interface InboxStatusSummary {
   session: string
   unread_count: number
+  /** The ids `unread_count` counts. Absent from a daemon older than the Stop
+   * hook that consumes it: a caller must read absence as UNKNOWN, never as an
+   * empty set — collapsing the two would stop a seat with an unread inbox. */
+  unread_ids?: string[]
   oldest_unread_age_min: number
   /** Retained owner-to-requester status messages for open requests on either side.
    * Null is unavailable; optional for older daemons. Never an unread count. */
