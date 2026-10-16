@@ -2198,9 +2198,9 @@ describe("stdio adapter delivery modes", () => {
     expect(channelText().filter((line) => line.includes("FRESH-ROW"))).toHaveLength(1)
   })
 
-  // #27459 — the independent per-pane delivery counter. Two drains of the same
-  // two attention rows: four PRESENTATIONS, two DELIVERIES (the first of each id),
-  // and two SUPPRESSED re-presentations. The durable first-handoff ledger is
+  // #27459 — the independent per-pane delivery counter. Join plus two wakes of the same
+  // two attention rows: six PRESENTATIONS, two DELIVERIES (the first of each id),
+  // and four SUPPRESSED re-presentations. The durable first-handoff ledger is
   // written under the kpi dir so a restart can still call a re-handoff duplicate.
   it("counts presentations and deliveries across two drains, and persists the per-pane ledger (#27459)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
@@ -2249,12 +2249,12 @@ describe("stdio adapter delivery modes", () => {
       counters: Record<string, number>
       coverage: { restarts: number; gap: boolean }
     }
-    expect(ledger.counters.presentations).toBe(4)
+    expect(ledger.counters.presentations).toBe(6)
     expect(ledger.counters.deliveries).toBe(2)
     expect(ledger.counters.newDeliveries).toBe(2)
     expect(ledger.counters.duplicateDeliveries).toBe(0)
-    expect(ledger.counters.duplicatePresentations).toBe(2)
-    expect(ledger.counters.suppressed).toBe(2)
+    expect(ledger.counters.duplicatePresentations).toBe(4)
+    expect(ledger.counters.suppressed).toBe(4)
     expect([...ledger.ids].sort()).toEqual(["count-row-a", "count-row-b"])
   })
 
@@ -2699,8 +2699,8 @@ describe("stdio adapter delivery modes", () => {
     expect(underscoreLedger.coverage.gap).toBe(true)
     expect(underscoreLedger.coverage.gapReason).toBe("schema")
     // PRE-EXISTING foreign counters are not inherited: this window counts only
-    // the one row it was actually handed.
-    expect(underscoreLedger.counters.presentations).toBe(1)
+    // the one row presented at join and again at the explicit wake.
+    expect(underscoreLedger.counters.presentations).toBe(2)
     // The refusal is loud on the adapter's own log.
     const underscoreLog = readFileSync(join(tmpDir, "adapter-underscore.log"), "utf8")
     expect(underscoreLog).toContain("records owner @dev/6, not @dev_6")
@@ -2797,8 +2797,9 @@ describe("stdio adapter delivery modes", () => {
     expect(ledger.counters.deliveries).toBe(2)
     expect(ledger.counters.newDeliveries).toBe(2)
     expect(ledger.counters.duplicateDeliveries).toBe(0)
-    expect(ledger.counters.presentations).toBe(4)
-    expect(ledger.counters.duplicatePresentations).toBe(2)
+    // Join presents the initial row before the three explicit wake drains.
+    expect(ledger.counters.presentations).toBe(5)
+    expect(ledger.counters.duplicatePresentations).toBe(3)
   })
 
   // #28282 - @cto 11:19 PDT: the counter is not broken, the two units are
@@ -3096,6 +3097,8 @@ describe("stdio adapter delivery modes", () => {
     const ledgerPath = join(tmpDir, "delivery.json")
     // Minimal wire projection of a recovered response candidate, not a claim about its historical cause.
     const id = "35de3ed0-de3b-40ba-a11f-7f82157d4b8f"
+    // Adapter-level stand-in for a wake before local joined flips, including join recovery.
+    // The current daemon does not emit this wake during an explicit-join pull registration.
     daemon = await spawnFakeDaemon(socketPath, {
       wakeupDuringRegister: true,
       fetchAttention: {
@@ -3120,8 +3123,8 @@ describe("stdio adapter delivery modes", () => {
     await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
     await waitForCondition(
-      () => daemon!.requests.some((request) => request.method === "tribe.fetch") && existsSync(ledgerPath),
-      "pre-join drain completed",
+      () => (loadDeliveryLedger(ledgerPath).state?.counters.presentations ?? 0) >= 1,
+      "pre-join drain completed and persisted",
     )
     expect(loadDeliveryLedger(ledgerPath).state?.ids).not.toContain(id)
 
@@ -3130,7 +3133,6 @@ describe("stdio adapter delivery modes", () => {
       callToolPayload(2, "join", { name: "@agent/test", delivery: "push" }),
       (line) => line.id === 2,
     )
-    daemon.clients[0]!.write(makeNotification("wakeup", { reason: "unread-after-join" }))
     const handedOff = (line: Record<string, unknown>) =>
       line.method === "notifications/claude/channel" &&
       (line.params as { meta?: { message_id?: string } } | undefined)?.meta?.message_id === id

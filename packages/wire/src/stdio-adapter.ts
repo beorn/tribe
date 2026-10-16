@@ -1329,6 +1329,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         from: "tribe-startup",
         type: "system",
       })
+      if (joined && currentDeliveryCapability().channel) drainDaemonInbox()
     }
     if ((name === "join" && joined) || name === "rename") {
       const r = result as { content: Array<{ type: string; text: string }> }
