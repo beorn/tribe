@@ -5,7 +5,7 @@
  * @level l1
  * @consumer the plugin supervisor's seat-ancestry judgment, recall's process-ancestor walk, the daemon's
  *           readProcessStartTime
- * @testonly none
+ * @testonly ParentPidSources: the fixture /proc root and ps command the reason table points readParentPid at
  *
  * One reader for "the parent of this pid" (@cto 6cbf36b7): /proc/<pid>/stat on Linux, `ps -o ppid=` elsewhere. The
  * stat line parser is shared with the daemon's start-time read, because the error-prone part is the same in both:
@@ -13,7 +13,10 @@
  */
 
 import { spawn, spawnSync } from "node:child_process"
-import { existsSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { safeRemoveSync } from "removely"
 import { describe, expect, test } from "vitest"
 import { parseProcStatLine, readParentPid, readParentPidFromPs } from "../src/lib/process-parent.ts"
 
@@ -74,5 +77,62 @@ describe("readParentPid", () => {
       ppid: null,
       reason: expect.stringMatching(/^ps exited 1 for pid 2147483648/u),
     })
+  })
+
+  // @cto a97214d7 must 4: every reason the reader can give, through readParentPid itself. A fixture /proc root with a
+  // self/stat stands for Linux; one without it sends the reader to ps, here a fixture script per reason.
+  test("names each of its reasons for reading no parent, one row per reason", () => {
+    const root = mkdtempSync(join(tmpdir(), "process-parent-reasons-"))
+    try {
+      const linux = join(root, "proc-linux")
+      mkdirSync(join(linux, "self"), { recursive: true })
+      writeFileSync(join(linux, "self", "stat"), "1 (self) S 0\n")
+      mkdirSync(join(linux, "4242"))
+      writeFileSync(join(linux, "4242", "stat"), "4242 bun S 1717\n")
+      const noProc = join(root, "proc-absent")
+      mkdirSync(noProc)
+      const ps = (name: string, body: string): string => {
+        const path = join(root, name)
+        writeFileSync(path, `#!/bin/sh\n${body}\n`)
+        chmodSync(path, 0o755)
+        return path
+      }
+      const missingPs = join(root, "no-such-ps")
+      const rows = [
+        { sources: { procRoot: linux, ps: "ps" }, pid: 0, reason: "0 is not a process id" },
+        {
+          sources: { procRoot: linux, ps: "ps" },
+          pid: 4343,
+          reason: `${linux}/4343/stat is unreadable (ENOENT)`,
+        },
+        { sources: { procRoot: linux, ps: "ps" }, pid: 4242, reason: `${linux}/4242/stat has no parent field` },
+        { sources: { procRoot: noProc, ps: missingPs }, pid: 4242, reason: "ps could not run (ENOENT)" },
+        {
+          sources: { procRoot: noProc, ps: ps("ps-slow", "exec sleep 5") },
+          pid: 4242,
+          reason: "ps timed out after 500 ms",
+        },
+        {
+          sources: { procRoot: noProc, ps: ps("ps-killed", "kill -9 $$") },
+          pid: 4242,
+          reason: "ps ended on SIGKILL inside its 500 ms bound",
+        },
+        {
+          sources: { procRoot: noProc, ps: ps("ps-exit-3", "echo 'no such pid' >&2; exit 3") },
+          pid: 4242,
+          reason: "ps exited 3 for pid 4242: no such pid",
+        },
+        {
+          sources: { procRoot: noProc, ps: ps("ps-silent", "exit 0") },
+          pid: 4242,
+          reason: "ps printed no parent for pid 4242",
+        },
+      ]
+      expect(rows.map((row) => readParentPid(row.pid, row.sources))).toEqual(
+        rows.map((row) => ({ ppid: null, reason: row.reason })),
+      )
+    } finally {
+      safeRemoveSync(root, { within: tmpdir() })
+    }
   })
 })

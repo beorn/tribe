@@ -38,12 +38,23 @@ export function parseProcStatLine(line: string): ProcStatFields | null {
 /** A process's parent, or why it could not be read: an errno, a ps exit status, a ps timeout, an unparseable line. */
 export type ParentPidReading = { readonly ppid: number } | { readonly ppid: null; readonly reason: string }
 
+/**
+ * Where the reader looks: the /proc root, and the `ps` it runs where that root has no `self/stat`. The defaults are the
+ * system's; the reason table in process-parent.test.ts points them at fixtures, the only way to reach every reason.
+ */
+export interface ParentPidSources {
+  readonly procRoot: string
+  readonly ps: string
+}
+
+const SYSTEM_SOURCES: ParentPidSources = { procRoot: "/proc", ps: "ps" }
+
 /** The parent of `pid`, or the reason it names no process this reader can read. */
-export function readParentPid(pid: number): ParentPidReading {
+export function readParentPid(pid: number, sources: ParentPidSources = SYSTEM_SOURCES): ParentPidReading {
   const invalid = invalidPid(pid)
   if (invalid !== null) return invalid
-  if (!existsSync("/proc/self/stat")) return readParentPidFromPs(pid)
-  const path = `/proc/${pid}/stat`
+  if (!existsSync(`${sources.procRoot}/self/stat`)) return readParentPidFromPs(pid, sources.ps)
+  const path = `${sources.procRoot}/${pid}/stat`
   let line: string
   try {
     line = readFileSync(path, "utf8")
@@ -59,10 +70,10 @@ export function readParentPid(pid: number): ParentPidReading {
 }
 
 /** `ps -o ppid= -p <pid>`: the reader where there is no /proc. Exported so Linux tests exercise it too. */
-export function readParentPidFromPs(pid: number): ParentPidReading {
+export function readParentPidFromPs(pid: number, ps: string = SYSTEM_SOURCES.ps): ParentPidReading {
   const invalid = invalidPid(pid)
   if (invalid !== null) return invalid
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], {
+  const result = spawnSync(ps, ["-o", "ppid=", "-p", String(pid)], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: PS_TIMEOUT_MS,
