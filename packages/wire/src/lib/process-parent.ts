@@ -41,8 +41,9 @@ export type ParentPidReading = { readonly ppid: number } | { readonly ppid: null
 /**
  * Where the reader looks: the /proc root, and the `ps` it runs where that root has no `self/stat`. The defaults are the
  * system's; the reason table in process-parent.test.ts points them at fixtures, the only way to reach every reason.
+ * Not exported (@cto 9eafeeb6 (a)): no caller names it, so the module adds only the optional parameter.
  */
-export interface ParentPidSources {
+interface ParentPidSources {
   readonly procRoot: string
   readonly ps: string
 }

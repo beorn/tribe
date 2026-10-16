@@ -135,4 +135,13 @@ describe("readParentPid", () => {
       safeRemoveSync(root, { within: tmpdir() })
     }
   })
+
+  // @cto 9eafeeb6 (a): with no sources the reader uses the system's. A right parent alone cannot show that: a wrong
+  // default root would fall back to ps and read the same parent. A missing pid's reason names the root it read.
+  test("with no sources it reads the real /proc, and its ps fallback runs the real ps", () => {
+    expect(readParentPid(process.pid)).toEqual({ ppid: process.ppid })
+    expect(readParentPid(2 ** 31)).toEqual({ ppid: null, reason: `/proc/${2 ** 31}/stat is unreadable (ENOENT)` })
+    if (!existsSync("/bin/ps") && !existsSync("/usr/bin/ps")) return
+    expect(readParentPidFromPs(process.pid)).toEqual({ ppid: process.ppid })
+  })
 })
