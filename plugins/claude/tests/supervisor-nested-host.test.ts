@@ -13,10 +13,11 @@
  * supervisor admitted.
  */
 import { spawn, type ChildProcess } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync } from "node:fs"
 import { createServer, type Server, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { HAB_ID_TOKEN_ENV, HAB_ID_TOKEN_FILE_ENV } from "tribe-wire/lib/hab-session-env"
 import { TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV } from "tribe-wire/lib/session-identity-env"
@@ -181,7 +182,7 @@ afterEach(async () => {
   for (const socket of sockets) socket.destroy()
   sockets.clear()
   await new Promise<void>((res) => server.close(() => res()))
-  rmSync(dir, { recursive: true, force: true })
+  safeRemoveSync(dir, { within: tmpdir() })
 })
 
 describe("a provider nested inside a managed seat (29567)", () => {
