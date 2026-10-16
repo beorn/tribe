@@ -102,7 +102,7 @@ short MCP calls as a polling loop.
 
 **Watch clients** (`tribe-watch`, `tribe-cli` log/events) always receive push regardless of the recipient's declared mode — the per-session toggle only gates _agent-bound_ fanout.
 
-**Future arc.** Once silvercode squad mode lands, it will wrap codex/gemini sessions and re-advertise them as push by proxying the notification channel through the host. Pull is the transitional fallback for MCP-only clients today; long-term the host owns the channel and squad members go back to push.
+**Future arc.** Once silvercode squad mode merges, it will wrap codex/gemini sessions and re-advertise them as push by proxying the notification channel through the host. Pull is the transitional fallback for MCP-only clients today; long-term the host owns the channel and squad members go back to push.
 
 **Internals** (for daemon work): per-session delivery lives in `sessions.delivery` (schema v12, NOT NULL DEFAULT `'push'`). The fanout filter is in `tools/lib/tribe/compose/with-broadcast.ts` — `toConnected` skips socket fanout for pull-mode recipients.
 
