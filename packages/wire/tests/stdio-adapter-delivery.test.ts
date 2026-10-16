@@ -3088,6 +3088,61 @@ describe("stdio adapter delivery modes", () => {
     expect(ledger.counters.duplicateDeliveries).toBe(0)
   })
 
+  // @failure 29633: a skipped pre-join send is recorded as delivered and suppresses its later valid handoff.
+  // @level l2 @consumer real stdio channel and durable per-pane delivery ledger
+  // Rejected-notification coverage throws; an unjoined send returns without attempting the transport.
+  it("keeps an unjoined row deliverable until its channel handoff succeeds", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const ledgerPath = join(tmpDir, "delivery.json")
+    // Minimal wire projection of a recovered response candidate, not a claim about its historical cause.
+    const id = "35de3ed0-de3b-40ba-a11f-7f82157d4b8f"
+    daemon = await spawnFakeDaemon(socketPath, {
+      wakeupDuringRegister: true,
+      fetchAttention: {
+        actionable_unread: [{ id, type: "response", from: "@dev/brain", content: "response awaiting handoff" }],
+        pending_balls: [],
+      },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_REQUIRE_JOIN: "1",
+        TRIBE_PLUGIN_RESUME_JOINED: "0",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_DELIVERY_LEDGER: ledgerPath,
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await waitForCondition(
+      () => daemon!.requests.some((request) => request.method === "tribe.fetch") && existsSync(ledgerPath),
+      "pre-join drain completed",
+    )
+    expect(loadDeliveryLedger(ledgerPath).state?.ids).not.toContain(id)
+
+    await writeJsonAndWaitForLine(
+      child,
+      callToolPayload(2, "join", { name: "@agent/test", delivery: "push" }),
+      (line) => line.id === 2,
+    )
+    daemon.clients[0]!.write(makeNotification("wakeup", { reason: "unread-after-join" }))
+    const handedOff = (line: Record<string, unknown>) =>
+      line.method === "notifications/claude/channel" &&
+      (line.params as { meta?: { message_id?: string } } | undefined)?.meta?.message_id === id
+    await waitForStdout(child, stdout, () => stdout.some(handedOff), { timeoutMs: 10_000 })
+    expect(stdout.filter(handedOff)).toHaveLength(1)
+    await waitForCondition(
+      () => loadDeliveryLedger(ledgerPath).state?.ids.includes(id) === true,
+      "successful handoff persisted",
+    )
+    expect(loadDeliveryLedger(ledgerPath).state?.ids).toContain(id)
+  })
+
   it("drains and pushes attention when wakeup arrives within the register round-trip (#26969 row 5)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const fetchAttention = {

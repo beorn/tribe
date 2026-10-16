@@ -1493,11 +1493,11 @@ function tryAutoRenameOnClaim(content: string): void {
     })
 }
 
-async function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[number]): Promise<void> {
+async function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[number]): Promise<boolean> {
   const content = String(event.content ?? "")
   const type = markedType(String(event.type ?? "notify"))
   if (type === "bead:claimed") tryAutoRenameOnClaim(content)
-  await sendChannel(content, {
+  const handoff = sendChannel(content, {
     from: String(event.from ?? "unknown"),
     type,
     bead: event.bead ? String(event.bead) : undefined,
@@ -1510,6 +1510,9 @@ async function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]
     // fresh instruction.
     ...replayEnvelopeMeta(event),
   })
+  if (handoff === undefined) return false
+  await handoff
+  return true
 }
 
 /**
@@ -1770,7 +1773,7 @@ function drainDaemonInbox(): void {
         for (const event of attentionEvents) {
           const eventId = event.id ? String(event.id) : undefined
           try {
-            await forwardFetchedEvent(event)
+            if (!(await forwardFetchedEvent(event))) continue
           } catch (error) {
             // #28378 — a REJECTED channel notification is not a completed
             // handoff: it must not enter the forwarded-id record, the delivery
@@ -1812,7 +1815,7 @@ function drainDaemonInbox(): void {
         for (const event of forward) {
           const eventId = event.id ? String(event.id) : undefined
           try {
-            await forwardFetchedEvent(event)
+            if (!(await forwardFetchedEvent(event))) continue
           } catch (error) {
             // #28378 — same rule on the ambient path: no completed handoff, no
             // record, no count; the row stays deliverable and the cause is loud.
@@ -1885,6 +1888,7 @@ function handleDaemonNotification(method: string, params?: Record<string, unknow
       return
     }
     const pushHandoff = sendChannel(content, pushMeta)
+    if (pushHandoff === undefined) return
     // Marked only AFTER the handoff, and persisted, so an adapter restart
     // cannot make the daemon's reconnect re-push read as a fresh delivery.
     // #28378 — a rejected push is not a handoff: nothing is remembered or
@@ -1892,7 +1896,7 @@ function handleDaemonNotification(method: string, params?: Record<string, unknow
     // forward the row.
     void (async () => {
       try {
-        await (pushHandoff ?? Promise.resolve())
+        await pushHandoff
         ensureDeliveryLedger(Date.now())
         forwardedAttention.remember(pushedId)
         deliveryCounter.deliver(pushedId, Buffer.byteLength(content, "utf8"))
