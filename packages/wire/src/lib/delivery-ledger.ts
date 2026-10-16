@@ -185,27 +185,17 @@ function zeroCounters(): DeliveryCounters {
 }
 
 /**
- * #27459 gap-7 - a lenient read of the persisted summary fingerprint. Anything
- * unrecognisable is null (send the summary once); this is a throttle hint, so a
- * lost value costs one extra line, never a delivered row.
+ * #27459 gap-7 - a lenient read of the persisted open-ball state. Anything
+ * unrecognisable is null (send the summary once); this is a reminder hint, so a
+ * lost value costs one extra line, never a delivered row. A ledger written by
+ * the pre-wake-removal shape has no `overdueIds`, so it reads null and the
+ * upgraded adapter sends at most one extra line.
  */
 function parsePendingBallSummary(value: unknown): PendingBallSummaryState | null {
   if (typeof value !== "object" || value === null) return null
   const candidate = value as Record<string, unknown>
-  if (
-    typeof candidate.previewIds !== "string" ||
-    typeof candidate.total !== "number" ||
-    typeof candidate.withheld !== "number" ||
-    typeof candidate.sentAt !== "number"
-  ) {
-    return null
-  }
-  return {
-    previewIds: candidate.previewIds,
-    total: candidate.total,
-    withheld: candidate.withheld,
-    sentAt: candidate.sentAt,
-  }
+  if (typeof candidate.overdueIds !== "string") return null
+  return { overdueIds: candidate.overdueIds }
 }
 
 const COUNTER_KEYS: readonly (keyof DeliveryCounters)[] = [

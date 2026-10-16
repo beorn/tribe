@@ -288,11 +288,6 @@ const CHANNEL_REPLAY_MAX = Number(process.env.TRIBE_CHANNEL_REPLAY_MAX) || undef
 const CHANNEL_REPLAY_WINDOW_MS = Number(process.env.TRIBE_CHANNEL_REPLAY_WINDOW_MS) || undefined
 const connectReplayGate = createConnectReplayGate({ maxEvents: CHANNEL_REPLAY_MAX, windowMs: CHANNEL_REPLAY_WINDOW_MS })
 
-// 27346 — the wakeup drain used to re-forward the open-ball summary line on every
-// arrival. An unchanged set is now re-surfaced at most once per window. Knob exists
-// for tests (small window → deterministic recurrence).
-const PENDING_BALL_SUMMARY_WINDOW_MS = Number(process.env.TRIBE_PENDING_BALL_SUMMARY_WINDOW_MS) || undefined
-
 // Worktree-isolation guardrail (km-bearly.tribe-codex-cwd-worktree-guardrail):
 // standalone codex / non-launcher MCP clients inherit the user's invocation
 // cwd. If that cwd is the main repo while a `<basename>-wtN` pool exists,
@@ -424,6 +419,8 @@ type TribeFetchResult = {
       request_id?: string
       sender?: string
       opened_at?: string
+      expires_at?: string
+      status?: string
       age_ms?: number
       message_id?: string
       fanout?: string
@@ -1788,10 +1785,12 @@ function drainDaemonInbox(): void {
         const currentPendingBalls = result?.attention?.pending_balls ?? []
         const currentPendingBallSummary = result?.attention?.pending_balls_summary
         const currentPendingBallTotal = currentPendingBallSummary?.total ?? currentPendingBalls.length
-        // 27346 — one summary per unchanged set (or per window), not per wakeup.
+        // 27346 / wake removal 1 — the summary line is re-surfaced ONLY when a
+        // ball the seat owns newly passes its due (or once at adapter start);
+        // a mere set change, and the old window re-send, are both gone.
         const pendingBallDecision = decidePendingBallSummary(
           { balls: currentPendingBalls, summary: currentPendingBallSummary },
-          { now: Date.now(), windowMs: PENDING_BALL_SUMMARY_WINDOW_MS, state: pendingBallSummaryState },
+          { now: Date.now(), state: pendingBallSummaryState },
         )
         pendingBallSummaryState = pendingBallDecision.state
         if (pendingBallDecision.send) forwardPendingBallSummary(currentPendingBalls, currentPendingBallSummary)

@@ -69,12 +69,6 @@ export function selectReplayEvents<T extends ReplayCandidate>(
  */
 export const CONNECT_REPLAY_WINDOW_MS = 5_000
 
-/**
- * How long an UNCHANGED open-ball summary may go un-repeated before it is
- * re-surfaced. 10 minutes.
- */
-export const PENDING_BALL_SUMMARY_WINDOW_MS = 10 * 60 * 1_000
-
 /** Bound on remembered forwarded attention ids (insertion-ordered eviction). */
 export const MAX_FORWARDED_ATTENTION_IDS = 10_000
 
@@ -330,68 +324,93 @@ export function createDeliveryCounter(opts?: { maxIds?: number }): DeliveryCount
 }
 
 /** The preview slice of a ball the summary line is built from. */
-export type PendingBallPreview = { request_id?: string | null }
+export type PendingBallPreview = {
+  request_id?: string | null
+  /** The ball's reply deadline. A ball past it is overdue. */
+  expires_at?: string | null
+  /** The daemon's own verdict for a deadline-passed ball. */
+  status?: string | null
+}
 
 export type PendingBallSummaryInput = {
   balls: readonly PendingBallPreview[]
   summary?:
     | {
         total?: number
-        /** Deliberately NOT part of the fingerprint: it changes every minute. */
+        /** Deliberately NOT part of the decision: it changes every minute. */
         oldest_age_ms?: number
         withheld?: { total?: number }
       }
     | undefined
 }
 
-/** In-memory adapter state for the open-ball summary throttle. */
+/** In-memory adapter state for the open-ball summary. */
 export type PendingBallSummaryState = {
-  /** Sorted request_ids the last summary previewed. */
-  previewIds: string
-  total: number
-  withheld: number
-  sentAt: number
+  /** Sorted request_ids of the balls whose deadline had passed at the last drain. */
+  overdueIds: string
 }
 
 export type PendingBallSummaryDecision = {
   /** Whether the caller should forward the summary line this drain. */
   send: boolean
-  /** State to retain; null when there is nothing to summarize (reset on empty). */
+  /** State to retain; the overdue set carries across drains. */
   state: PendingBallSummaryState | null
 }
 
-/**
- * 27346 - throttle the open-ball summary line.
- *
- * Every wakeup drain re-forwarded the same "You own N balls ..." line, so a push
- * seat's pane repeated it on every arrival. Re-surface an unchanged set only when
- * it actually changed (preview request_id set, total, withheld count) or when the
- * window has elapsed. The AGE is deliberately excluded: it always changes, so it
- * would defeat the throttle. An EMPTY set resets the state, so the next ball is a
- * first send. `now`/`state` are passed in - pure, no timer, no second store.
- */
-export function decidePendingBallSummary(
-  input: PendingBallSummaryInput,
-  opts: { now: number; windowMs?: number; state: PendingBallSummaryState | null },
-): PendingBallSummaryDecision {
-  const total = input.summary?.total ?? input.balls.length
-  if (total <= 0) return { send: false, state: null }
-  const previewIds = Array.from(
-    new Set(input.balls.map((ball) => ball.request_id).filter((id): id is string => Boolean(id))),
+/** A ball is overdue when the daemon says so or its deadline has passed. */
+function ballIsOverdue(ball: PendingBallPreview, now: number): boolean {
+  if (ball.status === "expired") return true
+  if (!ball.expires_at) return false
+  const due = Date.parse(ball.expires_at)
+  return Number.isFinite(due) && due <= now
+}
+
+function overdueIdList(balls: readonly PendingBallPreview[], now: number): string {
+  return Array.from(
+    new Set(
+      balls
+        .filter((ball) => ballIsOverdue(ball, now))
+        .map((ball) => ball.request_id)
+        .filter((id): id is string => Boolean(id)),
+    ),
   )
     .sort()
     .join(",")
-  const withheld = input.summary?.withheld?.total ?? 0
+}
+
+/**
+ * 27346, wake removal 1 - the open-ball summary line re-surfaces ONLY when a
+ * ball the seat owns NEWLY passes its due, plus once when the adapter starts.
+ *
+ * A changed set sends nothing: a newly arrived ball already reaches the pane as
+ * its own pushed request, so repeating "You own N balls ..." for it is the
+ * duplicate wake this removes. The window re-send of an unchanged set is gone
+ * with it. A settled ball only shrinks the remembered overdue set.
+ *
+ * `now`/`state` are passed in - pure, no timer, no second store. State is null
+ * only before the first decision; the durable ledger restores it across a
+ * restart, so a restart does not re-present an unchanged line.
+ */
+export function decidePendingBallSummary(
+  input: PendingBallSummaryInput,
+  opts: { now: number; state: PendingBallSummaryState | null },
+): PendingBallSummaryDecision {
+  const total = input.summary?.total ?? input.balls.length
+  if (total <= 0) {
+    // Nothing to summarize. Keep the remembered set (empty), never reset to
+    // null: a reset would make the NEXT ball a "first send" even though it has
+    // not passed its due.
+    return { send: false, state: opts.state === null ? null : { overdueIds: "" } }
+  }
+  const overdueIds = overdueIdList(input.balls, opts.now)
   const previous = opts.state
   if (previous === null) {
-    return { send: true, state: { previewIds, total, withheld, sentAt: opts.now } }
+    // Adapter start with a restored (or absent) ledger: the one non-overdue send.
+    return { send: true, state: { overdueIds } }
   }
-  const changed = previous.previewIds !== previewIds || previous.total !== total || previous.withheld !== withheld
-  const windowMs = opts.windowMs ?? PENDING_BALL_SUMMARY_WINDOW_MS
-  if (changed || opts.now - previous.sentAt >= windowMs) {
-    return { send: true, state: { previewIds, total, withheld, sentAt: opts.now } }
-  }
-  return { send: false, state: previous }
+  const before = new Set(previous.overdueIds ? previous.overdueIds.split(",") : [])
+  const newlyOverdue = overdueIds.split(",").some((id) => id && !before.has(id))
+  return { send: newlyOverdue, state: { overdueIds } }
 }
 
 export type ConnectReplayGate = {

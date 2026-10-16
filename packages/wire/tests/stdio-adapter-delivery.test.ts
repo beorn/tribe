@@ -1968,7 +1968,9 @@ describe("stdio adapter delivery modes", () => {
     await new Promise((resolveTick) => setTimeout(resolveTick, 300))
     expect(summaryLines(summaryText)).toHaveLength(1)
 
-    // A new ball outside the preview changes the total → the line re-surfaces.
+    // wake removal 1: a NEW ball that has not passed its due is not a new due.
+    // The line does NOT re-surface for it; the ball reaches the pane as its own
+    // pushed request, which is the duplicate this removes.
     fetchAttention.pending_balls_summary.total = 109
     fetchAttention.pending_balls.push({
       request_id: "request-r7",
@@ -1978,14 +1980,24 @@ describe("stdio adapter delivery modes", () => {
       age_ms: 1_000,
       summary: "A newly arrived ball",
     })
+    const fetchesBeforeThirdWake = daemon.requests.filter((request) => request.method === "tribe.fetch").length
     daemon.clients[0]?.write(makeNotification("wakeup", {}))
-    const grownText =
-      "You own 109 balls, oldest 9d. Top: Review the architecture revision | Confirm the migration invariant | Run the focused verification Preview withheld 98 (8 request, 90 incident)."
-    await waitForStdout(child, stdout, () => summaryLines(grownText).length === 1)
+    await waitForCondition(
+      () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > fetchesBeforeThirdWake,
+      "third pending-ball fetch",
+    )
+    await new Promise((resolveTick) => setTimeout(resolveTick, 300))
     expect(summaryLines(summaryText)).toHaveLength(1)
+    expect(
+      stdout.filter(
+        (line) => line.method === "notifications/claude/channel" && JSON.stringify(line).includes("You own 109 balls"),
+      ),
+    ).toHaveLength(0)
   })
 
-  it("re-surfaces an unchanged pending-ball summary once the window elapses (#27346)", async () => {
+  // wake removal 1: the 10-minute re-send of an unchanged set is gone. A pane
+  // that owns the same balls, none newly overdue, hears nothing.
+  it("does not re-surface an unchanged pending-ball summary on a timer (wake removal 1)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const fetchAttention = {
       actionable_unread: [],
@@ -1999,8 +2011,6 @@ describe("stdio adapter delivery modes", () => {
         ...process.env,
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
-        // 27346: shrunk window so the 10-minute recurrence is testable without waiting.
-        TRIBE_PENDING_BALL_SUMMARY_WINDOW_MS: "300",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },
       stdio: ["pipe", "pipe", "pipe"],
@@ -2019,14 +2029,15 @@ describe("stdio adapter delivery modes", () => {
     daemon.clients[0]?.write(makeNotification("wakeup", {}))
     await waitForStdout(child, stdout, () => summaryLines().length === 1)
 
+    // A second drain, comfortably past the old 10-minute window, still repeats nothing.
     const fetchesBefore = daemon.requests.filter((request) => request.method === "tribe.fetch").length
-    await new Promise((resolveTick) => setTimeout(resolveTick, 600))
     daemon.clients[0]?.write(makeNotification("wakeup", {}))
     await waitForCondition(
       () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > fetchesBefore,
-      "window-elapsed pending-ball fetch",
+      "second pending-ball fetch",
     )
-    await waitForStdout(child, stdout, () => summaryLines().length === 2)
+    await new Promise((resolveTick) => setTimeout(resolveTick, 400))
+    expect(summaryLines()).toHaveLength(1)
   })
 
   // #27459 gap-7 acceptance (@chief, plat gap 7): the open-ball summary line is
@@ -2039,16 +2050,21 @@ describe("stdio adapter delivery modes", () => {
     const fetchAttention = {
       actionable_unread: [],
       pending_balls_summary: { total: 1, oldest_age_ms: 60_000, truncated: false },
-      pending_balls: [{ request_id: "gap7-r1", sender: "@chief", age_ms: 60_000, summary: "The only ball" }],
+      pending_balls: [
+        {
+          request_id: "gap7-r1",
+          sender: "@chief",
+          age_ms: 60_000,
+          expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+          summary: "The only ball",
+        },
+      ],
     }
     const env = {
       ...process.env,
       TRIBE_DELIVERY: "push",
       TRIBE_NO_AUTOSTART: "1",
       TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
-      // Keep the 10-minute recurrence out of the way: this test is about the
-      // restart, not the window reminder.
-      TRIBE_PENDING_BALL_SUMMARY_WINDOW_MS: "600000",
       DEBUG_LOG: join(tmpDir, "adapter.log"),
     }
     daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
@@ -2109,17 +2125,24 @@ describe("stdio adapter delivery modes", () => {
     // RED before gap-7: the in-memory-only throttle reset on restart, so this read 2.
     expect(countOf(summaryText)).toBe(1)
 
-    // The throttle still fires on a real change AFTER the restart.
+    // wake removal 1: a mere set change after the restart is SILENT — a new ball
+    // reaches the pane as its own pushed request.
     fetchAttention.pending_balls_summary.total = 2
     fetchAttention.pending_balls.push({
       request_id: "gap7-r2",
       sender: "@chief",
       age_ms: 1_000,
+      expires_at: new Date(Date.now() + 3_600_000).toISOString(),
       summary: "A newly arrived ball",
     })
     await drain("gap-7 changed-set drain")
     const grownText = "You own 2 balls, oldest 1m. Top: The only ball | A newly arrived ball"
-    await waitForCondition(() => countOf(grownText) >= 1, "gap-7 grown summary")
+    expect(countOf(grownText)).toBe(0)
+
+    // The line DOES fire after the restart when a ball newly passes its due.
+    fetchAttention.pending_balls[0]!.expires_at = new Date(Date.now() - 60_000).toISOString()
+    await drain("gap-7 newly overdue drain")
+    await waitForCondition(() => countOf(grownText) >= 1, "gap-7 newly overdue summary")
     expect(countOf(summaryText)).toBe(1)
   })
 

@@ -14,7 +14,6 @@ import {
   decidePendingBallSummary,
   MAX_REPLAY_AGE_MS,
   MAX_REPLAY_EVENTS,
-  PENDING_BALL_SUMMARY_WINDOW_MS,
   replayEnvelopeMeta,
   selectReplayEvents,
 } from "../src/lib/replay-cap.ts"
@@ -174,97 +173,114 @@ describe("replayEnvelopeMeta (27346 re-presented attention row)", () => {
   })
 })
 
-// 27346 — each wakeup drain re-forwarded the open-ball summary line, so a push
-// seat's pane repeated "You own N balls ..." on every arrival. decidePendingBallSummary
-// is the pure in-memory throttle: the line is re-surfaced only when the ball set
-// changed or the window elapsed. `now` is passed, never read — deterministic.
-describe("decidePendingBallSummary (27346 open-ball summary throttle)", () => {
+// 27346, wake removal 1 — each wakeup drain re-forwarded the open-ball summary
+// line, so a push seat's pane repeated "You own N balls ..." on every arrival.
+// The line now re-surfaces ONLY when a ball the seat owns NEWLY passes its due,
+// plus once when the adapter starts. decidePendingBallSummary is the pure
+// decision: `now` and `state` are passed, never read from a clock or a store.
+describe("decidePendingBallSummary (27346 open-ball summary, wake removal 1)", () => {
   const NOW = 1_000_000
-  const ball = (request_id: string) => ({ request_id })
+  const notDue = { expires_at: new Date(NOW + 86_400_000).toISOString() }
+  const ball = (request_id: string, extra: Record<string, unknown> = notDue) => ({ request_id, ...extra })
+  const overdue = { expires_at: new Date(NOW - 60_000).toISOString() }
 
-  it("sends the first nonempty set and records its fingerprint", () => {
+  it("sends once when the adapter starts, recording the overdue set", () => {
     const r = decidePendingBallSummary(
       { balls: [ball("r1"), ball("r2")], summary: { total: 2 } },
       { now: NOW, state: null },
     )
     expect(r.send).toBe(true)
-    expect(r.state).toMatchObject({ previewIds: "r1,r2", total: 2, withheld: 0, sentAt: NOW })
+    expect(r.state).toEqual({ overdueIds: "" })
   })
 
-  it("suppresses an unchanged immediate re-drain, keeping the original sentAt", () => {
+  it("sends nothing on an unchanged set, however long the drain waits", () => {
     const first = decidePendingBallSummary({ balls: [ball("r1")], summary: { total: 1 } }, { now: NOW, state: null })
-    const second = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 1 } },
+    expect(first.send).toBe(true)
+    const soon = decidePendingBallSummary(
+      { balls: [ball("r1")], summary: { total: 1, oldest_age_ms: 60_000 } },
       { now: NOW + 60_000, state: first.state },
     )
-    expect(second.send).toBe(false)
-    expect(second.state).toEqual(first.state)
+    expect(soon.send).toBe(false)
+    // The 10-minute re-send of an unchanged set is gone: even an hour later, nothing.
+    const later = decidePendingBallSummary(
+      { balls: [ball("r1")], summary: { total: 1, oldest_age_ms: 3_600_000 } },
+      { now: NOW + 10 * 60_000, state: first.state },
+    )
+    expect(later.send).toBe(false)
+    expect(later.state).toEqual(first.state)
   })
 
-  it("ignores a changing age and only re-surfaces once the window elapses", () => {
-    const first = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 1, oldest_age_ms: 1_000 } },
+  it("sends once when a ball newly passes its due, then nothing", () => {
+    const dueSoon = { expires_at: new Date(NOW + 60_000).toISOString() }
+    const start = decidePendingBallSummary(
+      { balls: [ball("r1", dueSoon)], summary: { total: 1 } },
       { now: NOW, state: null },
     )
-    const justBefore = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 1, oldest_age_ms: 999_000 } },
-      { now: NOW + PENDING_BALL_SUMMARY_WINDOW_MS - 1, state: first.state },
+    expect(start.send).toBe(true)
+    expect(start.state).toEqual({ overdueIds: "" })
+    const passed = decidePendingBallSummary(
+      { balls: [ball("r1", dueSoon)], summary: { total: 1 } },
+      { now: NOW + 120_000, state: start.state },
     )
-    expect(justBefore.send).toBe(false)
-    const atWindow = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 1, oldest_age_ms: 999_999 } },
-      { now: NOW + PENDING_BALL_SUMMARY_WINDOW_MS, state: first.state },
+    expect(passed.send).toBe(true)
+    expect(passed.state).toEqual({ overdueIds: "r1" })
+    const again = decidePendingBallSummary(
+      { balls: [ball("r1", dueSoon)], summary: { total: 1 } },
+      { now: NOW + 180_000, state: passed.state },
     )
-    expect(atWindow.send).toBe(true)
-    expect(atWindow.state?.sentAt).toBe(NOW + PENDING_BALL_SUMMARY_WINDOW_MS)
+    expect(again.send).toBe(false)
   })
 
-  it("re-surfaces when the preview request_id set changes", () => {
+  it("sends nothing when the set merely changes", () => {
     const first = decidePendingBallSummary({ balls: [ball("r1")], summary: { total: 1 } }, { now: NOW, state: null })
-    const changed = decidePendingBallSummary(
-      { balls: [ball("r1"), ball("r2")], summary: { total: 2 } },
-      { now: NOW + 1, state: first.state },
-    )
-    expect(changed.send).toBe(true)
-    expect(changed.state?.previewIds).toBe("r1,r2")
-  })
-
-  it("re-surfaces when the total changes even though the preview is unchanged", () => {
-    const first = decidePendingBallSummary(
-      { balls: [ball("r1"), ball("r2")], summary: { total: 2 } },
-      { now: NOW, state: null },
-    )
     const grown = decidePendingBallSummary(
-      { balls: [ball("r1"), ball("r2")], summary: { total: 108 } },
+      { balls: [ball("r1"), ball("r2")], summary: { total: 2 } },
       { now: NOW + 1, state: first.state },
     )
-    expect(grown.send).toBe(true)
-    expect(grown.state?.total).toBe(108)
+    expect(grown.send).toBe(false)
+    expect(grown.state).toEqual({ overdueIds: "" })
+    const shrunk = decidePendingBallSummary({ balls: [], summary: { total: 0 } }, { now: NOW + 2, state: grown.state })
+    expect(shrunk.send).toBe(false)
   })
 
-  it("re-surfaces when the withheld count changes", () => {
+  it("treats a ball the daemon already calls expired as overdue", () => {
     const first = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 9, withheld: { total: 8 } } },
+      { balls: [ball("r1", { status: "active" })], summary: { total: 1 } },
       { now: NOW, state: null },
     )
-    const changed = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 9, withheld: { total: 4 } } },
+    const expired = decidePendingBallSummary(
+      { balls: [ball("r1", { status: "expired" })], summary: { total: 1 } },
       { now: NOW + 1, state: first.state },
     )
-    expect(changed.send).toBe(true)
-    expect(changed.state?.withheld).toBe(4)
+    expect(expired.send).toBe(true)
+    expect(expired.state).toEqual({ overdueIds: "r1" })
   })
 
-  it("resets on empty and treats the next nonempty set as a first send", () => {
+  it("sends nothing when an overdue ball settles — a removal is not a new due", () => {
+    const first = decidePendingBallSummary(
+      { balls: [ball("r1", overdue), ball("r2", overdue)], summary: { total: 2 } },
+      { now: NOW, state: null },
+    )
+    expect(first.send).toBe(true)
+    expect(first.state).toEqual({ overdueIds: "r1,r2" })
+    const settled = decidePendingBallSummary(
+      { balls: [ball("r2", overdue)], summary: { total: 1 } },
+      { now: NOW + 1, state: first.state },
+    )
+    expect(settled.send).toBe(false)
+    expect(settled.state).toEqual({ overdueIds: "r2" })
+  })
+
+  it("an empty set sends nothing and never makes the next ball a first send", () => {
     const first = decidePendingBallSummary({ balls: [ball("r1")], summary: { total: 1 } }, { now: NOW, state: null })
     const empty = decidePendingBallSummary({ balls: [], summary: { total: 0 } }, { now: NOW + 1, state: first.state })
     expect(empty.send).toBe(false)
-    expect(empty.state).toBeNull()
-    const again = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 1 } },
+    expect(empty.state).not.toBeNull()
+    const next = decidePendingBallSummary(
+      { balls: [ball("r2")], summary: { total: 1 } },
       { now: NOW + 2, state: empty.state },
     )
-    expect(again.send).toBe(true)
+    expect(next.send).toBe(false)
   })
 })
 
