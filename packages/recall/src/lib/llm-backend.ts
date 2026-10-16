@@ -106,9 +106,9 @@ export type LlmBackend = {
    */
   formatProviderError?: (model: LlmModel, error: unknown) => string
   /**
-   * The model ids the budgeted calls (planner, synthesis race) may use. Bearly's backend never sets it, so recall
-   * uses {@link BUDGETED_MODEL_IDS}; a hand-built backend names its own models to exercise the race and the
-   * fallback, the same reason explainUnavailable is optional.
+   * The model ids for whichever budgeted call (planner or synthesis race) a hand-built backend exercises. Bearly's
+   * backend never sets it, so recall uses that caller's entry in {@link BUDGETED_MODEL_IDS}; a test names its own
+   * models to exercise the race and the fallback, the same reason explainUnavailable is optional.
    */
   budgetedModelIds?: readonly string[]
 }
@@ -239,19 +239,34 @@ export function selectAvailableCheapModels(
 }
 
 /**
- * The models recall's budgeted LLM calls may use, the planner (DEFAULT_PLAN_TIMEOUT_MS per attempt) and the synthesis
- * race (DEFAULT_SYNTHESIS_TIMEOUT_MS): only routes whose latency was measured inside those budgets (@cto 967ea2db,
- * @ag/llm/29473). On 2026-10-15 deepseek-chat through OpenRouter planned in 5.6 to 13.8 s (20 calls) and synthesized in
- * 4.3 to 11.4 s (10 calls). Google stays out until @ag/llm/29520 measures its route inside both budgets: through the
- * agy one-shot it takes 2 to 4 s to start and 3.6 to 28 s to answer. A second OpenRouter model is no second route, since
- * one 429 refuses every OpenRouter model for 10 minutes (@ag/llm/29495). A list edited by hand, never a runtime latency
- * selector.
+ * The models each of recall's budgeted LLM calls may use: the planner (DEFAULT_PLAN_TIMEOUT_MS per attempt) and the
+ * synthesis race (DEFAULT_SYNTHESIS_TIMEOUT_MS). It declares membership only, edited by hand and never by a runtime
+ * latency selector. The shared selector decides availability and order, and within one race batch order does not
+ * matter, since raceLlmModels starts every model at once. If a caller ever declares a sequence of two or more, its order
+ * is a question for the shared selector's owner; never re-sort here (@cto 5beb3255).
+ *
+ * The rule (@cto 967ea2db, ba46468c): a provider a budgeted call depends on, alone or tried in sequence, must answer
+ * inside the budget at p95, because a slow one burns it. A second racer in the same batch as a measured primary cannot
+ * delay the primary, so it qualifies instead on three measured facts: it adds no latency (same batch, the full budget,
+ * the loser killed), its answer rate inside the budget at production load, and its call cost.
+ * - deepseek-chat through OpenRouter (@ag/llm/29473): planned in 5.6 to 13.8 s over 20 calls, synthesized in 4.3 to
+ *   11.4 s over 10 calls.
+ * - gemini-2.5-flash through the agy one-shot, synthesis only (@ag/llm/29520's corrected receipt): 14 of 20 answered
+ *   inside 20 s at host load 32 to 42, p95 20.3 s; when deepseek wins, the agy child is killed within 0.5 s. It answered
+ *   0 of 20 planner calls inside 14 s, so the planner stays on deepseek alone.
+ *
+ * Synthesis holds exactly two. synthesizeResults races two per batch and splits the remaining budget across batches,
+ * so a third entry would make a second batch and halve each batch's time. A second OpenRouter model is no second
+ * route, since one 429 refuses every OpenRouter model for 10 minutes (@ag/llm/29495).
  */
-export const BUDGETED_MODEL_IDS: readonly string[] = ["deepseek/deepseek-chat"]
+export const BUDGETED_MODEL_IDS: Readonly<Record<"planner" | "synthesis", readonly string[]>> = {
+  planner: ["deepseek/deepseek-chat"],
+  synthesis: ["deepseek/deepseek-chat", "gemini-2.5-flash"],
+}
 
-/** {@link selectAvailableCheapModels} over {@link BUDGETED_MODEL_IDS} only: no registry fallback adds a model. */
-export function selectBudgetedModels(llm: LlmBackend): CheapModelSelection {
-  const candidates = (llm.budgetedModelIds ?? BUDGETED_MODEL_IDS).map((id) => {
+/** {@link selectAvailableCheapModels} over one caller's {@link BUDGETED_MODEL_IDS} only: no registry fallback adds a model. */
+export function selectBudgetedModels(llm: LlmBackend, caller: keyof typeof BUDGETED_MODEL_IDS): CheapModelSelection {
+  const candidates = (llm.budgetedModelIds ?? BUDGETED_MODEL_IDS[caller]).map((id) => {
     const model = llm.getModel(id)
     if (!model) throw new Error(`recall's budgeted model ${id} is not in the LLM registry (@ag/llm/29473)`)
     return model

@@ -126,6 +126,7 @@ export interface HealthAlert {
     | "fd-count"
     | "gh-rate-limit"
     | "reaper"
+    | "thresholds"
     | "chief-absent"
     | "attribution"
   severity: "warning" | "critical"
@@ -164,6 +165,12 @@ export interface HealthThresholds {
   memWarningPercent: number
   memCriticalPercent: number
   processCountWarning: number
+  /** Process-count bar: bun/node processes expected per active agent (default: 10) */
+  processPerAgent: number
+  /** Process-count bar: the fixed chief/parent overhead (default: 6) */
+  processChiefConst: number
+  /** Process-count bar: the safety multiplier over the dynamic estimate (default: 1.5) */
+  processSafetyMargin: number
   diskWarningPercent: number
   diskCriticalPercent: number
   worktreeWarning: number
@@ -181,80 +188,168 @@ export interface HealthThresholds {
   /** Reaper: samples to wait after asking before escalating (default: 6, i.e. 60s at 10s interval) */
   reaperGraceSamples: number
   /**
-   * Why the reaper CPU threshold was refused, when it was: the reaper is off, and start() pages once about it.
-   * A refusal rides beside the field it explains rather than throwing (29561 item 4).
+   * Why a threshold was refused, when one was (29561 item 4, 29572). One mechanism for all thirteen values: each entry
+   * names the variable, the value it held, why it was refused, and the CONSEQUENCE - what the check that reads it does
+   * now. A refusal rides beside the values rather than throwing, and start() pages once listing every entry.
    */
-  reaperCpuRefusal?: ReaperCpuThresholdRefusal
+  thresholdRefusals?: readonly ThresholdRefusal[]
 }
 
 /**
- * Why the reaper's CPU threshold could not be read (29561 item 4). `Number("eighty")` is NaN and a value at or below
- * zero fails the same way: this plugin's own gate is `cpu > threshold`, so either one admits EVERY bun/node row as a
- * suspect instead of refusing to.
+ * What a refused threshold does to the check that reads it (29572).
+ *
+ * `off` is for a REAPER parameter only (cpu, age or grace): the reaper kills processes, so running it on a default the
+ * operator did not choose could kill what they meant to spare. `default` is every passive alert threshold: an alert
+ * left running at its declared default protects more than one switched off, and the refusal is paged either way
+ * (@cto, 2026-10-15, refining his earlier OFF-for-everything rule).
  */
-export type ReaperCpuThresholdRefusal = {
+export type ThresholdConsequence = { readonly kind: "off"; readonly check: string } | { readonly kind: "default" }
+
+/**
+ * Why a numeric threshold could not be read (29561 item 4, 29572). `Number("eighty")` is NaN and a value at or below
+ * zero fails the same way. Which way a NaN used to move depended on the comparison it fed: nine of these silenced the
+ * alert they gated, the legacy reaper's age floor widened what it reaped, and the managed reaper's age floor silenced
+ * it entirely. `consequence` is what the check does now instead.
+ */
+/** The three parameters that turn the reaper OFF when any of them is refused (@cto, 2026-10-15). */
+const REAPER_PARAMETER_ENV_VARS = [
+  "HEALTH_REAPER_CPU_THRESHOLD",
+  "HEALTH_REAPER_AGE_MINUTES",
+  "HEALTH_REAPER_GRACE_SAMPLES",
+] as const
+
+/** How strict a value's own bound is, after the one shared parse (@cto, 2026-10-15). */
+export type ThresholdKind = "integer" | "float" | "percent"
+
+export type ThresholdRefusal = {
   /** The variable the operator set. */
   readonly envVar: string
   /** The value it held, quoted as the operator typed it. */
   readonly raw: string
-  /** `not-a-number` when Number() could not read it; `not-positive` when it read as a finite value at or below 0. */
-  readonly reason: "not-a-number" | "not-positive"
+  /** Why the read was refused. One parse (Number) for every value, then the kind's own bound. */
+  readonly reason: "not-a-number" | "not-positive" | "not-an-integer" | "not-a-percent"
+  /** What the check that reads this value does now. */
+  readonly consequence: string
 }
 
 /**
- * The reaper's CPU threshold, or the refusal that names it (29561 item 4).
+ * One strict reader for one numeric threshold (29561 item 4, 29572) - the only read path for any of the thirteen.
  *
- * A throw here would not stay here: `defaultThresholds()` runs inside this plugin's own `start()`, and the plugin
- * loader disables any plugin whose start throws, so a loud refusal at load would have switched off the disk checks,
- * the bridge-lost paging and the reaper together, behind one log line nobody reads (@cto, 2026-10-15). The refusal is
- * contained instead: the reaper is turned OFF, the caller announces it through the monitor's ordinary alert path, and
- * every other check keeps running.
+ * A throw is not the cure: `defaultThresholds()` runs inside this plugin's own `start()`, and the plugin loader disables
+ * any plugin whose start throws, so a loud refusal at load would have switched off the disk checks, the bridge-lost
+ * paging and the reaper together, behind one log line nobody reads (@cto, 2026-10-15). The refusal is returned beside
+ * the value instead, carrying what the affected check now does; start() pages once about every entry.
  */
-function readReaperCpuThreshold(
+function readNumericThreshold(
   envVar: string,
   fallback: string,
-): { readonly value: number; readonly refusal?: ReaperCpuThresholdRefusal } {
+  kind: ThresholdKind,
+  onRefusal: ThresholdConsequence,
+): { readonly value: number; readonly refusal?: ThresholdRefusal } {
+  const declaredDefault = Number(fallback)
   const raw = process.env[envVar] ?? fallback
-  const value = raw.trim() === "" ? Number.NaN : Number(raw)
-  if (!Number.isFinite(value)) return { refusal: { envVar, raw, reason: "not-a-number" }, value: Number(fallback) }
-  if (value <= 0) return { refusal: { envVar, raw, reason: "not-positive" }, value: Number(fallback) }
+  const trimmed = raw.trim()
+  const consequence = onRefusal.kind === "off" ? onRefusal.check + " is OFF" : "default " + declaredDefault + " in use"
+  // ONE parse for every value, so this file has one strictness: Number() reads "85abc" and "0.8x" as NaN rather than as
+  // a silent 85 and 0.8 - the old parseInt/parseFloat accepted both - and an empty value stays not-a-number rather
+  // than reading as 0 (@cto, 2026-10-15). The kind then applies its own bound.
+  const value = trimmed === "" ? Number.NaN : Number(trimmed)
+  const refuse = (
+    reason: ThresholdRefusal["reason"],
+  ): { readonly value: number; readonly refusal: ThresholdRefusal } => ({
+    refusal: { envVar, raw, reason, consequence },
+    value: declaredDefault,
+  })
+  if (!Number.isFinite(value)) return refuse("not-a-number")
+  if (kind === "percent" && !(value > 0 && value <= 100)) return refuse("not-a-percent")
+  if (kind === "integer" && !Number.isInteger(value)) return refuse("not-an-integer")
+  if (value <= 0) return refuse("not-positive")
   return { value }
 }
 
-/** The one line that names a refused reaper threshold: the variable, the value it held, and that the reaper is off. */
-export function formatReaperThresholdRefusal(refusal: ReaperCpuThresholdRefusal): string {
-  const why = refusal.reason === "not-a-number" ? "is not a number" : "is not above zero"
-  return `${refusal.envVar} ${why}: ${JSON.stringify(refusal.raw)} — the process reaper is OFF, every other health check is still running, and HEALTH_REAPER_ENABLED=0 is the declared way to switch the reaper off (29561 item 4)`
+/** The one line that names every refused threshold and what its check is doing instead (29561 item 4, 29572). */
+export function formatThresholdRefusals(refusals: readonly ThresholdRefusal[]): string {
+  const parts = refusals.map((refusal) => {
+    const why =
+      refusal.reason === "not-a-number"
+        ? "is not a number"
+        : refusal.reason === "not-an-integer"
+          ? "is not a whole number"
+          : refusal.reason === "not-a-percent"
+            ? "is not a percentage above 0 and at most 100"
+            : "is not above zero"
+    return refusal.envVar + " " + why + ": " + JSON.stringify(refusal.raw) + " - " + refusal.consequence
+  })
+  const plural = refusals.length === 1 ? "" : "s"
+  return (
+    refusals.length +
+    " health threshold" +
+    plural +
+    " refused: " +
+    parts.join("; ") +
+    ". Every other check is still running, and no check was left comparing against a value nobody chose (29561 item 4, 29572)"
+  )
 }
 
 /**
- * The thresholds, with the reaper-CPU refusal riding beside the field it explains when there is one (29561 item 4).
+ * The thresholds, with every refusal riding beside the values when there is one (29561 item 4, 29572).
  *
- * One reader, never two: a caller that can act on the refusal (this plugin's own `start()`) reads it off the result and
- * pages once, and a caller that only needs numbers is unaffected. The refusal never throws on its way back to the
- * plugin loader, because that loader disables the whole plugin whose start throws.
+ * One reader, never two: all thirteen values go through readNumericThreshold, so there is one strict-env-read mechanism
+ * in this file. A caller that can act on a refusal (this plugin's own `start()`) pages once; a caller that only needs
+ * numbers is unaffected. No refusal throws on its way back to the plugin loader, because that loader disables the whole
+ * plugin whose start throws.
  */
 export function defaultThresholds(): HealthThresholds {
-  const reaperCpu = readReaperCpuThreshold("HEALTH_REAPER_CPU_THRESHOLD", "80")
+  const refusals: ThresholdRefusal[] = []
+  const off = (check: string): ThresholdConsequence => ({ kind: "off", check })
+  const useDefault: ThresholdConsequence = { kind: "default" }
+  const read = (envVar: string, fallback: string, kind: ThresholdKind, onRefusal: ThresholdConsequence): number => {
+    const result = readNumericThreshold(envVar, fallback, kind, onRefusal)
+    if (result.refusal !== undefined) refusals.push(result.refusal)
+    return result.value
+  }
+  const reaperOff = (): ThresholdConsequence =>
+    off("the process reaper (HEALTH_REAPER_ENABLED=0 is the declared way to switch it off)")
+  // Passive alerts keep the declared default: an alert left running protects more than one switched off.
+  const cpuWarningMultiplier = read("HEALTH_CPU_WARNING", "0.8", "float", useDefault)
+  const cpuCriticalMultiplier = read("HEALTH_CPU_CRITICAL", "1.5", "float", useDefault)
+  const memWarningPercent = read("HEALTH_MEM_WARNING", "85", "percent", useDefault)
+  const memCriticalPercent = read("HEALTH_MEM_CRITICAL", "95", "percent", useDefault)
+  const processCountWarning = read("HEALTH_PROC_WARNING", "50", "integer", useDefault)
+  const processPerAgent = read("HEALTH_PROC_PER_AGENT", "10", "integer", useDefault)
+  const processChiefConst = read("HEALTH_PROC_CHIEF_CONST", "6", "integer", useDefault)
+  const processSafetyMargin = read("HEALTH_PROC_SAFETY_MARGIN", "1.5", "float", useDefault)
+  const diskWarningPercent = read("HEALTH_DISK_WARNING", "85", "percent", useDefault)
+  const diskCriticalPercent = read("HEALTH_DISK_CRITICAL", "95", "percent", useDefault)
+  const worktreeWarning = read("HEALTH_WORKTREE_WARNING", "5", "integer", useDefault)
+  const fdWarningPercent = read("HEALTH_FD_WARNING", "70", "percent", useDefault)
+  const ghRateLimitWarning = read("HEALTH_GH_RATELIMIT_WARNING", "20", "percent", useDefault)
+  // The reaper kills processes, so ANY refused reaper parameter turns it OFF rather than run it on a default nobody chose.
+  const reaperAgeMinutes = read("HEALTH_REAPER_AGE_MINUTES", "30", "integer", reaperOff())
+  const reaperGraceSamples = read("HEALTH_REAPER_GRACE_SAMPLES", "6", "integer", reaperOff())
+  const reaperCpuThreshold = read("HEALTH_REAPER_CPU_THRESHOLD", "80", "float", reaperOff())
+  const reaperRefused = REAPER_PARAMETER_ENV_VARS.some((envVar) => refusals.some((entry) => entry.envVar === envVar))
   return {
-    ...(reaperCpu.refusal === undefined ? {} : { reaperCpuRefusal: reaperCpu.refusal }),
-    cpuWarningMultiplier: parseFloat(process.env.HEALTH_CPU_WARNING ?? "0.8"),
-    cpuCriticalMultiplier: parseFloat(process.env.HEALTH_CPU_CRITICAL ?? "1.5"),
-    memWarningPercent: parseInt(process.env.HEALTH_MEM_WARNING ?? "85", 10),
-    memCriticalPercent: parseInt(process.env.HEALTH_MEM_CRITICAL ?? "95", 10),
-    processCountWarning: parseInt(process.env.HEALTH_PROC_WARNING ?? "50", 10),
-    diskWarningPercent: parseInt(process.env.HEALTH_DISK_WARNING ?? "85", 10),
-    diskCriticalPercent: parseInt(process.env.HEALTH_DISK_CRITICAL ?? "95", 10),
-    worktreeWarning: parseInt(process.env.HEALTH_WORKTREE_WARNING ?? "5", 10),
-    fdWarningPercent: parseInt(process.env.HEALTH_FD_WARNING ?? "70", 10),
-    ghRateLimitWarning: parseInt(process.env.HEALTH_GH_RATELIMIT_WARNING ?? "20", 10),
+    ...(refusals.length === 0 ? {} : { thresholdRefusals: refusals }),
+    cpuWarningMultiplier,
+    cpuCriticalMultiplier,
+    memWarningPercent,
+    memCriticalPercent,
+    processCountWarning,
+    processPerAgent,
+    processChiefConst,
+    processSafetyMargin,
+    diskWarningPercent,
+    diskCriticalPercent,
+    worktreeWarning,
+    fdWarningPercent,
+    ghRateLimitWarning,
     // At 10s interval, 3 samples = 30s sustained
     sustainedSamples: 3,
-    reaperEnabled: process.env.HEALTH_REAPER_ENABLED !== "0" && reaperCpu.refusal === undefined,
-    // Inert while a refusal is present: the reaper is off, and the refusal is what a reader acts on.
-    reaperCpuThreshold: reaperCpu.value,
-    reaperAgeMinutes: parseInt(process.env.HEALTH_REAPER_AGE_MINUTES ?? "30", 10),
-    reaperGraceSamples: parseInt(process.env.HEALTH_REAPER_GRACE_SAMPLES ?? "6", 10),
+    reaperEnabled: process.env.HEALTH_REAPER_ENABLED !== "0" && !reaperRefused,
+    reaperCpuThreshold,
+    reaperAgeMinutes,
+    reaperGraceSamples,
   }
 }
 
@@ -1558,18 +1653,21 @@ function formatLockHolder(lock: GitLockInfo, sessionName: string | null): string
 // (accountly wrapper + stdio-adapter + tribe MCP + claude proc + transient
 // bd-CLI invocations all add up) plus a fixed chief/daemon constant. Tunable
 // via env vars when a new agent shape changes the baseline.
-const N_PER_AGENT = parseInt(process.env.HEALTH_PROC_PER_AGENT ?? "10", 10)
-const CHIEF_CONSTANT = parseInt(process.env.HEALTH_PROC_CHIEF_CONST ?? "6", 10)
-const SAFETY_MARGIN = parseFloat(process.env.HEALTH_PROC_SAFETY_MARGIN ?? "1.5")
 
 /** Dynamic process-count threshold that scales with active-agent count.
  *  When 0 active agents, falls back to the static `processCountWarning`
  *  so the daemon still alerts in standalone deployments. When the dynamic
  *  number exceeds the static floor, the dynamic one wins — alarms shouldn't
  *  fire just because a healthy 4-agent baseline is over the old 50 bar. */
-export function dynamicProcessThreshold(staticThreshold: number, activeAgentCount: number): number {
+export function dynamicProcessThreshold(
+  staticThreshold: number,
+  activeAgentCount: number,
+  dynamicProcess: { readonly perAgent: number; readonly chiefConst: number; readonly safetyMargin: number },
+): number {
   if (activeAgentCount <= 0) return staticThreshold
-  const dynamic = Math.ceil(CHIEF_CONSTANT + N_PER_AGENT * activeAgentCount * SAFETY_MARGIN)
+  const dynamic = Math.ceil(
+    dynamicProcess.chiefConst + dynamicProcess.perAgent * activeAgentCount * dynamicProcess.safetyMargin,
+  )
   return Math.max(staticThreshold, dynamic)
 }
 
@@ -1756,7 +1854,11 @@ export function evaluateAlerts(
   // dynamicProcessThreshold helper falls back to the static value when no
   // agents are connected (standalone deployments), so the bar never goes
   // BELOW the configured static threshold.
-  const processThreshold = dynamicProcessThreshold(thresholds.processCountWarning, activeAgentCount)
+  const processThreshold = dynamicProcessThreshold(thresholds.processCountWarning, activeAgentCount, {
+    perAgent: thresholds.processPerAgent,
+    chiefConst: thresholds.processChiefConst,
+    safetyMargin: thresholds.processSafetyMargin,
+  })
   if (metrics.bunProcesses !== undefined && metrics.bunProcesses > processThreshold) {
     if (!state.firedAlerts.has("process-count:warning")) {
       state.firedAlerts.add("process-count:warning")
@@ -2641,10 +2743,14 @@ export const healthMonitorPlugin: TribePluginApi = {
     // of start(). A throw would have made the plugin loader disable this whole plugin - disk, bridge-lost paging and
     // the reaper together - behind one log line (@cto, 2026-10-15). Severity critical because the page is the point:
     // it broadcasts (push) through the monitor's ordinary alert path with every other check still running.
-    if (thresholds.reaperCpuRefusal !== undefined) {
-      const refusalMessage = formatReaperThresholdRefusal(thresholds.reaperCpuRefusal)
+    // 29561 item 4 + 29572: every refused threshold is named in ONE page here, once per start(). A refused reaper
+    // parameter (cpu, age or grace) turns the reaper OFF; a refused alert threshold keeps its check running at the
+    // declared default; the page says which, per entry. Nothing throws, so the plugin stays loaded and every other
+    // check keeps running.
+    if (thresholds.thresholdRefusals !== undefined) {
+      const refusalMessage = formatThresholdRefusals(thresholds.thresholdRefusals)
       log.error?.(refusalMessage)
-      deliverHealthAlert(api, { severity: "critical", type: "reaper" }, refusalMessage, new Set(), true)
+      deliverHealthAlert(api, { severity: "critical", type: "thresholds" }, refusalMessage, new Set(), true)
     }
     const alertState = createAlertState()
     const processSource = createHealthProcessSource()

@@ -13,7 +13,15 @@ import {
   createCanonicalReaperState,
   SOURCE_RECOVERY_SAMPLES,
 } from "./health-monitor-canonical-reaper.ts"
-import { defaultThresholds } from "./health-monitor-plugin.ts"
+import {
+  type AlertState,
+  checkReaper,
+  createAlertState,
+  defaultThresholds,
+  evaluateAlerts,
+  formatThresholdRefusals,
+  type HealthMetrics,
+} from "./health-monitor-plugin.ts"
 
 function observation(
   attribution: ProcessRoutingAttribution,
@@ -564,6 +572,8 @@ describe("canonical source conditions announce edges, not observations", () => {
 })
 
 describe("the reaper's CPU threshold is read strictly, and a refusal stays inside the reaper", () => {
+  const refusalFor = (read: ReturnType<typeof defaultThresholds>, envVar = "HEALTH_REAPER_CPU_THRESHOLD") =>
+    read.thresholdRefusals?.find((entry) => entry.envVar === envVar)
   const withThreshold = (value: string | undefined, run: () => void): void => {
     const previous = process.env.HEALTH_REAPER_CPU_THRESHOLD
     try {
@@ -584,16 +594,19 @@ describe("the reaper's CPU threshold is read strictly, and a refusal stays insid
     // off, and start() pages once about it.
     withThreshold("eighty", () => {
       const read = defaultThresholds()
-      expect(read.reaperCpuRefusal).toEqual({
+      expect(refusalFor(read)).toMatchObject({
         envVar: "HEALTH_REAPER_CPU_THRESHOLD",
         raw: "eighty",
         reason: "not-a-number",
       })
       expect(read.reaperEnabled).toBe(false)
+      // The folded consequence is the data that says what the refusal does (29572).
+      expect(refusalFor(read)?.consequence).toContain("process reaper")
+      expect(refusalFor(read)?.consequence).toContain("is OFF")
     })
     // A finite value at or below zero fails exactly the way NaN does, so it is refused the same way.
     withThreshold("0", () => {
-      expect(defaultThresholds().reaperCpuRefusal).toEqual({
+      expect(refusalFor(defaultThresholds())).toMatchObject({
         envVar: "HEALTH_REAPER_CPU_THRESHOLD",
         raw: "0",
         reason: "not-positive",
@@ -601,7 +614,7 @@ describe("the reaper's CPU threshold is read strictly, and a refusal stays insid
     })
     withThreshold("-5", () => {
       const read = defaultThresholds()
-      expect(read.reaperCpuRefusal).toEqual({
+      expect(refusalFor(read)).toMatchObject({
         envVar: "HEALTH_REAPER_CPU_THRESHOLD",
         raw: "-5",
         reason: "not-positive",
@@ -617,14 +630,324 @@ describe("the reaper's CPU threshold is read strictly, and a refusal stays insid
   it("still reads the default, and a number the operator did set", () => {
     withThreshold(undefined, () => {
       const read = defaultThresholds()
-      expect(read.reaperCpuRefusal).toBeUndefined()
+      expect(refusalFor(read)).toBeUndefined()
       expect(read.reaperCpuThreshold).toBe(80)
       expect(read.reaperEnabled).toBe(true)
     })
     withThreshold("55", () => {
       const read = defaultThresholds()
-      expect(read.reaperCpuRefusal).toBeUndefined()
+      expect(refusalFor(read)).toBeUndefined()
       expect(read.reaperCpuThreshold).toBe(55)
+    })
+  })
+})
+
+describe("all thirteen thresholds are read strictly, and a refusal is contained (29572)", () => {
+  type Read = ReturnType<typeof defaultThresholds>
+  // [envVar, declared default, field, what the refusal does]. A passive alert keeps its declared default - an alert
+  // left running protects more than one switched off. A reaper parameter is different: the reaper kills processes, so
+  // any refused reaper value turns it OFF rather than run it on a number the operator never chose.
+  const PASSIVE: ReadonlyArray<readonly [string, number, (t: Read) => number]> = [
+    ["HEALTH_CPU_WARNING", 0.8, (t) => t.cpuWarningMultiplier],
+    ["HEALTH_CPU_CRITICAL", 1.5, (t) => t.cpuCriticalMultiplier],
+    ["HEALTH_MEM_WARNING", 85, (t) => t.memWarningPercent],
+    ["HEALTH_MEM_CRITICAL", 95, (t) => t.memCriticalPercent],
+    ["HEALTH_PROC_WARNING", 50, (t) => t.processCountWarning],
+    ["HEALTH_PROC_PER_AGENT", 10, (t) => t.processPerAgent],
+    ["HEALTH_PROC_CHIEF_CONST", 6, (t) => t.processChiefConst],
+    ["HEALTH_PROC_SAFETY_MARGIN", 1.5, (t) => t.processSafetyMargin],
+    ["HEALTH_DISK_WARNING", 85, (t) => t.diskWarningPercent],
+    ["HEALTH_DISK_CRITICAL", 95, (t) => t.diskCriticalPercent],
+    ["HEALTH_WORKTREE_WARNING", 5, (t) => t.worktreeWarning],
+    ["HEALTH_FD_WARNING", 70, (t) => t.fdWarningPercent],
+    ["HEALTH_GH_RATELIMIT_WARNING", 20, (t) => t.ghRateLimitWarning],
+  ]
+  const REAPER: ReadonlyArray<readonly [string, number, (t: Read) => number]> = [
+    ["HEALTH_REAPER_CPU_THRESHOLD", 80, (t) => t.reaperCpuThreshold],
+    ["HEALTH_REAPER_AGE_MINUTES", 30, (t) => t.reaperAgeMinutes],
+    ["HEALTH_REAPER_GRACE_SAMPLES", 6, (t) => t.reaperGraceSamples],
+  ]
+
+  const withEnv = (envVar: string, value: string | undefined, run: () => void): void => {
+    const previous = process.env[envVar]
+    try {
+      if (value === undefined) delete process.env[envVar]
+      else process.env[envVar] = value
+      run()
+    } finally {
+      if (previous === undefined) delete process.env[envVar]
+      else process.env[envVar] = previous
+    }
+  }
+
+  it("refuses a mistyped value on every one of the thirteen, with the consequence its check now has", () => {
+    for (const [envVar, fallback, get] of PASSIVE) {
+      withEnv(envVar, "eighty-ish", () => {
+        const read = defaultThresholds()
+        expect(get(read)).toBe(fallback)
+        expect(read.thresholdRefusals?.[0]).toMatchObject({ envVar, raw: "eighty-ish", reason: "not-a-number" })
+        expect(read.thresholdRefusals?.[0]?.consequence).toBe("default " + fallback + " in use")
+        expect(read.reaperEnabled).toBe(true)
+      })
+    }
+    for (const [envVar, fallback, get] of REAPER) {
+      withEnv(envVar, "eighty-ish", () => {
+        const read = defaultThresholds()
+        expect(get(read)).toBe(fallback)
+        expect(read.thresholdRefusals?.[0]).toMatchObject({ envVar, raw: "eighty-ish", reason: "not-a-number" })
+        expect(read.thresholdRefusals?.[0]?.consequence).toContain("process reaper")
+        expect(read.thresholdRefusals?.[0]?.consequence).toContain("is OFF")
+        // A refused reaper parameter turns the reaper off, whichever of the three it is.
+        expect(read.reaperEnabled).toBe(false)
+      })
+    }
+  })
+
+  it("refuses a value at or below zero on every one of the thirteen", () => {
+    // A percent field refuses 0 as "not-a-percent" (its bound is 0 < v <= 100); everything else as "not-positive".
+    const PERCENT = new Set([
+      "HEALTH_MEM_WARNING",
+      "HEALTH_MEM_CRITICAL",
+      "HEALTH_DISK_WARNING",
+      "HEALTH_DISK_CRITICAL",
+      "HEALTH_FD_WARNING",
+      "HEALTH_GH_RATELIMIT_WARNING",
+    ])
+    for (const [envVar, fallback, get] of [...PASSIVE, ...REAPER]) {
+      withEnv(envVar, "0", () => {
+        const read = defaultThresholds()
+        expect(get(read)).toBe(fallback)
+        expect(read.thresholdRefusals?.[0]?.reason).toBe(PERCENT.has(envVar) ? "not-a-percent" : "not-positive")
+      })
+    }
+  })
+
+  it("refuses a non-whole number on an integer field, rather than truncating it (85.5 is not 85)", () => {
+    for (const [envVar, fallback, get] of [
+      ["HEALTH_PROC_WARNING", 50, (t: Read) => t.processCountWarning],
+      ["HEALTH_WORKTREE_WARNING", 5, (t: Read) => t.worktreeWarning],
+      ["HEALTH_PROC_CHIEF_CONST", 6, (t: Read) => t.processChiefConst],
+    ] as const) {
+      withEnv(envVar, "85.5", () => {
+        const read = defaultThresholds()
+        expect(get(read)).toBe(fallback)
+        expect(read.thresholdRefusals?.[0]).toMatchObject({ raw: "85.5", reason: "not-an-integer" })
+      })
+    }
+  })
+
+  it("refuses a value outside 0..100 on a percent field, so a fat-fingered 850 cannot switch the alert off", () => {
+    for (const [envVar, fallback, get] of [
+      ["HEALTH_MEM_WARNING", 85, (t: Read) => t.memWarningPercent],
+      ["HEALTH_DISK_CRITICAL", 95, (t: Read) => t.diskCriticalPercent],
+      ["HEALTH_FD_WARNING", 70, (t: Read) => t.fdWarningPercent],
+      ["HEALTH_GH_RATELIMIT_WARNING", 20, (t: Read) => t.ghRateLimitWarning],
+    ] as const) {
+      withEnv(envVar, "850", () => {
+        const read = defaultThresholds()
+        expect(get(read)).toBe(fallback)
+        expect(read.thresholdRefusals?.[0]).toMatchObject({ raw: "850", reason: "not-a-percent" })
+      })
+    }
+  })
+
+  it("refuses trailing garbage that parseInt/parseFloat used to swallow silently", () => {
+    withEnv("HEALTH_MEM_WARNING", "85abc", () => {
+      const read = defaultThresholds()
+      expect(read.memWarningPercent).toBe(85)
+      expect(read.thresholdRefusals?.[0]?.reason).toBe("not-a-number")
+    })
+    withEnv("HEALTH_CPU_WARNING", "0.8x", () => {
+      const read = defaultThresholds()
+      expect(read.cpuWarningMultiplier).toBe(0.8)
+      expect(read.thresholdRefusals?.[0]?.reason).toBe("not-a-number")
+    })
+  })
+
+  it("leaves nothing comparing against NaN, and never throws out of defaultThresholds", () => {
+    for (const [envVar, , get] of [...PASSIVE, ...REAPER]) {
+      withEnv(envVar, "wat", () => {
+        expect(() => defaultThresholds()).not.toThrow()
+        expect(Number.isNaN(get(defaultThresholds()))).toBe(false)
+      })
+    }
+  })
+
+  it("names every refused variable in ONE message, with what each check does now", () => {
+    withEnv("HEALTH_MEM_WARNING", "nope", () => {
+      withEnv("HEALTH_DISK_CRITICAL", "-1", () => {
+        withEnv("HEALTH_REAPER_AGE_MINUTES", "30m", () => {
+          const read = defaultThresholds()
+          expect(read.thresholdRefusals).toHaveLength(3)
+          const message = formatThresholdRefusals(read.thresholdRefusals ?? [])
+          expect(message).toContain("HEALTH_MEM_WARNING")
+          expect(message).toContain("HEALTH_DISK_CRITICAL")
+          expect(message).toContain("HEALTH_REAPER_AGE_MINUTES")
+          expect(message).toContain("default 85 in use")
+          expect(message).toContain("process reaper")
+          expect(message).toContain("3 health thresholds refused")
+          expect(message).toContain("no check was left comparing against a value nobody chose")
+        })
+      })
+    })
+  })
+
+  it("reads every declared default, and a number the operator did set, with no refusal", () => {
+    for (const [envVar, fallback, get] of [...PASSIVE, ...REAPER]) {
+      withEnv(envVar, undefined, () => {
+        const read = defaultThresholds()
+        expect(get(read)).toBe(fallback)
+        expect(read.thresholdRefusals).toBeUndefined()
+      })
+      withEnv(envVar, String(fallback), () => {
+        const read = defaultThresholds()
+        expect(get(read)).toBe(fallback)
+        expect(read.thresholdRefusals).toBeUndefined()
+      })
+    }
+  })
+
+  it("keeps the folded item-4 value on the same field, with the reaper OFF and one list for all thirteen", () => {
+    withEnv("HEALTH_REAPER_CPU_THRESHOLD", "eighty", () => {
+      const read = defaultThresholds()
+      expect(read.reaperEnabled).toBe(false)
+      expect(read.thresholdRefusals).toHaveLength(1)
+      expect(read.thresholdRefusals?.[0]).toMatchObject({
+        envVar: "HEALTH_REAPER_CPU_THRESHOLD",
+        raw: "eighty",
+        reason: "not-a-number",
+      })
+    })
+  })
+})
+
+describe("a refused reaper parameter turns the reaper OFF on BOTH consumer paths (29572)", () => {
+  const withEnv = (envVar: string, value: string | undefined, run: () => void): void => {
+    const previous = process.env[envVar]
+    try {
+      if (value === undefined) delete process.env[envVar]
+      else process.env[envVar] = value
+      run()
+    } finally {
+      if (previous === undefined) delete process.env[envVar]
+      else process.env[envVar] = previous
+    }
+  }
+
+  it("managed (checkCanonicalReaper): a refused age asks nothing, because reaperEnabled is false", () => {
+    for (const envVar of ["HEALTH_REAPER_AGE_MINUTES", "HEALTH_REAPER_GRACE_SAMPLES"]) {
+      withEnv(envVar, "thirty-ish", () => {
+        const t = defaultThresholds()
+        // reaperEnabled false is the off switch both consumers return on first (canonical-reaper.ts:186).
+        expect(t.reaperEnabled).toBe(false)
+        const state = createCanonicalReaperState()
+        const sink = api()
+        for (let index = 0; index < 6; index++) {
+          checkCanonicalReaper(
+            observation(
+              { kind: "unowned" },
+              { observedAt: 1_000 + 31 * 60_000 + index * 30_000, sequence: 20 + index },
+            ),
+            t,
+            state,
+            sink.client,
+            sessions,
+          )
+        }
+        // Long past the age floor and the grace, and still nothing: the reaper is off, and it says why on the page.
+        expect(sink.broadcasts).toEqual([])
+        expect(sink.sends).toEqual([])
+      })
+    }
+  })
+
+  it("legacy (checkReaper): a refused age tracks nothing, because reaperEnabled is false", async () => {
+    const spawn = vi.spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
+      const etime = Number(argv[2]) === 424_242 ? "00:01:00" : "00:40:00"
+      return { stdout: new Blob([`${etime}\n`]).stream() } as unknown as ReturnType<typeof Bun.spawn>
+    }) as unknown as typeof Bun.spawn)
+    try {
+      for (const envVar of ["HEALTH_REAPER_AGE_MINUTES", "HEALTH_REAPER_GRACE_SAMPLES"]) {
+        const previous = process.env[envVar]
+        process.env[envVar] = "thirty-ish"
+        try {
+          const t = defaultThresholds()
+          expect(t.reaperEnabled).toBe(false)
+          const state = { reaperSuspects: new Map() } as unknown as AlertState
+          const legacyApi = { broadcast: () => {}, hasRecentMessage: () => false } as unknown as TribeClientApi
+          await checkReaper(
+            [
+              { pid: 424_242, cpu: 99, command: "bun young.ts" },
+              { pid: 424_243, cpu: 99, command: "bun old.ts" },
+            ],
+            new Map(),
+            [],
+            t,
+            state,
+            legacyApi,
+            () => false,
+          )
+          // Off means off: not even the 40-minute-old process is tracked, so nothing can be reaped on a refused value.
+          expect(state.reaperSuspects.size).toBe(0)
+        } finally {
+          if (previous === undefined) delete process.env[envVar]
+          else process.env[envVar] = previous
+        }
+      }
+    } finally {
+      spawn.mockRestore()
+    }
+  })
+})
+
+describe("a refused passive alert keeps RUNNING at its declared default (29572)", () => {
+  const metrics = (worktrees: number, fdCount?: HealthMetrics["fdCount"]): HealthMetrics => ({
+    cpu: { topProcesses: [] },
+    ...(fdCount === undefined ? {} : { fdCount }),
+    processObservation: { kind: "standalone-os" },
+    scalarObservation: { kind: "standalone-os", unavailable: ["disk.bytes", "disk.inodes"] },
+    timestamp: Date.now(),
+    worktrees,
+  })
+
+  const withWorktreeEnv = (value: string | undefined, run: () => void): void => {
+    const previous = process.env.HEALTH_WORKTREE_WARNING
+    try {
+      if (value === undefined) delete process.env.HEALTH_WORKTREE_WARNING
+      else process.env.HEALTH_WORKTREE_WARNING = value
+      run()
+    } finally {
+      if (previous === undefined) delete process.env.HEALTH_WORKTREE_WARNING
+      else process.env.HEALTH_WORKTREE_WARNING = previous
+    }
+  }
+
+  it("still fires the worktree warning at the declared default once the threshold is refused", () => {
+    // Control: 99 worktrees against the declared default of 5 is a real warning, so the row can fail loudly for an
+    // unrelated reason rather than passing by accident.
+    withWorktreeEnv(undefined, () => {
+      const alerts = evaluateAlerts(metrics(99), defaultThresholds(), createAlertState())
+      expect(alerts.filter((alert) => alert.type === "worktree")).toHaveLength(1)
+    })
+    // Refused: the check is NOT switched off - an alert left running protects more than one switched off - and the
+    // refusal is paged, naming the default it runs at.
+    withWorktreeEnv("ninety-nine", () => {
+      const thresholds = defaultThresholds()
+      expect(thresholds.thresholdRefusals?.[0]?.consequence).toBe("default 5 in use")
+      const alerts = evaluateAlerts(metrics(99), thresholds, createAlertState())
+      expect(alerts.filter((alert) => alert.type === "worktree")).toHaveLength(1)
+    })
+  })
+
+  it("does not take a different check down with it, so the monitor is not disabled", () => {
+    withWorktreeEnv("ninety-nine", () => {
+      const alerts = evaluateAlerts(
+        metrics(99, { total: 8_000, perSession: [], limit: 10_000, basis: "linux-file-nr-vs-file-max" }),
+        defaultThresholds(),
+        createAlertState(),
+      )
+      expect(alerts.filter((alert) => alert.type === "worktree")).toHaveLength(1)
+      expect(alerts.filter((alert) => alert.type === "fd-count")).toHaveLength(1)
     })
   })
 })

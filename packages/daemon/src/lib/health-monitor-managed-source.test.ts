@@ -278,12 +278,15 @@ describe("health monitor managed process source", () => {
         if (source.kind !== "managed") throw new Error("fixture must use canonical managed reads")
         expect(source.read).toHaveBeenCalledTimes(1)
         // ONE page, naming the variable, the value it held, and that the reaper is off - and it is a page (push).
-        const refusedPages = broadcast.mock.calls.filter(([, topic]) => topic === "health:reaper:critical")
+        // 29572 folds this refusal onto the shared threshold page, so the topic is health:thresholds:critical now
+        // rather than health:reaper:critical; it is still exactly ONE page and still a push.
+        const refusedPages = broadcast.mock.calls.filter(([, topic]) => topic === "health:thresholds:critical")
         expect(refusedPages).toHaveLength(1)
         const [message, , , options] = refusedPages[0] as [string, string, undefined, { delivery?: string }]
         expect(message).toContain("HEALTH_REAPER_CPU_THRESHOLD")
         expect(message).toContain(JSON.stringify(raw))
-        expect(message).toContain("reaper is OFF")
+        expect(message).toContain("process reaper")
+        expect(message).toContain("is OFF")
         expect(options).toMatchObject({ delivery: "push" })
       } finally {
         stop?.()

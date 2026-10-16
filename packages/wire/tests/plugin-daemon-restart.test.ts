@@ -281,17 +281,33 @@ describe("Claude plugin daemon-restart self-heal", () => {
     claudeSessionId?: string
     /** The launch's identity token, in place of launchEnvironment's; the daemon's verifier judges it. */
     idToken?: string
+    /**
+     * The harness PID the launch declares. A managed launch's harness starts the provider, which starts the plugin
+     * (29567), so a plugin this test spawns directly names the test's own parent: the test plays the provider.
+     */
     providerParentPid?: string
+    /** Spawn through a harness that declares itself and a provider under it, as `ag code` and its provider do. */
     providerShim?: boolean
     launchStateDir?: string
     delivery: "push" | "pull"
     requireJoin: boolean
   }): ChildProcessWithoutNullStreams {
     const pluginArgv = [PLUGIN_SERVER, "--socket", socketPath, "--name", opts.name]
+    // The harness declares itself and starts a provider hop, which starts the plugin: the declared PID is the
+    // plugin's grandparent, as on every live seat (29567). Each hop forwards stop signals and its child's exit.
     const providerShim = `
 const argv = JSON.parse(process.env.TRIBE_TEST_PLUGIN_ARGV ?? "[]")
-const child = Bun.spawn(argv, {
-  env: { ...process.env, TRIBE_PLUGIN_PROVIDER_PARENT_PID: String(process.pid) },
+const harness = process.env.TRIBE_TEST_PROVIDER_HOP !== "1"
+const env = { ...process.env }
+if (harness) {
+  env.TRIBE_PLUGIN_PROVIDER_PARENT_PID = String(process.pid)
+  env.TRIBE_TEST_PROVIDER_HOP = "1"
+} else {
+  delete env.TRIBE_TEST_PROVIDER_HOP
+  delete env.TRIBE_TEST_PROVIDER_SHIM
+}
+const child = Bun.spawn(harness ? [process.execPath, "-e", process.env.TRIBE_TEST_PROVIDER_SHIM ?? ""] : argv, {
+  env,
   stdin: "inherit",
   stdout: "inherit",
   stderr: "inherit",
@@ -303,11 +319,15 @@ process.exit(await child.exited)
       cwd: tmpDir,
       env: {
         ...process.env,
-        ...(opts.providerShim === true ? { TRIBE_TEST_PLUGIN_ARGV: JSON.stringify([BUN_BIN, ...pluginArgv]) } : {}),
+        ...(opts.providerShim === true
+          ? { TRIBE_TEST_PLUGIN_ARGV: JSON.stringify([BUN_BIN, ...pluginArgv]), TRIBE_TEST_PROVIDER_SHIM: providerShim }
+          : {}),
         TRIBE_DB: opts.dbPath,
         TRIBE_DELIVERY: opts.delivery,
         ...(opts.delivery === "pull" ? { TRIBE_PULL_TRANSPORT: "mcp" } : {}),
-        ...(opts.requireJoin ? {} : { TRIBE_REQUIRE_JOIN: "0" }),
+        // Explicit both ways: a seat running this test exports TRIBE_REQUIRE_JOIN=0, which would join a require-join
+        // fixture at register and report push before any tribe.join.
+        TRIBE_REQUIRE_JOIN: opts.requireJoin ? "1" : "0",
         TRIBE_TAKEOVER: "1",
         ...launchEnvironment(opts.launchId),
         ...(opts.claudeSessionId === undefined ? {} : { CLAUDE_SESSION_ID: opts.claudeSessionId }),
@@ -814,7 +834,7 @@ process.exit(await child.exited)
       logPath: adapterLog,
       name: PERSONA,
       launchId: "adapter-crash-launch",
-      providerParentPid: String(process.pid),
+      providerParentPid: String(process.ppid),
       delivery: "push",
       requireJoin: true,
     })
@@ -864,7 +884,7 @@ process.exit(await child.exited)
     expect(restoredMember).toMatchObject({
       member_id: initialMember?.member_id,
       launch_id: personaLaunchId("adapter-crash-launch"),
-      launch_parent_pid: process.pid,
+      launch_parent_pid: process.ppid,
       delivery: "pull",
       transport_state: "connected",
       owner_state: "live",
@@ -962,7 +982,7 @@ process.exit(await child.exited)
       logPath: join(tmpDir, "adapter-exit-record.log"),
       name: PERSONA,
       launchId: "exit-record-launch",
-      providerParentPid: String(process.pid),
+      providerParentPid: String(process.ppid),
       launchStateDir,
       delivery: "push",
       requireJoin: true,
@@ -1051,7 +1071,7 @@ process.exit(await child.exited)
       logPath: join(tmpDir, "adapter-signalled-child.log"),
       name: PERSONA,
       launchId: "signalled-child-launch",
-      providerParentPid: String(process.pid),
+      providerParentPid: String(process.ppid),
       launchStateDir,
       delivery: "push",
       requireJoin: true,
@@ -1117,7 +1137,7 @@ process.exit(await child.exited)
         logPath: join(tmpDir, "adapter-exit-record-unwritable.log"),
         name: PERSONA,
         launchId: "unwritable-exit-record-launch",
-        providerParentPid: String(process.pid),
+        providerParentPid: String(process.ppid),
         launchStateDir,
         delivery: "push",
         requireJoin: true,
@@ -1193,7 +1213,7 @@ process.exit(await child.exited)
       name: seat,
       launchId: "foreign-seat-launch",
       idToken: seatToken,
-      providerParentPid: String(process.pid),
+      providerParentPid: String(process.ppid),
       delivery: "pull",
       requireJoin: true,
     })
@@ -1217,7 +1237,7 @@ process.exit(await child.exited)
       name: foreign,
       launchId: "foreign-other-launch",
       idToken: seatToken,
-      providerParentPid: String(process.pid),
+      providerParentPid: String(process.ppid),
       delivery: "pull",
       requireJoin: true,
     })

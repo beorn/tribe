@@ -2,6 +2,7 @@ import { decorrelatedJitter, type RandomUnit } from "@bearly/pacing"
 import { isAbsolute, join } from "node:path"
 import { HAB_ID_TOKEN_ENV, HAB_ID_TOKEN_FILE_ENV } from "tribe-wire/lib/hab-session-env"
 import { TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV } from "tribe-wire/lib/session-identity-env"
+import type { ParentPidReading } from "tribe-wire/lib/process-parent"
 
 /** Longer than the adapter's 60s fresh-daemon reconnect watchdog. */
 export const ADAPTER_STABLE_MS = 90_000
@@ -139,6 +140,48 @@ export const PROVIDER_PARENT_REMEDY =
 export const LEGACY_PARENT_WARNING =
   "tribe plugin wrapper: managed launch supplied no provider-parent PID; falling back to the wrapper's real provider parent. Relaunch the host session to restore full launch provenance."
 
+export type SeatAncestry =
+  | { readonly kind: "seat" }
+  | { readonly kind: "unmeasured"; readonly warning: string }
+  | { readonly kind: "nested"; readonly reason: string }
+
+/**
+ * Whether this supervisor is the one its launch started (29567, @cto 42880a68, 4dc25c38). A managed launch declares
+ * its harness PID, the harness starts the provider, and the provider starts this supervisor: the declared PID is the
+ * provider's parent, exactly, on all 48 live supervisors of claude, codex and muse (census 2026-10-15), and an exec'ing
+ * wrapper in between (every cmux wrapper, cursor-agent's launcher) keeps it so. A provider run INSIDE the seat, such as
+ * an agy one-shot from bearly, inherits the declaration one or more processes deeper; its supervisor used to take the
+ * seat's claim and make the seat's own supervisor yield, darkening the seat. A launch with no declared harness is
+ * unchanged, and a provider whose parent cannot be read fails open with a named warning, as it behaved before.
+ */
+export function judgeSeatAncestry(
+  declaredHarnessPid: number | null,
+  providerPid: number,
+  parentOf: (pid: number) => ParentPidReading,
+): SeatAncestry {
+  if (declaredHarnessPid === null) return { kind: "seat" }
+  const reading = parentOf(providerPid)
+  if (reading.ppid === null) {
+    return {
+      kind: "unmeasured",
+      warning:
+        `tribe plugin supervisor: could not read the parent of provider ${providerPid} (${reading.reason}); acting ` +
+        "as this launch's supervisor without the nested-host check (29567)",
+    }
+  }
+  const providerParent = reading.ppid
+  if (providerParent === declaredHarnessPid) return { kind: "seat" }
+  return {
+    kind: "nested",
+    reason:
+      `refused to act as this seat's supervisor: its provider ${providerPid} is not a direct child of the seat's ` +
+      `harness ${declaredHarnessPid}; the provider's parent is ${providerParent} (29567)`,
+  }
+}
+
+/** The provider parent this wrapper reports, and whether its launch declared it rather than the wrapper reading it. */
+export type ProviderParent = { readonly pid: number; readonly declared: boolean }
+
 /**
  * The provider parent this wrapper reports as its launch owner. A managed launch names itself by its HAB_ID_TOKEN
  * alone (25074 3c-2b, @cto def441bf; 3d-2: TRIBE_LAUNCH_ID is never read). An ABSENT parent PID is indistinguishable
@@ -153,18 +196,18 @@ export function resolveProviderParentPid(
   self: { readonly pid: number; readonly ppid: number },
   processExists: (pid: number) => boolean,
   warn: (line: string) => void,
-): number {
+): ProviderParent {
   const raw = env[TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV]?.trim() ?? ""
   // Presence of EITHER name means a managed launch (27314 B1): after the producer cutover only the file path rides.
   const managed =
     (env[HAB_ID_TOKEN_ENV]?.trim() ?? "").length > 0 || (env[HAB_ID_TOKEN_FILE_ENV]?.trim() ?? "").length > 0
   if (raw.length === 0) {
     if (managed) warn(LEGACY_PARENT_WARNING)
-    return self.ppid
+    return { pid: self.ppid, declared: false }
   }
   const pid = Number(raw)
   if (!managed || !/^[1-9]\d*$/u.test(raw) || !Number.isSafeInteger(pid) || pid === self.pid || !processExists(pid)) {
     throw new Error(PROVIDER_PARENT_REMEDY)
   }
-  return pid
+  return { pid, declared: true }
 }
