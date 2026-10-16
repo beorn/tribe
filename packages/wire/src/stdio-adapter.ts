@@ -1566,11 +1566,11 @@ let drainInFlight = false
 let drainAgain = false
 // 27346 — in-memory only; the adapter process lifetime is the throttle scope.
 let pendingBallSummaryState: PendingBallSummaryState | null = null
-// wake removal 1 (wake removal 1 @cto 4d3f3a83, @dev/review2 REVISE) — a daemon
-// that does not report `newest_overdue_due_at` leaves the new-due reminder
-// reading only the bounded preview, where an out-of-preview ball that newly
-// passes its due can be missed. That coverage gap is NAMED once (loud), never
-// silently substituted.
+// wake removal 1 (@cto 4d3f3a83, @dev/review2 REVISE) — a daemon that does not
+// report `newest_overdue_due_at` leaves the new-due reminder reading only the
+// bounded preview, where an out-of-preview ball that newly passes its due can be
+// missed. That coverage gap is NAMED once, on STDERR (loud), never silently
+// substituted.
 let pendingBallSummaryPreviewWarned = false
 // 27346 — rows THIS pane has already been handed, so a re-presented attention
 // row stops re-forwarding on every wakeup. Adapter-local by necessity: the
@@ -1808,11 +1808,24 @@ function drainDaemonInbox(): void {
           { now: Date.now(), state: pendingBallSummaryState },
         )
         pendingBallSummaryState = pendingBallDecision.state
-        if (pendingBallDecision.readFromPreview && !pendingBallSummaryPreviewWarned) {
+        // Only a summary that PRESENT but lacks the field names the old-daemon
+        // gap. parseToolText returns null for an error or non-JSON fetch result
+        // and the drain still reaches here; blaming an old daemon for a failed
+        // fetch would spend this line's only firing (@cto 1d251d59 amendment).
+        if (
+          pendingBallDecision.readFromPreview &&
+          currentPendingBallSummary !== undefined &&
+          !pendingBallSummaryPreviewWarned
+        ) {
           pendingBallSummaryPreviewWarned = true
           // Loud, once per adapter process, never per fetch (wake removal 1).
-          log.warn?.(
-            "daemon summary lacks newest_overdue_due_at; new-due reminders read the 10-row preview until the daemon restarts",
+          // Written DIRECTLY to stderr in the adapter's loud-line idiom above,
+          // never through log.warn: setSuppressConsole(true) drops the console
+          // sink unless DEBUG_LOG/LOG_FILE is set, so a log.warn here would be
+          // silent in exactly the production case the line exists for
+          // (@dev/review2 52bab43e, @cto ae815826).
+          process.stderr.write(
+            "tribe stdio adapter: daemon summary lacks newest_overdue_due_at; new-due reminders read the 10-row preview until the daemon restarts\n",
           )
         }
         if (pendingBallDecision.send) forwardPendingBallSummary(currentPendingBalls, currentPendingBallSummary)

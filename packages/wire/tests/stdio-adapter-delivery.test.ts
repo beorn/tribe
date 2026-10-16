@@ -282,6 +282,16 @@ function collectStdoutJson(child: ChildProcessWithoutNullStreams): Record<string
   return lines
 }
 
+/** Accumulate the child's raw stderr, so a test can assert a line was written
+ *  there and NOT merely into the DEBUG_LOG file (29633 rev4). */
+function collectStderrText(child: ChildProcessWithoutNullStreams): () => string {
+  let text = ""
+  child.stderr.on("data", (chunk: Buffer | string) => {
+    text += chunk.toString()
+  })
+  return () => text
+}
+
 function waitForStdout(
   child: ChildProcessWithoutNullStreams,
   lines: Record<string, unknown>[],
@@ -2221,7 +2231,10 @@ describe("stdio adapter delivery modes", () => {
   // wake removal 1 (29633, @cto 4d3f3a83, @dev/review2 REVISE): a daemon that
   // does not report the watermark leaves the reminder on the bounded preview,
   // where an out-of-preview newly due ball can be missed. That gap must be
-  // NAMED, not silently presented as complete coverage.
+  // NAMED on STDERR, not silently presented as complete coverage — and NOT via
+  // the logger, which setSuppressConsole(true) drops unless DEBUG_LOG/LOG_FILE
+  // is set (@dev/review2 52bab43e). So this asserts the CHILD'S STDERR, once
+  // across repeated drains, with no debug-file variable in the environment.
   it("names the coverage gap once when the daemon omits the watermark (29633 REVISE)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const warnNeedle = "lacks newest_overdue_due_at"
@@ -2238,13 +2251,17 @@ describe("stdio adapter delivery modes", () => {
         },
       ],
     }
-    const env = {
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       TRIBE_DELIVERY: "push",
       TRIBE_NO_AUTOSTART: "1",
       TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
-      DEBUG_LOG: join(tmpDir, "adapter.log"),
     }
+    // A logger sink must NOT be present: the ruled line is required on stderr
+    // regardless of configuration, and a DEBUG_LOG here would mask a regression
+    // back to log.warn (the exact P2 review2 found).
+    delete env.DEBUG_LOG
+    delete env.LOG_FILE
     daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
@@ -2252,6 +2269,7 @@ describe("stdio adapter delivery modes", () => {
       stdio: ["pipe", "pipe", "pipe"],
     })
     collectStdoutJson(child)
+    const stderrText = collectStderrText(child)
     await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
     await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
@@ -2264,10 +2282,10 @@ describe("stdio adapter delivery modes", () => {
       )
       await new Promise((resolveTick) => setTimeout(resolveTick, 200))
     }
-    const gapLines = () => readFileSync(join(tmpDir, "adapter.log"), "utf8").split(warnNeedle).length - 1
+    const gapLines = () => stderrText().split(warnNeedle).length - 1
 
     await drain("29633 coverage-gap first drain")
-    await waitForCondition(() => existsSync(join(tmpDir, "adapter.log")) && gapLines() >= 1, "29633 coverage-gap warn")
+    await waitForCondition(() => gapLines() >= 1, "29633 coverage-gap stderr warn")
     // Named once, not on every drain.
     await drain("29633 coverage-gap second drain")
     expect(gapLines()).toBe(1)
