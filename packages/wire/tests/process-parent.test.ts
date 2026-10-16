@@ -137,10 +137,16 @@ describe("readParentPid", () => {
   })
 
   // @cto 9eafeeb6 (a): with no sources the reader uses the system's. A right parent alone cannot show that: a wrong
-  // default root would fall back to ps and read the same parent. A missing pid's reason names the root it read.
-  test("with no sources it reads the real /proc, and its ps fallback runs the real ps", () => {
+  // default root would fall back to ps and read the same parent. A missing pid's reason names the reader that ran,
+  // chosen as readParentPid chooses it (@dev/6 on r4): the real /proc where it has a self/stat, the real ps otherwise.
+  test("with no sources it reads the platform's own reader: the real /proc where there is one, else the real ps", () => {
+    const missing = 2 ** 31
+    const procReader = existsSync("/proc/self/stat")
     expect(readParentPid(process.pid)).toEqual({ ppid: process.ppid })
-    expect(readParentPid(2 ** 31)).toEqual({ ppid: null, reason: `/proc/${2 ** 31}/stat is unreadable (ENOENT)` })
+    expect(readParentPid(missing)).toEqual({
+      ppid: null,
+      reason: procReader ? `/proc/${missing}/stat is unreadable (ENOENT)` : expect.stringMatching(/^ps /u),
+    })
     if (!existsSync("/bin/ps") && !existsSync("/usr/bin/ps")) return
     expect(readParentPidFromPs(process.pid)).toEqual({ ppid: process.ppid })
   })
