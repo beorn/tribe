@@ -1080,6 +1080,27 @@ export function registerSendCommands(program: Command): void {
           console.error(`tribe.send: invalid --type '${type}' — expected one of: ${TRIBE_MESSAGE_TYPES.join(", ")}`)
           process.exit(2)
         }
+        // Decode argv's JSON spelling into the existing comma form; the daemon remains the one
+        // owner of recipient normalization for both CLI and MCP callers.
+        if (to.trimStart().startsWith("[")) {
+          try {
+            const recipients: unknown = JSON.parse(to)
+            if (
+              !Array.isArray(recipients) ||
+              recipients.length === 0 ||
+              recipients.some((recipient) => typeof recipient !== "string")
+            ) {
+              throw new Error("expected a non-empty JSON array of seat-name strings")
+            }
+            to = recipients.join(",")
+          } catch (error) {
+            console.error(
+              `tribe.send: invalid recipient JSON '${to}' — ${error instanceof Error ? error.message : String(error)}. ` +
+                `Use '@a,@b' or '["@a","@b"]'.`,
+            )
+            process.exit(2)
+          }
+        }
         // A SECOND RECIPIENT MUST NEVER BECOME MESSAGE TEXT.
         //
         // `send` is `<to>` plus a variadic `<message...>`, so `tribe send @a @b
@@ -1093,14 +1114,13 @@ export function registerSendCommands(program: Command): void {
         // correct usage quotes the message into one argument, so prose that
         // legitimately opens with "@chief ..." does not trip this.
         //
-        // This refuses rather than accepting a recipient list: the daemon and
-        // the MCP surface do take `to` as an array with `fanout`, but widening
-        // `<to>` here is a public API change. Failing loud is the bug fix.
+        // A recipient list still occupies ONE argv value (comma text or a JSON array).
+        // Bare extra arguments remain ambiguous with the variadic message body.
         const swallowedRecipient = message.length > 1 ? (message[0] ?? "") : ""
         if (/^@[A-Za-z0-9_/-]+$/u.test(swallowedRecipient)) {
           console.error(
             `tribe.send: invalid recipient - refusing '${swallowedRecipient}' which looks like a second recipient, but this command ` +
-              `takes exactly one. It would have been absorbed into the message body and delivered to '${to}' alone, ` +
+              `takes one recipient argument. It would have been absorbed into the message body and delivered to '${to}' alone, ` +
               `with '${swallowedRecipient}' silently receiving nothing.`,
           )
           console.error(`Send to each recipient separately:`)

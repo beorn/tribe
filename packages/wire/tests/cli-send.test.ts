@@ -1633,11 +1633,8 @@ describe("a second recipient must never be absorbed into the message body", () =
    * delivered to `@a` only, printed `Sent message to @a`, and exited 0. The
    * dropped recipient was indistinguishable from success.
    *
-   * The MCP surface over the same protocol accepts `to` as an array with
-   * `fanout`, so the CLI is strictly narrower — and was silent about it.
-   *
-   * This refuses rather than adding array support: widening `<to>` is a public
-   * API change. Failing loud is a bug fix.
+   * A comma list or JSON array occupies one recipient argument. Two bare seat
+   * arguments remain ambiguous with the variadic message body and must fail loud.
    */
   function runSend(args: string[]): Promise<{ code: number | null; stderr: string }> {
     return new Promise((resolveProcess) => {
@@ -1966,6 +1963,32 @@ describe("reply and taking convenience commands (25028)", () => {
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
     }
   }
+
+  // 29601: these commands share cmdSend with the ordinary send verb. Its argv encoding must not
+  // leave JSON punctuation in the recipient passed to the daemon's existing normalizer.
+  // @failure JSON list sends reach bogus bracket/quote-named seats while reporting success
+  // @level l2 @consumer tribe-wire send CLI
+  test("send recipient forms preserve the transport target and help documents both list forms", async () => {
+    for (const [input, target] of [
+      ['["@dev/3","@dev/7"]', "@dev/3,@dev/7"],
+      ["@dev/3,@dev/7", "@dev/3,@dev/7"],
+      ["@dev/3", "@dev/3"],
+      ["*", "*"],
+    ]) {
+      const res = await runMockDaemon(["send", input!, "recipient probe", "--summary", "recipient probe"])
+      expect(res.code).toBe(0)
+      expect(res.sent).toEqual([expect.objectContaining({ to: target, message: "recipient probe" })])
+    }
+    for (const invalid of ['["@dev/3",', "[1]", "[]"]) {
+      const res = await runMockDaemon(["send", invalid, "recipient probe", "--summary", "recipient probe"])
+      expect(res.code).not.toBe(0)
+      expect(res.sent).toEqual([])
+      expect(res.stderr).toContain("JSON")
+    }
+    const help = findCmd(buildProgram(), "send")!.helpInformation()
+    expect(help).toMatch(/comma/iu)
+    expect(help).toMatch(/JSON array/u)
+  })
 
   test("tribe reply settles a ball with type response, --reply, and derived summary", async () => {
     const res = await runMockDaemon(["reply", "req-ball-1", "Done and verified green\nDetails here"], {

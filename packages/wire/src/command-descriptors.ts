@@ -338,7 +338,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
       lifetime: "one-shot",
       mapsToMcp: "send",
       arguments: [
-        { name: "to", description: "Target session name" },
+        { name: "to", description: `Seat name, comma list '@a,@b', JSON array '["@a","@b"]', or '*'` },
         { name: "message", description: "Message text", variadic: true },
       ],
       options: [
