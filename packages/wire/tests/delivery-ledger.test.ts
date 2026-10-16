@@ -224,10 +224,10 @@ describe("loadDeliveryLedger (#27459)", () => {
       pane: "@dev/luna6",
       now: NOW,
     })
-    state.pendingBallSummary = { previewIds: "r1,r2", total: 2, withheld: 0, sentAt: NOW }
+    state.pendingBallSummary = { newestOverdueDueAt: NOW - 60_000 }
     saveDeliveryLedger(path, state)
     const loaded = loadDeliveryLedger(path)
-    expect(loaded.state?.pendingBallSummary).toEqual({ previewIds: "r1,r2", total: 2, withheld: 0, sentAt: NOW })
+    expect(loaded.state?.pendingBallSummary).toEqual({ newestOverdueDueAt: NOW - 60_000 })
     rmSync(path, { force: true })
   })
 
@@ -256,7 +256,7 @@ describe("loadDeliveryLedger (#27459)", () => {
       pane: "@dev/luna6",
       now: NOW,
     })
-    writeFileSync(path, JSON.stringify({ ...state, pendingBallSummary: { previewIds: 7 } }), "utf8")
+    writeFileSync(path, JSON.stringify({ ...state, pendingBallSummary: { overdueIds: 7 } }), "utf8")
     const loaded = loadDeliveryLedger(path)
     expect(loaded.coverage.gap).toBe(false)
     expect(loaded.state?.pendingBallSummary).toBeNull()
@@ -338,7 +338,7 @@ describe("openDeliveryLedgerWindow (#27459)", () => {
   })
 
   it("carries the summary fingerprint across a restart and a 4h roll (#27459 gap-7)", () => {
-    const summary = { previewIds: "r1", total: 1, withheld: 0, sentAt: NOW }
+    const summary = { newestOverdueDueAt: NOW - 30_000 }
     const existing: DeliveryLedgerState = {
       version: DELIVERY_LEDGER_VERSION,
       pane: "@dev/luna6",

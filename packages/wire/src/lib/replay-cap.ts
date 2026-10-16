@@ -69,12 +69,6 @@ export function selectReplayEvents<T extends ReplayCandidate>(
  */
 export const CONNECT_REPLAY_WINDOW_MS = 5_000
 
-/**
- * How long an UNCHANGED open-ball summary may go un-repeated before it is
- * re-surfaced. 10 minutes.
- */
-export const PENDING_BALL_SUMMARY_WINDOW_MS = 10 * 60 * 1_000
-
 /** Bound on remembered forwarded attention ids (insertion-ordered eviction). */
 export const MAX_FORWARDED_ATTENTION_IDS = 10_000
 
@@ -330,68 +324,133 @@ export function createDeliveryCounter(opts?: { maxIds?: number }): DeliveryCount
 }
 
 /** The preview slice of a ball the summary line is built from. */
-export type PendingBallPreview = { request_id?: string | null }
+export type PendingBallPreview = {
+  request_id?: string | null
+  /** The ball's reply deadline. A ball past it is overdue. */
+  expires_at?: string | null
+  /** The daemon's own verdict for a deadline-passed ball. */
+  status?: string | null
+}
 
 export type PendingBallSummaryInput = {
   balls: readonly PendingBallPreview[]
+  /**
+   * The LATEST due time (epoch ms) among owned balls overdue at projection time,
+   * from the daemon projection BEFORE its 10-row preview cap, or null when none
+   * (wake removal 1). Absent from an older daemon: the decision then derives the
+   * watermark from the bounded preview, its pre-fix coverage, and the adapter
+   * names that gap once. When present it is authoritative — the preview alone
+   * cannot see a due transition for a ball outside it, so an 11th newly-due ball
+   * would be silent. One number, not the id list: this rides every model-facing
+   * fetch, so an owner of many overdue balls must not pay a UUID per turn.
+   */
+  newestOverdueDueAt?: number | null
   summary?:
     | {
         total?: number
-        /** Deliberately NOT part of the fingerprint: it changes every minute. */
+        /** Deliberately NOT part of the decision: it changes every minute. */
         oldest_age_ms?: number
         withheld?: { total?: number }
       }
     | undefined
 }
 
-/** In-memory adapter state for the open-ball summary throttle. */
+/** In-memory adapter state for the open-ball summary. */
 export type PendingBallSummaryState = {
-  /** Sorted request_ids the last summary previewed. */
-  previewIds: string
-  total: number
-  withheld: number
-  sentAt: number
+  /** Latest overdue due time (epoch ms) seen at the last drain; the watermark
+   *  never decreases, so a settlement cannot make an already-overdue ball read
+   *  as newly due. Null before any ball has passed its due. */
+  newestOverdueDueAt: number | null
 }
 
 export type PendingBallSummaryDecision = {
   /** Whether the caller should forward the summary line this drain. */
   send: boolean
-  /** State to retain; null when there is nothing to summarize (reset on empty). */
+  /** State to retain; the watermark carries across drains. */
   state: PendingBallSummaryState | null
+  /** True when the daemon did not report `newestOverdueDueAt`, so the watermark
+   *  was derived from the BOUNDED 10-row preview. That is a named coverage gap
+   *  the adapter surfaces once, never a clean result (@dev/review2 REVISE). */
+  readFromPreview: boolean
+}
+
+/** A preview ball's due time in epoch ms when it is overdue, else null. */
+function previewBallDueAt(ball: PendingBallPreview, now: number): number | null {
+  // The daemon's own verdict wins: a deadline-passed ball with an unparseable
+  // (or absent) deadline still counts, at `now` as the conservative watermark.
+  if (ball.status === "expired") {
+    if (ball.expires_at) {
+      const due = Date.parse(ball.expires_at)
+      if (Number.isFinite(due)) return due
+    }
+    return now
+  }
+  if (!ball.expires_at) return null
+  const due = Date.parse(ball.expires_at)
+  return Number.isFinite(due) && due <= now ? due : null
+}
+
+/** The preview-derived watermark: the latest overdue due time the bounded
+ *  10-row preview can see. Incomplete only when more than ten balls are
+ *  overdue — the case the adapter names once when the daemon field is absent. */
+function previewWatermark(balls: readonly PendingBallPreview[], now: number): number | null {
+  let latest: number | null = null
+  for (const ball of balls) {
+    const due = previewBallDueAt(ball, now)
+    if (due !== null && (latest === null || due > latest)) latest = due
+  }
+  return latest
+}
+
+/** The larger of two watermarks, treating null as "none seen yet". */
+function maxWatermark(left: number | null, right: number | null): number | null {
+  if (left === null) return right
+  if (right === null) return left
+  return Math.max(left, right)
 }
 
 /**
- * 27346 - throttle the open-ball summary line.
+ * 27346, wake removal 1 - the open-ball summary line re-surfaces ONLY when a
+ * ball the seat owns NEWLY passes its due, plus once when the adapter starts.
  *
- * Every wakeup drain re-forwarded the same "You own N balls ..." line, so a push
- * seat's pane repeated it on every arrival. Re-surface an unchanged set only when
- * it actually changed (preview request_id set, total, withheld count) or when the
- * window has elapsed. The AGE is deliberately excluded: it always changes, so it
- * would defeat the throttle. An EMPTY set resets the state, so the next ball is a
- * first send. `now`/`state` are passed in - pure, no timer, no second store.
+ * A changed set sends nothing: a newly arrived ball already reaches the pane as
+ * its own pushed request, so repeating "You own N balls ..." for it is the
+ * duplicate wake this removes. The window re-send of an unchanged set is gone
+ * with it. A settled ball only shrinks the remembered overdue set.
+ *
+ * `now`/`state` are passed in - pure, no timer, no second store. State is null
+ * only before the first decision; the durable ledger restores it across a
+ * restart, so a restart does not re-present an unchanged line.
  */
 export function decidePendingBallSummary(
   input: PendingBallSummaryInput,
-  opts: { now: number; windowMs?: number; state: PendingBallSummaryState | null },
+  opts: { now: number; state: PendingBallSummaryState | null },
 ): PendingBallSummaryDecision {
-  const total = input.summary?.total ?? input.balls.length
-  if (total <= 0) return { send: false, state: null }
-  const previewIds = Array.from(
-    new Set(input.balls.map((ball) => ball.request_id).filter((id): id is string => Boolean(id))),
-  )
-    .sort()
-    .join(",")
-  const withheld = input.summary?.withheld?.total ?? 0
+  const daemonWatermark = input.newestOverdueDueAt
+  const readFromPreview = daemonWatermark === undefined
+  const current: number | null = readFromPreview ? previewWatermark(input.balls, opts.now) : daemonWatermark
   const previous = opts.state
+  // The watermark never decreases: any due time at or below the stored value was
+  // already overdue when that value was recorded, so settling a preview row
+  // cannot expose an already-overdue hidden row as falsely new.
+  const retained: PendingBallSummaryState = {
+    newestOverdueDueAt: maxWatermark(previous?.newestOverdueDueAt ?? null, current),
+  }
+  const total = input.summary?.total ?? input.balls.length
+  if (total <= 0) {
+    // Nothing to summarize. Keep the remembered floor, never reset to null: a
+    // reset would make the NEXT ball a "first send" though it never passed due.
+    return { send: false, state: previous === null ? null : retained, readFromPreview }
+  }
   if (previous === null) {
-    return { send: true, state: { previewIds, total, withheld, sentAt: opts.now } }
+    // Adapter start with a restored (or absent) ledger: the one non-overdue send.
+    return { send: true, state: retained, readFromPreview }
   }
-  const changed = previous.previewIds !== previewIds || previous.total !== total || previous.withheld !== withheld
-  const windowMs = opts.windowMs ?? PENDING_BALL_SUMMARY_WINDOW_MS
-  if (changed || opts.now - previous.sentAt >= windowMs) {
-    return { send: true, state: { previewIds, total, withheld, sentAt: opts.now } }
-  }
-  return { send: false, state: previous }
+  // Send only when the watermark RISES past what the adapter has already shown.
+  // A re-due by TAKING sets a later deadline, so it raises the watermark again
+  // even with no decision in between.
+  const send = current !== null && (previous.newestOverdueDueAt === null || current > previous.newestOverdueDueAt)
+  return { send, state: retained, readFromPreview }
 }
 
 export type ConnectReplayGate = {

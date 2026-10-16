@@ -288,11 +288,6 @@ const CHANNEL_REPLAY_MAX = Number(process.env.TRIBE_CHANNEL_REPLAY_MAX) || undef
 const CHANNEL_REPLAY_WINDOW_MS = Number(process.env.TRIBE_CHANNEL_REPLAY_WINDOW_MS) || undefined
 const connectReplayGate = createConnectReplayGate({ maxEvents: CHANNEL_REPLAY_MAX, windowMs: CHANNEL_REPLAY_WINDOW_MS })
 
-// 27346 — the wakeup drain used to re-forward the open-ball summary line on every
-// arrival. An unchanged set is now re-surfaced at most once per window. Knob exists
-// for tests (small window → deterministic recurrence).
-const PENDING_BALL_SUMMARY_WINDOW_MS = Number(process.env.TRIBE_PENDING_BALL_SUMMARY_WINDOW_MS) || undefined
-
 // Worktree-isolation guardrail (km-bearly.tribe-codex-cwd-worktree-guardrail):
 // standalone codex / non-launcher MCP clients inherit the user's invocation
 // cwd. If that cwd is the main repo while a `<basename>-wtN` pool exists,
@@ -424,6 +419,8 @@ type TribeFetchResult = {
       request_id?: string
       sender?: string
       opened_at?: string
+      expires_at?: string
+      status?: string
       age_ms?: number
       message_id?: string
       fanout?: string
@@ -433,6 +430,11 @@ type TribeFetchResult = {
       total?: number
       oldest_age_ms?: number
       truncated?: boolean
+      /** Latest overdue due time (epoch ms) over the FULL owned set before the
+       * 10-row preview cap, or null when none (wake removal 1). The bounded
+       * `pending_balls` preview cannot carry a due transition for a ball outside
+       * it; the decision reads THIS watermark. Absent on an older daemon. */
+      newest_overdue_due_at?: number | null
       withheld?: {
         total?: number
         by_kind?: { request?: number; incident?: number }
@@ -1564,6 +1566,12 @@ let drainInFlight = false
 let drainAgain = false
 // 27346 — in-memory only; the adapter process lifetime is the throttle scope.
 let pendingBallSummaryState: PendingBallSummaryState | null = null
+// wake removal 1 (@cto 4d3f3a83, @dev/review2 REVISE) — a daemon that does not
+// report `newest_overdue_due_at` leaves the new-due reminder reading only the
+// bounded preview, where an out-of-preview ball that newly passes its due can be
+// missed. That coverage gap is NAMED once, on STDERR (loud), never silently
+// substituted.
+let pendingBallSummaryPreviewWarned = false
 // 27346 — rows THIS pane has already been handed, so a re-presented attention
 // row stops re-forwarding on every wakeup. Adapter-local by necessity: the
 // daemon's `replay` flag is cursor-based and a registration tail-reset makes a
@@ -1788,12 +1796,38 @@ function drainDaemonInbox(): void {
         const currentPendingBalls = result?.attention?.pending_balls ?? []
         const currentPendingBallSummary = result?.attention?.pending_balls_summary
         const currentPendingBallTotal = currentPendingBallSummary?.total ?? currentPendingBalls.length
-        // 27346 — one summary per unchanged set (or per window), not per wakeup.
+        // 27346 / wake removal 1 — the summary line is re-surfaced ONLY when a
+        // ball the seat owns newly passes its due (or once at adapter start);
+        // a mere set change, and the old window re-send, are both gone.
         const pendingBallDecision = decidePendingBallSummary(
-          { balls: currentPendingBalls, summary: currentPendingBallSummary },
-          { now: Date.now(), windowMs: PENDING_BALL_SUMMARY_WINDOW_MS, state: pendingBallSummaryState },
+          {
+            balls: currentPendingBalls,
+            summary: currentPendingBallSummary,
+            newestOverdueDueAt: currentPendingBallSummary?.newest_overdue_due_at,
+          },
+          { now: Date.now(), state: pendingBallSummaryState },
         )
         pendingBallSummaryState = pendingBallDecision.state
+        // Only a summary that PRESENT but lacks the field names the old-daemon
+        // gap. parseToolText returns null for an error or non-JSON fetch result
+        // and the drain still reaches here; blaming an old daemon for a failed
+        // fetch would spend this line's only firing (@cto 1d251d59 amendment).
+        if (
+          pendingBallDecision.readFromPreview &&
+          currentPendingBallSummary !== undefined &&
+          !pendingBallSummaryPreviewWarned
+        ) {
+          pendingBallSummaryPreviewWarned = true
+          // Loud, once per adapter process, never per fetch (wake removal 1).
+          // Written DIRECTLY to stderr in the adapter's loud-line idiom above,
+          // never through log.warn: setSuppressConsole(true) drops the console
+          // sink unless DEBUG_LOG/LOG_FILE is set, so a log.warn here would be
+          // silent in exactly the production case the line exists for
+          // (@dev/review2 52bab43e, @cto ae815826).
+          process.stderr.write(
+            "tribe stdio adapter: daemon summary lacks newest_overdue_due_at; new-due reminders read the 10-row preview until the daemon restarts\n",
+          )
+        }
         if (pendingBallDecision.send) forwardPendingBallSummary(currentPendingBalls, currentPendingBallSummary)
         const events = (result?.events ?? []).filter(
           (event) => isForwardableRow(event) && (!event.id || !attentionIds.has(event.id)),

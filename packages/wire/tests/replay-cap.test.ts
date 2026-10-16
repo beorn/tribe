@@ -14,7 +14,6 @@ import {
   decidePendingBallSummary,
   MAX_REPLAY_AGE_MS,
   MAX_REPLAY_EVENTS,
-  PENDING_BALL_SUMMARY_WINDOW_MS,
   replayEnvelopeMeta,
   selectReplayEvents,
 } from "../src/lib/replay-cap.ts"
@@ -174,97 +173,212 @@ describe("replayEnvelopeMeta (27346 re-presented attention row)", () => {
   })
 })
 
-// 27346 — each wakeup drain re-forwarded the open-ball summary line, so a push
-// seat's pane repeated "You own N balls ..." on every arrival. decidePendingBallSummary
-// is the pure in-memory throttle: the line is re-surfaced only when the ball set
-// changed or the window elapsed. `now` is passed, never read — deterministic.
-describe("decidePendingBallSummary (27346 open-ball summary throttle)", () => {
+// 27346, wake removal 1 — each wakeup drain re-forwarded the open-ball summary
+// line, so a push seat's pane repeated "You own N balls ..." on every arrival.
+// The line now re-surfaces ONLY when a ball the seat owns NEWLY passes its due,
+// plus once when the adapter starts. decidePendingBallSummary is the pure
+// decision: `now` and `state` are passed, never read from a clock or a store.
+describe("decidePendingBallSummary (27346 open-ball summary, wake removal 1)", () => {
   const NOW = 1_000_000
-  const ball = (request_id: string) => ({ request_id })
+  const notDue = { expires_at: new Date(NOW + 86_400_000).toISOString() }
+  const ball = (request_id: string, extra: Record<string, unknown> = notDue) => ({ request_id, ...extra })
+  const overdue = { expires_at: new Date(NOW - 60_000).toISOString() }
 
-  it("sends the first nonempty set and records its fingerprint", () => {
+  it("sends once when the adapter starts, recording the watermark", () => {
     const r = decidePendingBallSummary(
       { balls: [ball("r1"), ball("r2")], summary: { total: 2 } },
       { now: NOW, state: null },
     )
     expect(r.send).toBe(true)
-    expect(r.state).toMatchObject({ previewIds: "r1,r2", total: 2, withheld: 0, sentAt: NOW })
+    expect(r.state).toEqual({ newestOverdueDueAt: null })
   })
 
-  it("suppresses an unchanged immediate re-drain, keeping the original sentAt", () => {
+  it("sends nothing on an unchanged set, however long the drain waits", () => {
     const first = decidePendingBallSummary({ balls: [ball("r1")], summary: { total: 1 } }, { now: NOW, state: null })
-    const second = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 1 } },
+    expect(first.send).toBe(true)
+    const soon = decidePendingBallSummary(
+      { balls: [ball("r1")], summary: { total: 1, oldest_age_ms: 60_000 } },
       { now: NOW + 60_000, state: first.state },
     )
-    expect(second.send).toBe(false)
-    expect(second.state).toEqual(first.state)
+    expect(soon.send).toBe(false)
+    // The 10-minute re-send of an unchanged set is gone: even an hour later, nothing.
+    const later = decidePendingBallSummary(
+      { balls: [ball("r1")], summary: { total: 1, oldest_age_ms: 3_600_000 } },
+      { now: NOW + 10 * 60_000, state: first.state },
+    )
+    expect(later.send).toBe(false)
+    expect(later.state).toEqual(first.state)
   })
 
-  it("ignores a changing age and only re-surfaces once the window elapses", () => {
-    const first = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 1, oldest_age_ms: 1_000 } },
+  it("sends once when a ball newly passes its due, then nothing", () => {
+    const dueSoon = { expires_at: new Date(NOW + 60_000).toISOString() }
+    const start = decidePendingBallSummary(
+      { balls: [ball("r1", dueSoon)], summary: { total: 1 } },
       { now: NOW, state: null },
     )
-    const justBefore = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 1, oldest_age_ms: 999_000 } },
-      { now: NOW + PENDING_BALL_SUMMARY_WINDOW_MS - 1, state: first.state },
+    expect(start.send).toBe(true)
+    expect(start.state).toEqual({ newestOverdueDueAt: null })
+    const passed = decidePendingBallSummary(
+      { balls: [ball("r1", dueSoon)], summary: { total: 1 } },
+      { now: NOW + 120_000, state: start.state },
     )
-    expect(justBefore.send).toBe(false)
-    const atWindow = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 1, oldest_age_ms: 999_999 } },
-      { now: NOW + PENDING_BALL_SUMMARY_WINDOW_MS, state: first.state },
+    expect(passed.send).toBe(true)
+    // The watermark rises to the ball's due time, not to `now`.
+    expect(passed.state).toEqual({ newestOverdueDueAt: NOW + 60_000 })
+    const again = decidePendingBallSummary(
+      { balls: [ball("r1", dueSoon)], summary: { total: 1 } },
+      { now: NOW + 180_000, state: passed.state },
     )
-    expect(atWindow.send).toBe(true)
-    expect(atWindow.state?.sentAt).toBe(NOW + PENDING_BALL_SUMMARY_WINDOW_MS)
+    expect(again.send).toBe(false)
   })
 
-  it("re-surfaces when the preview request_id set changes", () => {
+  it("sends nothing when the set merely changes", () => {
     const first = decidePendingBallSummary({ balls: [ball("r1")], summary: { total: 1 } }, { now: NOW, state: null })
-    const changed = decidePendingBallSummary(
-      { balls: [ball("r1"), ball("r2")], summary: { total: 2 } },
-      { now: NOW + 1, state: first.state },
-    )
-    expect(changed.send).toBe(true)
-    expect(changed.state?.previewIds).toBe("r1,r2")
-  })
-
-  it("re-surfaces when the total changes even though the preview is unchanged", () => {
-    const first = decidePendingBallSummary(
-      { balls: [ball("r1"), ball("r2")], summary: { total: 2 } },
-      { now: NOW, state: null },
-    )
     const grown = decidePendingBallSummary(
-      { balls: [ball("r1"), ball("r2")], summary: { total: 108 } },
+      { balls: [ball("r1"), ball("r2")], summary: { total: 2 } },
       { now: NOW + 1, state: first.state },
     )
-    expect(grown.send).toBe(true)
-    expect(grown.state?.total).toBe(108)
+    expect(grown.send).toBe(false)
+    expect(grown.state).toEqual({ newestOverdueDueAt: null })
+    const shrunk = decidePendingBallSummary({ balls: [], summary: { total: 0 } }, { now: NOW + 2, state: grown.state })
+    expect(shrunk.send).toBe(false)
   })
 
-  it("re-surfaces when the withheld count changes", () => {
+  it("treats a ball the daemon already calls expired as overdue", () => {
     const first = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 9, withheld: { total: 8 } } },
+      { balls: [ball("r1", { status: "active" })], summary: { total: 1 } },
       { now: NOW, state: null },
     )
-    const changed = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 9, withheld: { total: 4 } } },
+    const expired = decidePendingBallSummary(
+      { balls: [ball("r1", { status: "expired" })], summary: { total: 1 } },
       { now: NOW + 1, state: first.state },
     )
-    expect(changed.send).toBe(true)
-    expect(changed.state?.withheld).toBe(4)
+    expect(expired.send).toBe(true)
+    // No parseable deadline on the preview ball: `now` is the conservative floor.
+    expect(expired.state).toEqual({ newestOverdueDueAt: NOW + 1 })
   })
 
-  it("resets on empty and treats the next nonempty set as a first send", () => {
+  it("sends nothing when an overdue ball settles — a removal is not a new due", () => {
+    const first = decidePendingBallSummary(
+      { balls: [ball("r1", overdue), ball("r2", overdue)], summary: { total: 2 } },
+      { now: NOW, state: null },
+    )
+    expect(first.send).toBe(true)
+    expect(first.state).toEqual({ newestOverdueDueAt: NOW - 60_000 })
+    const settled = decidePendingBallSummary(
+      { balls: [ball("r2", overdue)], summary: { total: 1 } },
+      { now: NOW + 1, state: first.state },
+    )
+    expect(settled.send).toBe(false)
+    // The watermark never falls: the settled ball's due stays as the floor.
+    expect(settled.state).toEqual({ newestOverdueDueAt: NOW - 60_000 })
+  })
+
+  it("an empty set sends nothing and never makes the next ball a first send", () => {
     const first = decidePendingBallSummary({ balls: [ball("r1")], summary: { total: 1 } }, { now: NOW, state: null })
     const empty = decidePendingBallSummary({ balls: [], summary: { total: 0 } }, { now: NOW + 1, state: first.state })
     expect(empty.send).toBe(false)
-    expect(empty.state).toBeNull()
-    const again = decidePendingBallSummary(
-      { balls: [ball("r1")], summary: { total: 1 } },
+    expect(empty.state).not.toBeNull()
+    const next = decidePendingBallSummary(
+      { balls: [ball("r2")], summary: { total: 1 } },
       { now: NOW + 2, state: empty.state },
     )
+    expect(next.send).toBe(false)
+  })
+
+  // @dev/review2 REVISE (29633), @cto 4d3f3a83: the 10-row preview is a DISPLAY
+  // bound. Reading overdue identity from it alone is wrong once more than ten
+  // balls are overdue. The daemon now ships ONE monotone watermark — the latest
+  // overdue due time over the full set, before the cap.
+  const OLD_DUE = { expires_at: new Date(NOW - 120_000).toISOString() }
+  const NEW_DUE = { expires_at: new Date(NOW - 60_000).toISOString() }
+
+  it("sends when an out-of-preview 11th ball newly passes its due", () => {
+    const tenOld = Array.from({ length: 10 }, (_, i) => `old-${i}`)
+    const oldDue = NOW - 120_000
+    const newDue = NOW - 60_000
+    // Positive control (9 old overdue + the 11th newly due, all inside the
+    // preview): the watermark rises and still sends.
+    const nineOld = tenOld.slice(0, 9)
+    const control = decidePendingBallSummary(
+      {
+        balls: [...nineOld.map((id) => ball(id, OLD_DUE)), ball("new-11", NEW_DUE)],
+        summary: { total: 10 },
+        newestOverdueDueAt: newDue,
+      },
+      { now: NOW, state: { newestOverdueDueAt: oldDue } },
+    )
+    expect(control.send).toBe(true)
+    expect(control.readFromPreview).toBe(false)
+    // The boundary: ten older overdue balls fill the preview, so the newly due
+    // eleventh is WITHHELD from `balls`. The watermark still carries it.
+    const flips = decidePendingBallSummary(
+      {
+        balls: tenOld.map((id) => ball(id, OLD_DUE)),
+        summary: { total: 11 },
+        newestOverdueDueAt: newDue,
+      },
+      { now: NOW, state: { newestOverdueDueAt: oldDue } },
+    )
+    expect(flips.send).toBe(true)
+    expect(flips.readFromPreview).toBe(false)
+    expect(flips.state).toEqual({ newestOverdueDueAt: newDue })
+  })
+
+  it("does not read an exposed already-overdue hidden ball as a new due", () => {
+    // Settling a preview row exposes an already-overdue hidden row. Its due is
+    // at or below the stored watermark, so the maximum cannot rise: nothing sends.
+    const before = decidePendingBallSummary(
+      {
+        balls: [ball("a", overdue), ball("b", overdue)],
+        summary: { total: 3 },
+        newestOverdueDueAt: NOW - 60_000,
+      },
+      { now: NOW, state: { newestOverdueDueAt: NOW - 60_000 } },
+    )
+    expect(before.send).toBe(false)
+    const afterSettle = decidePendingBallSummary(
+      {
+        balls: [ball("b", overdue), ball("c", overdue)],
+        summary: { total: 3 },
+        newestOverdueDueAt: NOW - 60_000,
+      },
+      { now: NOW + 1, state: before.state },
+    )
+    expect(afterSettle.send).toBe(false)
+    expect(afterSettle.state).toEqual(before.state)
+  })
+
+  it("sends again when a TAKING re-due passes with no decision in between", () => {
+    // A ball reminded, then re-due by TAKING, then past due again: the re-set
+    // deadline is LATER than the stored watermark, so the maximum rises and the
+    // reminder fires even though no row was settled or added in between.
+    const first = decidePendingBallSummary(
+      { balls: [ball("r1", overdue)], summary: { total: 1 } },
+      { now: NOW, state: null },
+    )
+    expect(first.send).toBe(true)
+    expect(first.state).toEqual({ newestOverdueDueAt: NOW - 60_000 })
+    const reDue = { expires_at: new Date(NOW + 30_000).toISOString() }
+    const again = decidePendingBallSummary(
+      { balls: [ball("r1", reDue)], summary: { total: 1 } },
+      { now: NOW + 60_000, state: first.state },
+    )
     expect(again.send).toBe(true)
+    expect(again.state).toEqual({ newestOverdueDueAt: NOW + 30_000 })
+  })
+
+  it("derives the watermark from the preview when the daemon omits it, and NAMES that gap", () => {
+    // An older daemon returns no newestOverdueDueAt; the adapter derives the
+    // watermark from the bounded preview. That is a named coverage gap — the
+    // caller warns once — never silently presented as complete (@dev/review2).
+    const start = decidePendingBallSummary(
+      { balls: [ball("r1", overdue), ball("r2", overdue)], summary: { total: 2 } },
+      { now: NOW, state: null },
+    )
+    expect(start.send).toBe(true)
+    expect(start.readFromPreview).toBe(true)
+    expect(start.state).toEqual({ newestOverdueDueAt: NOW - 60_000 })
   })
 })
 
