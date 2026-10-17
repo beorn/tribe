@@ -1466,6 +1466,84 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/7'").get()).toEqual({ n: 0 })
   })
 
+  // @failure With no record of the LAST register refusal held per session, a refused seat reads on `tribe.members`
+  // exactly like one whose transport merely dropped, and the reader cannot tell "the server said no" from "the bridge
+  // fell down" (29686). The write, the wire effect and the two clears live in the registry's own store, so this drives
+  // them through the PRODUCTION register path rather than by writing that store directly: a refusal for a seat with no
+  // durable row is not recorded at all (recordRegisterRefusal returns silently with no target row), which is why the
+  // seat registers once and then loses its transport — the exact state a refused reconnector leaves behind.
+  it("29686 records a register refusal in the registry's own store and drops it through the production clearers", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-seat")
+    parseResult<RegisterResult>(
+      await harness.register("conn-seat", {
+        name: "@dev/7",
+        pid: 4101,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: "token-dev7",
+      }),
+    )
+    // The record is keyed by the durable ROW's `id` -- the key `newestDurableRowId` resolves and the one
+    // `markTransportConnected`/`forgetTransportSessions` clear -- NOT by `sessions.identity_sid`, which is the
+    // launch-side spelling ("sid-dev7") that the token proves. Two different id spaces, so the test reads the real key.
+    const sessionId = (
+      harness.db.prepare("SELECT id FROM sessions WHERE name = '@dev/7' ORDER BY updated_at DESC").get() as {
+        id: string
+      }
+    ).id
+    harness.dropClient("conn-seat")
+    expect(harness.registry.getRegisterRefusal(sessionId), "no refusal before one is made").toBeUndefined()
+
+    const refuseMismatch = async (connId: string) => {
+      harness.addPendingClient(connId)
+      return parseError(
+        await harness.register(connId, { name: "@dev/7", pid: 4201, project: "/tmp/p", idToken: "token-dev8" }),
+      )
+    }
+
+    expect(await refuseMismatch("conn-mismatch")).toMatchObject({
+      code: -32003,
+      data: { kind: "identity-name-mismatch" },
+    })
+    // The refusal is IN the store, keyed by the refused seat's durable row. Its `launch_id` is NULL, and that is the
+    // ruling rather than a gap: this stub verifier declares `suppliesGen: false`, so the daemon knows the sid the token
+    // named but NOT a generation, and @cto ruling 4a says a record with an unproven half carries no launch at all —
+    // never the bare sid, which no instance id can equal.
+    expect(harness.registry.getRegisterRefusal(sessionId)).toMatchObject({
+      kind: "identity-name-mismatch",
+      claimed: "@dev/8",
+      launch_id: null,
+      pid: 4201,
+    })
+
+    const roster = async () => {
+      const members = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.members", {}))
+      const payload = JSON.parse(members.content[0]!.text) as {
+        sessions: Array<Record<string, unknown>>
+        membership_discrepancy?: { missing?: Array<Record<string, unknown>> }
+      }
+      return [...payload.sessions, ...(payload.membership_discrepancy?.missing ?? [])].find(
+        (row) => row.name === "@dev/7",
+      )
+    }
+    // ... and the wire reads it from that same store, so the store is the source and not a second copy.
+    expect((await roster())?.last_refusal).toMatchObject({ kind: "identity-name-mismatch" })
+
+    // Clearer 1: a real transport connecting to the seat's row clears the record in place.
+    harness.registry.markTransportConnected(sessionId)
+    expect(harness.registry.getRegisterRefusal(sessionId), "cleared by markTransportConnected").toBeUndefined()
+    expect((await roster())?.last_refusal ?? null).toBeNull()
+
+    // Clearer 2: the reaper dropping a session whose durable row is gone.
+    expect(await refuseMismatch("conn-mismatch-2")).toMatchObject({ data: { kind: "identity-name-mismatch" } })
+    expect(harness.registry.getRegisterRefusal(sessionId)).toBeDefined()
+    harness.registry.forgetTransportSessions([sessionId])
+    expect(harness.registry.getRegisterRefusal(sessionId), "cleared by forgetTransportSessions").toBeUndefined()
+    expect((await roster())?.last_refusal ?? null).toBeNull()
+  })
+
   it("reports and pages a post-boot verifier fault, then clears on repair without exposing the token", async () => {
     const token = "secret-token-must-stay-private"
     let broken = true
