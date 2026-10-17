@@ -60,6 +60,7 @@ import { isExplicitTribePersonaName, isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } 
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
+import { UNRETRYABLE_REGISTER_REFUSAL_KINDS } from "./lib/foreign-refusal-kinds.ts"
 import {
   createConnectReplayGate,
   createDeliveryCounter,
@@ -589,12 +590,15 @@ function isManagedPersonaRegistrationConflict(err: unknown): boolean {
  */
 let foreignIdentityRefusal: string | null = null
 
-function isForeignIdentityRefusal(err: unknown): boolean {
+function isUnretryableRegisterRefusal(err: unknown): boolean {
   const data = (err as { data?: unknown } | null)?.data
   // 25074 3b — a token the daemon's verifier contradicts, or one naming another actor, is refused the same way:
   // retrying cannot change what the token proves. A verifier fault is not here; it may clear, so it retries.
   const kind = typeof data === "object" && data !== null ? (data as { kind?: unknown }).kind : undefined
-  return kind === "foreign-identity-transport" || kind === "identity-contradicted" || kind === "identity-name-mismatch"
+  // 29686 (@cto R3 blocking item 1): this set is NOT the daemon's foreign classification — it adds
+  // `identity-contradicted`, a fault in this connector's OWN identity — so it is a distinctly named set in
+  // tribe-wire/lib/foreign-refusal-kinds rather than three literals that read like a copy of that one.
+  return typeof kind === "string" && (UNRETRYABLE_REGISTER_REFUSAL_KINDS as readonly string[]).includes(kind)
 }
 
 let fatalRegistrationRefusal: string | null = null
@@ -894,7 +898,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
           managedRegistrationConflicts += 1
           setRequiredMcpTransportHealth("closed", errorMessage(err))
         }
-        if (isForeignIdentityRefusal(err)) {
+        if (isUnretryableRegisterRefusal(err)) {
           foreignIdentityRefusal = errorMessage(err)
           log.warn?.(foreignIdentityRefusal)
           setRequiredMcpTransportHealth("closed", foreignIdentityRefusal)

@@ -52,6 +52,7 @@
     "./lib/defang": "./src/lib/defang.ts",
     "./lib/persona-name": "./src/lib/persona-name.ts",
     "./lib/persona-launch-identity": "./src/lib/persona-launch-identity.ts",
+    "./lib/foreign-refusal-kinds": "./src/lib/foreign-refusal-kinds.ts",
     "./lib/spawn-pin-gate": "./src/lib/spawn-pin-gate.ts",
     "./lib/code-identity": "./src/lib/code-identity.ts",
     "./lib/reload-pacing": "./src/lib/reload-pacing.ts",
@@ -152,6 +153,10 @@
         "types": "./dist/lib/persona-launch-identity.d.mts",
         "import": "./dist/lib/persona-launch-identity.mjs"
       },
+      "./lib/foreign-refusal-kinds": {
+        "types": "./dist/lib/foreign-refusal-kinds.d.mts",
+        "import": "./dist/lib/foreign-refusal-kinds.mjs"
+      },
       "./lib/spawn-pin-gate": {
         "types": "./dist/lib/spawn-pin-gate.d.mts",
         "import": "./dist/lib/spawn-pin-gate.mjs"
@@ -251,6 +256,7 @@
       "src/lib/defang.ts",
       "src/lib/persona-name.ts",
       "src/lib/persona-launch-identity.ts",
+      "src/lib/foreign-refusal-kinds.ts",
       "src/lib/spawn-pin-gate.ts",
       "src/lib/code-identity.ts",
       "src/lib/reload-pacing.ts",

@@ -18,6 +18,7 @@
 
 import { existsSync, readFileSync } from "node:fs"
 import { parseProcStatLine } from "tribe-wire/lib/process-parent"
+import { FOREIGN_REFUSAL_KINDS } from "tribe-wire/lib/foreign-refusal-kinds"
 
 export type TransportState = "connected" | "disconnected"
 export type OwnerState = "live" | "dead" | "unknown"
@@ -65,16 +66,15 @@ export type RegisterRefusal = {
   readonly refused_at: string
 }
 
-/** The refusal kinds that mean "this transport carried another seat's identity" (24767). Two sites compose them: the
- *  managed-inbox and launch-takeover refusals name the impersonation `foreign-identity-transport`, and the verifier's
- *  own name mismatch keeps its `identity-name-mismatch` kind — which is what recorded the view against the presented
- *  name before this bead, so dropping it from this set silently stopped a name mismatch publishing `foreign_transport`
- *  (@cto eabd0565). The members wire publishes exactly these as `foreign_transport`, derived from the record, so the
- *  reader still gets the four fields it always had (29686). WHAT DID CHANGE is one field's SPELLING, named here rather
- *  than left to be discovered (@cto's Should item): `launch_id` is the record's, every refusal site now records a unit
- *  instance id (`<sid>@<gen>`, through `provenInstanceId`) or null, and the view below therefore publishes either that
- *  instance or the literal `(no launch)` — never the bare sid a pre-29686 row carried. */
-export const FOREIGN_REFUSAL_KINDS = ["foreign-identity-transport", "identity-name-mismatch"] as const
+/** The refusal kinds that mean "this transport carried another seat's identity" (24767), RE-EXPORTED from the wire
+ *  (`tribe-wire/lib/foreign-refusal-kinds`) since @cto's R3 ruling of 29686: agent-rig's WATCH keys its bridge verdict
+ *  on the same set and had been reading a COPY of it, so the set now has one owner and both sides import it. The
+ *  members wire publishes exactly these as `foreign_transport`, derived from the record, so the reader still gets the
+ *  four fields it always had. WHAT DID CHANGE is one field's SPELLING, named rather than left to be discovered (@cto's
+ *  Should item): `launch_id` is the record's, every refusal site now records a unit instance id (`<sid>@<gen>`, through
+ *  `provenInstanceId`) or null, and the view below therefore publishes either that instance or the literal `(no launch)`
+ *  — never the bare sid a pre-29686 row carried. */
+export { FOREIGN_REFUSAL_KINDS }
 
 /** Derive the members wire's `foreign_transport` view from a last refusal: the same four fields it always had, or
  *  undefined when the refusal is not a foreign one. */
