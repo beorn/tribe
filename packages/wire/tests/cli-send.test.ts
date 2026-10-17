@@ -441,6 +441,107 @@ describe("registerSendCommands", () => {
     }
   })
 
+  // 29718: a sender must learn both ids from the send itself, not a read-back.
+  test("successful send prints the message id and, for a tracked send, the ball id (29718)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-id-echo-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as {
+            id: number
+            method: string
+            params?: { reply?: string; payload?: { reply?: string } }
+          }
+          const result =
+            request.method === "cli_inbox_status_by_launch_v1"
+              ? { session: "@dev/12", launch_id: "launch-dev12", launch_parent_pid: 123 }
+              : request.method === "register"
+                ? { name: "@dev/12", role: "member" }
+                : request.method === "tribe.pending"
+                  ? { pending: [], count: 0 }
+                  : request.method === "tribe.send"
+                    ? {
+                        sent: true,
+                        id: "msg-29718",
+                        request_id: "ball-29718",
+                        ...(request.params?.reply === undefined && request.params?.payload?.reply === undefined
+                          ? {}
+                          : { tracker: { request_id: "ball-29718", closed: 1 } }),
+                        delivery: { state: "online", recipient: "@ci" },
+                      }
+                    : { error: `unexpected call ${request.method}` }
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+        }
+      })
+    })
+    const runSend = (args: string[]) =>
+      new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProcess) => {
+        const child = spawn(BUN_BIN, [CLI, "send", ...args], {
+          env: { ...process.env, TRIBE_SOCKET: socketPath, ...launchEnvironment("launch-dev12") },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProcess({ code, stdout, stderr }))
+      })
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+
+      const tracked = await runSend(["@ci", "please land this", "--type", "request", "--summary", "landing request"])
+      expect(tracked.code).toBe(0)
+      expect(tracked.stdout).toContain("Sent message to @ci")
+      expect(tracked.stdout).toContain("Message msg-29718")
+      expect(tracked.stdout).toContain("Ball ball-29718")
+
+      const json = await runSend([
+        "@ci",
+        "please land this",
+        "--type",
+        "request",
+        "--summary",
+        "landing request",
+        "--json",
+      ])
+      expect(json.code).toBe(0)
+      expect(JSON.parse(json.stdout)).toMatchObject({ sent: true, id: "msg-29718", request_id: "ball-29718" })
+
+      // The reply journey: tracker prose must not pollute --json stdout.
+      const replyJson = await runSend([
+        "@ci",
+        "done",
+        "--type",
+        "response",
+        "--reply",
+        "ball-29718",
+        "--summary",
+        "done",
+        "--json",
+      ])
+      expect(replyJson.code).toBe(0)
+      expect(JSON.parse(replyJson.stdout)).toMatchObject({ sent: true, id: "msg-29718" })
+      expect(replyJson.stderr).toContain("Closed 1 pending request row(s) for @dev/12: ball-29718")
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
+    }
+  })
+
   test("options validation failures output canonical tribe.send: invalid --<opt> shape (24994)", async () => {
     const runCliRaw = (args: string[]) =>
       new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProcess) => {
