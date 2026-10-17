@@ -211,8 +211,8 @@ export function installInjectionFileWriter(path: string): () => void {
   _installedWriters.set(writer, path)
 
   /**
-   * The inode of the live segment right now, or `undefined` when there is no file there to hold. Reported through
-   * the same reader as the size, so a stat this process cannot perform is loud once rather than silent twice.
+   * The inode of the live segment right now, or `undefined` when there is no file there to hold. Read through the
+   * same reader as the size, so a stat this process cannot perform is named on stderr rather than swallowed here.
    */
   const liveIno = (): number | undefined => {
     const live = readLiveSegment(path)
