@@ -1903,10 +1903,15 @@ export function withDispatcher<
               )
             }
             const tokenKeyed = verifiedSid !== null && (verifiedGen !== null || !hasLaunchId)
-            if (tokenKeyed && verifiedGen === null) {
+            // 29686 generation half (@cto ruling 4 of 43f630c5, his cdeab187 item 2): "this verdict proved no usable
+            // instance" has ONE predicate, `provenInstanceId`, so an ABSENT gen and a present-but-unusable one
+            // (negative or non-integer) take the same loud refusal, which names the generation it could not use.
+            // Testing only `verifiedGen === null` let an unusable gen compose `sid-dev7@-1` at `launchIdRaw` below
+            // and REGISTER a session on it; with that predicate the empty-launchId fallback is unreachable here.
+            if (tokenKeyed && provenInstanceId(verifiedSid, verifiedGen) === null) {
               const message =
-                `register refused: ${String(p.name)}'s token verified, but the verifier verdict carries no gen; ` +
-                "the daemon cannot key this session without a launch id"
+                `register refused: ${String(p.name)}'s token verified, but the verifier verdict carries no usable ` +
+                `gen (gen=${String(verifiedGen)}); the daemon cannot key this session without a launch id`
               log.warn?.(message)
               return refuseRegister(id, typeof p.name === "string" ? p.name : "(no name)", {
                 message,

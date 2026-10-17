@@ -103,6 +103,9 @@ type RegisterParams = {
   identityToken?: string
   launchId?: string
   launchParentPid?: number
+  // The daemon reads this on register (with-client-registry.ts:45); the local fixture type had not named it, because
+  // no row in this file had built a service-principal register (29686 slice 2's launch-authority row is the first).
+  principalClass?: "agent" | "service"
   idToken?: string
   mailboxAuthorityHash?: string
   filterMode?: string
@@ -939,6 +942,56 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
         identity_sid: string | null
       }
     ).identity_sid
+  // Registers the seat through the PRODUCTION register path and returns the DURABLE ROW's id -- the key the refusal
+  // store uses (29686), never `sessions.identity_sid`, which is the launch-side spelling ("sid-dev7").
+  const registeredSeat = async (
+    harness: ReturnType<typeof createDispatcherHarness>,
+    connId: string,
+    idToken: string,
+  ) => {
+    harness.addPendingClient(connId)
+    parseResult<RegisterResult>(
+      await harness.register(connId, {
+        name: "@dev/7",
+        pid: 4101,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken,
+      }),
+    )
+    return (
+      harness.db.prepare("SELECT id FROM sessions WHERE name = '@dev/7' ORDER BY updated_at DESC").get() as {
+        id: string
+      }
+    ).id
+  }
+  // A gen-SUPPLYING verifier (@cto ruling 4a). `identityVerifier` below declares `suppliesGen: false`, so its verdicts'
+  // gens are dropped and every record reads `launch_id: null` -- correct there, but it cannot show the proven instance.
+  const genVerifier = {
+    path: "/stub/identity-verifier.ts",
+    suppliesGen: true,
+    verify: async (token: string): Promise<IdentityVerdict> => {
+      const verdicts: Record<string, IdentityVerdict> = {
+        "token-dev7": { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 },
+        "token-dev8": { result: "verified", actor: "@dev/8", sid: "sid-dev8", gen: 1 },
+      }
+      const verdict = verdicts[token]
+      if (verdict === undefined) throw new Error(`stub has no verdict for ${token}`)
+      return verdict
+    },
+  }
+  // A gen-supplying verifier keyed by the caller for the two sites whose STATE no neighbouring fixture builds: the
+  // launch-authority site needs a service-principal row, and the persona-token site needs a persona reached with a
+  // PROVEN instance.
+  const siteVerifier = (verdicts: Record<string, IdentityVerdict>) => ({
+    path: "/stub/identity-verifier.ts",
+    suppliesGen: true,
+    verify: async (token: string): Promise<IdentityVerdict> => {
+      const verdict = verdicts[token]
+      if (verdict === undefined) throw new Error(`stub has no verdict for ${token}`)
+      return verdict
+    },
+  })
   const membersAuthority = async (harness: ReturnType<typeof createDispatcherHarness>) => {
     const result = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.members", {}))
     const sessions = (JSON.parse(result.content[0]!.text) as { sessions: Array<{ name: string; authority: string }> })
@@ -1542,6 +1595,170 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     harness.registry.forgetTransportSessions([sessionId])
     expect(harness.registry.getRegisterRefusal(sessionId), "cleared by forgetTransportSessions").toBeUndefined()
     expect((await roster())?.last_refusal ?? null).toBeNull()
+  })
+
+  // 29686 slice 2, required item 1 (@cto cdeab187): the record must name what the register could PROVE. Each row here
+  // fails on revert of the site it pins -- the four sites the earlier slice left without one.
+  it("29686 records a verifier fault with NO launch id, never the launch id the register presented", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const sessionId = await registeredSeat(harness, "conn-fault-seat", "token-dev7")
+    harness.dropClient("conn-fault-seat")
+    harness.addPendingClient("conn-fault")
+    // The fault path is LOUD by design and the harness globals refuse stray console output, so this row captures the
+    // error channel it provokes (the sibling row above does the same) and asserts the fault was named.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+    expect(
+      parseError(
+        await harness.register("conn-fault", {
+          name: "@dev/7",
+          pid: 4201,
+          project: "/tmp/p",
+          launchParentPid: process.pid,
+          launchId: "sid-dev7@1",
+          idToken: "token-fault",
+        }),
+      ),
+    ).toMatchObject({ code: -32003, data: { kind: "identity-verifier-fault" } })
+    // The verifier faulted BEFORE it named a sid and a gen, so this register proves no instance at all: the record
+    // carries NO launch rather than the client-sent string, which is exactly what `launch_id: null` says here.
+    expect(harness.registry.getRegisterRefusal(sessionId)).toMatchObject({
+      kind: "identity-verifier-fault",
+      launch_id: null,
+      pid: 4201,
+    })
+    expect(String(errors.mock.calls.flat())).toContain("signing key unreadable")
+  })
+
+  it("29686 records the instance the token PROVED, and keeps the presented launch id only in the refusal's data", async () => {
+    const harness = createDispatcherHarness({ identityVerifier: genVerifier })
+    cleanup = harness.dispose
+    const sessionId = await registeredSeat(harness, "conn-mismatch-seat", "token-dev7")
+    harness.dropClient("conn-mismatch-seat")
+    harness.addPendingClient("conn-mismatch")
+    expect(
+      parseError(
+        await harness.register("conn-mismatch", {
+          name: "@dev/7",
+          pid: 4202,
+          project: "/tmp/p",
+          launchParentPid: process.pid,
+          launchId: "sid-dev9@1",
+          idToken: "token-dev7",
+        }),
+      ),
+    ).toMatchObject({
+      code: -32003,
+      data: { kind: "identity-mismatch", launch_id: "sid-dev9@1", sid: "sid-dev7" },
+    })
+    // The refusal's own `data` names what the transport CLAIMED (`sid-dev9@1`); the record names what the token
+    // PROVED, in the one spelling the rest of the wire uses: `sid-dev7@1`, an instance id no bare sid can equal.
+    expect(harness.registry.getRegisterRefusal(sessionId)).toMatchObject({
+      kind: "identity-mismatch",
+      launch_id: "sid-dev7@1",
+    })
+  })
+
+  // 29686 slice 2, required item 1 (@cto cdeab187), the launch-authority site: the service owner's own transport is
+  // gone, so this register proves no authority over the launch tuple it presents.
+  it("29686 records a launch-authority refusal with the instance the token PROVED", async () => {
+    const harness = createDispatcherHarness({
+      identityVerifier: siteVerifier({
+        "token-svc": { result: "verified", actor: "@svc/km-fold", sid: "sid-svc", gen: 1 },
+      }),
+    })
+    cleanup = harness.dispose
+    const ownerPid = 6301
+    harness.addPendingClient("conn-svc")
+    parseResult<RegisterResult>(
+      await harness.register("conn-svc", {
+        name: "@svc/km-fold",
+        pid: ownerPid,
+        project: "/tmp/p",
+        launchId: "sid-svc@1",
+        launchParentPid: ownerPid,
+        principalClass: "service",
+        idToken: "token-svc",
+      }),
+    )
+    const sessionId = (
+      harness.db.prepare("SELECT id FROM sessions WHERE name = '@svc/km-fold'").get() as { id: string }
+    ).id
+    harness.dropClient("conn-svc")
+    harness.addPendingClient("conn-svc-2")
+    expect(
+      parseError(
+        await harness.register("conn-svc-2", {
+          name: "@svc/km-fold",
+          pid: 6399,
+          project: "/tmp/p",
+          launchId: "sid-svc@1",
+          launchParentPid: ownerPid,
+          idToken: "token-svc",
+        }),
+      ),
+    ).toMatchObject({
+      code: -32003,
+      data: { kind: "launch-authority-unavailable", reason: "owner-transport-disconnected" },
+    })
+    // The record keys on the service's own durable row and names the instance this register's token proved.
+    expect(harness.registry.getRegisterRefusal(sessionId)).toMatchObject({
+      kind: "launch-authority-unavailable",
+      launch_id: "sid-svc@1",
+    })
+  })
+
+  // 29686 slice 2, required item 1 (@cto cdeab187), the persona-token site. A proven instance and a persona-token
+  // defect coexist only when the verifier ACCEPTS a token whose launch claims are unreadable, and the persona is then
+  // reached through a persisted rename -- the pid/cwd route is closed to a verified token by construction. So this
+  // registers a bare seat, renames it to the persona at runtime, then reconnects with its frozen spawn-time name.
+  it("29686 records a persona-token refusal with the instance the token PROVED", async () => {
+    const harness = createDispatcherHarness({
+      identityVerifier: siteVerifier({
+        "token-standalone": { result: "verified", actor: "standalone", sid: "sid-dev7", gen: 1 },
+        "not-a-jws": { result: "verified", actor: "standalone", sid: "sid-dev7", gen: 1 },
+      }),
+    })
+    cleanup = harness.dispose
+    const ownerPid = 6401
+    harness.addPendingClient("conn-standalone")
+    parseResult<RegisterResult>(
+      await harness.register("conn-standalone", {
+        name: "standalone",
+        pid: ownerPid,
+        project: "/tmp/p",
+        launchId: "sid-dev7@1",
+        launchParentPid: ownerPid,
+        idToken: "token-standalone",
+      }),
+    )
+    parseResult(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "rename-persona", method: "tribe.rename", params: { new_name: "@dev/7" } },
+        "conn-standalone",
+      ),
+    )
+    const sessionId = (harness.db.prepare("SELECT id FROM sessions WHERE name = '@dev/7'").get() as { id: string }).id
+    harness.dropClient("conn-standalone")
+    harness.addPendingClient("conn-malformed")
+    expect(
+      parseError(
+        await harness.register("conn-malformed", {
+          name: "standalone",
+          pid: ownerPid,
+          project: "/tmp/p",
+          launchParentPid: ownerPid,
+          idToken: "not-a-jws",
+        }),
+      ),
+    ).toMatchObject({
+      code: -32003,
+      data: { kind: "identity-token-missing", reason: "malformed" },
+    })
+    expect(harness.registry.getRegisterRefusal(sessionId)).toMatchObject({
+      kind: "identity-token-missing",
+      launch_id: "sid-dev7@1",
+    })
   })
 
   it("reports and pages a post-boot verifier fault, then clears on repair without exposing the token", async () => {
@@ -2744,7 +2961,44 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       ),
     ).toMatchObject({
       code: -32003,
-      message: expect.stringContaining("verifier verdict carries no gen; the daemon cannot key this session"),
+      message: expect.stringContaining(
+        "verifier verdict carries no usable gen (gen=null); the daemon cannot key this session",
+      ),
+      data: { kind: "identity-verdict-without-gen" },
+    })
+    expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/7'").get()).toEqual({ n: 0 })
+  })
+
+  // 29686 generation half (@cto ruling 4 of 43f630c5, his cdeab187 item 2): this token keyed the session, so the
+  // client was never allowed to send a launch id. A gen the daemon cannot USE must refuse by name: with only the
+  // `verifiedGen === null` test the daemon composed `sid-dev7@-1` and registered a session on it.
+  it("an unusable gen from a verified token refuses by name, and registers nothing", async () => {
+    const harness = createDispatcherHarness({
+      identityVerifier: {
+        ...identityVerifier,
+        verify: async (): Promise<IdentityVerdict> => ({
+          result: "verified",
+          actor: "@dev/7",
+          sid: "sid-dev7",
+          gen: -1,
+        }),
+      },
+    })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-badgen")
+    expect(
+      parseError(
+        await harness.register("conn-badgen", {
+          name: "@dev/7",
+          pid: 5301,
+          project: "/tmp/p",
+          launchParentPid: 5300,
+          idToken: "token-g3",
+        }),
+      ),
+    ).toMatchObject({
+      code: -32003,
+      message: expect.stringContaining("carries no usable gen (gen=-1)"),
       data: { kind: "identity-verdict-without-gen" },
     })
     expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/7'").get()).toEqual({ n: 0 })
