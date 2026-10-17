@@ -33,6 +33,7 @@
       "name": "tribe-injection-envelope",
       "version": "0.1.0",
       "dependencies": {
+        "@bearly/flock": "^0.1.0",
         "loggily": "^0.11.0",
       },
     },

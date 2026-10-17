@@ -47,11 +47,20 @@
  *   The reader is the other half of that contract and reads BOTH segments, the
  *   previous one first, so a rotation landing inside its hour cannot hide the
  *   side of the window it moved.
+ *
+ *   Every writer of this record is a separate hook process. Until 29681 two of
+ *   them could each approve a row that fit alone while neither saw the other's:
+ *   the occupancy check and the append were separate operations. The writers now
+ *   exclude each other with a kernel flock on `<path>.lock`, held across
+ *   measure, append and flush — so the file's size IS the occupancy and the
+ *   64 MiB pair bound holds instead of approximating. A writer that cannot take
+ *   the lock says so loudly and still records its row.
  */
 
 import { mkdirSync, renameSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
+import { acquireFlockBlocking, type FlockHandle } from "@bearly/flock"
 import { addWriter, createFileWriter, createLogger, type Event } from "loggily"
 
 /**
@@ -63,14 +72,12 @@ import { addWriter, createFileWriter, createLogger, type Event } from "loggily"
 const RECORD_SEGMENT_MAX_BYTES = 32 * 1024 * 1024
 
 /**
- * Room kept below the segment ceiling for bytes no check can see: an uncoordinated peer holds at most loggily's
- * write buffer in memory (4096 characters, flushed on a 100 ms timer WITHOUT consulting anyone), so a peer's last
- * few KiB can land after this writer's check. Rotating this far below the ceiling keeps the ruling's
- * `live + previous <= 64 MiB` a bound rather than an approximation: it absorbs 16 concurrent hook processes' buffers
- * plus the row being appended. A writer count above that is the one shape this cannot bound, and it is not a real
- * one — a prompt runs one hook process.
+ * The record's exclusion, as one spelling: a sibling lock file no reader opens, taken by a writer for the whole
+ * measure-then-append window. Exported so a writer, a probe and a test agree on one path instead of retyping it.
  */
-const RECORD_ROTATION_RESERVE_BYTES = 64 * 1024
+export function injectionRecordLockPath(path: string): string {
+  return `${path}.lock`
+}
 
 /**
  * The one previous segment. The next rotation replaces it, so there is never a `.2`.
@@ -187,44 +194,22 @@ export function installInjectionFileWriter(path: string): () => void {
   }
   let writer = createFileWriter(path)
   _installedWriters.set(writer, path)
-  // Bytes handed to the write since the last rotation, seeded from what a previous writer left behind so a file that
-  // is already past the threshold rotates on its first append rather than growing forever. It is a floor rather than
-  // the whole truth: loggily buffers, so our own rows trail the file until it flushes (4 KiB or a 100 ms timer).
-  let bytesInSegment = recordBytesOnDisk(path)
-  const rotateBefore = (lineBytes: number): void => {
-    // Our own rows go to disk FIRST. loggily buffers (4 KiB or a 100 ms timer), and our pending rows and a peer's
-    // already-flushed rows are DIFFERENT bytes: a bare `max(tally, disk)` counts one and loses the other, which is
-    // how a peer's 1 KB plus our own 1.5 KB could sit outside one number and leave the pair over 64 MiB
-    // (@dev/review2's r2 verdict, its exact sequential counterexample). After the flush the file's size IS every byte
-    // this process has written, so `max` has nothing to choose between and the measurement is the occupancy.
-    let flushed = true
-    try {
-      writer.flush()
-    } catch (error) {
-      flushed = false
-      // Loud, and the segment counts as full: an occupancy we could not establish must not read as an empty file.
-      console.error(
-        `injection-envelope: could not flush before measuring the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
-      )
-    }
-    const segmentBytes = flushed ? Math.max(bytesInSegment, recordBytesOnDisk(path)) : RECORD_SEGMENT_MAX_BYTES
-    if (segmentBytes + lineBytes <= RECORD_SEGMENT_MAX_BYTES - RECORD_ROTATION_RESERVE_BYTES) {
-      bytesInSegment = segmentBytes
-      return
-    }
+
+  /**
+   * Rename the live record aside as its one previous segment, and open a fresh one. Loud on failure: a record
+   * that did not rotate is unbounded, and that must never be silent. The row being appended is unaffected —
+   * it lands in the fresh segment.
+   */
+  const rotate = (): void => {
     const replaced = writer
     try {
-      replaced.flush()
       replaced.close()
       // Renaming over an existing previous segment keeps exactly one of them.
       renameSync(path, path + RECORD_PREVIOUS_SEGMENT_SUFFIX)
       writer = createFileWriter(path)
       _installedWriters.delete(replaced)
       _installedWriters.set(writer, path)
-      bytesInSegment = 0
     } catch (error) {
-      // Loud, like the flush path below: a rotation that failed leaves an unbounded record, which must never be
-      // silent. The row is still written, so nothing is lost to the failure itself.
       console.error(
         `injection-envelope: could not rotate the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
       )
@@ -232,15 +217,64 @@ export function installInjectionFileWriter(path: string): () => void {
         writer = createFileWriter(path)
         _installedWriters.delete(replaced)
         _installedWriters.set(writer, path)
-        bytesInSegment = recordBytesOnDisk(path)
       } catch (reopenError) {
         console.error(
           `injection-envelope: could not reopen the debug log ${path}: ${reopenError instanceof Error ? reopenError.message : String(reopenError)}`,
         )
-        bytesInSegment = RECORD_SEGMENT_MAX_BYTES
       }
     }
   }
+
+  /**
+   * Append one row with the record lock held, so the whole measure-then-append window is exclusive.
+   *
+   * The lock is the contract, not a nicety. Two hook processes appending at once each measured the same live
+   * length before either had written, so both approved a row that fit alone and the pair landed past the
+   * ruling's ceiling (@dev/review2's r3 counterexample: M=32 MiB, previous=M−R, live=M−R−L, both approve their
+   * L-byte row, pair = 64 MiB + 896 KiB). No margin below the ceiling can bound that — the window it must
+   * cover is another writer's whole row. Holding the flock across measure, append and flush makes the file's
+   * size the entire occupancy: every writer's rows are on disk before it releases, so a peer's row cannot land
+   * between this writer's measurement and its append.
+   */
+  const appendRow = (line: string, lineBytes: number): void => {
+    let lock: FlockHandle | undefined
+    try {
+      lock = acquireFlockBlocking(injectionRecordLockPath(path))
+    } catch (error) {
+      // Loud, and the row is still recorded: a filesystem without flock must not become a missing record.
+      // The bound rests on this lock, so a writer that could not take it says so rather than writing silently.
+      console.error(
+        `injection-envelope: could not take the record lock ${injectionRecordLockPath(path)}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    try {
+      let occupancyKnown = true
+      try {
+        // Normally nothing of ours is pending — every row is flushed before its lock is released. This repair
+        // matters after a failed flush: bytes this process wrote but cannot see must not read as an empty segment.
+        writer.flush()
+      } catch (error) {
+        occupancyKnown = false
+        console.error(
+          `injection-envelope: could not flush before measuring the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      const segmentBytes = occupancyKnown ? recordBytesOnDisk(path) : RECORD_SEGMENT_MAX_BYTES
+      if (segmentBytes + lineBytes > RECORD_SEGMENT_MAX_BYTES) rotate()
+      writer.write(line)
+      try {
+        // On disk before the lock is released, so the next writer's measurement includes this row.
+        writer.flush()
+      } catch (error) {
+        console.error(
+          `injection-envelope: could not flush the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    } finally {
+      lock?.release()
+    }
+  }
+
   const sink = (_formatted: string, _level: string, _ns: string, event: Event): void => {
     // Span events flow past too — we only persist log records.
     if (event.kind !== "log") return
@@ -254,10 +288,7 @@ export function installInjectionFileWriter(path: string): () => void {
     // Bytes, not characters: loggily writes the row as UTF-8 plus its own newline, so `line.length` (UTF-16 units)
     // under-counts a non-ASCII row by up to half and would let the two segments pass their byte ceiling while
     // claiming to be under it.
-    const lineBytes = Buffer.byteLength(line, "utf8") + 1
-    rotateBefore(lineBytes)
-    writer.write(line)
-    bytesInSegment += lineBytes
+    appendRow(line, Buffer.byteLength(line, "utf8") + 1)
   }
   // Three independent subscriptions — addWriter's ns filter is OR-only,
   // so we register once per top-level namespace tree. The unsubscribe
