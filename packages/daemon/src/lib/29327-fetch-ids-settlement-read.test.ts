@@ -223,7 +223,9 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     expect(events[0]?.settlement).toBe("undecided")
     expect(events[0]?.settled).toBeUndefined()
     expect((res.settlement_lookup as { status?: string })?.status).toBe("unavailable")
-    expect(String((res.settlement_lookup as { detail?: string })?.detail)).toMatch(/exceed the settlement lookup budget/)
+    expect(String((res.settlement_lookup as { detail?: string })?.detail)).toMatch(
+      /exceed the settlement lookup budget/,
+    )
     expect(logs.some((entry) => entry.level === "warn" && String(entry.msg).includes("could not decide"))).toBe(true)
   })
 })

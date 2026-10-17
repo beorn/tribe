@@ -241,9 +241,9 @@ describe("29327 an unread request whose ball is closed renders settled", () => {
     expect(attention.settlement_lookup?.detail).toMatch(/exceed the settlement lookup budget/)
     // @cto 2026-10-17: the fallback names its cause in the daemon's own log too,
     // never only in the response the caller happens to read.
-    expect(logs.some((entry) => entry.level === "warn" && String(entry.msg).includes("settlement lookup stopped"))).toBe(
-      true,
-    )
+    expect(
+      logs.some((entry) => entry.level === "warn" && String(entry.msg).includes("settlement lookup stopped")),
+    ).toBe(true)
     // The undecided row is still presented, and claims nothing.
     expect(row, "an undecided row is never dropped").toBeDefined()
     expect(row?.settled).toBeUndefined()
