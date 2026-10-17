@@ -196,7 +196,7 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     expect((res.events as Array<unknown>).length).toBe(0)
   })
 
-  it("reads the ball by the MESSAGE's recipient, so a watch-role seat is never told a live ball is settled", () => {
+  it("reads the ball by the ids the batch names, so a watch-role seat is never told a live ball is settled", () => {
     // @cto verdict 2026-10-17 (ruling 2). A watch-role adapter is NOT a ball's
     // recipient: the ag adapter registers `watch` whenever its host name differs
     // from the mirrored persona name (tribe.ts `hostOwnsTargetIdentity`), and that
@@ -212,12 +212,44 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     expect(events[0]?.settlement).toBe("open")
   })
 
+  it("reads an open BROADCAST ball as open, though no tracker row carries '*' as a recipient", () => {
+    // @cto verdict 2026-10-17 (C1, correcting ruling 2). A `*` send's ball is
+    // opened ONCE PER OWNER — messaging.ts inserts the tracker row with
+    // `$recipient: owner` — so the message's recipient is `*` while the ball's is
+    // a seat. A read keyed on "the recipients these messages name" therefore
+    // misses every open broadcast ball and answers `settled`: the same defect
+    // through a different door. Only the IDS can be asked about, and here the
+    // ball is open for the very seat doing the reading.
+    message("msg-29327-broadcast", "msg-29327-broadcast", "*")
+    stmts.openPendingRequest.run({
+      $request_id: "msg-29327-broadcast",
+      $recipient: SEAT,
+      $sender: SENDER,
+      $opened_at: TS,
+      $expires_at: TS + 60_000,
+      $message_id: "msg-29327-broadcast",
+      $fanout: "all",
+    })
+
+    const res = read(["msg-29327-broadcast"])
+    const events = res.events as Array<Record<string, unknown>>
+
+    expect(events[0]?.settlement).toBe("open")
+  })
+
   it("answers undecided for EVERY row when the lookup stops at its budget, and names the cause", () => {
     logs.length = 0
-    openBall("msg-29327-over-budget")
-    for (let index = 0; index <= SETTLEMENT_LOOKUP_BUDGET; index += 1) openBall(`msg-29327-ball-${index}`)
+    // The read is keyed on the ids it was asked about, so the over-run can only
+    // come from the BATCH itself: every one of these ids is in the request, and
+    // one more than the budget is open. (An owner-scoped read could trip this
+    // from someone else's busy mailbox; an id-keyed one cannot, which is the
+    // point — the work done is proportional to what was asked, never to how much
+    // traffic the seat happens to be carrying.)
+    const ids = ["msg-29327-over-budget"]
+    for (let index = 0; index < SETTLEMENT_LOOKUP_BUDGET; index += 1) ids.push(`msg-29327-ball-${index}`)
+    for (const id of ids) openBall(id)
 
-    const res = read(["msg-29327-over-budget"])
+    const res = read(ids)
     const events = res.events as Array<Record<string, unknown>>
 
     expect(events[0]?.settlement).toBe("undecided")

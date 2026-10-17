@@ -3166,17 +3166,29 @@ export function createStatements(db: Database) {
     `),
     ),
 
-    /** 29327 - the open balls of the RECIPIENTS a batch of messages names, rather
-     *  than of the seat asking (@cto verdict 2026-10-17, ruling 2). A watch-role
-     *  adapter is not a ball's recipient: the ball belongs to the target persona,
-     *  so the owner-scoped read above finds no row for work that persona still
-     *  owes and would answer `settled` for it. Same budget-plus-one detection. */
-    selectOpenBallIdsForRecipients: db.prepare(
+    /** 29327 - which of the ids a batch names still own an open ball, decided by
+     *  the IDS ALONE (@cto verdict 2026-10-17, ruling 2, corrected against C1).
+     *
+     *  Not by `recipient = $name`, the way `selectOpenBallIdsForRecipient` above
+     *  asks: a watch-role adapter is not a ball's recipient, so an owner-scoped
+     *  read finds no row for work its target still owes and answers `settled`.
+     *  And not by "the recipients these messages name" either: a `*` broadcast's
+     *  ball is opened ONCE PER OWNER (`messaging.ts` inserts with `$recipient:
+     *  owner`), so `p.recipient` is a seat and never `*`, and keying on the
+     *  message's recipient misses every open broadcast ball the same way.
+     *
+     *  So the read asks about the identities themselves — the request ids the
+     *  batch's messages name, and the message ids — through the two indexes those
+     *  columns already have (the `pending_request` primary key and
+     *  idx_pending_message_id). Same budget-plus-one over-run detection as above. */
+    selectOpenBallIdsForMessageIds: db.prepare(
       assertSingleStatement(`
-      WITH asked(recipient) AS (SELECT value FROM json_each($recipients))
+      WITH asked_request(request_id) AS (SELECT value FROM json_each($request_ids)),
+           asked_message(message_id) AS (SELECT value FROM json_each($message_ids))
       SELECT p.request_id AS request_id, p.message_id AS message_id
-      FROM asked a CROSS JOIN pending_request p INDEXED BY idx_pending_recipient
-      WHERE p.recipient = a.recipient
+      FROM pending_request p
+      WHERE p.request_id IN (SELECT request_id FROM asked_request)
+         OR p.message_id IN (SELECT message_id FROM asked_message)
       LIMIT $limit
     `),
     ),
