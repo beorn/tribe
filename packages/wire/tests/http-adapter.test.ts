@@ -442,6 +442,46 @@ describe("HTTP MCP adapter", () => {
     }
   })
 
+  // @failure A configured watch registers as watch but omits its role claim on the ordinary MCP join.
+  // @level l2 @consumer configured-watch HTTP MCP callers
+  // Delivery-mode coverage never configures watch or checks both daemon role claims.
+  it("explicitly claims configured watch on both register and ordinary MCP join", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-watch-role-"))
+    const socketPath = join(tempDir, "tribe.sock")
+    const daemon = await spawnFakeDaemon(socketPath, () => ({ name: "watch-http", role: "watch" }))
+    let bridge: TribeHttpMcpServer | undefined
+    try {
+      bridge = await startTribeHttpMcpServer({ socketPath, name: "watch-http", role: "watch", requireJoin: true })
+      expect(daemon.requests.find((request) => request.method === "register")?.params).toMatchObject({ role: "watch" })
+      const response = await fetch(bridge.url, {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          authorization: `Bearer ${bridge.secret}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "join", arguments: { name: "watch-http" } },
+        }),
+      })
+      expect(response.status).toBe(200)
+      const payload = (await response.json()) as { result?: { isError?: boolean }; error?: unknown }
+      expect(payload.error).toBeUndefined()
+      expect(payload.result?.isError).not.toBe(true)
+      expect(daemon.requests.find((request) => request.method === "tribe.join")?.params).toMatchObject({
+        role: "watch",
+      })
+    } finally {
+      bridge?.close()
+      for (const client of daemon.clients) client.destroy()
+      await new Promise<void>((resolve) => daemon.server.close(() => resolve()))
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it("declares the launch notification filter during registration", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-adapter-filter-"))
     const socketPath = join(tempDir, "tribe.sock")

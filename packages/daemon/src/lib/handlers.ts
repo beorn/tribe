@@ -3710,11 +3710,11 @@ export function resolveRuntimeJoinIdentity(
   hasActiveTransport: HandlerOpts["hasActiveTransport"],
 ): { joinName: string; joinRole: string; identityToken: string | null } {
   let joinName = a.name as string
-  let joinRole = (a.role as string) ?? ctx.sessionRole
+  const joinRole = (a.role as string) ?? ctx.sessionRole
   const identityToken = (a.identity_token as string) ?? (a.identityToken as string) ?? null
   // Identity-token adoption: if the caller supplies a token that matches a
-  // non-active prior session, inherit its name/role when the caller didn't
-  // pass them explicitly. Symmetric with the register path in tribe-daemon.
+  // non-active prior session, inherit its name when the caller didn't pass
+  // one explicitly. The connection keeps its own role, as on register.
   if (identityToken) {
     const prior = ctx.db
       .prepare(
@@ -3727,7 +3727,6 @@ export function resolveRuntimeJoinIdentity(
     } | null
     if (prior && !hasActiveTransport(prior.id)) {
       if (!a.name) joinName = prior.name
-      if (!a.role) joinRole = prior.role
     }
   }
   return { joinName, joinRole, identityToken }

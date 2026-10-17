@@ -1911,13 +1911,6 @@ export function withDispatcher<
               ? (pidCwdAdopted ?? launchAdopted)
               : (pidCwdAdopted ?? adoptIdentity(db, identityToken, isActive))
 
-            if (!p.role && adopted?.role) {
-              const adoptedRole = adopted.role
-              if (adoptedRole === "member" || adoptedRole === "watch") {
-                role = adoptedRole
-              }
-            }
-
             const project = String(p.project ?? process.cwd())
             const projectName = String(p.projectName ?? project.split("/").pop() ?? "unknown")
             const projectId = String(p.projectId ?? resolveProjectId(project))

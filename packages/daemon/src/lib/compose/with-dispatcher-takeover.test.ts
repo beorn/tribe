@@ -908,6 +908,112 @@ function createDispatcherHarness(
   }
 }
 
+describe("inactive session role precedence", () => {
+  // @failure an inactive token row overrides the current connection's role on an ordinary join
+  // @level l2 @consumer daemon join acknowledgment and participating-member projection
+  // Existing fan-in rows specify roles on live siblings; they miss omitted-role adoption in either direction.
+  it.each([
+    { currentRole: "member", priorRole: "watch" },
+    { currentRole: "watch", priorRole: "member" },
+  ] as const)("join keeps $currentRole over inactive $priorRole metadata", async ({ currentRole, priorRole }) => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    harness.addPendingClient("role-prior")
+    parseResult<RegisterResult>(
+      await harness.register("role-prior", {
+        name: "role-prior-name",
+        role: priorRole,
+        pid: 0,
+        project: "/tmp/role-prior",
+        identityToken: "prior-role-token",
+      }),
+    )
+    harness.dropClient("role-prior")
+    harness.addPendingClient("role-current")
+    const current = parseResult<RegisterResult>(
+      await harness.register("role-current", {
+        name: "role-current-name",
+        role: currentRole,
+        pid: 0,
+        project: "/tmp/role-current",
+        identityToken: "current-role-token",
+      }),
+    )
+    const result = parseResult<{ content: Array<{ text: string }> }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "role-join",
+          method: "tribe.join",
+          params: { identity_token: "prior-role-token" },
+        },
+        "role-current",
+      ),
+    )
+    const joined = JSON.parse(result.content[0]!.text) as { joined?: boolean; name?: string; role?: string }
+    expect(joined).toMatchObject({ joined: true, name: "role-prior-name", role: currentRole })
+    expect(harness.registry.clients.get("role-current")?.role).toBe(currentRole)
+    expect(harness.registry.getActiveSessionIds().has(current.sessionId)).toBe(currentRole === "member")
+    expect(harness.registry.getActiveSessionInfo().some((row) => row.id === current.sessionId)).toBe(
+      currentRole === "member",
+    )
+    expect(harness.db.prepare("SELECT role FROM sessions WHERE id = ?").get(current.sessionId)).toEqual({
+      role: currentRole,
+    })
+  })
+
+  // @failure a role-omitted reconnect inherits inactive watch instead of the registration's member default
+  // @level l2 @consumer daemon register acknowledgment, identity/state adoption and member projection
+  // The harness register helper supplies member; the already-exposed dispatcher exercises a genuinely omitted role.
+  it("register adopts inactive watch identity and state while resolving to member", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    harness.addPendingClient("role-prior")
+    const prior = parseResult<RegisterResult>(
+      await harness.register("role-prior", {
+        name: "role-reconnect",
+        role: "watch",
+        pid: process.pid,
+        project: "/tmp/role-reconnect",
+        identityToken: "reconnect-token",
+        filterMode: "focus",
+      }),
+    )
+    harness.dropClient("role-prior")
+    harness.addPendingClient("role-current")
+    const current = parseResult<RegisterResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "role-register",
+          method: "register",
+          params: {
+            pid: process.pid,
+            project: "/tmp/role-reconnect",
+            identityToken: "reconnect-token",
+            protocolVersion: TRIBE_PROTOCOL_VERSION,
+            delivery: "pull",
+          },
+        },
+        "role-current",
+      ),
+    )
+    expect(current).toMatchObject({ sessionId: prior.sessionId, name: "role-reconnect", role: "member" })
+    expect(harness.registry.clients.get("role-current")?.role).toBe("member")
+    expect(harness.registry.getActiveSessionIds().has(prior.sessionId)).toBe(true)
+    expect(harness.registry.getActiveSessionInfo()).toEqual([
+      expect.objectContaining({ id: prior.sessionId, role: "member" }),
+    ])
+    expect(
+      harness.db.prepare("SELECT role, identity_token, filter_mode FROM sessions WHERE id = ?").get(prior.sessionId),
+    ).toEqual({
+      role: "member",
+      identity_token: "reconnect-token",
+      filter_mode: "focus",
+    })
+  })
+})
+
 // 25074 3b — the verifier seam on register (@cto 4a194bbf). The verifier is a stub keyed by token, so each case
 // states exactly what the composing layer answered; hh's real module has its own test at the root.
 describe("dispatcher identity verification on register (25074 3b)", () => {

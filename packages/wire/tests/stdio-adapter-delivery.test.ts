@@ -549,6 +549,38 @@ describe("stdio adapter delivery modes", () => {
     expect(joinRequest?.params?.delivery).toBe("pull")
   })
 
+  // @failure A configured watch registers as watch but omits its role claim on the ordinary MCP join.
+  // @level l2 @consumer configured-watch stdio MCP callers
+  // Delivery-mode coverage never configures watch or checks both daemon role claims.
+  it("explicitly claims configured watch on both register and ordinary MCP join", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, { registerAck: { role: "watch" }, joinAck: { role: "watch" } })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test", "--role", "watch"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_REQUIRE_JOIN: "1",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2)
+    expect(daemon.requests.find((request) => request.method === "register")?.params).toMatchObject({ role: "watch" })
+
+    const joined = await writeJsonAndWaitForLine(
+      child,
+      callToolPayload(3, "join", { name: "@agent/test" }),
+      (line) => line.id === 3,
+    )
+    expect(joined).toHaveProperty("result.content")
+    expect(daemon.requests.find((request) => request.method === "tribe.join")?.params).toMatchObject({ role: "watch" })
+  })
+
   it("pull delivery seeds an explicit TRIBE_NAME persona at initial register", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)
