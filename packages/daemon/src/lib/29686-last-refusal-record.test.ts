@@ -29,11 +29,14 @@ import { registerSession } from "./session.ts"
 const PROJECT_ID = "29686-last-refusal-record"
 
 /** Every kind the register path composes, each with the site that composes it (@cto's Should item: the list and its
- *  citations both moved with the combined REVISE, and the three kinds it had never named are here now):
+ *  citations both moved with the combined REVISE, and the three kinds it had never named are here now. Every cite was
+ *  re-derived at this head, because the comment added at with-dispatcher.ts:2109 moved each later line by one):
  *  with-dispatcher.ts:1321 (token missing), :1367 (verifier fault), :1388 (name mismatch), :1395 (contradicted),
  *  :1416 (undecided), :1925 (the token's sid contradicts the launch id the register presented), :1949 (a verified
- *  token whose verdict proves no usable instance), :2152 (no authority over the launch tuple), :2361 (a duplicate
- *  generation yielding to a live incumbent) and :973/:2416/:2444 (a transport claiming a seat a live holder keeps). */
+ *  token whose verdict proves no usable instance), :2153 (no authority over the launch tuple), :2362 (a HIGHER
+ *  generation claiming a name a lower-generation incumbent still holds: its filter demands `held.gen < verifiedGen`,
+ *  :2255-2260, and "duplicate" is the FENCE's own reason token at :2418, a different arm) and :973/:2417/:2445 (a
+ *  transport claiming a seat a live holder keeps). */
 const REGISTER_REFUSAL_KINDS = [
   "identity-token-missing",
   "identity-verifier-fault",
@@ -250,7 +253,7 @@ describe("29686 — one bounded last-refusal record per session, published on th
     const name = "@agent/cleared"
     addSession(db, stmts, sessionId, name, { id: "launch-cleared", parentPid: 60_104 })
     // The daemon's REAL store (@cto required item 4): the registry's own map, cleared by ITS OWN reaper —
-    // forgetTransportSessions (with-client-registry.ts:305-312). A local Map this test deleted from by hand proved
+    // forgetTransportSessions (with-client-registry.ts:303-308). A local Map this test deleted from by hand proved
     // nothing: reverting that delete left this case green. The wire effect of BOTH clearers, driven through the
     // production register path, is pinned in with-dispatcher-takeover.test.ts:1553; this row keeps only what that one
     // cannot state — that the key is PRESENT after a clear rather than absent (@cto B5).
