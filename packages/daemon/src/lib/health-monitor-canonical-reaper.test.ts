@@ -957,7 +957,6 @@ describe("a refused passive alert keeps RUNNING at its declared default (29572)"
     processObservation: { kind: "standalone-os" },
     scalarObservation: { kind: "standalone-os", unavailable: ["disk.bytes", "disk.inodes"] },
     timestamp: Date.now(),
-    worktrees: 0,
   })
 
   const withFdEnv = (value: string | undefined, run: () => void): void => {

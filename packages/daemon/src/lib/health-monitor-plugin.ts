@@ -110,7 +110,6 @@ export interface HealthMetrics {
         readonly unavailable: readonly string[]
       }
     | { readonly detail?: string; readonly kind: "canonical-unavailable"; readonly reason: string }
-  worktrees: number
   timestamp: number
 }
 
@@ -426,7 +425,7 @@ export function deliverHealthAlert(
 /** Collect OS-level metrics (no child process needed). */
 export function collectOsMetrics(): Omit<
   HealthMetrics,
-  "bunProcesses" | "worktrees" | "disk" | "cpu" | "processObservation" | "scalarObservation"
+  "bunProcesses" | "disk" | "cpu" | "processObservation" | "scalarObservation"
 > & {
   cpu: Omit<HealthMetrics["cpu"], "topProcesses">
 } {
@@ -844,13 +843,6 @@ async function checkCollectedProcessReaper(
     return
   }
   checkCanonicalReaper(observation, thresholds, state.canonicalReaper, api, sessions)
-}
-
-/** Parse `git worktree list` output to count worktrees. */
-export function parseWorktreeList(output: string): number {
-  const trimmed = output.trim()
-  if (trimmed === "") return 0
-  return trimmed.split("\n").length
 }
 
 // ---------------------------------------------------------------------------
@@ -2464,7 +2456,6 @@ export async function collectFullMetrics(
   let bunProcesses: number | undefined
   let swapUsedMB = 0
   let pidToParent = new Map<number, number>()
-  let worktrees = 0
   let fdCount: HealthMetrics["fdCount"]
   if (processObservation.kind === "available") {
     const totalBytes =
@@ -2478,7 +2469,6 @@ export async function collectFullMetrics(
   }
 
   try {
-    const wtProc = Bun.spawn(["git", "worktree", "list"], { stdout: "pipe", stderr: "ignore" })
     // Two small kernel reads, no spawn and no 200,000-line pipe per sample.
     // `undefined` (not "0") when unreadable, so resolveFdReading can tell "this
     // host does not expose it" from "it read zero".
@@ -2497,9 +2487,8 @@ export async function collectFullMetrics(
             }).stdout,
           ).text()
         : Promise.resolve("")
-    const [observedPs, wtOutput, fdCountOutput, ulimitOutput] = await Promise.all([
+    const [observedPs, fdCountOutput, ulimitOutput] = await Promise.all([
       psOutput,
-      new Response(wtProc.stdout).text().catch(() => ""),
       fdCountOutputPromise.catch(() => undefined),
       ulimitOutputPromise.catch(() => undefined),
     ])
@@ -2509,8 +2498,6 @@ export async function collectFullMetrics(
       bunProcesses = processMetrics.bunProcesses
       pidToParent = processMetrics.pidToParent
     }
-    worktrees = parseWorktreeList(wtOutput)
-
     // File descriptor count — host-wide against a host-wide ceiling, or nothing.
     const reading = resolveFdReading({ fileNr: fdCountOutput, fileMax: ulimitOutput })
     if (reading.kind === "measured") {
@@ -2594,7 +2581,6 @@ export async function collectFullMetrics(
                 reason: processObservation.reason,
               },
       scalarObservation: hostMetrics.scalarObservation,
-      worktrees,
       timestamp: hostMetrics.timestamp,
     },
     pidToParent,

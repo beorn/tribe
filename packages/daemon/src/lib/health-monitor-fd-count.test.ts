@@ -36,7 +36,6 @@ function metrics(fdCount?: HealthMetrics["fdCount"]): HealthMetrics {
     processObservation: { kind: "standalone-os" },
     scalarObservation: { kind: "standalone-os", unavailable: ["disk.bytes", "disk.inodes"] },
     timestamp: Date.now(),
-    worktrees: 0,
     ...(fdCount === undefined ? {} : { fdCount }),
   }
 }
@@ -120,7 +119,6 @@ describe("24297 — the BLIND notice speaks only for sensors it reads", () => {
       processObservation: { kind: "standalone-os" },
       scalarObservation: { kind: "canonical-unavailable", reason: "scalar-fact-unavailable" },
       timestamp: Date.now(),
-      worktrees: 0,
     }
 
     const state = createAlertState()
