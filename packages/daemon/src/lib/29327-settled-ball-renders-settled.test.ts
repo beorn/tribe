@@ -36,12 +36,31 @@ import type { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { SETTLEMENT_LOOKUP_BUDGET, readAttentionProjection } from "./handlers.ts"
 import { registerSession } from "./session.ts"
+
+/**
+ * The daemon's OWN log (@cto 2026-10-17). A fallback that reports its cause in
+ * the response but writes nothing to the log is still a silent error: whoever
+ * reads the daemon's log cannot tell a stopped lookup from a clean batch. This
+ * captures the loggily boundary the way the daemon's other log tests do.
+ */
+const logs = vi.hoisted(() => [] as Array<{ level: string; msg: unknown; ns: string }>)
+vi.mock("loggily", async (original) => {
+  const actual = await original<typeof import("loggily")>()
+  const logger = (ns: string) => ({
+    info: (msg: unknown) => logs.push({ level: "info", msg, ns }),
+    warn: (msg: unknown) => logs.push({ level: "warn", msg, ns }),
+    error: (msg: unknown) => logs.push({ level: "error", msg, ns }),
+    debug: () => {},
+    child: () => logger(ns),
+  })
+  return { ...actual, createLogger: (ns: string) => logger(ns) }
+})
 
 const SEAT = "@dev/brain"
 const SENDER = "@chief"
@@ -73,6 +92,7 @@ function fixture(): Fixture {
 afterEach(() => {
   for (const item of opened.splice(0)) {
     item.db.close()
+    // raw-delete-allow: this test's own mkdtemp root under os.tmpdir(); removely is not a dependency of vendor/tribe, and nothing here is outside the fixture.
     rmSync(item.dir, { recursive: true, force: true })
   }
 })
@@ -206,6 +226,7 @@ describe("29327 an unread request whose ball is closed renders settled", () => {
 
   it("reports an unavailable lookup instead of reading the surplus as owed", () => {
     const { stmts, ctx } = fixture()
+    logs.length = 0
     trackedRequest(stmts, "req-29327-over-budget")
     stmts.closePendingRequest.run({ $request_id: "req-29327-over-budget", $recipient: SEAT })
     // Over the batch budget, so the tracker read cannot decide the batch.
@@ -218,6 +239,11 @@ describe("29327 an unread request whose ball is closed renders settled", () => {
 
     expect(attention.settlement_lookup?.status).toBe("unavailable")
     expect(attention.settlement_lookup?.detail).toMatch(/exceed the settlement lookup budget/)
+    // @cto 2026-10-17: the fallback names its cause in the daemon's own log too,
+    // never only in the response the caller happens to read.
+    expect(logs.some((entry) => entry.level === "warn" && String(entry.msg).includes("settlement lookup stopped"))).toBe(
+      true,
+    )
     // The undecided row is still presented, and claims nothing.
     expect(row, "an undecided row is never dropped").toBeDefined()
     expect(row?.settled).toBeUndefined()
