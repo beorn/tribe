@@ -48,9 +48,13 @@ export type ForeignIdentityTransport = {
 
 /**
  * The daemon keeps ONE record per session: the LAST refusal the register path gave it (29686, @cto ruling 1 of
- * 6c1953dd). It replaces the foreign-transport-only record, so every kind the register path composes can be read
+ * 43f630c5). It replaces the foreign-transport-only record, so every kind the register path composes can be read
  * back instead of only the impersonation case. `claimed` is the name the refused transport presented, which is not
  * the row's own name when a transport carried another seat's identity.
+ *
+ * `launch_id` is the refused transport's unit instance id in ONE spelling, `<sid>@<gen>` (tribe-wire's
+ * `formatInstanceId`), and is null whenever the daemon did not know both values — never a bare sid, which no
+ * instance id ever equals (@cto ruling 4 of 43f630c5).
  */
 export type RegisterRefusal = {
   readonly kind: string
@@ -61,9 +65,13 @@ export type RegisterRefusal = {
   readonly refused_at: string
 }
 
-/** The refusal kinds that mean "this transport carried another seat's identity" (24767). The members wire publishes
- *  exactly these as `foreign_transport`, derived from the record, so a reader of that field sees no change (29686). */
-export const FOREIGN_REFUSAL_KINDS = ["foreign-identity-transport"] as const
+/** The refusal kinds that mean "this transport carried another seat's identity" (24767). Two sites compose them: the
+ *  managed-inbox and launch-takeover refusals name the impersonation `foreign-identity-transport`, and the verifier's
+ *  own name mismatch keeps its `identity-name-mismatch` kind — which is what recorded the view against the presented
+ *  name before this bead, so dropping it from this set silently stopped a name mismatch publishing `foreign_transport`
+ *  (@cto eabd0565). The members wire publishes exactly these as `foreign_transport`, derived from the record, so a
+ *  reader of that field sees no change (29686). */
+export const FOREIGN_REFUSAL_KINDS = ["foreign-identity-transport", "identity-name-mismatch"] as const
 
 /** Derive the members wire's `foreign_transport` view from a last refusal: the same four fields it always had, or
  *  undefined when the refusal is not a foreign one. */

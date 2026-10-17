@@ -247,7 +247,7 @@ describe("29686 — one bounded last-refusal record per session, published on th
     }
   })
 
-  it("(c) a cleared record leaves no last_refusal: neither after a real transport connects nor after forgetTransportSessions", () => {
+  it("(c) a cleared record still writes last_refusal, as an explicit null, and a connected row carries neither", () => {
     const sessionId = "ref-cleared"
     const name = "@agent/cleared"
     addSession(db, stmts, sessionId, name, { id: "launch-cleared", parentPid: 60_104 })
@@ -278,7 +278,11 @@ describe("29686 — one bounded last-refusal record per session, published on th
     expect(entryFor(membersReply(opCtx, opts), name)?.last_refusal).toMatchObject({ kind: "identity-verifier-fault" })
     stored.delete(sessionId)
     const afterForget = membersReply(opCtx, opts)
-    expect(entryFor(afterForget, name), `${name} after forgetTransportSessions`).not.toHaveProperty("last_refusal")
+    // The rollout contract (@cto): the key is PRESENT and null, so a reader can tell "the daemon holds no refusal for
+    // this seat" from "this daemon predates the field". Reading a dropped bridge out of an absent key is the bug.
+    const clearedEntry = entryFor(afterForget, name)
+    expect(clearedEntry, `${name} after forgetTransportSessions`).toHaveProperty("last_refusal")
+    expect(clearedEntry?.last_refusal, `${name} cleared last_refusal`).toBeNull()
   })
 
   it("(d) a foreign-identity refusal keeps the row shape it has today, and gains last_refusal beside it", () => {

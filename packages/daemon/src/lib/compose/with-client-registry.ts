@@ -132,7 +132,7 @@ export interface ClientRegistry {
   /** Forget transient grace entries once their durable rows are reaped. */
   forgetTransportSessions(sessionIds: readonly string[]): void
   /** Remember the LATEST register refusal for this session — every kind, not only the foreign one — until a real
-   *  transport connects, the durable row is forgotten, or the daemon restarts (29686, @cto ruling 1 of 6c1953dd). */
+   *  transport connects, the durable row is forgotten, or the daemon restarts (29686, @cto ruling 1 of 43f630c5). */
   recordRegisterRefusal(sessionId: string, refusal: RegisterRefusal): void
   getRegisterRefusal(sessionId: string): RegisterRefusal | undefined
 }

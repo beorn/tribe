@@ -2856,7 +2856,7 @@ type MissingTransportOrExited =
       launch_id: string
       launch_parent_pid: number
       state: "missing-transport"
-      last_refusal?: RegisterRefusal
+      last_refusal?: RegisterRefusal | null
     }
   | {
       member_id: string
@@ -2865,7 +2865,7 @@ type MissingTransportOrExited =
       launch_parent_pid: number
       state: "exited-not-remounted"
       left_at: string
-      last_refusal?: RegisterRefusal
+      last_refusal?: RegisterRefusal | null
     }
 
 /** A missing-transport row whose only transport attempt the daemon refused
@@ -2878,7 +2878,7 @@ type ForeignIdentityMissing = {
   launch_parent_pid: number
   state: "foreign-identity-transport"
   foreign_transport: ForeignIdentityTransport
-  last_refusal?: RegisterRefusal
+  last_refusal?: RegisterRefusal | null
 }
 
 /** Everything `MembershipDiscrepancy.missing` can carry. `never-registered`
@@ -3278,9 +3278,11 @@ function projectMembershipDiscrepancy(
       // 29686 (@cto ruling 3): EVERY missing entry carries the last refusal, the settled exit included —
       // it is the only server-refusing evidence left now that the seat's own stderr record has no live
       // writer. The foreign shape keeps `foreign_transport` and gains this beside it (ruling 1).
+      // Rollout (@cto): the key is written on every entry, `null` when this daemon holds no refusal, so a reader can
+      // tell "the daemon says it holds none" from "this daemon predates the field". The second is indeterminate
+      // evidence, and an absent key must never be read as a dropped bridge.
       const lastRefusal = getLastRefusal?.(row.id)
-      const withRefusal: MissingLaunch =
-        lastRefusal === undefined ? classified : { ...classified, last_refusal: lastRefusal }
+      const withRefusal: MissingLaunch = { ...classified, last_refusal: lastRefusal ?? null }
       missing.push(
         foreignTransport === undefined
           ? withRefusal
