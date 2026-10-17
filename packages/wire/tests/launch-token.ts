@@ -44,6 +44,22 @@ export async function verifyIdentity(token) {
 }
 
 /**
+ * Write a test identity verifier that CONTRADICTS every token it is shown (29686, @cto's R5 fold-in). The daemon turns
+ * that verdict into its own `identity-contradicted` register refusal — a fault in the connector's OWN identity, which
+ * the adapter's unretryable arm carries but the wire's FOREIGN_REFUSAL_KINDS must not.
+ */
+export function writeContradictsVerifier(verifierPath: string, reason: string): void {
+  writeFileSync(
+    verifierPath,
+    `export const IDENTITY_VERIFIER_INTERFACE = 1
+export async function verifyIdentity() {
+  return { result: "contradicted", reason: ${JSON.stringify(reason)} }
+}
+`,
+  )
+}
+
+/**
  * The FILE half of a test launch identity (27314 B1): the same token `launchToken` mints, written 0600 and handed by
  * PATH, so a fixture can exercise the `_FILE` reader a producer will emit after the cutover.
  */
