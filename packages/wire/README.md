@@ -168,7 +168,8 @@ rows are reaped only after reconnect grace.
 
 A supervised plugin adapter's exits outlive the host's MCP log. The plugin
 supervisor appends one JSON line per adapter exit (`at`, `adapter_pid`, `code`,
-`signal`, `decision` of `retry` / `stop` / `host-stop` / `clean-exit`, plus
+`signal`, `decision` of `retry` / `stop` / `host-stop` / `clean-exit` /
+`nested-host-refused`, plus
 `attempt` and `retry_delay_ms` for a restart, and `reason` for a terminal
 refusal that records why it stopped without retrying) to
 `tribe-adapter-exits.jsonl` in the launch's state directory,
@@ -185,6 +186,17 @@ is relaunched - the recovery measured on that seat, where a pane-level MCP
 toggle did not work (`hh-hab up <seat> --relaunch`). A line that cannot be
 written, including for a launch with no state directory, is reported on the
 supervisor's own stderr.
+
+Each emitted row also carries `instance_id`: the canonical `session@generation`
+from the same launch identity token, read through the existing file-first token
+reader and captured once when the stable supervisor resolves its record target.
+Child adapter replacement does not change that captured instance. These are
+unverified diagnostic claims, not signature verification or authorization.
+An absent, unreadable or malformed identity writes `instance_id: null` and names
+the attribution gap once on the supervisor's stderr; it does not disable ending
+writes or standalone operation. No ambient generation is substituted and no old
+row is backfilled. A supervisor must start with the updated writer to emit this
+field; replacing only its adapter child does not reload the writer module.
 
 Service principals declare `principalClass: "service"` when registering through
 `connectTribeLaunch`. They are attributed senders with their own bare names,

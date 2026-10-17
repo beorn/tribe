@@ -5,7 +5,7 @@
  * @testonly none
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
@@ -31,6 +31,7 @@ import { openDatabase, createStatements } from "./database.ts"
 import { createTribeContext } from "./context.ts"
 import { sendMessage } from "./messaging.ts"
 import { incidentKey } from "tribe-wire"
+import { RECORD_PREVIOUS_SEGMENT_SUFFIX } from "tribe-injection-envelope"
 
 describe("Prompt hook latency reader & paging (25304)", () => {
   let tempDir: string
@@ -957,5 +958,138 @@ describe("27712 terminal cohort, window boundaries and exclusions", () => {
     })
     expect(stats.completedRuns).toBe(1)
     expect(stats.maxMs).toBe(700)
+  })
+})
+
+/**
+ * 29681: the writer keeps the live record plus one previous segment (`<path>.1`, tribe-injection-envelope
+ * src/debug.ts), so a rotation that lands inside the reader's window must not hide the older side of it.
+ *
+ * @failure A rotation moves every row into `<path>.1` while the reader reads only the live path: the hour before a
+ *   cut reports no runs at all, and a start in the previous segment whose terminal is in the live one is either
+ *   excluded as an orphan terminal or reported as a kill the run never was.
+ * @level   l2 — the reader's window and admission rules over the two segments the writer actually produces.
+ * @consumer @ag/hab/29681-every-log-writer-goes-through/bound-the-tribe-injection-record
+ */
+describe("29681 the record is segmented: the reader reads the previous segment with the live one", () => {
+  let tempDir: string
+  let logPath: string
+  let previousPath: string
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "hook-latency-29681-segments-"))
+    logPath = join(tempDir, "injection.jsonl")
+    previousPath = logPath + RECORD_PREVIOUS_SEGMENT_SUFFIX
+  })
+
+  afterEach(() => {
+    safeRemoveSync(tempDir, { within: tmpdir() })
+    vi.restoreAllMocks()
+  })
+
+  const hookRow = (fields: Record<string, unknown>): string =>
+    JSON.stringify({ namespace: "recall:hook:prompt", level: "info", ...fields })
+
+  const startRow = (pid: number, session: string, at: number): string =>
+    hookRow({ pid, session, msg: "start", start_time: at, ts: new Date(at).toISOString() })
+
+  const terminalRow = (
+    pid: number,
+    session: string,
+    at: number,
+    msg: string,
+    extra: Record<string, unknown> = {},
+  ): string => hookRow({ pid, session, msg, elapsed_ms: at, ts: new Date(at).toISOString(), ...extra })
+
+  const warnSpy = (): string[] => {
+    const lines: string[] = []
+    vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      lines.push(args.map((a) => String(a)).join(" "))
+    })
+    return lines
+  }
+
+  test("a window that spans a rotation reads both segments: the previous segment's completions are not lost", () => {
+    const t0 = new Date("2026-10-05T18:00:00.000Z").getTime()
+    // Rows the writer had already rotated out of the live file, before the cut.
+    writeFileSync(
+      previousPath,
+      [
+        startRow(501, "sess-before-the-cut", t0),
+        terminalRow(501, "sess-before-the-cut", t0 + 300, "library ok", { elapsed_ms: 300 }),
+      ].join("\n") + "\n",
+      "utf8",
+    )
+    // Rows written after the cut, in the new live segment.
+    writeFileSync(
+      logPath,
+      [
+        startRow(502, "sess-after-the-cut", t0 + 1000),
+        terminalRow(502, "sess-after-the-cut", t0 + 1400, "library ok", { elapsed_ms: 400 }),
+      ].join("\n") + "\n",
+      "utf8",
+    )
+
+    const stats = readHookLatencyStats(logPath, {
+      windowStartMs: t0 - 60_000,
+      windowEndMs: t0 + 60_000,
+      budgetMs: 1500,
+      timeoutMs: 30_000,
+    })
+
+    expect(stats.completedRuns, "one hour's two runs, split by the cut, are still two runs").toBe(2)
+    expect(stats.killCount, "neither run was killed; the cut is not a kill").toBe(0)
+    expect(stats.maxMs).toBe(400)
+    expect(stats.stepMaxMs).toEqual({})
+  })
+
+  test("a start in the previous segment closed by a terminal in the live one is a completion, never an orphan", () => {
+    const t0 = new Date("2026-10-05T19:00:00.000Z").getTime()
+    const warnings = warnSpy()
+    writeFileSync(previousPath, startRow(503, "sess-across-the-seam", t0) + "\n", "utf8")
+    writeFileSync(
+      logPath,
+      terminalRow(503, "sess-across-the-seam", t0 + 900, "library ok", { elapsed_ms: 900 }) + "\n",
+      "utf8",
+    )
+
+    const stats = readHookLatencyStats(logPath, {
+      windowStartMs: t0 - 60_000,
+      windowEndMs: t0 + 60_000,
+      budgetMs: 1500,
+      timeoutMs: 30_000,
+    })
+
+    expect(stats.completedRuns, "the run finishes across the seam and is one completion").toBe(1)
+    expect(stats.killCount, "its start is closed, so it is never a timeout kill").toBe(0)
+    expect(stats.maxMs).toBe(900)
+    expect(warnings.join("\n"), "a seam the reader covers is not an excluded orphan").not.toContain(
+      "excluded terminal with no matching start",
+    )
+  })
+
+  test("a previous segment that cannot be read is named, and the live segment still answers the window", () => {
+    const t0 = new Date("2026-10-05T20:00:00.000Z").getTime()
+    const warnings = warnSpy()
+    // A readable live segment, and a previous segment that exists but cannot be read as a record at all.
+    mkdirSync(previousPath)
+    writeFileSync(
+      logPath,
+      [
+        startRow(504, "sess-live-only", t0),
+        terminalRow(504, "sess-live-only", t0 + 250, "library ok", { elapsed_ms: 250 }),
+      ].join("\n") + "\n",
+      "utf8",
+    )
+
+    const stats = readHookLatencyStats(logPath, {
+      windowStartMs: t0 - 60_000,
+      windowEndMs: t0 + 60_000,
+      budgetMs: 1500,
+      timeoutMs: 30_000,
+    })
+
+    expect(stats.completedRuns, "an unreadable segment must not zero the segment that did read").toBe(1)
+    expect(warnings.join("\n"), "an unreadable segment is named, never silently read as empty").toContain(previousPath)
   })
 })

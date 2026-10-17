@@ -425,6 +425,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           flags: "-v, --verbose",
           description: "Emit verbose diagnostic details on refusal or delivery failure",
         },
+        {
+          name: "json",
+          flags: "--json",
+          description: "Print the send result as JSON, including the message id and any ball id",
+        },
       ],
     }),
   },

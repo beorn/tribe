@@ -172,6 +172,8 @@ type SendPayloadInput = {
   incidentCleared?: boolean
   /** Verbose output on refusal or delivery failure. */
   verbose?: boolean
+  /** CLI control only; never forwarded to the daemon payload. */
+  json?: boolean
 }
 
 type SendPayload = {
@@ -566,6 +568,7 @@ function reportCommittedReplyTracker(
   owner: string,
   reply: string,
   tracker: { request_id?: string; closed?: number; cause?: string } | undefined,
+  json = false,
 ): void {
   if (tracker === undefined) {
     console.error(
@@ -605,7 +608,10 @@ function reportCommittedReplyTracker(
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
     process.exit(3)
   }
-  console.log(`Closed ${closed} pending request row(s) for ${owner}: ${canonicalRequestId}`)
+  // 29718: in --json mode stdout is the machine-readable result alone, so
+  // this human receipt goes to stderr (validation and exit 3 above unchanged).
+  if (json) console.error(`Closed ${closed} pending request row(s) for ${owner}: ${canonicalRequestId}`)
+  else console.log(`Closed ${closed} pending request row(s) for ${owner}: ${canonicalRequestId}`)
 }
 
 function collectDomain(value: string, previous: string[]): string[] {
@@ -655,6 +661,9 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   }
 
   const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller, !input.anonymous)) as {
+    sent?: boolean
+    id?: string
+    request_id?: string
     error?: string
     detail?: string
     summary?: string
@@ -681,11 +690,13 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   if (input.reply && caller) {
     const type = input.type ?? "notify"
     if (type === "response" || type === "verdict") {
-      reportCommittedReplyTracker(caller.name, input.reply, result.tracker)
+      reportCommittedReplyTracker(caller.name, input.reply, result.tracker, input.json)
     } else {
       const tail = input.ref === undefined ? "" : `; reply ${input.reply} was not recorded; ref ${input.ref} kept`
       // @ag/tribe/29512: three outcomes, three sentences — see `replyNotSettledNote`.
-      console.log(replyNotSettledNote(type, input.reply, caller.name, replyBallOpen) + tail)
+      // 29718: in --json mode this prose goes to stderr; stdout stays JSON alone.
+      if (input.json) console.error(replyNotSettledNote(type, input.reply, caller.name, replyBallOpen) + tail)
+      else console.log(replyNotSettledNote(type, input.reply, caller.name, replyBallOpen) + tail)
     }
   }
   if (result.delivery?.state === "bounced") {
@@ -704,13 +715,28 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
       console.error("Inspect the recipient mailbox and daemon delivery policy before retrying.")
       process.exit(3)
     }
-    console.log(`Sent message to ${recipient} (redirected from ${originalTarget}: ${reason})`)
-  } else {
+    if (!input.json) console.log(`Sent message to ${recipient} (redirected from ${originalTarget}: ${reason})`)
+  } else if (!input.json) {
     console.log(`Sent message to ${input.to}`)
+  }
+  // 29718: the sender learns both ids from the send itself, never a read-back.
+  if (input.json) {
+    await writeJsonStdout({
+      sent: true,
+      ...(result.id === undefined ? {} : { id: result.id }),
+      ...(result.request_id === undefined ? {} : { request_id: result.request_id }),
+      to:
+        typeof result.delivery?.recipient === "string" && result.delivery.recipient.length > 0
+          ? result.delivery.recipient
+          : input.to,
+    })
+  } else {
+    if (result.id !== undefined) console.log(`Message ${result.id}`)
+    if (result.request_id !== undefined) console.log(`Ball ${result.request_id}`)
   }
   // 27735 B: a status + ref receipt with --expires-in-ms re-set its ball's due; say which ball and the new due.
   const appliedDue = result.applied_due
-  if (appliedDue?.request_id !== undefined && typeof appliedDue.expires_at === "number") {
+  if (!input.json && appliedDue?.request_id !== undefined && typeof appliedDue.expires_at === "number") {
     const previous =
       typeof appliedDue.previous_expires_at === "number"
         ? new Date(appliedDue.previous_expires_at).toISOString()
@@ -1031,6 +1057,7 @@ export function registerSendCommands(program: Command): void {
   const sendIncident = cliOption(SEND_CLI, "incident")
   const sendIncidentCleared = cliOption(SEND_CLI, "incident-cleared")
   const sendVerbose = cliOption(SEND_CLI, "verbose")
+  const sendJson = cliOption(SEND_CLI, "json")
   program
     .command(SEND_CLI.name)
     .description(SEND_CLI.description)
@@ -1049,6 +1076,7 @@ export function registerSendCommands(program: Command): void {
     .option(sendIncident.flags, sendIncident.description)
     .option(sendIncidentCleared.flags, sendIncidentCleared.description)
     .option(sendVerbose.flags, sendVerbose.description)
+    .option(sendJson.flags, sendJson.description)
     .addHelpText(
       "after",
       "\nExit codes: 0 delivered; 1 not delivered; 2 identity or usage refused; 3 delivered, its ball close not " +
@@ -1073,6 +1101,7 @@ export function registerSendCommands(program: Command): void {
           incident?: string
           incidentCleared?: boolean
           verbose?: boolean
+          json?: boolean
         },
       ) => {
         const type = opts.type ?? "notify"
@@ -1177,6 +1206,7 @@ export function registerSendCommands(program: Command): void {
           incident: opts.incident,
           incidentCleared: opts.incidentCleared,
           verbose: opts.verbose,
+          json: opts.json,
         })
       },
     )

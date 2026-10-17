@@ -33,20 +33,100 @@
  * via `INJECTION_DEBUG_LOG=/path` or the unified `LOGGILY_FILE`. Browse via
  * `tail -f` or the (planned) `bearly inject status` CLI.
  *
- * Provenance:
+ * Bound and fields (29681, @cto ruling centralized-logging-fates-2026-10-16):
  *
- *   Every record carries `producer` (=`@bearly/injection-envelope`), `pid`,
- *   and `hookEvent` so a reader can attribute at a glance without
- *   code archaeology. The package name lives in `_PRODUCER_ID` below.
+ *   This file is a RECORD, not a log: `packages/daemon/src/lib/hook-latency-reader.ts`
+ *   reads it back, and its parser takes only `recall:hook:prompt` rows, using
+ *   `ts`, `pid`, `msg` and the props it needs. So the writer keeps the live
+ *   file plus one previous segment, at most 64 MiB together — it rotates at
+ *   32 MiB into `<path>.1`, which the next rotation replaces — and writes only
+ *   the fields a reader uses. `producer` (one constant, and the file's own path
+ *   already names the writer) and `level` (which nothing reads) are gone: they
+ *   were about an eighth of every row when the bound landed.
+ *
+ *   The reader is the other half of that contract and reads BOTH segments, the
+ *   previous one first, so a rotation landing inside its hour cannot hide the
+ *   side of the window it moved.
+ *
+ *   Every writer of this record is a separate hook process. Until 29681 two of
+ *   them could each approve a row that fit alone while neither saw the other's:
+ *   the occupancy check and the append were separate operations. The writers now
+ *   exclude each other with a kernel flock on `<path>.lock`, held across
+ *   measure, append and flush — so the file's size IS the occupancy and the
+ *   64 MiB pair bound holds instead of approximating. A writer that cannot take
+ *   the lock says so loudly and still records its row.
+ *
+ *   A rotation is a rename by one of those processes, and every other writer
+ *   holds a descriptor opened before it: that descriptor follows the inode which
+ *   was renamed aside, so a writer also reopens the live path when the inode it
+ *   is holding is no longer the one at that path. Otherwise its next row would
+ *   be written into `<path>.1` while it measured `<path>`. The open that pairs a
+ *   descriptor with the inode it will be compared against happens under that same
+ *   lock: unlocked, the pair is a schedule, and a peer's rotation between the two
+ *   steps would label the stale descriptor with the fresh inode.
  */
 
-import { mkdirSync } from "node:fs"
+import { mkdirSync, renameSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
+import { acquireFlockBlocking, type FlockHandle } from "@bearly/flock"
 import { addWriter, createFileWriter, createLogger, type Event } from "loggily"
 
-/** Self-identifying provenance tag stamped on every JSONL record. */
-const _PRODUCER_ID = "@bearly/injection-envelope"
+/**
+ * Bytes of live record before it rotates into the previous segment. Two segments is the ruling's ceiling of 64 MiB,
+ * and at the record's measured growth (~4 KiB/min) one segment spans days, so a cut is rare and the previous segment
+ * is history a reader only needs at the seam. The reader reads both segments anyway: `hook-latency-reader.ts` reads
+ * the previous one alongside the live one, so a rotation never hides a window that straddles it.
+ */
+const RECORD_SEGMENT_MAX_BYTES = 32 * 1024 * 1024
+
+/**
+ * The record's exclusion, as one spelling: a sibling lock file no reader opens, taken by a writer for the whole
+ * measure-then-append window. Exported so a writer, a probe and a test agree on one path instead of retyping it.
+ */
+export function injectionRecordLockPath(path: string): string {
+  return `${path}.lock`
+}
+
+/**
+ * The one previous segment. The next rotation replaces it, so there is never a `.2`.
+ *
+ * Exported because the seam has exactly one spelling and the READER is the other half of it: the daemon's
+ * `packages/daemon/src/lib/hook-latency-reader.ts` reads the previous segment with the live one, so it imports this
+ * suffix rather than spelling ".1" a second time. Two packages, one rotation contract.
+ */
+export const RECORD_PREVIOUS_SEGMENT_SUFFIX = ".1"
+
+/**
+ * What the live segment at `path` is right now: its size and the inode it is, absent, or unmeasurable.
+ *
+ * The inode is what tells a writer whether the descriptor it holds is still the file at this path. A rotation is a
+ * rename performed by another hook process, so a peer's rotation leaves this process holding the segment that was
+ * renamed aside — same descriptor, different file from the one at the path it measures.
+ *
+ * Only a genuinely absent file is the empty-file case: an occupancy this process cannot read is named on stderr and
+ * reported as the full segment, so the next append rotates rather than growing a record nobody can measure. Reading a
+ * failed stat as 0 would reset the accounting against a file that is already past the ceiling, which is how the
+ * record grew to 252 MB in the first place.
+ */
+type LiveSegment = { bytes: number; ino: number } | "absent" | "unmeasurable"
+
+function readLiveSegment(path: string): LiveSegment {
+  try {
+    const stats = statSync(path)
+    return { bytes: stats.size, ino: stats.ino }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+      // A record that does not exist yet holds zero bytes — the writer creates it on its first write.
+      // silent-fallback-allow: absent file, not a masked failure (any other stat error is raised loudly below)
+      return "absent"
+    }
+    console.error(
+      `injection-envelope: could not measure the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+    return "unmeasurable"
+  }
+}
 
 export interface InjectionDebugEvent {
   /** Upstream emitter identity — which logical source produced this (recall, tribe, telegram, …). */
@@ -130,22 +210,160 @@ export function installInjectionFileWriter(path: string): () => void {
     // mkdir failure is recoverable if the dir already exists with the
     // right perms; let createFileWriter surface the real error.
   }
-  const writer = createFileWriter(path)
-  _installedWriters.set(writer, path)
+  /**
+   * The inode of the live segment right now, or `undefined` when there is no file there to hold. Read through the
+   * same reader as the size, so a stat this process cannot perform is named on stderr rather than swallowed here.
+   */
+  const liveIno = (): number | undefined => {
+    const live = readLiveSegment(path)
+    return typeof live === "object" ? live.ino : undefined
+  }
+
+  let writer!: ReturnType<typeof createFileWriter>
+  /**
+   * The inode this writer's descriptor is holding. A peer's rotation renames the live path, so "the path's inode is
+   * not this one" is exactly "this descriptor now points at the segment that was renamed aside". Left unset when the
+   * identity could not be established under the lock, which makes the first append open the record again under it.
+   */
+  let openedIno: number | undefined
+
+  // Open the record and record the inode that descriptor is holding, BOTH under the record lock. Unlocked, the pair
+  // is a schedule: this process opens the segment that is live, a peer rotates and opens a fresh one, and the stat
+  // below then labels this process's OLD descriptor with the peer's NEW inode — the first append finds them equal,
+  // skips the reopen and writes into `<path>.1` while it measures `<path>` (@dev/review2, 2026-10-16, asking whether
+  // the initial open and identity read are inside the flock).
+  let installLock: FlockHandle | undefined
+  try {
+    installLock = acquireFlockBlocking(injectionRecordLockPath(path))
+  } catch (error) {
+    // A filesystem without flock still gets its file opened — a missing record is worse than an unproven identity —
+    // and the identity stays unset, so the first append takes the lock it can take and opens the record again.
+    console.error(
+      `injection-envelope: could not take the record lock ${injectionRecordLockPath(path)}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  try {
+    writer = createFileWriter(path)
+    _installedWriters.set(writer, path)
+    if (installLock !== undefined) openedIno = liveIno()
+  } finally {
+    installLock?.release()
+  }
+
+  /**
+   * Close the descriptor this writer holds and open the live path again, renaming the segment it held aside as the one
+   * previous when `renameAside`. Loud on failure: a record that did not rotate is unbounded, and a record whose
+   * descriptor could not be reopened is one this process can no longer write to — neither may be silent. The row being
+   * appended is unaffected: it lands in the segment this opens.
+   */
+  const openFresh = (renameAside: boolean): void => {
+    const replaced = writer
+    try {
+      replaced.close()
+      // Renaming over an existing previous segment keeps exactly one of them.
+      if (renameAside) renameSync(path, path + RECORD_PREVIOUS_SEGMENT_SUFFIX)
+      writer = createFileWriter(path)
+      _installedWriters.delete(replaced)
+      _installedWriters.set(writer, path)
+      openedIno = liveIno()
+    } catch (error) {
+      console.error(
+        `injection-envelope: could not ${renameAside ? "rotate" : "reopen"} the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      try {
+        writer = createFileWriter(path)
+        _installedWriters.delete(replaced)
+        _installedWriters.set(writer, path)
+        openedIno = liveIno()
+      } catch (reopenError) {
+        console.error(
+          `injection-envelope: could not reopen the debug log ${path}: ${reopenError instanceof Error ? reopenError.message : String(reopenError)}`,
+        )
+      }
+    }
+  }
+
+  /** This writer's own rotation: the live segment becomes the one previous, and the row lands in a fresh one. */
+  const rotate = (): void => openFresh(true)
+
+  /**
+   * Append one row with the record lock held, so the whole measure-then-append window is exclusive.
+   *
+   * The lock is the contract, not a nicety. Two hook processes appending at once each measured the same live
+   * length before either had written, so both approved a row that fit alone and the pair landed past the
+   * ruling's ceiling (@dev/review2's r3 counterexample: M=32 MiB, previous=M−R, live=M−R−L, both approve their
+   * L-byte row, pair = 64 MiB + 896 KiB). No margin below the ceiling can bound that — the window it must
+   * cover is another writer's whole row. Holding the flock across measure, append and flush makes the file's
+   * size the entire occupancy: every writer's rows are on disk before it releases, so a peer's row cannot land
+   * between this writer's measurement and its append.
+   */
+  const appendRow = (line: string, lineBytes: number): void => {
+    let lock: FlockHandle | undefined
+    try {
+      lock = acquireFlockBlocking(injectionRecordLockPath(path))
+    } catch (error) {
+      // Loud, and the row is still recorded: a filesystem without flock must not become a missing record.
+      // The bound rests on this lock, so a writer that could not take it says so rather than writing silently.
+      console.error(
+        `injection-envelope: could not take the record lock ${injectionRecordLockPath(path)}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    try {
+      let occupancyKnown = true
+      try {
+        // Normally nothing of ours is pending — every row is flushed before its lock is released. This repair
+        // matters after a failed flush: bytes this process wrote but cannot see must not read as an empty segment.
+        writer.flush()
+      } catch (error) {
+        occupancyKnown = false
+        console.error(
+          `injection-envelope: could not flush before measuring the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      // A peer may have rotated the record while this writer sat idle: the descriptor above would then point at the
+      // segment that was renamed aside, and the row below would be written into `<path>.1` while this writer measured
+      // `<path>`. The same check covers an identity that was never established (no lock at install, so no inode
+      // captured): the first append opens the record under the lock it is holding and captures it there. Silent by
+      // design — a peer's rotation is the contract working, not a failure.
+      let live = readLiveSegment(path)
+      if (live !== "unmeasurable" && (live === "absent" || live.ino !== openedIno)) {
+        openFresh(false)
+        live = readLiveSegment(path)
+      }
+      // An occupancy we could not establish reads as a full segment, never as an empty one.
+      let segmentBytes: number
+      if (!occupancyKnown || live === "unmeasurable") segmentBytes = RECORD_SEGMENT_MAX_BYTES
+      else if (live === "absent") segmentBytes = 0
+      else segmentBytes = live.bytes
+      if (segmentBytes + lineBytes > RECORD_SEGMENT_MAX_BYTES) rotate()
+      writer.write(line)
+      try {
+        // On disk before the lock is released, so the next writer's measurement includes this row.
+        writer.flush()
+      } catch (error) {
+        console.error(
+          `injection-envelope: could not flush the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    } finally {
+      lock?.release()
+    }
+  }
+
   const sink = (_formatted: string, _level: string, _ns: string, event: Event): void => {
     // Span events flow past too — we only persist log records.
     if (event.kind !== "log") return
-    writer.write(
-      JSON.stringify({
-        ts: new Date(event.time).toISOString(),
-        producer: _PRODUCER_ID,
-        pid: process.pid,
-        namespace: event.namespace,
-        level: event.level,
-        msg: event.message,
-        ...event.props,
-      }),
-    )
+    const line = JSON.stringify({
+      ts: new Date(event.time).toISOString(),
+      pid: process.pid,
+      namespace: event.namespace,
+      msg: event.message,
+      ...event.props,
+    })
+    // Bytes, not characters: loggily writes the row as UTF-8 plus its own newline, so `line.length` (UTF-16 units)
+    // under-counts a non-ASCII row by up to half and would let the two segments pass their byte ceiling while
+    // claiming to be under it.
+    appendRow(line, Buffer.byteLength(line, "utf8") + 1)
   }
   // Three independent subscriptions — addWriter's ns filter is OR-only,
   // so we register once per top-level namespace tree. The unsubscribe

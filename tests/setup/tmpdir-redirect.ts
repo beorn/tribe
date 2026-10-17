@@ -19,6 +19,7 @@
  */
 import { randomUUID } from "node:crypto"
 import { mkdirSync, readdirSync, realpathSync, statSync } from "node:fs"
+import { homedir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 
@@ -95,4 +96,30 @@ if (!process.env.TRIBE_DAEMON_STDERR_LOG) {
 // TRIBE_ACTIVITY_LOG itself.
 if (!process.env.TRIBE_ACTIVITY_LOG) {
   process.env.TRIBE_ACTIVITY_LOG = join(TEST_TMP_BASE, "activity-log-guard.jsonl")
+}
+
+// Injection-record guard — the identical hazard, a fourth time: the record writer
+// (packages/injection-envelope/src/debug.ts, ensureFileWriter) falls back to
+// ~/.local/share/bearly/injection.jsonl whenever INJECTION_DEBUG_LOG and
+// LOGGILY_FILE are both unset (hook-dispatch.ts resolves the same three names).
+// The injection-envelope tests install a scratch writer for their assertions and
+// then emit rows, and the emit installs that fallback too — so every test run
+// wrote tens of MiB of fixture rows into the operator's real record. That was
+// growth while the record had no bound; since the bound landed it is DESTRUCTION,
+// because the writer rotates what it can no longer measure: on 2026-10-16 a single
+// `vitest run` of packages/injection-envelope rotated the real 251,832,256 B
+// record aside as `<path>.1` and the same run's next 32 MiB replaced it.
+//
+// Same fix shape as the guards above, widened by one clause: pin when nothing
+// names a path, and also when what names one points into the real per-user state
+// directory (a seat or CI shell exporting LOGGILY_FILE at a live log must not
+// decide where tests write). Explicit always wins otherwise — a test that wants
+// its own path still sets INJECTION_DEBUG_LOG or LOGGILY_FILE itself, and an
+// explicit installInjectionFileWriter(path) is unaffected either way.
+const declaredRecordPath = process.env.INJECTION_DEBUG_LOG ?? process.env.LOGGILY_FILE
+if (declaredRecordPath === undefined || declaredRecordPath.startsWith(join(homedir(), ".local", "share"))) {
+  // Per-process, like the socket guard's unique directory: two workers sharing one
+  // record would rotate under each other, and the file is swept with the rest of
+  // TEST_TMP_BASE after 24h.
+  process.env.INJECTION_DEBUG_LOG = join(TEST_TMP_BASE, `injection-record-guard-${process.pid}.jsonl`)
 }
