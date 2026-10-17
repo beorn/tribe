@@ -117,12 +117,12 @@ function childEnv(): NodeJS.ProcessEnv {
   return env
 }
 
-/** Start one real second hook process on the shared record and wait until its writer is installed. */
-async function spawnChild(path: string): Promise<{
+/** Start one real second hook process on the shared record; it reports `ready` once its writer is installed. */
+function startChild(path: string): {
   child: ChildProcess
   reader: ReturnType<typeof lineReader>
   childStderr: () => string
-}> {
+} {
   const child = spawn(process.execPath, [CHILD, path], { env: childEnv(), stdio: ["pipe", "pipe", "pipe"] })
   live.push(child)
   // A child that cannot take the record lock says so on stderr; swallowing it would make the schedule below
@@ -132,11 +132,21 @@ async function spawnChild(path: string): Promise<{
     stderrText += chunk.toString("utf8")
   })
   const reader = lineReader(child.stdout!)
-  const ready = await reader.next(30_000)
-  if (ready !== "ready") {
-    throw new Error(`fixture child never reported ready: ${JSON.stringify(ready)} — stderr: ${stderrText}`)
-  }
   return { child, reader, childStderr: () => stderrText }
+}
+
+/** Start one real second hook process on the shared record and wait until its writer is installed. */
+async function spawnChild(path: string): Promise<{
+  child: ChildProcess
+  reader: ReturnType<typeof lineReader>
+  childStderr: () => string
+}> {
+  const started = startChild(path)
+  const ready = await started.reader.next(30_000)
+  if (ready !== "ready") {
+    throw new Error(`fixture child never reported ready: ${JSON.stringify(ready)} — stderr: ${started.childStderr()}`)
+  }
+  return started
 }
 
 describe("injection record — a second process appending at the same time", () => {
@@ -236,5 +246,50 @@ describe("injection record — a peer rotates the record while this writer is id
       "the row written after the peer's rotation followed the renamed inode into the previous segment",
     ).toBe(1)
     expect(rows(live, "child-row"), "the row written after the peer's rotation must land in the live segment").toBe(1)
+  })
+})
+
+/**
+ * The window before the first row. The writer's whole staleness test is "the inode I am holding is not the inode at
+ * this path", and holding an inode means two steps that must agree: opening the descriptor, and reading what the path
+ * is. Unlocked, those two steps are a schedule: A opens the segment that is live, B rotates and opens a fresh one, A
+ * reads the path and labels its OLD descriptor with B's NEW inode — A's first append then finds them equal, skips the
+ * reopen and writes into `<path>.1` while measuring `<path>`. (The reviewer's own schedule, `@dev/review2`
+ * 2026-10-16, asked before his verdict on the fix for rotation after the first row.)
+ *
+ * @failure The install's open and the path stat that pairs a descriptor with an inode are outside the record lock, so
+ *   a peer's rotation between them labels a stale descriptor with the live inode.
+ * @level   l2 — two real processes and the real kernel lock
+ * @consumer @ag/hab/29681-every-log-writer-goes-through/bound-the-tribe-injection-record
+ * @reach fs-walk <fixture-only: an mkdtemp scratch directory, written by the writer under test>
+ * @testonly none
+ */
+describe("injection record — this writer's own install", () => {
+  test("the descriptor and the inode it will be compared against are established under the record lock", async () => {
+    const path = join(dir, "injection.jsonl")
+    writeFileSync(path, "")
+
+    // The peer holds the exclusion first. Install is the pair the lock protects - open, then read what the path is -
+    // so it waits here, and the child says nothing at all until the peer is finished.
+    const lock = acquireFlockBlocking(injectionRecordLockPath(path))
+    const started = startChild(path)
+    let early: string | null
+    try {
+      early = await started.reader.next(4_000)
+    } finally {
+      lock.release()
+    }
+    expect(
+      early,
+      `the writer installed without the record lock, so its descriptor and its inode can be paired across a peer's rotation — child stderr: ${started.childStderr()}`,
+    ).toBeNull()
+
+    // It was alive and held, not dead: released, it installs and reports ready.
+    expect(await started.reader.next(30_000), `the child never reported ready — stderr: ${started.childStderr()}`).toBe("ready")
+
+    // And its first row lands in the live record.
+    started.child.stdin!.write("emit 1024\n")
+    expect(await started.reader.next(30_000), "the writer never wrote its first row").toBe("written")
+    expect(readFileSync(path, "utf8"), "the first row is in the live record").toContain("child-row")
   })
 })

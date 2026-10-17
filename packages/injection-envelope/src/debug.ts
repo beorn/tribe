@@ -60,7 +60,10 @@
  *   holds a descriptor opened before it: that descriptor follows the inode which
  *   was renamed aside, so a writer also reopens the live path when the inode it
  *   is holding is no longer the one at that path. Otherwise its next row would
- *   be written into `<path>.1` while it measured `<path>`.
+ *   be written into `<path>.1` while it measured `<path>`. The open that pairs a
+ *   descriptor with the inode it will be compared against happens under that same
+ *   lock: unlocked, the pair is a schedule, and a peer's rotation between the two
+ *   steps would label the stale descriptor with the fresh inode.
  */
 
 import { mkdirSync, renameSync, statSync } from "node:fs"
@@ -207,9 +210,6 @@ export function installInjectionFileWriter(path: string): () => void {
     // mkdir failure is recoverable if the dir already exists with the
     // right perms; let createFileWriter surface the real error.
   }
-  let writer = createFileWriter(path)
-  _installedWriters.set(writer, path)
-
   /**
    * The inode of the live segment right now, or `undefined` when there is no file there to hold. Read through the
    * same reader as the size, so a stat this process cannot perform is named on stderr rather than swallowed here.
@@ -219,11 +219,36 @@ export function installInjectionFileWriter(path: string): () => void {
     return typeof live === "object" ? live.ino : undefined
   }
 
+  let writer!: ReturnType<typeof createFileWriter>
   /**
    * The inode this writer's descriptor is holding. A peer's rotation renames the live path, so "the path's inode is
-   * not this one" is exactly "this descriptor now points at the segment that was renamed aside".
+   * not this one" is exactly "this descriptor now points at the segment that was renamed aside". Left unset when the
+   * identity could not be established under the lock, which makes the first append open the record again under it.
    */
-  let openedIno = liveIno()
+  let openedIno: number | undefined
+
+  // Open the record and record the inode that descriptor is holding, BOTH under the record lock. Unlocked, the pair
+  // is a schedule: this process opens the segment that is live, a peer rotates and opens a fresh one, and the stat
+  // below then labels this process's OLD descriptor with the peer's NEW inode — the first append finds them equal,
+  // skips the reopen and writes into `<path>.1` while it measures `<path>` (@dev/review2, 2026-10-16, asking whether
+  // the initial open and identity read are inside the flock).
+  let installLock: FlockHandle | undefined
+  try {
+    installLock = acquireFlockBlocking(injectionRecordLockPath(path))
+  } catch (error) {
+    // A filesystem without flock still gets its file opened — a missing record is worse than an unproven identity —
+    // and the identity stays unset, so the first append takes the lock it can take and opens the record again.
+    console.error(
+      `injection-envelope: could not take the record lock ${injectionRecordLockPath(path)}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  try {
+    writer = createFileWriter(path)
+    _installedWriters.set(writer, path)
+    if (installLock !== undefined) openedIno = liveIno()
+  } finally {
+    installLock?.release()
+  }
 
   /**
    * Close the descriptor this writer holds and open the live path again, renaming the segment it held aside as the one
@@ -297,7 +322,9 @@ export function installInjectionFileWriter(path: string): () => void {
       }
       // A peer may have rotated the record while this writer sat idle: the descriptor above would then point at the
       // segment that was renamed aside, and the row below would be written into `<path>.1` while this writer measured
-      // `<path>`. Silent by design — a peer's rotation is the contract working, not a failure.
+      // `<path>`. The same check covers an identity that was never established (no lock at install, so no inode
+      // captured): the first append opens the record under the lock it is holding and captures it there. Silent by
+      // design — a peer's rotation is the contract working, not a failure.
       let live = readLiveSegment(path)
       if (live !== "unmeasurable" && (live === "absent" || live.ino !== openedIno)) {
         openFresh(false)
