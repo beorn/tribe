@@ -13,8 +13,8 @@ import { launchToken } from "../../../packages/wire/tests/launch-token.ts"
 import { recordAdapterExit, resolveAdapterExitRecord, type AdapterExit } from "../supervisor-exit-record.ts"
 
 const PRIVATE = "fixture-private-identity-value"
-const badClaims = (gen?: unknown) =>
-  `e30.${Buffer.from(JSON.stringify({ sid: PRIVATE, act: { sub: "fixture-seat" }, gen })).toString("base64url")}.c2ln`
+const badClaims = (gen?: unknown, sid = PRIVATE) =>
+  `e30.${Buffer.from(JSON.stringify({ sid, act: { sub: "fixture-seat" }, gen })).toString("base64url")}.c2ln`
 
 describe("launch-stamped adapter ending record (29701)", () => {
   let home: string
@@ -71,18 +71,32 @@ describe("launch-stamped adapter ending record (29701)", () => {
   })
 
   test.each([
-    { label: "absent token", env: () => ({}) },
-    { label: "malformed token", env: () => ({ HAB_ID_TOKEN: PRIVATE }) },
-    { label: "missing generation", env: () => ({ HAB_ID_TOKEN: badClaims() }) },
-    { label: "invalid generation", env: () => ({ HAB_ID_TOKEN: badClaims(PRIVATE) }) },
+    { label: "absent token", env: () => ({}), problem: "HAB_ID_TOKEN_FILE / HAB_ID_TOKEN is unset" },
+    { label: "malformed token", env: () => ({ HAB_ID_TOKEN: PRIVATE }), problem: "HAB_ID_TOKEN claims unreadable" },
+    {
+      label: "missing generation",
+      env: () => ({ HAB_ID_TOKEN: badClaims() }),
+      problem: "HAB_ID_TOKEN claims unreadable",
+    },
+    {
+      label: "invalid generation",
+      env: () => ({ HAB_ID_TOKEN: badClaims(PRIVATE) }),
+      problem: "HAB_ID_TOKEN claims unreadable",
+    },
+    {
+      label: "refused instance id",
+      env: () => ({ HAB_ID_TOKEN: badClaims(1, `${PRIVATE}@invalid`) }),
+      problem: "instance id refused",
+    },
     {
       label: "unreadable preferred token file",
+      problem: "HAB_ID_TOKEN_FILE unreadable",
       env: () => ({
         HAB_ID_TOKEN_FILE: join(home, "missing-token"),
         HAB_ID_TOKEN: launchToken("fallback-must-not-be-used"),
       }),
     },
-  ])("$label still records its ending with null and one redacted diagnostic", ({ env }) => {
+  ])("$label still records its ending with null and one redacted diagnostic", ({ env, problem }) => {
     const target = resolveAdapterExitRecord({ AG_HOST_SESSION_STATE_DIR: home, ...env() })
     for (const code of [17, 18]) recordAdapterExit(target, { adapterPid: 4242, code, signal: null, decision: "stop" })
     expect(rows()).toEqual(
@@ -92,6 +106,7 @@ describe("launch-stamped adapter ending record (29701)", () => {
     const warning = stderr.mock.calls.map(([text]) => String(text)).join("")
     expect(warning).toContain("instance_id")
     expect(warning).toContain("null")
+    expect(warning).toContain(problem)
     expect(warning).not.toContain(PRIVATE)
     expect(warning).not.toContain(badClaims(PRIVATE))
     expect(JSON.stringify(rows())).not.toContain(PRIVATE)

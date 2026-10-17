@@ -44,15 +44,18 @@ export function resolveAdapterExitRecord(env: Readonly<NodeJS.ProcessEnv>): Adap
   // These are diagnostic self-claims; only the daemon verifies authority.
   let instanceId: string | null = null
   let identityProblem = `${HAB_ID_TOKEN_FILE_ENV} / ${HAB_ID_TOKEN_ENV} is unset`
+  let identityStep = `${HAB_ID_TOKEN_FILE_ENV} unreadable`
   try {
     const token = readIdentityTokenFromEnvironment(env)
     if (token !== null) {
+      identityStep = `${HAB_ID_TOKEN_ENV} claims unreadable`
       const claims = readUnverifiedTokenClaims(token, { generation: true })
+      identityStep = "instance id refused"
       instanceId = formatInstanceId(claims.sid, claims.gen)
     }
   } catch {
     // catch-cause-allow: credential/codec failures can quote paths or claim values; name the required sources/claims instead.
-    identityProblem = `${HAB_ID_TOKEN_FILE_ENV} / ${HAB_ID_TOKEN_ENV} or its sid/gen claims could not be read canonically`
+    identityProblem = identityStep
   }
   if (instanceId === null) {
     process.stderr.write(

@@ -51,7 +51,9 @@ describe("unverified token generation opt-in (29701)", () => {
       failure = error
     }
     expect(failure).toBeInstanceOf(Error)
-    expect((failure as Error).message).toContain("HAB_ID_TOKEN is malformed")
+    expect((failure as Error).message).toBe(
+      "HAB_ID_TOKEN is malformed: it has no readable JSON claims payload; relaunch the seat through hab",
+    )
     expect((failure as Error).message).not.toContain(PRIVATE)
     expect((failure as Error).message).not.toContain(token)
   })
