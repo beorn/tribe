@@ -4918,13 +4918,14 @@ function settlementReadInOneSnapshot(
     const factRows = ctx.stmts.selectSettlementFactsForRequests.all({
       $request_ids: JSON.stringify(factRequestIds),
     }) as BallOutcomeFactRow[]
-    // A fact row this batch cannot use is COUNTED and said out loud at debug,
-    // never dropped in silence. Three ways a row is skipped: it names a request
-    // the batch was not asked about (the read answers only about the ids it was
-    // asked about), it names a message whose verdict in this batch is not
-    // `settled`, or a newer fact already won the row.
+    // Every fact row is accounted for and said out loud at debug, never dropped
+    // in silence. Only ONE shape is skipped: a row naming a request this batch
+    // was not asked about (the read answers only about the ids it was asked
+    // about). The other two are DELIVERED in the request's `settlements` and
+    // only decline to name the settler: no settled verdict for that message in
+    // this batch, or a newer fact already won the naming.
     let offBatchFacts = 0
-    let offVerdictFacts = 0
+    let unsettledFacts = 0
     let supersededFacts = 0
     const askedRequests = new Set(factRequestIds)
     const newestSettledAt = new Map<string, number>()
@@ -4952,8 +4953,11 @@ function settlementReadInOneSnapshot(
         },
       ])
       const current = verdicts.get(fact.message_id)
+      // Admitted above, so the fact still rides its request's `settlements`;
+      // it just cannot name the settler, because this batch carries no settled
+      // verdict for its message id. A shared open ball's facts land here.
       if (current === undefined || current.settlement !== "settled") {
-        offVerdictFacts += 1
+        unsettledFacts += 1
         continue
       }
       const newest = newestSettledAt.get(fact.message_id)
@@ -4975,9 +4979,9 @@ function settlementReadInOneSnapshot(
       const listed = settlementsByRequest.get(request)
       if (listed !== undefined && listed.length > 0) verdicts.set(id, { ...current, settlements: listed })
     }
-    if (offBatchFacts > 0 || offVerdictFacts > 0 || supersededFacts > 0) {
+    if (offBatchFacts > 0 || unsettledFacts > 0 || supersededFacts > 0) {
       log.debug?.(
-        `settlement facts skipped for "${owner}": ${offBatchFacts} of ${factRows.length} name a request this batch was not asked about, ${offVerdictFacts} name a message that is not a settled verdict in this batch, ${supersededFacts} superseded by a newer fact`,
+        `settlement facts for "${owner}": ${offBatchFacts} of ${factRows.length} skipped (a request this batch was not asked about); ${unsettledFacts} delivered but naming no settler (no settled verdict for that message in this batch); ${supersededFacts} delivered but naming no settler (a newer fact won the naming)`,
       )
     }
   } catch (error) {
