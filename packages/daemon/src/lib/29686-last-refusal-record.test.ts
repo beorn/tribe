@@ -8,6 +8,7 @@
  * silently absent, and an `exited-not-remounted` row cannot carry one at all (#29686, writer half).
  * @level l1
  * @consumer Tribe operators reading `tribe.members`, and the WATCH bridge diagnosis that reads it.
+ * @testonly none
  */
 
 import { Database } from "bun:sqlite"
