@@ -165,6 +165,48 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     return parseToolJson(handleToolCall(ctx, "tribe.fetch", { ids }, makeOpts()))
   }
 
+  /** One durable settlement fact for `recipient`'s row of `requestId`. The
+   *  reason is the daemon's own: only "answered" means the ball was answered. */
+  function settledFact(
+    requestId: string,
+    messageId: string,
+    recipient: string,
+    reason: string,
+    settledBy: string,
+    settledAt = TS + 90_000,
+  ): void {
+    stmts.insertMessage.run({
+      $id: `fact-${requestId}-${recipient}`,
+      $type: "event.ball.settled",
+      $sender: "daemon",
+      $recipient: recipient,
+      $kind: "event",
+      $content: JSON.stringify({
+        schema_version: 1,
+        request_id: requestId,
+        recipient,
+        sender: SENDER,
+        opened_at: TS,
+        expires_at: TS + 60_000,
+        message_id: messageId,
+        fanout: "all",
+        summary: null,
+        settlement: reason,
+        settled_at: settledAt,
+        settled_by: settledBy,
+      }),
+      $bead_id: null,
+      $ref: requestId,
+      $ts: settledAt,
+      $delivery: "pull",
+      $topic: null,
+      $room_id: null,
+      $request: null,
+      $reply: null,
+      $summary: null,
+    })
+  }
+
   it("answers open, settled and untracked for the rows it returns, naming the settler", () => {
     openBall("msg-29327-open")
     closedBall("msg-29327-settled")
@@ -212,8 +254,8 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     const byId = new Map(events.map((event) => [String(event.id), event]))
 
     expect(byId.get(id)?.settlement).toBe("open")
-    // 29707 — the verdict now names WHO holds it: the fallback owner, never the
-    // original addressee the message still names.
+    // The verdict names WHO holds it: the fallback owner, never the original
+    // addressee the message still names.
     expect(byId.get(id)?.owners).toEqual([FALLBACK])
     expect(res.settlement_unresolved ?? []).toEqual([])
   })
@@ -293,9 +335,9 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     expect(logs.some((entry) => entry.level === "warn" && String(entry.msg).includes("could not decide"))).toBe(true)
   })
 
-  // 29707 (@cto 62fd7b3c) — the open verdict must name WHO holds the ball, and
-  // the owner set and the settlement facts must come from one snapshot. Each row
-  // below is RED when the owner column is reverted: `owners` is then undefined.
+  // The open verdict must name WHO holds the ball, and the owner set and the
+  // settlement facts must come from one snapshot. Each row below is RED when the
+  // owner column is reverted: `owners` is then undefined.
   it("names the owner holding the ball on an open verdict (29707 control)", () => {
     openBall("msg-29707-control")
 
@@ -394,7 +436,37 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     expect(byId.get(id)?.settlement).toBe("open")
     expect(byId.get(id)?.owners).toEqual([B])
     expect(byId.get(id)?.settlements).toEqual([
-      { owner: A, settled_by: A, settled_at: new Date(TS + 90_000).toISOString() },
+      { owner: A, settled_by: A, settled_at: new Date(TS + 90_000).toISOString(), reason: "answered" },
     ])
+  })
+
+  it("keeps a shared ball open under the owner still holding it when MY row closes without an answer", () => {
+    const MINE = "@dev/brain"
+    const OTHER = "@dev/shared-other"
+    const id = "msg-29707-not-an-answer"
+    const requestId = "req-29707-not-an-answer"
+    message(id, requestId, "*")
+    stmts.openPendingRequest.run({
+      $request_id: requestId,
+      $recipient: OTHER,
+      $sender: SENDER,
+      $opened_at: TS,
+      $expires_at: TS + 60_000,
+      $message_id: id,
+      $fanout: "all",
+    })
+    // My own row closed by the roster sweep, never by a reply or a verdict.
+    settledFact(requestId, id, MINE, "gc-expired", "declared-roster")
+
+    const res = read([id])
+    const byId = new Map((res.events as Array<Record<string, unknown>>).map((event) => [String(event.id), event]))
+
+    // A non-answer close on my row is not a settlement of the shared ball: the
+    // other owner still holds it, so this must read open under them.
+    expect(byId.get(id)?.settlement).toBe("open")
+    expect(byId.get(id)?.owners).toEqual([OTHER])
+    // The reader must be able to tell a close from an answer, so the reason
+    // rides the fact instead of being dropped.
+    expect((byId.get(id)?.settlements as Array<Record<string, unknown>>)[0]?.reason).toBe("gc-expired")
   })
 })

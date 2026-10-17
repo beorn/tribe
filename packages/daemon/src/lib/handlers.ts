@@ -4579,12 +4579,6 @@ export type AttentionSettlement = {
    *  every snapshotted owner, so the row a seat never answered is settled by
    *  someone else's reply, the emitter's clear or the pruner. */
   by_another_owner?: true
-  /** 29707 — WHO holds an OPEN ball for this id. Present on `open` only, and
-   *  REQUIRED there by this read: the consumer labels the row owed only when
-   *  the identity it drains for is in this set, and presents it as "open under
-   *  <owner>" otherwise. A set, not a scalar: a per-owner broadcast carries one
-   *  ball per owner for the same message id. */
-  owners?: string[]
 }
 
 export function fetchEvent(row: FetchRow, replay?: boolean, settlement?: AttentionSettlement): FetchEvent {
@@ -4753,24 +4747,29 @@ export type MessageIdSettlementState = "open" | "settled" | "untracked" | "undec
 
 /** One row's verdict from an ids read, plus the settler naming that rides the
  *  SAME durable fact `settlementBatch` reads for the attention projection. */
-export type MessageIdSettlementRead = {
-  settlement: MessageIdSettlementState
-  settled_by?: string
-  settled_at?: string
-  by_another_owner?: true
-  /** 29707 — WHO holds an OPEN ball for this id. Present on `open` only, and
-   *  REQUIRED there by this read: the consumer labels the row owed only when
-   *  the identity it drains for is in this set, and presents it as "open under
-   *  <owner>" otherwise. A set, not a scalar: a per-owner broadcast carries one
-   *  ball per owner for the same message id. */
-  owners?: string[]
-  /** 29707 — settlement facts already recorded for this ball, from the SAME
-   *  snapshot as `owners`. `owner` is the recipient whose ball closed; every
-   *  entry is a real close (a bounce is a dead-letter delivery, never an
-   *  `event.ball.settled` fact). Present on `open` only, when at least one
-   *  owner's row of a shared ball has already been settled. */
-  settlements?: Array<{ owner: string; settled_by: string; settled_at: string }>
-}
+export type MessageIdSettlementRead =
+  | {
+      settlement: "open"
+      /** WHO holds an OPEN ball for this id. REQUIRED here: the consumer labels
+       *  the row owed only when the identity it drains for is in this set, and
+       *  presents it as "open under <owner>" otherwise. A set, not a scalar: a
+       *  per-owner broadcast carries one ball per owner for one message id. */
+      owners: string[]
+      /** Settlement facts already recorded for this ball, from the SAME
+       *  snapshot as `owners`. `owner` is the recipient whose ball closed;
+       *  `reason` is the fact's own settlement reason, so the reader can tell
+       *  an answer from a manual close, an incident clear, a gc expiry, a
+       *  sender withdrawal or an offline-owner close. Present on `open` only,
+       *  when at least one owner's row of a shared ball has closed. */
+      settlements?: Array<{ owner: string; settled_by: string; settled_at: string; reason: string }>
+    }
+  | {
+      settlement: "settled"
+      settled_by?: string
+      settled_at?: string
+      by_another_owner?: true
+    }
+  | { settlement: "untracked" | "undecided" }
 
 /** What one ids read answered: a verdict for every row it returns, the ids it
  *  was asked about and the daemon knows nothing of, and — when it could not
@@ -4801,11 +4800,10 @@ export type MessageIdSettlementBatch = {
  * in `unresolved` rather than being answered as `untracked`.
  */
 /**
- * 29707 (@cto 62fd7b3c, condition 2) — the owner set and the settlement facts
- * that name a settler come from ONE snapshot. A close landing between the
- * open-ball read and the fact read would otherwise let a row report a live
- * owner AND a settler at once. SQLite gives a snapshot per transaction, so the
- * whole read runs inside one.
+ * The owner set and the settlement facts that name a settler come from ONE
+ * snapshot. A close landing between the open-ball read and the fact read would
+ * otherwise let a row report a live owner AND a settler at once. SQLite gives a
+ * snapshot per transaction, so the whole read runs inside one.
  */
 function settlementReadForMessageIds(
   ctx: TribeContext,
@@ -4876,8 +4874,8 @@ function settlementReadInOneSnapshot(
         `${openRows.length} open balls for the ids in this batch exceed the settlement lookup budget (asked by "${owner}")`,
       )
     }
-    // 29707 — the SAME rows also say WHO holds each open ball. The verdict stays
-    // the tracker's (`open`); the owner set is a FACT, never a label, and the
+    // The SAME rows also say WHO holds each open ball. The verdict stays the
+    // tracker's (`open`); the owner set is a FACT, never a label, and the
     // reader compares it against the identity it drains for. A set, not a
     // scalar: a per-owner broadcast opens one ball per owner for one message id.
     const ownersByKey = new Map<string, Set<string>>()
@@ -4901,11 +4899,11 @@ function settlementReadInOneSnapshot(
       else if (owners.length > 0) verdicts.set(id, { settlement: "open", owners })
       else verdicts.set(id, { settlement: "settled" })
     }
-    // 29707 (@cto 62fd7b3c) — the facts ride the OPEN rows too, from this same
-    // transaction. A per-owner broadcast shares one request id, so owner A's
-    // closed ball and owner B's still-open one are the same request: without the
-    // facts, "open under B" and "A already answered" are indistinguishable and a
-    // consumer would tell A its answered row was reassigned.
+    // The facts ride the OPEN rows too, from this same transaction. A per-owner
+    // broadcast shares one request id, so owner A's closed ball and owner B's
+    // still-open one are the same request: without the facts, "open under B" and
+    // "A already answered" are indistinguishable and a consumer would tell A its
+    // answered row was reassigned.
     const factRequestIds = [
       ...new Set(
         [...requests.entries()]
@@ -4921,34 +4919,45 @@ function settlementReadInOneSnapshot(
     const factRows = ctx.stmts.selectSettlementFactsForRequests.all({
       $request_ids: JSON.stringify(factRequestIds),
     }) as BallOutcomeFactRow[]
-    // 29327 (@cto verdict 2026-10-17, ruling 2, item (a)) — a fact row this batch
-    // cannot use is COUNTED and said out loud at debug, never dropped in silence.
-    // Two ways a row is skipped: it names a message the batch was not asked about
-    // (the read answers only about the ids it was asked about), or a newer fact
-    // already won the row.
+    // A fact row this batch cannot use is COUNTED and said out loud at debug,
+    // never dropped in silence. Two ways a row is skipped: it names a request the
+    // batch was not asked about (the read answers only about the ids it was asked
+    // about), or a newer fact already won the row.
     let offBatchFacts = 0
     let supersededFacts = 0
-    const settlementsByRequest = new Map<string, NonNullable<MessageIdSettlementRead["settlements"]>>()
+    const askedRequests = new Set(factRequestIds)
+    const newestSettledAt = new Map<string, number>()
+    const settlementsByRequest = new Map<
+      string,
+      Array<{ owner: string; settled_by: string; settled_at: string; reason: string }>
+    >()
     for (const factRow of factRows) {
       const fact = parseBallOutcomeFact(factRow)
       if (fact.kind !== "settled") continue
-      if (!requests.has(fact.message_id)) {
+      // A fact is admitted by the key this read indexes by, its request id: a
+      // shared request carries one fact per owner, and a fact recorded under
+      // another message of the same request still belongs to this ball.
+      if (!askedRequests.has(fact.request_id)) {
         offBatchFacts += 1
         continue
       }
-      const listed = settlementsByRequest.get(fact.request_id) ?? []
-      listed.push({
-        owner: fact.recipient,
-        settled_by: fact.settled_by,
-        settled_at: new Date(fact.settled_at).toISOString(),
-      })
-      settlementsByRequest.set(fact.request_id, listed)
+      settlementsByRequest.set(fact.request_id, [
+        ...(settlementsByRequest.get(fact.request_id) ?? []),
+        {
+          owner: fact.recipient,
+          settled_by: fact.settled_by,
+          settled_at: new Date(fact.settled_at).toISOString(),
+          reason: fact.settlement,
+        },
+      ])
       const current = verdicts.get(fact.message_id)
       if (current === undefined || current.settlement !== "settled") continue
-      if (current.settled_at !== undefined && Date.parse(current.settled_at) > fact.settled_at) {
+      const newest = newestSettledAt.get(fact.message_id)
+      if (newest !== undefined && newest >= fact.settled_at) {
         supersededFacts += 1
         continue
       }
+      newestSettledAt.set(fact.message_id, fact.settled_at)
       verdicts.set(fact.message_id, {
         settlement: "settled",
         settled_by: fact.settled_by,
