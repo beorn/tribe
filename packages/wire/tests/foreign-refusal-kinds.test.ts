@@ -20,10 +20,12 @@ describe("29686 the register-refusal kind set has one owner and answers the daem
     expect([...FOREIGN_REFUSAL_KINDS]).toEqual(["foreign-identity-transport", "identity-name-mismatch"])
   })
 
-  test("identity-contradicted MUST NOT be in the foreign set, and the wider set is not published here", () => {
+  test("identity-contradicted MUST NOT be in the foreign set: a fault in this connector's own identity", () => {
     // A contradicted token is a fault in THIS connector's own identity, so a reader keyed on the foreign set would take
     // a self-refusal for another party's — the conflation @cto's R3 ruling separates by name. The wider, unretryable set
-    // is derived in its only consumer (src/stdio-adapter.ts), so this module holds only the set @cto approved.
+    // is derived in its only consumer (src/stdio-adapter.ts), and that kind is driven through the real adapter by the
+    // contradicted-identity row in plugin-daemon-restart.test.ts (@cto's R5 fold-in): this module holds only the set he
+    // approved, and nothing here claims what the adapter derives.
     expect(foreign).not.toContain("identity-contradicted")
   })
 })

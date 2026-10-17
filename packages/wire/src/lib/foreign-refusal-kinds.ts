@@ -19,10 +19,13 @@
  * name mismatch keeps `identity-name-mismatch`, the kind that recorded the view against the presented name before 29686,
  * so dropping it from this set would silently stop a name mismatch publishing `foreign_transport`.
  *
- * Neither kind proves WHOSE connector was refused. "No live-holder proof" holds for the name-mismatch writer, which
- * files the record on the row the presented name belongs to; the managed-inbox writer records
- * `foreign-identity-transport` on the row whose LAUNCH id was presented, and the fence and precedence writers target the
- * live holder. So a seat's own relaunch presenting its name with a foreign token can be refused on its OWN connector
- * (@cto's correction to his own 1fcb6a7a premise; the per-writer split is his R4 item 2).
+ * Neither kind proves WHOSE connector was refused (@cto's R5 item 1, and the fold-in that withdrew the per-writer split).
+ * There is no per-writer split to lean on: every writer resolves its target among the rows `hasLaunchAuthority` holds
+ * for — true of ANY agent row — so the name-mismatch writer can land on the live holder's row exactly as the other two
+ * do. The managed-inbox writer records `foreign-identity-transport` on the row whose LAUNCH id was presented; the
+ * generation FENCE records it for the SAME session's own instance when the generation is stale or duplicated, on the
+ * holder's row; and PRECEDENCE refuses a lower-authority claimant on the holder's row. So a seat's own relaunch
+ * presenting its name with a foreign token can be refused on its OWN connector (@cto's correction to his own 1fcb6a7a
+ * premise; the per-writer split he asked for in R4 item 2 was withdrawn in R5 item 1).
  */
 export const FOREIGN_REFUSAL_KINDS = ["foreign-identity-transport", "identity-name-mismatch"] as const

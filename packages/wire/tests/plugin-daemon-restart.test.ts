@@ -18,7 +18,7 @@ import { deriveTribePersonaLaunchIdentity, formatInstanceId } from "../src/lib/p
 import { RELOAD_REJOIN_MAX_MS, RELOAD_SLOT_MS } from "../src/lib/reload-pacing.ts"
 import { REEXEC_BACKOFF_BASE_MS, REEXEC_BACKOFF_MAX_MS } from "../../../plugins/claude/supervisor-policy.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
-import { launchEnvironment, launchToken, writeClaimsVerifier } from "./launch-token.ts"
+import { launchEnvironment, launchToken, writeClaimsVerifier, writeContradictsVerifier } from "./launch-token.ts"
 import { assertSingleStatement } from "@bearly/sqlite"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -1281,6 +1281,61 @@ process.exit(await child.exited)
     generation.client.close()
   }, 45_000)
 
+  // 29686 (@cto's R5 fold-in): the adapter's unretryable arm carries `identity-contradicted` as well as the foreign
+  // kinds — a contradicted token is a fault in THIS connector's own identity — and no row drove the adapter with that
+  // kind. The 24767 row above drives the foreign kind through the same arm; this one drives the contradicted token:
+  // the daemon refuses the register and every tool call answers with that refusal at once.
+  it("refuses a connector whose own token the daemon contradicts at once (29686)", async () => {
+    const dbPath = join(tmpDir, "tribe-contradicted-identity.db")
+    const seat = "@agent/contradicted-seat"
+    const contradiction = "the token is not from the habitat key it names"
+    const verifierPath = join(tmpDir, "contradicts-verifier.ts")
+    writeContradictsVerifier(verifierPath, contradiction)
+    spawnTestDaemon(
+      dbPath,
+      join(tmpDir, "daemon-contradicted-identity.log"),
+      { TRIBE_EXPECTED_MEMBERS: JSON.stringify([{ name: seat, expected: true }]) },
+      { identityVerifier: verifierPath },
+    )
+    await waitFor(() => existsSync(socketPath), "contradicted-identity daemon socket")
+    const generation = await connectToGeneration(socketPath)
+    daemonPids.add(generation.pid)
+
+    const adapterLog = join(tmpDir, "adapter-contradicted-identity.log")
+    const plugin = spawnTestPlugin({
+      dbPath,
+      logPath: adapterLog,
+      name: seat,
+      launchId: "contradicted-seat-launch",
+      idToken: launchToken("contradicted-seat-launch", seat),
+      providerParentPid: String(process.ppid),
+      delivery: "pull",
+      requireJoin: true,
+    })
+    const stdout = collectJsonLines(plugin)
+    writeJson(plugin, initializePayload(90))
+    await waitFor(() => stdout.some((line) => line.id === 90), "plugin initialization 90")
+    writeJson(plugin, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await waitFor(
+      () => existsSync(adapterLog) && readFileSync(adapterLog, "utf8").includes("presented is contradicted"),
+      "the contradicted connector's register refusal",
+    )
+
+    const joinStartedAt = Date.now()
+    writeJson(plugin, callToolPayload(91, "join", { name: seat }))
+    await waitFor(() => stdout.some((line) => line.id === 91), "contradicted-identity join answer", 5_000)
+    expect(Date.now() - joinStartedAt).toBeLessThan(5_000)
+    const answer = stdout.find((line) => line.id === 91)?.result as
+      | { isError?: boolean; content?: Array<{ text?: string }> }
+      | undefined
+    expect(answer?.isError).toBe(true)
+    // The daemon's own refusal, verbatim: the arm's whole point is that no retry is waited for.
+    const text = answer?.content?.[0]?.text ?? ""
+    expect(text).toContain("presented is contradicted")
+    expect(text).toContain(contradiction)
+    generation.client.close()
+  }, 45_000)
+
   it.each([
     ["a malformed parent PID", "not-a-pid", "invalid-provider-parent-launch"],
     ["a dead parent PID", String(Number.MAX_SAFE_INTEGER), "dead-provider-parent-launch"],
@@ -1853,7 +1908,10 @@ process.exit(await child.exited)
         })
         expect(discrepancy?.missing).toEqual(
           expect.arrayContaining([
-            { ...ids.withheld, state: "missing-transport" },
+            // 29686: the daemon publishes `last_refusal` on every durable-row entry, so a roster gap row carries it
+            // (null here — neither seat's register was refused). A strict expectation has to name the field the row
+            // now has; this row was red at the pin already, before anything in this file touched it.
+            { ...ids.withheld, state: "missing-transport", last_refusal: null },
             expect.objectContaining({ ...ids.finished, state: "exited-not-remounted" }),
           ]),
         )
@@ -1890,7 +1948,7 @@ process.exit(await child.exited)
           finished_count: 1,
           meaning: "missing transport does not establish agent absence",
         })
-        expect(discrepancy?.missing).toEqual([{ ...ids.withheld, state: "missing-transport" }])
+        expect(discrepancy?.missing).toEqual([{ ...ids.withheld, state: "missing-transport", last_refusal: null }])
         expect((rosterAfterRestart2 as { finished_launches?: unknown[] }).finished_launches).toEqual([
           expect.objectContaining({ ...ids.finished, state: "finished" }),
         ])
