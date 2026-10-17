@@ -80,6 +80,16 @@ only wakes for the canonical actionable types: `request`, `query`, `assign`,
 and `verdict`. This is a generic session preference; role policy belongs to the
 launch controller, not the Tribe daemon.
 
+**A wait reports; it does not consume.** `inbox-wait` retires no row and never
+advances the mailbox cursor, so a row a wait returned stays fetch-visible and
+unread until the caller's own read acknowledges it — a default `fetch` (receipt
+on) or `tribe-wire inbox`. After any wait, woken or timed out, issue one default
+fetch before treating the inbox as read. A woken chunk also hands back a
+baseline covering every row it delivered, so a resumed wait does not re-wake on
+rows already handed over (28911). The daemon test
+`inbox-wait.test.ts › does not retire the row it reports` pins both halves:
+the row stays unread and the cursor stays where it was.
+
 ### Doctor
 
 `tribe-wire doctor` checks daemon identity, protocol versions, membership and
