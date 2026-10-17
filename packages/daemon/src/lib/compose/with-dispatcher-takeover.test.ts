@@ -1356,7 +1356,9 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     const rows = (JSON.parse(members.content[0]!.text) as { sessions: Array<Record<string, unknown>> }).sessions
     expect(rows.find((row) => row.name === "@dev/7")?.foreign_transport).toMatchObject({
       name: "@dev/8",
-      launch_id: "sid-dev8",
+      // 29686 (@cto ruling 4 of 43f630c5): the record carries the refused transport's unit INSTANCE id in its one
+      // spelling, `<sid>@<gen>` -- never the bare sid this row published before. The token proves sid-dev8 at gen 1.
+      launch_id: "sid-dev8@1",
     })
     const errors = vi.spyOn(console, "error").mockImplementation(() => {})
     const leaked = parseError(

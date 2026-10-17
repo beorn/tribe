@@ -43,7 +43,11 @@ import {
   incidentKey,
   resolveInboxWaitOptions,
 } from "tribe-wire"
-import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "tribe-wire/lib/persona-launch-identity"
+import {
+  deriveTribePersonaLaunchIdentity,
+  formatInstanceId,
+  providerLaunchIdOf,
+} from "tribe-wire/lib/persona-launch-identity"
 import { HAB_ID_TOKEN_ENV, MANAGED_INBOX_TOKEN_REQUIRED, readTokenLaunch } from "tribe-wire/lib/identity-token"
 import { isExplicitTribePersonaName } from "tribe-wire/lib/persona-name"
 import {
@@ -968,7 +972,7 @@ export function withDispatcher<
             recordRegisterRefusal(target.id, {
               kind: "foreign-identity-transport",
               claimed: verified.verdict.actor,
-              launch_id: verifiedSid,
+              launch_id: provenInstanceId(verified.verdict.sid, verified.verdict.gen),
               pid: clients.get(connId)?.pid ?? 0,
             })
           }
@@ -1460,6 +1464,17 @@ export function withDispatcher<
       })
     }
 
+    /** The unit instance id this register can PROVE, or null when it cannot prove both values. ONE spelling only,
+     *  `<sid>@<gen>` through tribe-wire's `formatInstanceId`; a client-sent launch id is never recorded as the current
+     *  instance because it may be a bare sid or a persona key, and no instance id ever equals a bare sid
+     *  (@cto ruling 4 of 43f630c5). A generation the verifier did not supply is UNPROVEN, so it reads null rather than
+     *  being guessed, and `formatInstanceId`'s own throw is never reachable from a verdict. */
+    function provenInstanceId(sid: string | null | undefined, gen: number | null | undefined): string | null {
+      if (typeof sid !== "string" || sid.length === 0) return null
+      if (typeof gen !== "number" || !Number.isSafeInteger(gen) || gen < 0) return null
+      return formatInstanceId(sid, gen)
+    }
+
     /** 29686 (@cto ruling 2): ONE write path for the register path's refusals. It resolves the row the presented
      *  name belongs to, records the last refusal there, then returns the error, so a register refusal cannot reach
      *  a caller without leaving the record a reader needs. For an impersonation the recorded `claimed` is the
@@ -1850,8 +1865,11 @@ export function withDispatcher<
               // 29686 (@cto ruling 2): every kind, the impersonation case included, now leaves through the one
               // write path. The impersonation record lands on the presented name's newest durable row and carries
               // the impersonating identity as `claimed`, so `foreign_transport` derives exactly as it always did.
+              // The verifier refused BEFORE it named a sid and a gen, so this register can prove no unit instance at
+              // all: the record carries NO launch rather than the client-sent string, which may be a bare sid or a
+              // persona key and never equals an instance id (@cto ruling 4 of 43f630c5).
               return refuseRegister(id, typeof p.name === "string" ? p.name : "(no name)", identity.refusal, {
-                launch_id: typeof p.launchId === "string" ? p.launchId : null,
+                launch_id: null,
                 pid: Number(p.pid ?? 0),
               })
             }
@@ -1879,7 +1897,9 @@ export function withDispatcher<
                   message,
                   data: { kind: "identity-mismatch", claimed: p.name, launch_id: String(p.launchId), sid: verifiedSid },
                 },
-                { launch_id: String(p.launchId) },
+                // The record names the instance the TOKEN proved, in the one spelling; the presented launch id stays
+                // in the refusal's own `data`, where it names what the transport claimed rather than what it is.
+                { launch_id: provenInstanceId(verifiedSid, verifiedGen) },
               )
             }
             const tokenKeyed = verifiedSid !== null && (verifiedGen !== null || !hasLaunchId)
@@ -1903,7 +1923,7 @@ export function withDispatcher<
               )
             }
             const launchIdRaw = tokenKeyed
-              ? `${verifiedSid}@${verifiedGen}`
+              ? (provenInstanceId(verifiedSid, verifiedGen) ?? "")
               : typeof p.launchId === "string"
                 ? p.launchId.trim()
                 : ""
@@ -2050,7 +2070,9 @@ export function withDispatcher<
             // adoption. Judge the effective name before any row is reused.
             if (hooks.identityVerifier && identity.personaTokenDefect && isExplicitTribePersonaName(resolvedName)) {
               const refusal = missingPersonaTokenRefusal(resolvedName, identity.personaTokenDefect, "register")
-              return refuseRegister(id, resolvedName, refusal)
+              return refuseRegister(id, resolvedName, refusal, {
+                launch_id: provenInstanceId(verifiedSid, verifiedGen),
+              })
             }
             // Class belongs to the resolved identity, not the optional caller
             // name. PID/cwd adoption and persisted renames must not turn an
@@ -2079,12 +2101,17 @@ export function withDispatcher<
                   hasLaunchAuthority(prior),
               )
               if (!authorized) {
-                return refuseRegister(id, resolvedName, {
-                  message:
-                    `launch authority for ${resolvedName} is unavailable; its service owner is disconnected or ` +
-                    "the current launch tuple was not supplied",
-                  data: { kind: "launch-authority-unavailable", reason: "owner-transport-disconnected" },
-                })
+                return refuseRegister(
+                  id,
+                  resolvedName,
+                  {
+                    message:
+                      `launch authority for ${resolvedName} is unavailable; its service owner is disconnected or ` +
+                      "the current launch tuple was not supplied",
+                    data: { kind: "launch-authority-unavailable", reason: "owner-transport-disconnected" },
+                  },
+                  { launch_id: provenInstanceId(verifiedSid, verifiedGen) },
+                )
               }
             }
             const launchFanIn = findLaunchFanIn(
