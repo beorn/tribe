@@ -17,6 +17,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { resolveProjectName } from "./lib/beads-path.ts"
+import { settledMarker } from "./lib/settled-marker.ts"
 import {
   parseTribeArgs,
   parseSessionDomains,
@@ -403,6 +404,15 @@ type TribeFetchResultRow = {
    *  which is state in `pending_balls`, never a message the pane is handed as
    *  an envelope. False/absent on every message row. */
   is_incident?: boolean
+  /**
+   * 29327 - the ball behind this row is settled. The daemon decides it from
+   * the tracker, and names the settler only when its own record has one; the
+   * pane envelope must carry both so a settled request never reads as owed.
+   */
+  settled?: boolean
+  settled_by?: string
+  settled_at?: string
+  by_another_owner?: boolean
   /**
    * 27346 - the daemon sets this true when the mailbox cursor is already past
    * the row, so this presentation is a re-presentation of something the seat
@@ -1514,7 +1524,7 @@ function tryAutoRenameOnClaim(content: string): void {
 }
 
 async function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[number]): Promise<boolean> {
-  const content = String(event.content ?? "")
+  const content = `${settledMarker(event)}${String(event.content ?? "")}`
   const type = markedType(String(event.type ?? "notify"))
   if (type === "bead:claimed") tryAutoRenameOnClaim(content)
   const handoff = sendChannel(content, {
