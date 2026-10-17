@@ -3448,4 +3448,63 @@ describe("stdio adapter delivery modes", () => {
       expect(cost?.readRepeatBytes).toBe(Buffer.byteLength("READ-DUP-A", "utf8"))
     })
   })
+
+  it("29327: a settled actionable row reaches the pane labelled settled, never owed", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const ts = new Date().toISOString()
+    daemon = await spawnFakeDaemon(socketPath, {
+      fetchAttention: {
+        actionable_unread: [
+          {
+            id: "29327-settled",
+            type: "request",
+            from: "@chief",
+            content: "29327 PROBE SETTLED",
+            ts,
+            settled: true,
+            settled_by: "@dev/brain",
+          },
+          {
+            id: "29327-open",
+            type: "request",
+            from: "@chief",
+            content: "29327 PROBE CONTROL",
+            ts,
+            settled: false,
+          },
+        ],
+        pending_balls: [],
+      },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+
+    await waitForStdout(child, stdout, () =>
+      stdout.some((line) => JSON.stringify(line).includes("29327 PROBE CONTROL")),
+    )
+
+    const channels = stdout.filter(
+      (line) =>
+        line.method === "notifications/claude/channel" &&
+        (line.params as { meta?: { from?: string } })?.meta?.from !== "tribe-startup",
+    )
+    const settled = channels.find((line) => JSON.stringify(line).includes("29327 PROBE SETTLED"))
+    const open = channels.find((line) => JSON.stringify(line).includes("29327 PROBE CONTROL"))
+    expect(JSON.stringify(settled)).toContain("[settled by @dev/brain — not owed]")
+    expect(JSON.stringify(open)).not.toContain("[settled")
+  })
 })
