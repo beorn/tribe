@@ -63,6 +63,16 @@ import { addWriter, createFileWriter, createLogger, type Event } from "loggily"
 const RECORD_SEGMENT_MAX_BYTES = 32 * 1024 * 1024
 
 /**
+ * Room kept below the segment ceiling for bytes no check can see: an uncoordinated peer holds at most loggily's
+ * write buffer in memory (4096 characters, flushed on a 100 ms timer WITHOUT consulting anyone), so a peer's last
+ * few KiB can land after this writer's check. Rotating this far below the ceiling keeps the ruling's
+ * `live + previous <= 64 MiB` a bound rather than an approximation: it absorbs 16 concurrent hook processes' buffers
+ * plus the row being appended. A writer count above that is the one shape this cannot bound, and it is not a real
+ * one — a prompt runs one hook process.
+ */
+const RECORD_ROTATION_RESERVE_BYTES = 64 * 1024
+
+/**
  * The one previous segment. The next rotation replaces it, so there is never a `.2`.
  *
  * Exported because the seam has exactly one spelling and the READER is the other half of it: the daemon's
@@ -182,12 +192,23 @@ export function installInjectionFileWriter(path: string): () => void {
   // the whole truth: loggily buffers, so our own rows trail the file until it flushes (4 KiB or a 100 ms timer).
   let bytesInSegment = recordBytesOnDisk(path)
   const rotateBefore = (lineBytes: number): void => {
-    // The FILE is the bound, not this counter: the default record path is shared by every hook process, and each
-    // counts only its own writes, so two producers can each stay under their own tally while the shared file passes
-    // the ceiling. The larger of the two — what a peer has on disk, and what we have buffered — is the occupancy the
-    // next row must fit into.
-    const segmentBytes = Math.max(bytesInSegment, recordBytesOnDisk(path))
-    if (segmentBytes + lineBytes <= RECORD_SEGMENT_MAX_BYTES) {
+    // Our own rows go to disk FIRST. loggily buffers (4 KiB or a 100 ms timer), and our pending rows and a peer's
+    // already-flushed rows are DIFFERENT bytes: a bare `max(tally, disk)` counts one and loses the other, which is
+    // how a peer's 1 KB plus our own 1.5 KB could sit outside one number and leave the pair over 64 MiB
+    // (@dev/review2's r2 verdict, its exact sequential counterexample). After the flush the file's size IS every byte
+    // this process has written, so `max` has nothing to choose between and the measurement is the occupancy.
+    let flushed = true
+    try {
+      writer.flush()
+    } catch (error) {
+      flushed = false
+      // Loud, and the segment counts as full: an occupancy we could not establish must not read as an empty file.
+      console.error(
+        `injection-envelope: could not flush before measuring the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    const segmentBytes = flushed ? Math.max(bytesInSegment, recordBytesOnDisk(path)) : RECORD_SEGMENT_MAX_BYTES
+    if (segmentBytes + lineBytes <= RECORD_SEGMENT_MAX_BYTES - RECORD_ROTATION_RESERVE_BYTES) {
       bytesInSegment = segmentBytes
       return
     }

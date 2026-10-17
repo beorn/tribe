@@ -16,7 +16,16 @@
  * with ~1 MiB props are written until well past 64 MiB, and what lands on disk must satisfy it.
  */
 
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import {
+  appendFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  truncateSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
@@ -26,6 +35,8 @@ import { emitInjectionDebugEvent, flushInjectionFileWriters, installInjectionFil
 const MIB = 1024 * 1024
 /** The ruling's ceiling for the live file plus the one previous segment. */
 const RECORD_TOTAL_BOUND = 64 * MIB
+/** Its per-segment half: no append may carry the live file past this. */
+const SEGMENT_BOUND = RECORD_TOTAL_BOUND / 2
 /** One row's own bytes may cross the rotation threshold before it rotates, so the bound carries this slack. */
 const ONE_ROW_SLACK = 2 * MIB
 
@@ -144,7 +155,8 @@ describe("injection record — the writer keeps the live file plus one previous"
 
     // The default record path is shared by every hook process and each keeps its own counter, so what a peer has
     // already flushed to disk (its own buffer is at most loggily's 4 KiB) is invisible to this writer's count. That
-    // is the shape that let two producers leave ~94 MiB: the file, not this process's tally, is the bound.
+    // is the shape that let two producers leave ~94 MiB: the file, not this process's tally, is the bound. This row
+    // exercises the peer-bytes half alone; the row below pairs it with this writer's own buffered rows.
     appendFileSync(path, "p".repeat(30 * MIB))
 
     emitRow(4 * MIB, "row-after-a-peer-filled-the-segment")
@@ -153,6 +165,37 @@ describe("injection record — the writer keeps the live file plus one previous"
     expect(sizeOf(`${path}.1`), "the peer's 30 MiB became the previous segment").toBeGreaterThanOrEqual(30 * MIB)
     expect(sizeOf(path), "this row opened a fresh segment instead of passing the ceiling").toBeLessThan(8 * MIB)
     expect(readFileSync(path, "utf8")).toContain("row-after-a-peer-filled-the-segment")
+  })
+
+  test("a peer's flushed bytes and this writer's own buffered rows are both counted, not one instead of the other", () => {
+    const path = join(dir, "injection.jsonl")
+    track(installInjectionFileWriter(path))
+
+    // Fill a segment, then set the live length EXACTLY, so what follows is @dev/review2's sequential counterexample
+    // rather than a race: the ceiling is the ruling's per-segment half, and live sits 70 KiB under it.
+    for (let i = 0; i < 40; i++) emitRow(MIB, `fill-${i}`)
+    flushInjectionFileWriters()
+    truncateSync(path, SEGMENT_BOUND - 70 * 1024)
+
+    // This writer's own ~3 KiB row, left in loggily's buffer (under 4096 characters, so write() does not flush it).
+    emitRow(3000, "own-row-still-buffered")
+    expect(sizeOf(path), "the fixture needs this row buffered, not on disk").toBe(SEGMENT_BOUND - 70 * 1024)
+
+    // A second hook process on the same shared file flushes its own 4 KiB behind this writer's back.
+    appendFileSync(path, "q".repeat(4 * 1024))
+
+    // The next row is the decision point: our buffered row and the peer's bytes are different bytes, and only their
+    // SUM is the occupancy. Measured as max(tally, disk) this row is accepted — the disk says ceiling − 66 KiB, so
+    // ceiling − 1.5 KiB fits — and the file then ends at ceiling + 1.6 KiB, past the bound the ruling sets. Flushing
+    // the buffered row first makes the file's size the whole occupancy, so this row opens a fresh segment instead.
+    emitRow(63 * 1024, "the-row-that-decides")
+    flushInjectionFileWriters()
+
+    const live = sizeOf(path)
+    const previous = sizeOf(`${path}.1`)
+
+    expect(live, "no append may carry the live segment past its ceiling").toBeLessThanOrEqual(SEGMENT_BOUND)
+    expect(live + previous).toBeLessThanOrEqual(RECORD_TOTAL_BOUND)
   })
 })
 
