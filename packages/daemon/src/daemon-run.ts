@@ -12,7 +12,6 @@ import { parseArgs } from "node:util"
 import { createLogger } from "loggily"
 import { pipe, withTool, withTools, createScope, formatRuntimeId } from "tribe-wire"
 import type { TribeAutostart } from "./lib/autostart-config.ts"
-import { gitPlugin } from "./lib/git-plugin.ts"
 import { githubPlugin } from "./lib/github-plugin.ts"
 import { healthMonitorPlugin } from "./lib/health-monitor-plugin.ts"
 import { accountlyPlugin } from "./lib/accountly-plugin.ts"
@@ -329,9 +328,7 @@ const withSignalsShape = withSignals<typeof withHotReloadShape>({
   onReload: () => withHotReloadShape.hotReload.reload(),
 })(withHotReloadShape)
 const tribe = withRuntime<typeof withSignalsShape>({
-  plugins: process.env.TRIBE_NO_PLUGINS
-    ? []
-    : [gitPlugin, githubPlugin, healthMonitorPlugin, accountlyPlugin, hookLatencyPlugin],
+  plugins: process.env.TRIBE_NO_PLUGINS ? [] : [githubPlugin, healthMonitorPlugin, accountlyPlugin, hookLatencyPlugin],
   expectedMemberCount: () => getExpectedMembers()?.byName.size,
   publishActivePluginNames: (n) => {
     refs.activePluginNames = n
