@@ -4010,12 +4010,11 @@ export function resolveRuntimeJoinIdentity(
   if (identityToken) {
     const prior = ctx.db
       .prepare(
-        "SELECT id, name, role FROM sessions WHERE identity_token = $tok AND id != $id ORDER BY updated_at DESC LIMIT 1",
+        "SELECT id, name FROM sessions WHERE identity_token = $tok AND id != $id ORDER BY updated_at DESC LIMIT 1",
       )
       .get({ $tok: identityToken, $id: ctx.sessionId }) as {
       id: string
       name: string
-      role: string
     } | null
     if (prior && !hasActiveTransport(prior.id)) {
       if (!a.name) joinName = prior.name
