@@ -1630,6 +1630,53 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     expect(String(errors.mock.calls.flat())).toContain("signing key unreadable")
   })
 
+  // 29686 (@cto B1 of c81bc71d): the identity-precedence arm records the ONE producer's answer, never
+  // `launchIdentity.id`. A CLAIMED claimant — no token at all — presents a BARE sid as its launch id while a
+  // VERIFIED holder owns the name, and no verdict proved a sid or a gen for the claimant, so the record holds NULL.
+  // It must not echo the bare sid the transport presented: no instance id ever equals one (@cto ruling 4 of
+  // 43f630c5). This row fails on revert, where `launchIdentity?.id` records "sid-peer".
+  it("29686 records NO launch for a claimed claimant refused on identity precedence, never its bare sid", async () => {
+    const harness = createDispatcherHarness({
+      identityVerifier: siteVerifier({
+        "token-peer": { result: "verified", actor: "peer-x", sid: "sid-peer", gen: 1 },
+      }),
+    })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-peer-holder")
+    parseResult<RegisterResult>(
+      await harness.register("conn-peer-holder", {
+        name: "peer-x",
+        pid: 4101,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: "token-peer",
+      }),
+    )
+    const holderRow = harness.db
+      .prepare("SELECT id FROM sessions WHERE name = 'peer-x' ORDER BY updated_at DESC")
+      .get() as { id: string }
+    harness.addPendingClient("conn-peer-claimant")
+    expect(
+      parseError(
+        await harness.register("conn-peer-claimant", {
+          name: "peer-x",
+          pid: 4199,
+          project: "/tmp/p",
+          launchParentPid: process.pid,
+          launchId: "sid-peer",
+          takeover: true,
+        }),
+      ),
+    ).toMatchObject({
+      code: -32003,
+      data: { kind: "foreign-identity-transport", reason: "identity-precedence" },
+    })
+    expect(harness.registry.getRegisterRefusal(holderRow.id)).toMatchObject({
+      kind: "foreign-identity-transport",
+      launch_id: null,
+    })
+  })
+
   it("29686 records the instance the token PROVED, and keeps the presented launch id only in the refusal's data", async () => {
     const harness = createDispatcherHarness({ identityVerifier: genVerifier })
     cleanup = harness.dispose
@@ -2455,6 +2502,12 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
           .run("recycled-birth", old.sessionId)
       }
       harness.addPendingClient("new-pull")
+      // 29686 (@cto B1 of c81bc71d): the duplicate-join refusal records the instance the VERIFIER proved for the
+      // successor (token-g4 proves sid-dev7 at gen 4), taken from the one producer rather than a literal. Dropping the
+      // identity argument at the site leaves the record null and fails this assertion.
+      const refusalTarget = harness.db
+        .prepare("SELECT id FROM sessions WHERE name = '@dev/7' ORDER BY updated_at DESC")
+        .get() as { id: string }
       const refusal = parseError(
         await harness.register("new-pull", {
           name: "@dev/7",
@@ -2467,6 +2520,10 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
         }),
       )
       expect(refusal).toMatchObject({ code: -32003, data: { kind: "verified-duplicate-join" } })
+      expect(harness.registry.getRegisterRefusal(refusalTarget.id)).toMatchObject({
+        kind: "verified-duplicate-join",
+        launch_id: "sid-dev7@4",
+      })
       expect(refusal.message).toContain("no yield notice")
       expect(oldSocket.destroyedByDispatcher).toBe(false)
       expect(watchSocket.writes.filter((line) => line.includes("successor_yield"))).toEqual([])

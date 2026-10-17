@@ -18,10 +18,12 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
+import { withClientRegistry } from "./compose/with-client-registry.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { logSessionLeft } from "./messaging.ts"
 import { parseExpectedMembers, type DeclaredRoster } from "./membership-declared-roster.ts"
+import { type RegisterRefusal } from "./session-transport-state.ts"
 import { registerSession } from "./session.ts"
 
 const PROJECT_ID = "29686-last-refusal-record"
@@ -40,15 +42,9 @@ const REGISTER_REFUSAL_KINDS = [
 ] as const
 
 /** The daemon's one bounded record per session: the LAST refusal, overwritten by the next one, held until a
- *  real transport connects or `forgetTransportSessions` runs. */
-type LastRefusal = {
-  readonly kind: string
-  readonly claimed: string
-  readonly reason?: string
-  readonly launch_id: string
-  readonly pid: number
-  readonly refused_at: string
-}
+ *  real transport connects or `forgetTransportSessions` runs. It is the wire type itself (@cto required item 4):
+ *  a hand-copied shape is how this file went on reading a bare-sid `launch_id` the daemon can no longer write. */
+type LastRefusal = RegisterRefusal
 
 function makeContext(db: Database, stmts: TribeStatements, sessionId: string, name: string): TribeContext {
   return createTribeContext({
@@ -94,13 +90,9 @@ function parseToolJson(result: ReturnType<typeof handleToolCall>): Record<string
   return JSON.parse(text) as Record<string, unknown>
 }
 
-/** `HandlerOpts` plus the one reader this bead adds: `getLastRefusal` is not on `HandlerOpts` yet, and the
- *  whole object is cast in the same shape membership-declared-roster.test.ts's identical helper uses. */
-type HandlerOptsWithLastRefusal = Partial<HandlerOpts> & {
-  getLastRefusal?: (sessionId: string) => LastRefusal | undefined
-}
-
-function baseOpts(overrides: HandlerOptsWithLastRefusal = {}): HandlerOpts {
+/** No cast: `getLastRefusal` is a real `HandlerOpts` member now (handlers.ts:317), so the six required fields below
+ *  are the whole literal and a future member missing here is a build error rather than a silent `as` (@cto item 4). */
+function baseOpts(overrides: Partial<HandlerOpts> = {}): HandlerOpts {
   return {
     cleanup: () => {},
     userRenamed: false,
@@ -110,7 +102,7 @@ function baseOpts(overrides: HandlerOptsWithLastRefusal = {}): HandlerOpts {
     getActiveSessionInfo: () => [],
     isPidAlive: () => true,
     ...overrides,
-  } as HandlerOpts
+  }
 }
 
 /** Built the way the daemon parses `TRIBE_EXPECTED_MEMBERS`, never hand-assembled. */
@@ -122,7 +114,7 @@ function refusalFor(kind: string, claimed: string, overrides: Partial<LastRefusa
   return {
     kind,
     claimed,
-    launch_id: "sid-29686-refused",
+    launch_id: "sid-29686-refused@7",
     pid: 60_123,
     refused_at: "2026-10-17T03:14:15.926Z",
     ...overrides,
@@ -251,32 +243,37 @@ describe("29686 — one bounded last-refusal record per session, published on th
     const sessionId = "ref-cleared"
     const name = "@agent/cleared"
     addSession(db, stmts, sessionId, name, { id: "launch-cleared", parentPid: 60_104 })
-    // The daemon's store: one record per session, cleared by a real transport connecting and by
-    // forgetTransportSessions (with-client-registry.ts:303-315). A refused connection never becomes a member, so
-    // this map — not the ClientSession registry — is what holds it; the wire sees only its effect.
-    const stored = new Map<string, LastRefusal>([[sessionId, refusalFor("identity-name-mismatch", name)]])
+    // The daemon's REAL store (@cto required item 4): the registry's own map, cleared by ITS OWN paths —
+    // markTransportConnected and forgetTransportSessions (with-client-registry.ts:288-315). A local Map this test
+    // deleted from by hand proved neither path: reverting either one left this case green.
+    const deferred: Array<() => void> = []
+    const { registry } = withClientRegistry()({
+      scope: { defer: (fn: () => void) => deferred.push(fn) },
+      startedAt: 0,
+    } as never)
     const connected = new Set<string>()
     const opCtx = makeContext(db, stmts, "operator", "@operator")
     const opts = baseOpts({
       getExpectedMembers: () => roster([{ name, expected: true }]),
       getActiveSessionIds: () => connected,
-      getLastRefusal: (candidate) => stored.get(candidate),
+      getLastRefusal: (candidate) => registry.getRegisterRefusal(candidate),
     })
 
+    registry.recordRegisterRefusal(sessionId, refusalFor("identity-name-mismatch", name))
     expect(entryFor(membersReply(opCtx, opts), name)?.last_refusal).toMatchObject({ kind: "identity-name-mismatch" })
 
-    // A real transport connects: the row becomes active and the record is gone.
+    // A real transport connects: markTransportConnected drops the record and the row becomes active.
     connected.add(sessionId)
-    stored.delete(sessionId)
+    registry.markTransportConnected(sessionId)
     const afterConnect = membersReply(opCtx, opts)
     expect(entryFor(afterConnect, name)).toBeUndefined()
     expect(rowFor(afterConnect, name), `${name} connected row`).not.toHaveProperty("last_refusal")
 
     // Same for the reaper: forgetTransportSessions drops the record of a session whose durable row is gone.
     connected.delete(sessionId)
-    stored.set(sessionId, refusalFor("identity-verifier-fault", name))
+    registry.recordRegisterRefusal(sessionId, refusalFor("identity-verifier-fault", name))
     expect(entryFor(membersReply(opCtx, opts), name)?.last_refusal).toMatchObject({ kind: "identity-verifier-fault" })
-    stored.delete(sessionId)
+    registry.forgetTransportSessions([sessionId])
     const afterForget = membersReply(opCtx, opts)
     // The rollout contract (@cto): the key is PRESENT and null, so a reader can tell "the daemon holds no refusal for
     // this seat" from "this daemon predates the field". Reading a dropped bridge out of an absent key is the bug.
