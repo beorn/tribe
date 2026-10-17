@@ -14,7 +14,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { Database } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
-import { deriveTribePersonaLaunchIdentity } from "../src/lib/persona-launch-identity.ts"
+import { deriveTribePersonaLaunchIdentity, formatInstanceId } from "../src/lib/persona-launch-identity.ts"
 import { RELOAD_REJOIN_MAX_MS, RELOAD_SLOT_MS } from "../src/lib/reload-pacing.ts"
 import { REEXEC_BACKOFF_BASE_MS, REEXEC_BACKOFF_MAX_MS } from "../../../plugins/claude/supervisor-policy.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
@@ -330,6 +330,8 @@ process.exit(await child.exited)
         TRIBE_REQUIRE_JOIN: opts.requireJoin ? "1" : "0",
         TRIBE_TAKEOVER: "1",
         ...launchEnvironment(opts.launchId),
+        // This fixture supplies its own legacy token, never the runner's preferred file.
+        HAB_ID_TOKEN_FILE: "",
         ...(opts.claudeSessionId === undefined ? {} : { CLAUDE_SESSION_ID: opts.claudeSessionId }),
         ...(opts.idToken === undefined ? {} : { HAB_ID_TOKEN: opts.idToken }),
         ...(opts.launchStateDir === undefined
@@ -394,7 +396,7 @@ process.exit(await child.exited)
       .split("\n")
       .map((line) => JSON.parse(line) as JsonObject)
     expect(exits).toHaveLength(1)
-    expect(exits[0]).toMatchObject({ decision: "stop" })
+    expect(exits[0]).toMatchObject({ instance_id: null, decision: "stop" })
     const db = new Database(dbPath, { readonly: true })
     try {
       expect(
@@ -1015,6 +1017,7 @@ process.exit(await child.exited)
     await waitFor(() => readRecord().length === 1, "adapter crash recorded")
     const crash = readRecord()[0]
     expect(crash).toMatchObject({
+      instance_id: formatInstanceId("exit-record-launch", 1),
       adapter_pid: crashedPid,
       code: null,
       signal: "SIGKILL",
@@ -1029,7 +1032,11 @@ process.exit(await child.exited)
 
     process.kill(plugin.pid!, "SIGTERM")
     await waitFor(() => readRecord().length === 2, "host stop recorded")
-    expect(readRecord()[1]).toMatchObject({ adapter_pid: restarted.transport_pids![0], decision: "host-stop" })
+    expect(readRecord()[1]).toMatchObject({
+      instance_id: formatInstanceId("exit-record-launch", 1),
+      adapter_pid: restarted.transport_pids![0],
+      decision: "host-stop",
+    })
 
     let departed: Member | undefined
     await waitFor(async () => {
@@ -1099,7 +1106,13 @@ process.exit(await child.exited)
     const signalledPid = first.transport_pids![0]!
     process.kill(signalledPid, "SIGTERM")
     await waitFor(() => readRecord().length === 1, "signalled child exit recorded")
-    expect(readRecord()[0]).toMatchObject({ adapter_pid: signalledPid, code: 143, signal: null, decision: "retry" })
+    expect(readRecord()[0]).toMatchObject({
+      instance_id: formatInstanceId("signalled-child-launch", 1),
+      adapter_pid: signalledPid,
+      code: 143,
+      signal: null,
+      decision: "retry",
+    })
 
     const restored = await connectedMember("signalled-child supervised recovery", signalledPid)
     expect(restored.member_id).toBe(first.member_id)
@@ -1115,7 +1128,12 @@ process.exit(await child.exited)
     plugin.stdin.end()
     await waitFor(() => plugin.exitCode !== null, "wrapper exit after the host closed its pipe")
     expect(plugin.exitCode).toBe(0)
-    expect(readRecord()[1]).toMatchObject({ adapter_pid: restored.transport_pids![0], code: 0, decision: "clean-exit" })
+    expect(readRecord()[1]).toMatchObject({
+      instance_id: formatInstanceId("signalled-child-launch", 1),
+      adapter_pid: restored.transport_pids![0],
+      code: 0,
+      decision: "clean-exit",
+    })
     generation.client.close()
   }, 30_000)
 

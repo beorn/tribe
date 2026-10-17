@@ -26,6 +26,7 @@ import { PLUGIN_SUPERVISOR_CLAIM_FILE } from "../supervisor-claim.ts"
 import { createLineParser } from "../../../packages/wire/src/parser.ts"
 import { isRequest, makeResponse } from "../../../packages/wire/src/rpc.ts"
 import { launchToken } from "../../../packages/wire/tests/launch-token.ts"
+import { formatInstanceId } from "../../../packages/wire/src/lib/persona-launch-identity.ts"
 
 const PLUGIN_ROOT = resolve(import.meta.dirname, "..")
 const SERVER = join(PLUGIN_ROOT, "server.ts")
@@ -227,6 +228,7 @@ describe("a provider nested inside a managed seat (29567)", () => {
     expect(exitRows()).toEqual([
       {
         at: expect.any(String),
+        instance_id: formatInstanceId("29567-seat-launch", 1),
         adapter_pid: null,
         code: null,
         signal: null,

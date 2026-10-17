@@ -23,6 +23,10 @@
 
 ### Added
 
+- `readUnverifiedTokenClaims(token, { generation: true })` reads a required
+  non-negative safe-integer generation from the same token payload as the session.
+  One-argument callers keep their existing return shape and behavior.
+
 - **Narrow library imports.** External consumers can use
   `tribe-wire/launch-environment`, `/client`, `/trust`, `/records`,
   `/service-send`, and `/lib/daemon-environment` according to the README map.
