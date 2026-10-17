@@ -333,7 +333,6 @@ describe("attribution blindness alerts when sustained (acceptance 2)", () => {
       },
       scalarObservation: { kind: "standalone-os", unavailable: ["disk.bytes", "disk.inodes"] },
       timestamp: Date.now(),
-      worktrees: 0,
     }
 
     const r1 = evaluateAlerts(unavailableMetrics, thresholds, state)
@@ -368,7 +367,6 @@ describe("attribution blindness alerts when sustained (acceptance 2)", () => {
       },
       scalarObservation: { kind: "standalone-os", unavailable: ["disk.bytes", "disk.inodes"] },
       timestamp: Date.now(),
-      worktrees: 0,
     }
     const r5 = evaluateAlerts(availableMetrics, thresholds, state)
     expect(r5.filter((a) => a.type === "attribution")).toHaveLength(0)
