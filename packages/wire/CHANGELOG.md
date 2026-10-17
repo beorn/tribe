@@ -10,6 +10,10 @@
   attention). A fresh logical wait's baseline now also covers the attention present at its start, so attention
   that predates the wait keeps `timeout` with the rows listed and never manufactures a wake. Recurrence of 22378;
   callers that already act on `unread_count > 0` are unaffected.
+- An omitted role on register or join no longer inherits an inactive session's
+  role. Reconnecting callers retain identity, name and state; a watcher claims
+  `watch` explicitly on both register and join. Explicit roles and live sibling
+  transports keep their existing behavior.
 
 - Health RPC `growth_7d.estimated_bytes` is now `null` with an
   `estimated_bytes_not_collected` reason unless `TRIBE_HEALTH_DB_GROWTH_WARN_BYTES`

@@ -185,6 +185,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
       const mcp = createMcpServer({
         daemon,
         identityToken,
+        role: opts.role,
         defaultDelivery: deliveryCapability.delivery,
         deliveryCapability,
         requireJoin: !personaLaunch && requireJoin,
@@ -229,6 +230,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
 function createMcpServer(opts: {
   readonly daemon: DaemonClient
   readonly identityToken: string
+  readonly role: string | undefined
   readonly defaultDelivery: TribeDelivery
   readonly deliveryCapability: TribeDeliveryCapability
   readonly requireJoin: boolean
@@ -259,6 +261,7 @@ function createMcpServer(opts: {
       name === "join"
         ? {
             ...a,
+            ...(a.role === undefined && opts.role === "watch" ? { role: "watch" } : {}),
             // The HTTP bridge has no Claude channel reader. The bridge host may
             // choose its adapter delivery, but a model call cannot upgrade it.
             delivery: resolveJoinDelivery({

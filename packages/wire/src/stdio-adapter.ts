@@ -1344,6 +1344,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       name === "join"
         ? {
             ...a,
+            ...(a.role === undefined && args.role === "watch" ? { role: "watch" } : {}),
             // Pull-only adapters have no channel reader. Do not let a model
             // self-report push and make later tribe.fetch calls skip directs.
             delivery: resolveJoinDelivery({
