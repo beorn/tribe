@@ -285,7 +285,9 @@ describe("injection record — this writer's own install", () => {
     ).toBeNull()
 
     // It was alive and held, not dead: released, it installs and reports ready.
-    expect(await started.reader.next(30_000), `the child never reported ready — stderr: ${started.childStderr()}`).toBe("ready")
+    expect(await started.reader.next(30_000), `the child never reported ready — stderr: ${started.childStderr()}`).toBe(
+      "ready",
+    )
 
     // And its first row lands in the live record.
     started.child.stdin!.write("emit 1024\n")
