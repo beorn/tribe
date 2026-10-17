@@ -43,6 +43,10 @@
  *   the fields a reader uses. `producer` (one constant, and the file's own path
  *   already names the writer) and `level` (which nothing reads) are gone: they
  *   were about an eighth of every row when the bound landed.
+ *
+ *   The reader is the other half of that contract and reads BOTH segments, the
+ *   previous one first, so a rotation landing inside its hour cannot hide the
+ *   side of the window it moved.
  */
 
 import { mkdirSync, renameSync, statSync } from "node:fs"
@@ -52,19 +56,40 @@ import { addWriter, createFileWriter, createLogger, type Event } from "loggily"
 
 /**
  * Bytes of live record before it rotates into the previous segment. Two segments is the ruling's ceiling of 64 MiB,
- * and the reader's window (hook-latency polls an hour) is orders of magnitude under one segment at the record's
- * measured growth, so a rotation never moves rows out from under a reader.
+ * and at the record's measured growth (~4 KiB/min) one segment spans days, so a cut is rare and the previous segment
+ * is history a reader only needs at the seam. The reader reads both segments anyway: `hook-latency-reader.ts` reads
+ * the previous one alongside the live one, so a rotation never hides a window that straddles it.
  */
 const RECORD_SEGMENT_MAX_BYTES = 32 * 1024 * 1024
 
-/** The one previous segment. The next rotation replaces it, so there is never a `.2`. */
-const RECORD_PREVIOUS_SEGMENT = ".1"
+/**
+ * The one previous segment. The next rotation replaces it, so there is never a `.2`.
+ *
+ * Exported because the seam has exactly one spelling and the READER is the other half of it: the daemon's
+ * `packages/daemon/src/lib/hook-latency-reader.ts` reads the previous segment with the live one, so it imports this
+ * suffix rather than spelling ".1" a second time. Two packages, one rotation contract.
+ */
+export const RECORD_PREVIOUS_SEGMENT_SUFFIX = ".1"
 
+/**
+ * Bytes already in the live segment at `path`. Only a genuinely absent file is the empty-file case: an occupancy this
+ * process cannot read is named on stderr and reported as the full segment, so the next append rotates rather than
+ * growing a record nobody can measure. Reading a failed stat as 0 would reset the accounting against a file that is
+ * already past the ceiling, which is how the record grew to 252 MB in the first place.
+ */
 function recordBytesOnDisk(path: string): number {
   try {
     return statSync(path).size
-  } catch {
-    return 0
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+      // A record that does not exist yet holds zero bytes — the writer creates it on its first write.
+      // silent-fallback-allow: absent file, not a masked failure (any other stat error is raised loudly below)
+      return 0
+    }
+    console.error(
+      `injection-envelope: could not measure the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+    return RECORD_SEGMENT_MAX_BYTES
   }
 }
 
@@ -153,16 +178,25 @@ export function installInjectionFileWriter(path: string): () => void {
   let writer = createFileWriter(path)
   _installedWriters.set(writer, path)
   // Bytes handed to the write since the last rotation, seeded from what a previous writer left behind so a file that
-  // is already past the threshold rotates on its first append rather than growing forever.
+  // is already past the threshold rotates on its first append rather than growing forever. It is a floor rather than
+  // the whole truth: loggily buffers, so our own rows trail the file until it flushes (4 KiB or a 100 ms timer).
   let bytesInSegment = recordBytesOnDisk(path)
   const rotateBefore = (lineBytes: number): void => {
-    if (bytesInSegment + lineBytes <= RECORD_SEGMENT_MAX_BYTES) return
+    // The FILE is the bound, not this counter: the default record path is shared by every hook process, and each
+    // counts only its own writes, so two producers can each stay under their own tally while the shared file passes
+    // the ceiling. The larger of the two — what a peer has on disk, and what we have buffered — is the occupancy the
+    // next row must fit into.
+    const segmentBytes = Math.max(bytesInSegment, recordBytesOnDisk(path))
+    if (segmentBytes + lineBytes <= RECORD_SEGMENT_MAX_BYTES) {
+      bytesInSegment = segmentBytes
+      return
+    }
     const replaced = writer
     try {
       replaced.flush()
       replaced.close()
       // Renaming over an existing previous segment keeps exactly one of them.
-      renameSync(path, path + RECORD_PREVIOUS_SEGMENT)
+      renameSync(path, path + RECORD_PREVIOUS_SEGMENT_SUFFIX)
       writer = createFileWriter(path)
       _installedWriters.delete(replaced)
       _installedWriters.set(writer, path)
@@ -182,6 +216,7 @@ export function installInjectionFileWriter(path: string): () => void {
         console.error(
           `injection-envelope: could not reopen the debug log ${path}: ${reopenError instanceof Error ? reopenError.message : String(reopenError)}`,
         )
+        bytesInSegment = RECORD_SEGMENT_MAX_BYTES
       }
     }
   }
@@ -195,9 +230,13 @@ export function installInjectionFileWriter(path: string): () => void {
       msg: event.message,
       ...event.props,
     })
-    rotateBefore(line.length + 1)
+    // Bytes, not characters: loggily writes the row as UTF-8 plus its own newline, so `line.length` (UTF-16 units)
+    // under-counts a non-ASCII row by up to half and would let the two segments pass their byte ceiling while
+    // claiming to be under it.
+    const lineBytes = Buffer.byteLength(line, "utf8") + 1
+    rotateBefore(lineBytes)
     writer.write(line)
-    bytesInSegment += line.length + 1
+    bytesInSegment += lineBytes
   }
   // Three independent subscriptions — addWriter's ns filter is OR-only,
   // so we register once per top-level namespace tree. The unsubscribe

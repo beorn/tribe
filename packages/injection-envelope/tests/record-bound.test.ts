@@ -16,7 +16,7 @@
  * with ~1 MiB props are written until well past 64 MiB, and what lands on disk must satisfy it.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
@@ -65,6 +65,16 @@ function sizeOf(path: string): number {
   return existsSync(path) ? statSync(path).size : 0
 }
 
+/** Emit one row carrying roughly `chars` characters of `unit`: a multi-byte `unit` makes characters and bytes differ. */
+function emitRowOfChars(unit: string, chars: number, marker: string): void {
+  emitInjectionDebugEvent({
+    source: "recall",
+    action: "skip",
+    reason: marker,
+    additionalContext: unit.repeat(chars),
+  })
+}
+
 describe("injection record — the writer keeps the live file plus one previous", () => {
   test("writing well past 64 MiB leaves the live file plus exactly one previous, under the ruling's bound", () => {
     const path = join(dir, "injection.jsonl")
@@ -109,6 +119,40 @@ describe("injection record — the writer keeps the live file plus one previous"
 
     expect(sizeOf(`${path}.1`)).toBeGreaterThanOrEqual(33 * MIB)
     expect(sizeOf(path)).toBeLessThan(2 * MIB)
+  })
+
+  test("a non-ASCII row is counted in encoded bytes: the bound holds for rows whose UTF-8 size is twice their length", () => {
+    const path = join(dir, "injection.jsonl")
+    track(installInjectionFileWriter(path))
+
+    // "é" is one UTF-16 unit and two UTF-8 bytes, and the writer stores it as UTF-8 (loggily writeSync of the
+    // string). 40 such rows are ~40 MiB of characters — four fifths of the two segments counted as characters —
+    // and 80 MiB as bytes, so a character-counting cap would let the pair pass 64 MiB on disk.
+    for (let i = 0; i < 40; i++) emitRowOfChars("é", MIB, `utf8-row-${i}`)
+    flushInjectionFileWriters()
+
+    const live = sizeOf(path)
+    const previous = sizeOf(`${path}.1`)
+
+    expect(previous, "80 MiB of bytes must have crossed the 32 MiB segment ceiling").toBeGreaterThan(0)
+    expect(live + previous).toBeLessThanOrEqual(RECORD_TOTAL_BOUND + ONE_ROW_SLACK)
+  })
+
+  test("bytes another producer wrote to the same file are counted, so a peer cannot fill the segment behind this writer", () => {
+    const path = join(dir, "injection.jsonl")
+    track(installInjectionFileWriter(path))
+
+    // The default record path is shared by every hook process and each keeps its own counter, so what a peer has
+    // already flushed to disk (its own buffer is at most loggily's 4 KiB) is invisible to this writer's count. That
+    // is the shape that let two producers leave ~94 MiB: the file, not this process's tally, is the bound.
+    appendFileSync(path, "p".repeat(30 * MIB))
+
+    emitRow(4 * MIB, "row-after-a-peer-filled-the-segment")
+    flushInjectionFileWriters()
+
+    expect(sizeOf(`${path}.1`), "the peer's 30 MiB became the previous segment").toBeGreaterThanOrEqual(30 * MIB)
+    expect(sizeOf(path), "this row opened a fresh segment instead of passing the ceiling").toBeLessThan(8 * MIB)
+    expect(readFileSync(path, "utf8")).toContain("row-after-a-peer-filled-the-segment")
   })
 })
 
