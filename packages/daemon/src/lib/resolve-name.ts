@@ -241,7 +241,8 @@ export function adoptIdentity(
  * (pid, cwd) is the right key here: the CLIENT process didn't die (it's the
  * same adapter), so its OS PID and cwd are bit-for-bit identical across the
  * daemon's re-exec. Reusing the row preserves the prior session's name +
- * role + sessionId (and therefore the chief-claim row that keys on it).
+ * sessionId (and therefore the chief-claim row that keys on it). The incoming
+ * registration determines the connection's role.
  *
  * Sibling to adoptIdentity() — but stronger guarantee. identityToken is
  * sha256(claude_session_id|cwd|role), which can collide if a different
