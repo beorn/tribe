@@ -939,6 +939,57 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
         identity_sid: string | null
       }
     ).identity_sid
+  // Registers the seat through the PRODUCTION register path and returns the DURABLE ROW's id -- the key the refusal
+  // store uses (29686), never `sessions.identity_sid`, which is the launch-side spelling ("sid-dev7").
+  const registeredSeat = async (
+    harness: ReturnType<typeof createDispatcherHarness>,
+    connId: string,
+    idToken: string,
+  ) => {
+    harness.addPendingClient(connId)
+    parseResult<RegisterResult>(
+      await harness.register(connId, {
+        name: "@dev/7",
+        pid: 4101,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken,
+      }),
+    )
+    return (
+      harness.db.prepare("SELECT id FROM sessions WHERE name = '@dev/7' ORDER BY updated_at DESC").get() as {
+        id: string
+      }
+    ).id
+  }
+  // A gen-SUPPLYING verifier (@cto ruling 4a). A dropped gen is NOT why a refusal arm records `launch_id: null` (@cto
+  // B1 of the combined REVISE: that null is by name for every kind that refuses before naming an instance), so this
+  // verifier exists to show the arms that DO record the instance a verdict proved.
+  const genVerifier = {
+    path: "/stub/identity-verifier.ts",
+    suppliesGen: true,
+    verify: async (token: string): Promise<IdentityVerdict> => {
+      const verdicts: Record<string, IdentityVerdict> = {
+        "token-dev7": { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 },
+        "token-dev8": { result: "verified", actor: "@dev/8", sid: "sid-dev8", gen: 1 },
+      }
+      const verdict = verdicts[token]
+      if (verdict === undefined) throw new Error(`stub has no verdict for ${token}`)
+      return verdict
+    },
+  }
+  // A gen-supplying verifier keyed by the caller for the two sites whose STATE no neighbouring fixture builds: the
+  // launch-authority site needs a service-principal row, and the persona-token site needs a persona reached with a
+  // PROVEN instance.
+  const siteVerifier = (verdicts: Record<string, IdentityVerdict>) => ({
+    path: "/stub/identity-verifier.ts",
+    suppliesGen: true,
+    verify: async (token: string): Promise<IdentityVerdict> => {
+      const verdict = verdicts[token]
+      if (verdict === undefined) throw new Error(`stub has no verdict for ${token}`)
+      return verdict
+    },
+  })
   const membersAuthority = async (harness: ReturnType<typeof createDispatcherHarness>) => {
     const result = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.members", {}))
     const sessions = (JSON.parse(result.content[0]!.text) as { sessions: Array<{ name: string; authority: string }> })
@@ -1356,7 +1407,9 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     const rows = (JSON.parse(members.content[0]!.text) as { sessions: Array<Record<string, unknown>> }).sessions
     expect(rows.find((row) => row.name === "@dev/7")?.foreign_transport).toMatchObject({
       name: "@dev/8",
-      launch_id: "sid-dev8",
+      // 29686 (@cto ruling 4 of 43f630c5): the record carries the refused transport's unit INSTANCE id in its one
+      // spelling, `<sid>@<gen>` -- never the bare sid this row published before. The token proves sid-dev8 at gen 1.
+      launch_id: "sid-dev8@1",
     })
     const errors = vi.spyOn(console, "error").mockImplementation(() => {})
     const leaked = parseError(
@@ -1462,6 +1515,316 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     })
     expect(String(errors.mock.calls.flat())).toContain("identity verifier /stub/identity-verifier.ts failed")
     expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/7'").get()).toEqual({ n: 0 })
+  })
+
+  // @failure With no record of the LAST register refusal held per session, a refused seat reads on `tribe.members`
+  // exactly like one whose transport merely dropped, and the reader cannot tell "the server said no" from "the bridge
+  // fell down" (29686). The write, the wire effect and the two clears live in the registry's own store, so this drives
+  // them through the PRODUCTION register path rather than by writing that store directly: a refusal for a seat with no
+  // durable row is not recorded at all (recordRegisterRefusal returns silently with no target row), which is why the
+  // seat registers once and then loses its transport — the exact state a refused reconnector leaves behind.
+  it("29686 records a register refusal in the registry's own store and drops it through the production clearers", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-seat")
+    parseResult<RegisterResult>(
+      await harness.register("conn-seat", {
+        name: "@dev/7",
+        pid: 4101,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: "token-dev7",
+      }),
+    )
+    // The record is keyed by the durable ROW's `id` -- the key `newestDurableRowId` resolves and the one
+    // `markTransportConnected`/`forgetTransportSessions` clear -- NOT by `sessions.identity_sid`, which is the
+    // launch-side spelling ("sid-dev7") that the token proves. Two different id spaces, so the test reads the real key.
+    const sessionId = (
+      harness.db.prepare("SELECT id FROM sessions WHERE name = '@dev/7' ORDER BY updated_at DESC").get() as {
+        id: string
+      }
+    ).id
+    harness.dropClient("conn-seat")
+    expect(harness.registry.getRegisterRefusal(sessionId), "no refusal before one is made").toBeUndefined()
+
+    const refuseMismatch = async (connId: string) => {
+      harness.addPendingClient(connId)
+      return parseError(
+        await harness.register(connId, { name: "@dev/7", pid: 4201, project: "/tmp/p", idToken: "token-dev8" }),
+      )
+    }
+
+    expect(await refuseMismatch("conn-mismatch")).toMatchObject({
+      code: -32003,
+      data: { kind: "identity-name-mismatch" },
+    })
+    // The refusal is IN the store, keyed by the refused seat's durable row. Its `launch_id` is NULL BY NAME (@cto B1 of
+    // the combined REVISE): the sid and gen a name-mismatch verdict carries belong to the seat its TOKEN names, while
+    // this record lands on the PRESENTED seat's row, so publishing them would name another seat's instance as this
+    // one's — and no kind reaching that arm carries either value at all. This stub's `suppliesGen: false` is not the
+    // reason: before the ruling the arm read a pair no verdict in it carries, so it recorded null for the wrong reason.
+    expect(harness.registry.getRegisterRefusal(sessionId)).toMatchObject({
+      kind: "identity-name-mismatch",
+      claimed: "@dev/8",
+      launch_id: null,
+      pid: 4201,
+    })
+
+    const roster = async () => {
+      const members = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.members", {}))
+      const payload = JSON.parse(members.content[0]!.text) as {
+        sessions: Array<Record<string, unknown>>
+        membership_discrepancy?: { missing?: Array<Record<string, unknown>> }
+      }
+      return [...payload.sessions, ...(payload.membership_discrepancy?.missing ?? [])].find(
+        (row) => row.name === "@dev/7",
+      )
+    }
+    // ... and the wire reads it from that same store, so the store is the source and not a second copy.
+    expect((await roster())?.last_refusal).toMatchObject({ kind: "identity-name-mismatch" })
+
+    // Clearer 1: a real transport connecting to the seat's row clears the record in place.
+    harness.registry.markTransportConnected(sessionId)
+    expect(harness.registry.getRegisterRefusal(sessionId), "cleared by markTransportConnected").toBeUndefined()
+    expect((await roster())?.last_refusal ?? null).toBeNull()
+
+    // Clearer 2: the reaper dropping a session whose durable row is gone.
+    expect(await refuseMismatch("conn-mismatch-2")).toMatchObject({ data: { kind: "identity-name-mismatch" } })
+    expect(harness.registry.getRegisterRefusal(sessionId)).toBeDefined()
+    harness.registry.forgetTransportSessions([sessionId])
+    expect(harness.registry.getRegisterRefusal(sessionId), "cleared by forgetTransportSessions").toBeUndefined()
+    expect((await roster())?.last_refusal ?? null).toBeNull()
+  })
+
+  // 29686 slice 2, required item 1 (@cto cdeab187): the record must name what the register could PROVE. Each row here
+  // fails on revert of the site it pins -- the four sites the earlier slice left without one.
+  it("29686 records a verifier fault with NO launch id, never the launch id the register presented", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const sessionId = await registeredSeat(harness, "conn-fault-seat", "token-dev7")
+    harness.dropClient("conn-fault-seat")
+    harness.addPendingClient("conn-fault")
+    // The fault path is LOUD by design and the harness globals refuse stray console output, so this row captures the
+    // error channel it provokes (the sibling row above does the same) and asserts the fault was named.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+    expect(
+      parseError(
+        await harness.register("conn-fault", {
+          name: "@dev/7",
+          pid: 4201,
+          project: "/tmp/p",
+          launchParentPid: process.pid,
+          launchId: "sid-dev7@1",
+          idToken: "token-fault",
+        }),
+      ),
+    ).toMatchObject({ code: -32003, data: { kind: "identity-verifier-fault" } })
+    // The verifier faulted BEFORE it named a sid and a gen, so this register proves no instance at all: the record
+    // carries NO launch rather than the client-sent string, which is exactly what `launch_id: null` says here.
+    expect(harness.registry.getRegisterRefusal(sessionId)).toMatchObject({
+      kind: "identity-verifier-fault",
+      launch_id: null,
+      pid: 4201,
+    })
+    expect(String(errors.mock.calls.flat())).toContain("signing key unreadable")
+  })
+
+  // 29686 (@cto B1 of c81bc71d): the identity-precedence arm records the ONE producer's answer, never
+  // `launchIdentity.id`. A CLAIMED claimant — no token at all — presents a BARE sid as its launch id while a
+  // VERIFIED holder owns the name, and no verdict proved a sid or a gen for the claimant, so the record holds NULL.
+  // It must not echo the bare sid the transport presented: no instance id ever equals one (@cto ruling 4 of
+  // 43f630c5). This row fails on revert, where `launchIdentity?.id` records "sid-peer".
+  it("29686 records NO launch for a claimed claimant refused on identity precedence, never its bare sid", async () => {
+    const harness = createDispatcherHarness({
+      identityVerifier: siteVerifier({
+        "token-peer": { result: "verified", actor: "peer-x", sid: "sid-peer", gen: 1 },
+      }),
+    })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-peer-holder")
+    parseResult<RegisterResult>(
+      await harness.register("conn-peer-holder", {
+        name: "peer-x",
+        pid: 4101,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: "token-peer",
+      }),
+    )
+    const holderRow = harness.db
+      .prepare("SELECT id FROM sessions WHERE name = 'peer-x' ORDER BY updated_at DESC")
+      .get() as { id: string }
+    harness.addPendingClient("conn-peer-claimant")
+    expect(
+      parseError(
+        await harness.register("conn-peer-claimant", {
+          name: "peer-x",
+          pid: 4199,
+          project: "/tmp/p",
+          launchParentPid: process.pid,
+          launchId: "sid-peer",
+          takeover: true,
+        }),
+      ),
+    ).toMatchObject({
+      code: -32003,
+      data: { kind: "foreign-identity-transport", reason: "identity-precedence" },
+    })
+    expect(harness.registry.getRegisterRefusal(holderRow.id)).toMatchObject({
+      kind: "foreign-identity-transport",
+      launch_id: null,
+    })
+  })
+
+  it("29686 records the instance the token PROVED, and keeps the presented launch id only in the refusal's data", async () => {
+    const harness = createDispatcherHarness({ identityVerifier: genVerifier })
+    cleanup = harness.dispose
+    const sessionId = await registeredSeat(harness, "conn-mismatch-seat", "token-dev7")
+    harness.dropClient("conn-mismatch-seat")
+    harness.addPendingClient("conn-mismatch")
+    expect(
+      parseError(
+        await harness.register("conn-mismatch", {
+          name: "@dev/7",
+          pid: 4202,
+          project: "/tmp/p",
+          launchParentPid: process.pid,
+          launchId: "sid-dev9@1",
+          idToken: "token-dev7",
+        }),
+      ),
+    ).toMatchObject({
+      code: -32003,
+      data: { kind: "identity-mismatch", launch_id: "sid-dev9@1", sid: "sid-dev7" },
+    })
+    // The refusal's own `data` names what the transport CLAIMED (`sid-dev9@1`); the record names what the token
+    // PROVED, in the one spelling the rest of the wire uses: `sid-dev7@1`, an instance id no bare sid can equal.
+    expect(harness.registry.getRegisterRefusal(sessionId)).toMatchObject({
+      kind: "identity-mismatch",
+      launch_id: "sid-dev7@1",
+    })
+  })
+
+  // 29686 B6 of the combined REVISE (@cto 937c40b4): the two fixtures that stood here (a launch-authority register and
+  // a persona-token register) are REMOVED. Trace 1 claimed a persona is reached from a bare request "through pid/cwd
+  // adoption, launch adoption, or a persisted runtime rename"; "launch adoption" is not a route — adoption-by-prior-state
+  // was removed from the resolver in 2026-05-14 (resolve-name.ts:311-345) — and the launch-authority site is reachable
+  // only from state no production register builds (a pre-existing service row plus a presented class that is neither
+  // "service" nor "agent"). The two routes below are the ones the code actually runs.
+  it("29686 refuses a persona an UNNAMED register reaches through claudeSessionName, recording no instance it never proved", async () => {
+    const harness = createDispatcherHarness({
+      identityVerifier: siteVerifier({
+        "token-dev7": { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 },
+      }),
+    })
+    cleanup = harness.dispose
+    // A durable row for the persona has to exist first: the refusal keys on the PRESENTED name's newest row
+    // (with-dispatcher.ts:1441-1448), and a refusal carrying no row is not recorded at all.
+    harness.addPendingClient("conn-seat")
+    parseResult<RegisterResult>(
+      await harness.register("conn-seat", {
+        name: "@dev/7",
+        pid: 6501,
+        project: "/tmp/p",
+        launchId: "sid-dev7@1",
+        launchParentPid: 6500,
+        idToken: "token-dev7",
+      }),
+    )
+    const sessionId = (
+      harness.db.prepare("SELECT id FROM sessions WHERE name = '@dev/7' ORDER BY updated_at DESC").get() as {
+        id: string
+      }
+    ).id
+    harness.dropClient("conn-seat")
+
+    harness.addPendingClient("conn-unnamed")
+    // No `name` at all: the resolver's step 2 takes `claudeSessionName` VERBATIM (resolve-name.ts:335), so this request
+    // is never a managed persona where the token is judged — its `claimed` is "(no name)" — and the EFFECTIVE name only
+    // becomes a persona once resolveName has run (with-dispatcher.ts:2107-2115). The token is absent, so the register
+    // proves no instance.
+    expect(
+      parseError(
+        await harness.register("conn-unnamed", {
+          claudeSessionName: "@dev/7",
+          pid: 6502,
+          project: "/tmp/p",
+        }),
+      ),
+    ).toMatchObject({
+      code: -32003,
+      message: expect.stringContaining("@dev/7"),
+      data: { kind: "identity-token-missing", claimed: "@dev/7", reason: "missing" },
+    })
+    // `launch_id: null` BY NAME (@cto B2 of the combined REVISE): nothing was proved here, and the pid is the one this
+    // transport reported, never a default.
+    expect(harness.registry.getRegisterRefusal(sessionId)).toMatchObject({
+      kind: "identity-token-missing",
+      claimed: "@dev/7",
+      reason: "missing",
+      launch_id: null,
+      pid: 6502,
+    })
+  })
+
+  // 29686 B6 (@cto 937c40b4), trace 1's second half: for an UNVERIFIED register the persisted-rename route is not open
+  // to a persona either. The guard at with-dispatcher.ts:2075-2083 skips the rename and says so, so the seat keeps the
+  // frozen spawn-time name it registered with and the persona is never reached.
+  it("29686 skips a persisted persona rename for an unverified register instead of adopting the persona", async () => {
+    const harness = createDispatcherHarness({
+      identityVerifier: siteVerifier({
+        "token-dev7": { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 },
+        "token-standalone": { result: "verified", actor: "standalone", sid: "sid-dev7", gen: 1 },
+      }),
+    })
+    cleanup = harness.dispose
+    const ownerPid = 6601
+    harness.addPendingClient("conn-standalone")
+    expect(
+      parseResult<RegisterResult>(
+        await harness.register("conn-standalone", {
+          name: "standalone",
+          pid: ownerPid,
+          project: "/tmp/p",
+          launchId: "sid-dev7@1",
+          launchParentPid: ownerPid,
+          // The session must be VERIFIED for the rename below to be allowed at all: tribe.rename refuses a persona
+          // target while `sessions.identity_sid` is null (with-dispatcher.ts:3036-3044).
+          idToken: "token-standalone",
+        }),
+      ).name,
+    ).toBe("standalone")
+    // The seat renames itself to a persona at runtime, which persists against its launch identity.
+    parseResult(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "rename-persona", method: "tribe.rename", params: { new_name: "@dev/7" } },
+        "conn-standalone",
+      ),
+    )
+    harness.dropClient("conn-standalone")
+
+    harness.addPendingClient("conn-standalone-2")
+    // The same LAUNCH tuple, a NEW process id, the frozen spawn-time name, and NO token. The new pid matters: a register
+    // that keeps the old pid is adopted by (pid, cwd) first, which injects the row's CURRENT name — the persona — before
+    // this guard is ever consulted. With the pid of a restarted process there is no pid/cwd row to adopt, so this is the
+    // arm that decides: `verifiedSid` is null and the persisted rename names a persona, so the rename is SKIPPED rather
+    // than re-applied, and — the effective name staying "standalone" — the persona-token guard is never reached either.
+    // Reverting the skip re-applies the rename, resolves a persona, and refuses this register as a persona with a
+    // missing token instead of serving the seat.
+    const reconnected = parseResult<RegisterResult>(
+      await harness.register("conn-standalone-2", {
+        name: "standalone",
+        pid: 6602,
+        project: "/tmp/p",
+        launchId: "sid-dev7@1",
+        launchParentPid: ownerPid,
+      }),
+    )
+    expect(reconnected.name).toBe("standalone")
+    const live = parseResult<CliStatusResult>(await harness.cliStatus()).sessions.filter(
+      (session) => session.pid === 6602,
+    )
+    expect(live.map((session) => session.name)).toEqual(["standalone"])
   })
 
   it("reports and pages a post-boot verifier fault, then clears on repair without exposing the token", async () => {
@@ -2158,6 +2521,12 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
           .run("recycled-birth", old.sessionId)
       }
       harness.addPendingClient("new-pull")
+      // 29686 (@cto B1 of c81bc71d): the duplicate-join refusal records the instance the VERIFIER proved for the
+      // successor (token-g4 proves sid-dev7 at gen 4), taken from the one producer rather than a literal. Dropping the
+      // identity argument at the site leaves the record null and fails this assertion.
+      const refusalTarget = harness.db
+        .prepare("SELECT id FROM sessions WHERE name = '@dev/7' ORDER BY updated_at DESC")
+        .get() as { id: string }
       const refusal = parseError(
         await harness.register("new-pull", {
           name: "@dev/7",
@@ -2170,6 +2539,10 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
         }),
       )
       expect(refusal).toMatchObject({ code: -32003, data: { kind: "verified-duplicate-join" } })
+      expect(harness.registry.getRegisterRefusal(refusalTarget.id)).toMatchObject({
+        kind: "verified-duplicate-join",
+        launch_id: "sid-dev7@4",
+      })
       expect(refusal.message).toContain("no yield notice")
       expect(oldSocket.destroyedByDispatcher).toBe(false)
       expect(watchSocket.writes.filter((line) => line.includes("successor_yield"))).toEqual([])
@@ -2664,10 +3037,145 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       ),
     ).toMatchObject({
       code: -32003,
-      message: expect.stringContaining("verifier verdict carries no gen; the daemon cannot key this session"),
+      message: expect.stringContaining(
+        "proves no usable instance — carries no usable gen (gen=null); the daemon cannot key this session",
+      ),
       data: { kind: "identity-verdict-without-gen" },
     })
     expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/7'").get()).toEqual({ n: 0 })
+  })
+
+  // 29686 generation half (@cto ruling 4 of 43f630c5, his cdeab187 item 2): this token keyed the session, so the
+  // client was never allowed to send a launch id. A gen the daemon cannot USE must refuse by name: with only the
+  // `verifiedGen === null` test the daemon composed `sid-dev7@-1` and registered a session on it.
+  it("an unusable gen from a verified token refuses by name, and registers nothing", async () => {
+    const harness = createDispatcherHarness({
+      identityVerifier: {
+        ...identityVerifier,
+        verify: async (): Promise<IdentityVerdict> => ({
+          result: "verified",
+          actor: "@dev/7",
+          sid: "sid-dev7",
+          gen: -1,
+        }),
+      },
+    })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-badgen")
+    expect(
+      parseError(
+        await harness.register("conn-badgen", {
+          name: "@dev/7",
+          pid: 5301,
+          project: "/tmp/p",
+          launchParentPid: 5300,
+          idToken: "token-g3",
+        }),
+      ),
+    ).toMatchObject({
+      code: -32003,
+      message: expect.stringContaining(
+        "proves no usable instance — Tribe instance generation -1 must be a non-negative safe integer",
+      ),
+      data: { kind: "identity-verdict-without-gen" },
+    })
+    expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/7'").get()).toEqual({ n: 0 })
+  })
+
+  // 29686 B3 (@cto, combined REVISE): the defect must be `formatInstanceId`'s OWN cause. The predicate it replaces
+  // asked only whether the sid contained `@`, so a sid the one spelling refuses for WHITESPACE or `#` was reported as
+  // a bad GENERATION — a diagnostic lying about its own cause, and sending a reader to the verifier's gen.
+  it("a sid the one spelling refuses is named by its own cause, never as a bad generation", async () => {
+    const harness = createDispatcherHarness({
+      identityVerifier: {
+        ...identityVerifier,
+        verify: async (): Promise<IdentityVerdict> => ({
+          result: "verified",
+          actor: "@dev/7",
+          sid: "sid dev7",
+          gen: 3,
+        }),
+      },
+    })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-badsid")
+    const refusal = parseError(
+      await harness.register("conn-badsid", {
+        name: "@dev/7",
+        pid: 5401,
+        project: "/tmp/p",
+        launchParentPid: 5400,
+        idToken: "token-g3",
+      }),
+    )
+
+    expect(refusal).toMatchObject({
+      code: -32003,
+      message: expect.stringContaining(
+        "proves no usable instance — Tribe instance session id must be a non-empty string without whitespace or #",
+      ),
+      data: { kind: "identity-verdict-without-gen" },
+    })
+    expect(refusal.message).not.toContain("carries no usable gen")
+    expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/7'").get()).toEqual({ n: 0 })
+  })
+
+  // 29686 B3 (@cto, combined REVISE): `provenInstanceId` also CATCHES that throw, on the arms that record the instance
+  // a verdict proved. A verified verdict is constrained only to a non-empty sid (`checkedVerdict`), so a sid carrying
+  // `@` reaches the join; the record must then carry NO launch, and the caller must still get a refusal it can read
+  // rather than a throw out of the register path.
+  it("a sid the one spelling refuses still refuses by name and records no launch", async () => {
+    const verdictsByToken: Record<string, IdentityVerdict> = {
+      "token-dev7": { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 },
+      "token-at-sid": { result: "verified", actor: "@dev/7", sid: "sid@dev7", gen: 3 },
+    }
+    const harness = createDispatcherHarness({
+      identityVerifier: {
+        path: "/stub/identity-verifier.ts",
+        suppliesGen: true,
+        verify: async (token: string): Promise<IdentityVerdict> => {
+          const verdict = verdictsByToken[token]
+          if (verdict === undefined) throw new Error(`stub has no verdict for ${token}`)
+          return verdict
+        },
+      },
+    })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-seat")
+    parseResult<RegisterResult>(
+      await harness.register("conn-seat", {
+        name: "@dev/7",
+        pid: 5501,
+        project: "/tmp/p",
+        launchParentPid: 5500,
+        idToken: "token-dev7",
+      }),
+    )
+    const seatRow = (
+      harness.db.prepare("SELECT id FROM sessions WHERE name = '@dev/7' ORDER BY updated_at DESC").get() as {
+        id: string
+      }
+    ).id
+
+    harness.addPendingClient("conn-at-sid")
+    const refusal = parseError(
+      await harness.register("conn-at-sid", {
+        name: "@dev/7",
+        pid: 5502,
+        project: "/tmp/p",
+        launchId: "other-launch",
+        launchParentPid: 5500,
+        idToken: "token-at-sid",
+      }),
+    )
+
+    // Reverting the catch in `provenInstanceId` makes `formatInstanceId` throw out of this register instead.
+    expect(refusal).toMatchObject({ code: -32003, data: { kind: "identity-mismatch" } })
+    expect(harness.registry.getRegisterRefusal(seatRow)).toMatchObject({
+      kind: "identity-mismatch",
+      launch_id: null,
+      pid: 5502,
+    })
   })
 
   // 25074 3c-2b forward fix (@cto 95c2be2d): the client never omits a launch id it was given, and the daemon decides

@@ -50,5 +50,10 @@ export type { GateInput, GateDecision, Permission } from "./gate.ts"
 export { retrieveMemory, registerRetrieveSource, qmdFetcher, retrieveFetcherCount } from "./retrieve.ts"
 export type { RetrievedMemory, RetrieveFetcher } from "./retrieve.ts"
 
-export { emitInjectionDebugEvent, installInjectionFileWriter, flushInjectionFileWriters } from "./debug.ts"
+export {
+  emitInjectionDebugEvent,
+  installInjectionFileWriter,
+  flushInjectionFileWriters,
+  RECORD_PREVIOUS_SEGMENT_SUFFIX,
+} from "./debug.ts"
 export type { InjectionDebugEvent } from "./debug.ts"

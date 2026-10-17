@@ -50,7 +50,6 @@ function blindMetrics(reason = "scalar-fact-unavailable", detail?: string): Heal
     // is unchanged, and present so the alert can be held to carrying it.
     scalarObservation: { detail, kind: "canonical-unavailable", reason },
     timestamp: Date.now(),
-    worktrees: 0,
   }
 }
 
@@ -70,7 +69,6 @@ function platformLimitMetrics(): HealthMetrics {
     processObservation: { kind: "standalone-os" },
     scalarObservation: { kind: "standalone-os", unavailable: ["disk.bytes", "disk.inodes"] },
     timestamp: Date.now(),
-    worktrees: 0,
   }
 }
 
@@ -114,7 +112,6 @@ function seeingMetrics(usedFraction: number, sequence: number): HealthMetrics {
       unavailable: [],
     },
     timestamp: Date.now(),
-    worktrees: 0,
   }
 }
 

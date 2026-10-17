@@ -230,6 +230,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
           name: "@agent/6",
           launch_id: "launch-health",
           launch_parent_pid: 6006,
+          last_refusal: null,
           state: "missing-transport",
         },
       ],

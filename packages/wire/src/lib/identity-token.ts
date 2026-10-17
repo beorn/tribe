@@ -30,24 +30,59 @@ export function readIdentityTokenFromEnvironment(env: Readonly<NodeJS.ProcessEnv
  * actor (`act.sub`, with `act.kind` "service" for a hab service). Verification has one home, the daemon; this read
  * checks only presence and shape, so a malformed token fails here, by name, instead of as a daemon refusal nobody can
  * read.
+ *
+ * The generation opt-in reads a required safe-integer gen from the same payload, with value-free failures for
+ * diagnostic attribution. One-argument callers keep their existing sid/actor read and ignore gen.
  */
 export type UnverifiedTokenClaims = Readonly<{ sid: string; actor: string; kind?: "service" }>
 
-export function readUnverifiedTokenClaims(token: string): UnverifiedTokenClaims {
+export function readUnverifiedTokenClaims(
+  token: string,
+  options: Readonly<{ generation: true }>,
+): UnverifiedTokenClaims & Readonly<{ gen: number }>
+export function readUnverifiedTokenClaims(token: string): UnverifiedTokenClaims
+export function readUnverifiedTokenClaims(
+  token: string,
+  options?: Readonly<{ generation: true }>,
+): UnverifiedTokenClaims & Readonly<{ gen?: number }> {
   const payload = token.split(".")[1]
-  let claims: { readonly sid?: unknown; readonly act?: { readonly sub?: unknown; readonly kind?: unknown } }
+  let claims: {
+    readonly sid?: unknown
+    readonly gen?: unknown
+    readonly act?: { readonly sub?: unknown; readonly kind?: unknown }
+  }
   try {
     if (payload === undefined) throw new Error("it is not a three-part JWT")
     claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as typeof claims
   } catch (error) {
+    // The diagnostic opt-in must not quote a JSON parser's token/claim bytes.
+    // Keep the existing one-argument failure text unchanged.
+    const problem =
+      options?.generation === true
+        ? "it has no readable JSON claims payload"
+        : error instanceof Error
+          ? error.message
+          : String(error)
+    throw new Error(`${HAB_ID_TOKEN_ENV} is malformed: ${problem}; relaunch the seat through hab`)
+  }
+  if (options?.generation === true && (claims === null || typeof claims !== "object" || Array.isArray(claims))) {
     throw new Error(
-      `${HAB_ID_TOKEN_ENV} is malformed: ${error instanceof Error ? error.message : String(error)}; relaunch the seat through hab`,
+      `${HAB_ID_TOKEN_ENV} is malformed: its claims payload is not an object; relaunch the seat through hab`,
     )
   }
   const sid = claims.sid
   const actor = claims.act?.sub
   if (typeof sid !== "string" || sid.length === 0 || typeof actor !== "string" || actor.length === 0) {
     throw new Error(`${HAB_ID_TOKEN_ENV} is malformed: it names no sid or no act.sub; relaunch the seat through hab`)
+  }
+  if (options?.generation === true) {
+    const gen = claims.gen
+    if (typeof gen !== "number" || !Number.isSafeInteger(gen) || gen < 0) {
+      throw new Error(
+        `${HAB_ID_TOKEN_ENV} is malformed: claim gen requires a non-negative safe integer; relaunch the seat through hab`,
+      )
+    }
+    return claims.act?.kind === "service" ? { sid, actor, kind: "service", gen } : { sid, actor, gen }
   }
   return claims.act?.kind === "service" ? { sid, actor, kind: "service" } : { sid, actor }
 }

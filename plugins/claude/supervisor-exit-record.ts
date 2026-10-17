@@ -3,7 +3,7 @@
  *
  * A dead adapter used to leave one stderr line in the host's MCP log, which is
  * gone or unfindable by the time anyone asks why a seat reads disconnected. The
- * supervisor appends one JSON line per adapter exit (time, pid, code, signal,
+ * supervisor appends one JSON line per adapter exit (launch instance, time, pid, code, signal,
  * restart decision, and for a decided refusal its reason) to
  * `tribe-adapter-exits.jsonl` in the launch's existing state directory, which ag
  * projects as AG_HOST_SESSION_STATE_DIR. It hands the path to its adapter, which
@@ -19,11 +19,20 @@
 import { appendFileSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
 import { AG_HOST_SESSION_STATE_DIR_ENV } from "tribe-wire/lib/ag-host-env"
+import {
+  HAB_ID_TOKEN_ENV,
+  HAB_ID_TOKEN_FILE_ENV,
+  readIdentityTokenFromEnvironment,
+  readUnverifiedTokenClaims,
+} from "tribe-wire/lib/identity-token"
+import { formatInstanceId } from "tribe-wire/lib/persona-launch-identity"
 
 const LAUNCH_STATE_DIR_ENV = AG_HOST_SESSION_STATE_DIR_ENV
 const ADAPTER_EXIT_RECORD_FILE = "tribe-adapter-exits.jsonl"
 
-export type AdapterExitRecordTarget = { readonly path: string } | { readonly path: null; readonly reason: string }
+export type AdapterExitRecordTarget =
+  | { readonly path: string; readonly instanceId: string | null }
+  | { readonly path: null; readonly reason: string }
 
 export function resolveAdapterExitRecord(env: Readonly<NodeJS.ProcessEnv>): AdapterExitRecordTarget {
   const stateDir = env[LAUNCH_STATE_DIR_ENV]?.trim() ?? ""
@@ -31,7 +40,29 @@ export function resolveAdapterExitRecord(env: Readonly<NodeJS.ProcessEnv>): Adap
     return { path: null, reason: `${LAUNCH_STATE_DIR_ENV} is unset, so this launch has no state directory` }
   }
   if (!isAbsolute(stateDir)) return { path: null, reason: `${LAUNCH_STATE_DIR_ENV} is not absolute: ${stateDir}` }
-  return { path: join(stateDir, ADAPTER_EXIT_RECORD_FILE) }
+  // Capture once before the supervisor's early refusals or child replacements.
+  // These are diagnostic self-claims; only the daemon verifies authority.
+  let instanceId: string | null = null
+  let identityProblem = `${HAB_ID_TOKEN_FILE_ENV} / ${HAB_ID_TOKEN_ENV} is unset`
+  let identityStep = `${HAB_ID_TOKEN_FILE_ENV} unreadable`
+  try {
+    const token = readIdentityTokenFromEnvironment(env)
+    if (token !== null) {
+      identityStep = `${HAB_ID_TOKEN_ENV} claims unreadable`
+      const claims = readUnverifiedTokenClaims(token, { generation: true })
+      identityStep = "instance id refused"
+      instanceId = formatInstanceId(claims.sid, claims.gen)
+    }
+  } catch {
+    // catch-cause-allow: credential/codec failures can quote paths or claim values; name the required sources/claims instead.
+    identityProblem = identityStep
+  }
+  if (instanceId === null) {
+    process.stderr.write(
+      `tribe plugin supervisor: adapter exit instance_id null: ${identityProblem}; emitted rows have no provable launch instance\n`,
+    )
+  }
+  return { path: join(stateDir, ADAPTER_EXIT_RECORD_FILE), instanceId }
 }
 
 /**
@@ -59,6 +90,7 @@ export function recordAdapterExit(target: AdapterExitRecordTarget, exit: Adapter
   if (target.path !== null) {
     const line = {
       at: new Date().toISOString(),
+      instance_id: target.instanceId,
       adapter_pid: exit.adapterPid ?? null,
       code: exit.code,
       signal: exit.signal,

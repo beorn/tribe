@@ -11,10 +11,16 @@
  * terminal-shaped outcome is logged by name; an orphan or an unusable timing is excluded, never a fabricated zero;
  * a start whose terminal lands after the window is a completion in the NEXT hour, never a boundary kill.
  *
+ * Segments (29681): the producer keeps a live record plus one previous segment, `<path>.1` (the suffix's one home is
+ * `tribe-injection-envelope` src/debug.ts). Both are read, the previous one first, so a rotation that lands inside
+ * the hour does not hide the earlier side of the window — a start in the previous segment whose terminal is in the
+ * live one is matched normally rather than excluded as an orphan.
+ *
  * @consumer @ag/tribe/25304-nothing-reads-the-prompt-hooks-latency-log-so-a-30-s-kill-is-found-by-the-operator
  */
 import { existsSync, readFileSync } from "node:fs"
 import { createLogger } from "loggily"
+import { RECORD_PREVIOUS_SEGMENT_SUFFIX } from "tribe-injection-envelope"
 import type { TribeClientApi } from "./plugin-api.ts"
 
 const log = createLogger("tribe:hook-latency")
@@ -217,18 +223,26 @@ export function readHookLatencyStats(logPath: string, options?: ReadHookLatencyO
     budgetMs,
   }
 
-  if (!existsSync(logPath)) {
+  const previousPath = logPath + RECORD_PREVIOUS_SEGMENT_SUFFIX
+  // Previous first: it holds the older rows, and the admission loop below is order-sensitive — a start must be seen
+  // before the terminal that closes it, and a rotation can put them in different segments (29681).
+  const segments = [previousPath, logPath].filter((segment) => existsSync(segment))
+  if (segments.length === 0) {
     return emptyStats
   }
 
-  let content: string
-  try {
-    content = readFileSync(logPath, "utf8")
-  } catch {
-    return emptyStats
+  const lines: string[] = []
+  for (const segment of segments) {
+    try {
+      lines.push(...readFileSync(segment, "utf8").split("\n"))
+    } catch (error) {
+      // Loud and scoped: the segment we could not read is named, and the segments that did read still answer for the
+      // window. Returning zeroed stats here would report "no runs" for an hour we never read.
+      log.warn?.(
+        `prompt hook latency: could not read the log segment ${segment}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
   }
-
-  const lines = content.split("\n")
   // Every start is collected, not only the in-window ones: a terminal that lands after windowEnd still closes its
   // start, so it is never read as a boundary kill and counts as a completion in the hour it lands in (27712).
   const openRuns: OpenRun[] = []

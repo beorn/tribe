@@ -18,6 +18,17 @@
 
 import { existsSync, readFileSync } from "node:fs"
 import { parseProcStatLine } from "tribe-wire/lib/process-parent"
+// The refusal kinds the daemon CLASSIFIES as foreign (24767) are IMPORTED from the wire
+// (`tribe-wire/lib/foreign-refusal-kinds`), never re-exported: the label is the daemon's own classification of the KIND
+// and never says whose connector was refused. agent-rig's WATCH keys its bridge verdict on the same set and had been
+// reading a COPY of it, so the set has one owner and both sides import it — a second door to one set is a second place
+// to drift from it, so this file only reads the wire's set. The
+// wire publishes these kinds as `foreign_transport` derived from the record, so a reader still gets the same four
+// fields. What DID change is one field's SPELLING, named rather than left to be discovered: `launch_id` is the record's,
+// every refusal site now records a unit instance id (`<sid>@<gen>`, through `provenInstanceId`) or null, and
+// `foreignTransportView` below publishes either that instance or the literal `(no launch)` — never the bare sid a
+// pre-29686 row carried.
+import { FOREIGN_REFUSAL_KINDS } from "tribe-wire/lib/foreign-refusal-kinds"
 
 export type TransportState = "connected" | "disconnected"
 export type OwnerState = "live" | "dead" | "unknown"
@@ -44,6 +55,38 @@ export type ForeignIdentityTransport = {
   readonly launch_id: string
   readonly pid: number
   readonly refused_at: string
+}
+
+/**
+ * The daemon keeps ONE record per session: the LAST refusal the register path gave it (29686, @cto ruling 1 of
+ * 43f630c5). It replaces the foreign-transport-only record, so every kind the register path composes can be read
+ * back instead of only the impersonation case. `claimed` is the name the refused transport presented, which is not
+ * the row's own name when a transport carried another seat's identity.
+ *
+ * `launch_id` is the refused transport's unit instance id in ONE spelling, `<sid>@<gen>` (tribe-wire's
+ * `formatInstanceId`), and is null whenever the daemon did not know both values — never a bare sid, which no
+ * instance id ever equals (@cto ruling 4 of 43f630c5).
+ */
+export type RegisterRefusal = {
+  readonly kind: string
+  readonly claimed: string
+  readonly reason?: string
+  readonly launch_id: string | null
+  readonly pid: number
+  readonly refused_at: string
+}
+
+/** Derive the members wire's `foreign_transport` view from a last refusal: the same four fields it always had, or
+ *  undefined when the refusal is not a foreign one. */
+export function foreignTransportView(refusal: RegisterRefusal | undefined): ForeignIdentityTransport | undefined {
+  if (refusal === undefined) return undefined
+  if (!(FOREIGN_REFUSAL_KINDS as readonly string[]).includes(refusal.kind)) return undefined
+  return {
+    name: refusal.claimed,
+    launch_id: refusal.launch_id ?? "(no launch)",
+    pid: refusal.pid,
+    refused_at: refusal.refused_at,
+  }
 }
 
 export type SessionAnswerCapability = "observed" | "not-observed"

@@ -22,7 +22,7 @@ import { createLineParser } from "../../../packages/wire/src/parser.ts"
 import { PLUGIN_CODE_ROOT_WINDOW_ENV } from "../supervisor-policy.ts"
 import { isRequest, makeResponse } from "../../../packages/wire/src/rpc.ts"
 import { AG_HOST_SESSION_STATE_DIR_ENV } from "tribe-wire/lib/ag-host-env"
-import { HAB_ID_TOKEN_ENV } from "tribe-wire/lib/hab-session-env"
+import { HAB_ID_TOKEN_ENV, HAB_ID_TOKEN_FILE_ENV } from "tribe-wire/lib/hab-session-env"
 import { TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV } from "tribe-wire/lib/session-identity-env"
 
 const PLUGIN_ROOT = resolve(import.meta.dirname, "..")
@@ -84,6 +84,7 @@ function startSupervisor(overrides: NodeJS.ProcessEnv = {}): ChildProcess {
     ...overrides,
   }
   delete env[HAB_ID_TOKEN_ENV]
+  delete env[HAB_ID_TOKEN_FILE_ENV]
   delete env[TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV]
   const child = spawn(process.execPath, [SERVER], { cwd: PLUGIN_ROOT, env, stdio: ["pipe", "pipe", "pipe"] })
   children.push(child)
@@ -168,7 +169,7 @@ describe("the supervisor spawns the adapter from the daemon's landing root", () 
       .split("\n")
       .map((line) => JSON.parse(line))
     expect(rows).toHaveLength(1)
-    expect(rows[0]).toMatchObject({ adapter_pid: null, code: null, signal: null, decision: "stop" })
+    expect(rows[0]).toMatchObject({ instance_id: null, adapter_pid: null, code: null, signal: null, decision: "stop" })
     expect((rows[0] as { reason?: unknown }).reason).toContain("no code root within 300 ms of the cold start")
     // @cto 857b0478 (28920 step 3, reading B): the row is what the reader of a dark seat actually sees, so the
     // remedy rides the reason, host-neutral - no host is named in code.

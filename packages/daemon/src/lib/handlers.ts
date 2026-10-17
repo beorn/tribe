@@ -75,6 +75,7 @@ import {
   projectSessionTransportEvidence,
   projectSessionTransportState,
   type ForeignIdentityTransport,
+  type RegisterRefusal,
   type OwnerState,
   type SessionTransportEvidence,
 } from "./session-transport-state.ts"
@@ -310,6 +311,10 @@ export type HandlerOpts = {
   /** 24767: the latest transport refused for presenting this session's
    * authority under another seat's identity, until a real transport connects. */
   getForeignIdentityTransport?: (sessionId: string) => ForeignIdentityTransport | undefined
+  /** 29686 (@cto ruling 1): the daemon's ONE bounded last register refusal per session, until a real
+   *  transport connects, the durable row is forgotten, or the daemon restarts. The wire reads it as
+   *  `last_refusal` beside the `foreign_transport` shape that already published this seat's refusal. */
+  getLastRefusal?: (sessionId: string) => RegisterRefusal | undefined
   /** Exact identities retired by explicit composing-layer policy. */
   retiredNames?: ReadonlySet<string>
   /**
@@ -2856,6 +2861,7 @@ type MissingTransportOrExited =
       launch_id: string
       launch_parent_pid: number
       state: "missing-transport"
+      last_refusal?: RegisterRefusal | null
     }
   | {
       member_id: string
@@ -2864,6 +2870,7 @@ type MissingTransportOrExited =
       launch_parent_pid: number
       state: "exited-not-remounted"
       left_at: string
+      last_refusal?: RegisterRefusal | null
     }
 
 /** A missing-transport row whose only transport attempt the daemon refused
@@ -2876,6 +2883,7 @@ type ForeignIdentityMissing = {
   launch_parent_pid: number
   state: "foreign-identity-transport"
   foreign_transport: ForeignIdentityTransport
+  last_refusal?: RegisterRefusal | null
 }
 
 /** Everything `MembershipDiscrepancy.missing` can carry. `never-registered`
@@ -3256,6 +3264,7 @@ function projectMembershipDiscrepancy(
   getSessionLeftFact: SessionLeftFactReader,
   roster: DeclaredRoster | undefined,
   getForeignIdentityTransport?: (sessionId: string) => ForeignIdentityTransport | undefined,
+  getLastRefusal?: (sessionId: string) => RegisterRefusal | undefined,
 ): MembershipProjection {
   const missing: MissingLaunch[] = []
   const finished: FinishedLaunch[] = []
@@ -3271,10 +3280,18 @@ function projectMembershipDiscrepancy(
     else {
       const foreignTransport =
         classified.state === "missing-transport" ? getForeignIdentityTransport?.(row.id) : undefined
+      // 29686 (@cto ruling 3): EVERY missing entry carries the last refusal, the settled exit included —
+      // it is the only server-refusing evidence left now that the seat's own stderr record has no live
+      // writer. The foreign shape keeps `foreign_transport` and gains this beside it (ruling 1).
+      // Rollout (@cto): the key is written on every entry, `null` when this daemon holds no refusal, so a reader can
+      // tell "the daemon says it holds none" from "this daemon predates the field". The second is indeterminate
+      // evidence, and an absent key must never be read as a dropped bridge.
+      const lastRefusal = getLastRefusal?.(row.id)
+      const withRefusal: MissingLaunch = { ...classified, last_refusal: lastRefusal ?? null }
       missing.push(
         foreignTransport === undefined
-          ? classified
-          : { ...classified, state: "foreign-identity-transport", foreign_transport: foreignTransport },
+          ? withRefusal
+          : { ...withRefusal, state: "foreign-identity-transport", foreign_transport: foreignTransport },
       )
     }
   }
@@ -3512,6 +3529,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
   const sessions = visibleRows.map((r) => {
     const parent = r.claude_session_id ? parentMap.get(r.claude_session_id) : undefined
     const foreignTransport = opts.getForeignIdentityTransport?.(r.id)
+    const lastRefusal = opts.getLastRefusal?.(r.id)
     const { active, transportPids, agentPid, evidence } = projectSessionRowTransport(
       r,
       activeIds,
@@ -3564,6 +3582,9 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       // 24767 — the transport the daemon refused for this seat: it presented
       // this seat's authority under another seat's name and launch.
       ...(foreignTransport ? { foreign_transport: foreignTransport } : {}),
+      // 29686 — the daemon's last register refusal for this session: the only server-refusing
+      // evidence on the wire now that the seat's own stderr record has no live writer.
+      ...(lastRefusal ? { last_refusal: lastRefusal } : {}),
     }
   })
   const roster = opts.getExpectedMembers?.()
@@ -3577,6 +3598,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     (row) => readSessionLeftFact(ctx, row),
     roster,
     opts.getForeignIdentityTransport,
+    opts.getLastRefusal,
   )
   // Connected rows whose name the roster never mentions at all — probes,
   // subagents, anything not in hab's persona table. Fine to be connected,
@@ -3929,6 +3951,7 @@ function projectHealthMembership(ctx: TribeContext, opts: HandlerOpts) {
     (row) => readSessionLeftFact(ctx, row),
     opts.getExpectedMembers?.(),
     opts.getForeignIdentityTransport,
+    opts.getLastRefusal,
   )
   return { retiredNames, byId, rows, liveSessions, activeIds, disconnected, diagnosticDisconnected, discrepancy }
 }

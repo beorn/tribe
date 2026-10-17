@@ -2533,7 +2533,7 @@ describe("dispatcher inbox-wait parsing", () => {
     expect(result.attention).toEqual({
       actionable_unread: [],
       pending_balls: [],
-      pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
+      pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false, newest_overdue_due_at: null },
       sent_offline_balls: [],
       sent_offline_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
     })
