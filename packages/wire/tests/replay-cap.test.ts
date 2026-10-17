@@ -16,6 +16,7 @@ import {
   MAX_REPLAY_EVENTS,
   replayEnvelopeMeta,
   selectReplayEvents,
+  settledEnvelopeMeta,
 } from "../src/lib/replay-cap.ts"
 
 // Fixed clock — no Date.now() so the test is deterministic.
@@ -170,6 +171,29 @@ describe("replayEnvelopeMeta (27346 re-presented attention row)", () => {
 
   it("still names the replay when the row carries no timestamp", () => {
     expect(replayEnvelopeMeta({ replay: true })).toEqual({ replay: "true" })
+  })
+})
+
+// 29327 - the settlement facts are the replay facts' sibling: they ride the
+// same envelope, because content is the sender's words and the type alone
+// cannot say why a `request` is not owed.
+describe("settledEnvelopeMeta (29327 settled ball)", () => {
+  it("names the settlement and the settler on a settled row", () => {
+    expect(settledEnvelopeMeta({ settled: true, settled_by: "@dev/brain" })).toEqual({
+      settled: "true",
+      settled_by: "@dev/brain",
+    })
+  })
+
+  it("still marks settled when the daemon recorded no settler", () => {
+    expect(settledEnvelopeMeta({ settled: true })).toEqual({ settled: "true" })
+    expect(settledEnvelopeMeta({ settled: true, settled_by: null })).toEqual({ settled: "true" })
+    expect(settledEnvelopeMeta({ settled: true, settled_by: "" })).toEqual({ settled: "true" })
+  })
+
+  it("adds nothing to an unsettled or unflagged row", () => {
+    expect(settledEnvelopeMeta({ settled: false, settled_by: "@dev/brain" })).toEqual({})
+    expect(settledEnvelopeMeta({})).toEqual({})
   })
 })
 

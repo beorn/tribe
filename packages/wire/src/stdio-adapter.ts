@@ -17,7 +17,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { resolveProjectName } from "./lib/beads-path.ts"
-import { settledMarker } from "./lib/settled-marker.ts"
+import { markedType } from "./lib/notification-only.ts"
 import {
   parseTribeArgs,
   parseSessionDomains,
@@ -70,6 +70,7 @@ import {
   MAX_REPLAY_EVENTS,
   replayEnvelopeMeta,
   selectReplayEvents,
+  settledEnvelopeMeta,
   type PendingBallSummaryState,
 } from "./lib/replay-cap.ts"
 import {
@@ -376,19 +377,6 @@ function sendChannelDetached(content: string, meta: Record<string, string | unde
   })
 }
 
-const NOTIFICATION_ONLY_MARKER = "notification-only:do-not-acknowledge-or-respond-to"
-
-function isNotificationOnlyType(type: string): boolean {
-  if (type === "session" || type === "status" || type === "delta") return true
-  if (type.startsWith("chief:")) return true
-  if (type.startsWith("github:")) return true
-  return false
-}
-
-function markedType(type: string): string {
-  return isNotificationOnlyType(type) ? `${NOTIFICATION_ONLY_MARKER}:${type}` : type
-}
-
 /** One row of a `tribe.fetch` result — the same shape for the attention
  * projection and the ambient event window. */
 type TribeFetchResultRow = {
@@ -410,9 +398,7 @@ type TribeFetchResultRow = {
    * pane envelope must carry both so a settled request never reads as owed.
    */
   settled?: boolean
-  settled_by?: string
-  settled_at?: string
-  by_another_owner?: boolean
+  settled_by?: string | null
   /**
    * 27346 - the daemon sets this true when the mailbox cursor is already past
    * the row, so this presentation is a re-presentation of something the seat
@@ -1524,8 +1510,8 @@ function tryAutoRenameOnClaim(content: string): void {
 }
 
 async function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[number]): Promise<boolean> {
-  const content = `${settledMarker(event)}${String(event.content ?? "")}`
-  const type = markedType(String(event.type ?? "notify"))
+  const content = String(event.content ?? "")
+  const type = markedType(String(event.type ?? "notify"), event.settled === true)
   if (type === "bead:claimed") tryAutoRenameOnClaim(content)
   const handoff = sendChannel(content, {
     from: String(event.from ?? "unknown"),
@@ -1539,6 +1525,9 @@ async function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]
     // was first sent, so a pane that drains hours later does not read it as a
     // fresh instruction.
     ...replayEnvelopeMeta(event),
+    // 29327 - a settled row names itself settled in the envelope, not in the
+    // sender's words: the type marker says no reply is owed and this says why.
+    ...settledEnvelopeMeta(event),
   })
   if (handoff === undefined) return false
   await handoff
