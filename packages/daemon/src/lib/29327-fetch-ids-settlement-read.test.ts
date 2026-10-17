@@ -186,6 +186,35 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     }
   })
 
+  // 29707 (@cto 2026-10-17, non-blocking: recheck the bounced case after item 2).
+  // A bounced send keeps its message addressed to the ORIGINAL target while the
+  // ball is opened for the FALLBACK owner (handlers.ts persistDelivery: owner is
+  // `resolution.to`). A read keyed on the recipients the messages name cannot see
+  // that ball for the original addressee; a read keyed on the IDS can, wherever
+  // the ball now lives.
+  it("reads a bounced row's ball open, though it is owned by the fallback name", () => {
+    const ORIGINAL = "@dev/offline-target"
+    const FALLBACK = "@dev/fallback-owner"
+    const id = "msg-29327-bounced"
+    message(id, id, ORIGINAL)
+    stmts.openPendingRequest.run({
+      $request_id: id,
+      $recipient: FALLBACK,
+      $sender: SENDER,
+      $opened_at: TS,
+      $expires_at: TS + 60_000,
+      $message_id: id,
+      $fanout: "first",
+    })
+
+    const res = read([id])
+    const events = res.events as Array<Record<string, unknown>>
+    const byId = new Map(events.map((event) => [String(event.id), event]))
+
+    expect(byId.get(id)?.settlement).toBe("open")
+    expect(res.settlement_unresolved ?? []).toEqual([])
+  })
+
   it("names an id it knows no message for instead of answering it as untracked", () => {
     const absent = "0f0f0f0f-1111-4222-8333-444455556666"
 
