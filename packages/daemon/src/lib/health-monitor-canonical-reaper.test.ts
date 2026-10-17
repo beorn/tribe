@@ -685,7 +685,7 @@ describe("the reaper's CPU threshold is read strictly, and a refusal stays insid
   })
 })
 
-describe("all thirteen thresholds are read strictly, and a refusal is contained (29572)", () => {
+describe("all twelve thresholds are read strictly, and a refusal is contained (29572)", () => {
   type Read = ReturnType<typeof defaultThresholds>
   // [envVar, declared default, field, what the refusal does]. A passive alert keeps its declared default - an alert
   // left running protects more than one switched off. A reaper parameter is different: the reaper kills processes, so
@@ -701,7 +701,6 @@ describe("all thirteen thresholds are read strictly, and a refusal is contained 
     ["HEALTH_PROC_SAFETY_MARGIN", 1.5, (t) => t.processSafetyMargin],
     ["HEALTH_DISK_WARNING", 85, (t) => t.diskWarningPercent],
     ["HEALTH_DISK_CRITICAL", 95, (t) => t.diskCriticalPercent],
-    ["HEALTH_WORKTREE_WARNING", 5, (t) => t.worktreeWarning],
     ["HEALTH_FD_WARNING", 70, (t) => t.fdWarningPercent],
     ["HEALTH_GH_RATELIMIT_WARNING", 20, (t) => t.ghRateLimitWarning],
   ]
@@ -723,7 +722,7 @@ describe("all thirteen thresholds are read strictly, and a refusal is contained 
     }
   }
 
-  it("refuses a mistyped value on every one of the thirteen, with the consequence its check now has", () => {
+  it("refuses a mistyped value on every one of the twelve, with the consequence its check now has", () => {
     for (const [envVar, fallback, get] of PASSIVE) {
       withEnv(envVar, "eighty-ish", () => {
         const read = defaultThresholds()
@@ -746,7 +745,7 @@ describe("all thirteen thresholds are read strictly, and a refusal is contained 
     }
   })
 
-  it("refuses a value at or below zero on every one of the thirteen", () => {
+  it("refuses a value at or below zero on every one of the twelve", () => {
     // A percent field refuses 0 as "not-a-percent" (its bound is 0 < v <= 100); everything else as "not-positive".
     const PERCENT = new Set([
       "HEALTH_MEM_WARNING",
@@ -768,7 +767,6 @@ describe("all thirteen thresholds are read strictly, and a refusal is contained 
   it("refuses a non-whole number on an integer field, rather than truncating it (85.5 is not 85)", () => {
     for (const [envVar, fallback, get] of [
       ["HEALTH_PROC_WARNING", 50, (t: Read) => t.processCountWarning],
-      ["HEALTH_WORKTREE_WARNING", 5, (t: Read) => t.worktreeWarning],
       ["HEALTH_PROC_CHIEF_CONST", 6, (t: Read) => t.processChiefConst],
     ] as const) {
       withEnv(envVar, "85.5", () => {
@@ -850,7 +848,7 @@ describe("all thirteen thresholds are read strictly, and a refusal is contained 
     }
   })
 
-  it("keeps the folded item-4 value on the same field, with the reaper OFF and one list for all thirteen", () => {
+  it("keeps the folded item-4 value on the same field, with the reaper OFF and one list for all twelve", () => {
     withEnv("HEALTH_REAPER_CPU_THRESHOLD", "eighty", () => {
       const read = defaultThresholds()
       expect(read.reaperEnabled).toBe(false)
@@ -944,53 +942,60 @@ describe("a refused reaper parameter turns the reaper OFF on BOTH consumer paths
 })
 
 describe("a refused passive alert keeps RUNNING at its declared default (29572)", () => {
-  const metrics = (worktrees: number, fdCount?: HealthMetrics["fdCount"]): HealthMetrics => ({
+  // Control: 80% fd usage against the declared default of 70 is a real warning, so the row can fail loudly for an
+  // unrelated reason rather than passing by accident.
+  const highFds: HealthMetrics["fdCount"] = {
+    total: 8_000,
+    perSession: [],
+    limit: 10_000,
+    basis: "linux-file-nr-vs-file-max",
+  }
+  const metrics = (fdCount?: HealthMetrics["fdCount"], memory?: HealthMetrics["memory"]): HealthMetrics => ({
     cpu: { topProcesses: [] },
     ...(fdCount === undefined ? {} : { fdCount }),
+    ...(memory === undefined ? {} : { memory }),
     processObservation: { kind: "standalone-os" },
     scalarObservation: { kind: "standalone-os", unavailable: ["disk.bytes", "disk.inodes"] },
     timestamp: Date.now(),
-    worktrees,
+    worktrees: 0,
   })
 
-  const withWorktreeEnv = (value: string | undefined, run: () => void): void => {
-    const previous = process.env.HEALTH_WORKTREE_WARNING
+  const withFdEnv = (value: string | undefined, run: () => void): void => {
+    const previous = process.env.HEALTH_FD_WARNING
     try {
-      if (value === undefined) delete process.env.HEALTH_WORKTREE_WARNING
-      else process.env.HEALTH_WORKTREE_WARNING = value
+      if (value === undefined) delete process.env.HEALTH_FD_WARNING
+      else process.env.HEALTH_FD_WARNING = value
       run()
     } finally {
-      if (previous === undefined) delete process.env.HEALTH_WORKTREE_WARNING
-      else process.env.HEALTH_WORKTREE_WARNING = previous
+      if (previous === undefined) delete process.env.HEALTH_FD_WARNING
+      else process.env.HEALTH_FD_WARNING = previous
     }
   }
 
-  it("still fires the worktree warning at the declared default once the threshold is refused", () => {
-    // Control: 99 worktrees against the declared default of 5 is a real warning, so the row can fail loudly for an
-    // unrelated reason rather than passing by accident.
-    withWorktreeEnv(undefined, () => {
-      const alerts = evaluateAlerts(metrics(99), defaultThresholds(), createAlertState())
-      expect(alerts.filter((alert) => alert.type === "worktree")).toHaveLength(1)
+  it("still fires the fd warning at the declared default once the threshold is refused", () => {
+    withFdEnv(undefined, () => {
+      const alerts = evaluateAlerts(metrics(highFds), defaultThresholds(), createAlertState())
+      expect(alerts.filter((alert) => alert.type === "fd-count")).toHaveLength(1)
     })
     // Refused: the check is NOT switched off - an alert left running protects more than one switched off - and the
     // refusal is paged, naming the default it runs at.
-    withWorktreeEnv("ninety-nine", () => {
+    withFdEnv("ninety-nine", () => {
       const thresholds = defaultThresholds()
-      expect(thresholds.thresholdRefusals?.[0]?.consequence).toBe("default 5 in use")
-      const alerts = evaluateAlerts(metrics(99), thresholds, createAlertState())
-      expect(alerts.filter((alert) => alert.type === "worktree")).toHaveLength(1)
+      expect(thresholds.thresholdRefusals?.[0]?.consequence).toBe("default 70 in use")
+      const alerts = evaluateAlerts(metrics(highFds), thresholds, createAlertState())
+      expect(alerts.filter((alert) => alert.type === "fd-count")).toHaveLength(1)
     })
   })
 
   it("does not take a different check down with it, so the monitor is not disabled", () => {
-    withWorktreeEnv("ninety-nine", () => {
+    withFdEnv("ninety-nine", () => {
       const alerts = evaluateAlerts(
-        metrics(99, { total: 8_000, perSession: [], limit: 10_000, basis: "linux-file-nr-vs-file-max" }),
+        metrics(highFds, { totalMB: 32_000, usedMB: 30_400, availableMB: 1_600, pressurePercent: 96 }),
         defaultThresholds(),
         createAlertState(),
       )
-      expect(alerts.filter((alert) => alert.type === "worktree")).toHaveLength(1)
       expect(alerts.filter((alert) => alert.type === "fd-count")).toHaveLength(1)
+      expect(alerts.filter((alert) => alert.type === "memory")).toHaveLength(1)
     })
   })
 })

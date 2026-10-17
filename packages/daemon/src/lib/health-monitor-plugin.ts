@@ -11,7 +11,6 @@
  *   HEALTH_PROC_WARNING   — bun/node process count for warning (default: 50)
  *   HEALTH_DISK_WARNING   — disk usage % for warning (default: 85)
  *   HEALTH_DISK_CRITICAL   — disk usage % for critical (default: 95)
- *   HEALTH_WORKTREE_WARNING — open worktree count for warning (default: 5)
  *   HEALTH_GH_RATELIMIT_WARNING — GitHub API remaining % for warning (default: 20)
  *   HEALTH_FD_WARNING      — fd usage % for warning (default: 70)
  *   HEALTH_REAPER_ENABLED     — enable process reaper (default: "1")
@@ -122,7 +121,6 @@ export interface HealthAlert {
     | "process-count"
     | "git-lock"
     | "disk"
-    | "worktree"
     | "fd-count"
     | "gh-rate-limit"
     | "reaper"
@@ -173,7 +171,6 @@ export interface HealthThresholds {
   processSafetyMargin: number
   diskWarningPercent: number
   diskCriticalPercent: number
-  worktreeWarning: number
   fdWarningPercent: number
   /** Alert when GitHub API remaining % drops below this (default: 20) */
   ghRateLimitWarning: number
@@ -188,7 +185,7 @@ export interface HealthThresholds {
   /** Reaper: samples to wait after asking before escalating (default: 6, i.e. 60s at 10s interval) */
   reaperGraceSamples: number
   /**
-   * Why a threshold was refused, when one was (29561 item 4, 29572). One mechanism for all thirteen values: each entry
+   * Why a threshold was refused, when one was (29561 item 4, 29572). One mechanism for all twelve values: each entry
    * names the variable, the value it held, why it was refused, and the CONSEQUENCE - what the check that reads it does
    * now. A refusal rides beside the values rather than throwing, and start() pages once listing every entry.
    */
@@ -233,7 +230,7 @@ export type ThresholdRefusal = {
 }
 
 /**
- * One strict reader for one numeric threshold (29561 item 4, 29572) - the only read path for any of the thirteen.
+ * One strict reader for one numeric threshold (29561 item 4, 29572) - the only read path for any of the twelve.
  *
  * A throw is not the cure: `defaultThresholds()` runs inside this plugin's own `start()`, and the plugin loader disables
  * any plugin whose start throws, so a loud refusal at load would have switched off the disk checks, the bridge-lost
@@ -294,7 +291,7 @@ export function formatThresholdRefusals(refusals: readonly ThresholdRefusal[]): 
 /**
  * The thresholds, with every refusal riding beside the values when there is one (29561 item 4, 29572).
  *
- * One reader, never two: all thirteen values go through readNumericThreshold, so there is one strict-env-read mechanism
+ * One reader, never two: all twelve values go through readNumericThreshold, so there is one strict-env-read mechanism
  * in this file. A caller that can act on a refusal (this plugin's own `start()`) pages once; a caller that only needs
  * numbers is unaffected. No refusal throws on its way back to the plugin loader, because that loader disables the whole
  * plugin whose start throws.
@@ -321,7 +318,6 @@ export function defaultThresholds(): HealthThresholds {
   const processSafetyMargin = read("HEALTH_PROC_SAFETY_MARGIN", "1.5", "float", useDefault)
   const diskWarningPercent = read("HEALTH_DISK_WARNING", "85", "percent", useDefault)
   const diskCriticalPercent = read("HEALTH_DISK_CRITICAL", "95", "percent", useDefault)
-  const worktreeWarning = read("HEALTH_WORKTREE_WARNING", "5", "integer", useDefault)
   const fdWarningPercent = read("HEALTH_FD_WARNING", "70", "percent", useDefault)
   const ghRateLimitWarning = read("HEALTH_GH_RATELIMIT_WARNING", "20", "percent", useDefault)
   // The reaper kills processes, so ANY refused reaper parameter turns it OFF rather than run it on a default nobody chose.
@@ -341,7 +337,6 @@ export function defaultThresholds(): HealthThresholds {
     processSafetyMargin,
     diskWarningPercent,
     diskCriticalPercent,
-    worktreeWarning,
     fdWarningPercent,
     ghRateLimitWarning,
     // At 10s interval, 3 samples = 30s sustained
@@ -2039,22 +2034,6 @@ export function evaluateAlerts(
     })
   }
 
-  // --- Worktrees ---
-  if (metrics.worktrees > thresholds.worktreeWarning) {
-    if (!state.firedAlerts.has("worktree:warning")) {
-      state.firedAlerts.add("worktree:warning")
-      alerts.push({
-        type: "worktree",
-        severity: "warning",
-        message: `Worktree count warning: ${metrics.worktrees} open worktrees (threshold: ${thresholds.worktreeWarning}). Run 'bun worktree clean' to remove stale ones.`,
-        metrics: {},
-        topOffenders: [],
-      })
-    }
-  } else {
-    state.firedAlerts.delete("worktree:warning")
-  }
-
   // --- File descriptors ---
   if (metrics.fdCount) {
     const usagePercent = (metrics.fdCount.total / metrics.fdCount.limit) * 100
@@ -2980,6 +2959,6 @@ export const healthMonitorPlugin: TribePluginApi = {
   },
 
   instructions() {
-    return "- Health monitoring active: CPU, memory, process count, disk space, disk I/O, worktree count, file descriptor count, GitHub API rate limit, git lock alerts, and process reaper are broadcast automatically. To claim a process the reaper is targeting, reply with 'reaper:claim PID <pid>'."
+    return "- Health monitoring active: CPU, memory, process count, disk space, disk I/O, file descriptor count, GitHub API rate limit, git lock alerts, and process reaper are broadcast automatically. To claim a process the reaper is targeting, reply with 'reaper:claim PID <pid>'."
   },
 }
