@@ -4579,6 +4579,12 @@ export type AttentionSettlement = {
    *  every snapshotted owner, so the row a seat never answered is settled by
    *  someone else's reply, the emitter's clear or the pruner. */
   by_another_owner?: true
+  /** 29707 — WHO holds an OPEN ball for this id. Present on `open` only, and
+   *  REQUIRED there by this read: the consumer labels the row owed only when
+   *  the identity it drains for is in this set, and presents it as "open under
+   *  <owner>" otherwise. A set, not a scalar: a per-owner broadcast carries one
+   *  ball per owner for the same message id. */
+  owners?: string[]
 }
 
 export function fetchEvent(row: FetchRow, replay?: boolean, settlement?: AttentionSettlement): FetchEvent {
@@ -4752,6 +4758,12 @@ export type MessageIdSettlementRead = {
   settled_by?: string
   settled_at?: string
   by_another_owner?: true
+  /** 29707 — WHO holds an OPEN ball for this id. Present on `open` only, and
+   *  REQUIRED there by this read: the consumer labels the row owed only when
+   *  the identity it drains for is in this set, and presents it as "open under
+   *  <owner>" otherwise. A set, not a scalar: a per-owner broadcast carries one
+   *  ball per owner for the same message id. */
+  owners?: string[]
 }
 
 /** What one ids read answered: a verdict for every row it returns, the ids it
@@ -4782,7 +4794,34 @@ export type MessageIdSettlementBatch = {
  * the cause. Report nothing silently: an id the daemon has no message for lands
  * in `unresolved` rather than being answered as `untracked`.
  */
+/**
+ * 29707 (@cto 62fd7b3c, condition 2) — the owner set and the settlement facts
+ * that name a settler come from ONE snapshot. A close landing between the
+ * open-ball read and the fact read would otherwise let a row report a live
+ * owner AND a settler at once. SQLite gives a snapshot per transaction, so the
+ * whole read runs inside one.
+ */
 function settlementReadForMessageIds(
+  ctx: TribeContext,
+  owner: string,
+  messageIds: readonly string[],
+): MessageIdSettlementBatch {
+  try {
+    return ctx.db.transaction(() => settlementReadInOneSnapshot(ctx, owner, messageIds))()
+  } catch (error) {
+    const detail = `settlement snapshot failed: ${error instanceof Error ? error.message : String(error)}`
+    const verdicts = new Map<string, MessageIdSettlementRead>()
+    for (const id of messageIds) verdicts.set(id, { settlement: "undecided" })
+    log.warn?.(`attention settlement read could not decide ${messageIds.length} id(s) for "${owner}": ${detail}`)
+    return {
+      verdicts,
+      unresolved: [],
+      unavailable: { status: "unavailable", budget: SETTLEMENT_LOOKUP_BUDGET, detail },
+    }
+  }
+}
+
+function settlementReadInOneSnapshot(
   ctx: TribeContext,
   owner: string,
   messageIds: readonly string[],
@@ -4825,20 +4864,35 @@ function settlementReadForMessageIds(
       $request_ids: JSON.stringify(askedRequestIds),
       $message_ids: JSON.stringify(messageIds),
       $limit: SETTLEMENT_LOOKUP_BUDGET + 1,
-    }) as Array<{ request_id: string; message_id: string }>
+    }) as Array<{ request_id: string; message_id: string; owner: string }>
     if (openRows.length > SETTLEMENT_LOOKUP_BUDGET) {
       return undecidedEverywhere(
         `${openRows.length} open balls for the ids in this batch exceed the settlement lookup budget (asked by "${owner}")`,
       )
     }
-    const open = new Set<string>()
+    // 29707 — the SAME rows also say WHO holds each open ball. The verdict stays
+    // the tracker's (`open`); the owner set is a FACT, never a label, and the
+    // reader compares it against the identity it drains for. A set, not a
+    // scalar: a per-owner broadcast opens one ball per owner for one message id.
+    const ownersByKey = new Map<string, Set<string>>()
     for (const row of openRows) {
-      open.add(row.request_id)
-      open.add(row.message_id)
+      for (const key of [row.request_id, row.message_id]) {
+        const owners = ownersByKey.get(key) ?? new Set<string>()
+        owners.add(row.owner)
+        ownersByKey.set(key, owners)
+      }
+    }
+    const ownersOfOpenBall = (id: string, request: string): string[] => {
+      const owners = new Set<string>()
+      for (const key of request === "" ? [id] : [id, request]) {
+        for (const name of ownersByKey.get(key) ?? []) owners.add(name)
+      }
+      return [...owners].sort()
     }
     for (const [id, request] of requests) {
+      const owners = ownersOfOpenBall(id, request)
       if (request === "") verdicts.set(id, { settlement: "untracked" })
-      else if (open.has(id) || open.has(request)) verdicts.set(id, { settlement: "open" })
+      else if (owners.length > 0) verdicts.set(id, { settlement: "open", owners })
       else verdicts.set(id, { settlement: "settled" })
     }
     const closedRequests = [...requests.entries()]

@@ -212,6 +212,9 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     const byId = new Map(events.map((event) => [String(event.id), event]))
 
     expect(byId.get(id)?.settlement).toBe("open")
+    // 29707 — the verdict now names WHO holds it: the fallback owner, never the
+    // original addressee the message still names.
+    expect(byId.get(id)?.owners).toEqual([FALLBACK])
     expect(res.settlement_unresolved ?? []).toEqual([])
   })
 
@@ -288,5 +291,55 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
       /exceed the settlement lookup budget/,
     )
     expect(logs.some((entry) => entry.level === "warn" && String(entry.msg).includes("could not decide"))).toBe(true)
+  })
+
+  // 29707 (@cto 62fd7b3c) — the open verdict must name WHO holds the ball, and
+  // the owner set and the settlement facts must come from one snapshot. Each row
+  // below is RED when the owner column is reverted: `owners` is then undefined.
+  it("names the owner holding the ball on an open verdict (29707 control)", () => {
+    openBall("msg-29707-control")
+
+    const res = read(["msg-29707-control"])
+    const byId = new Map((res.events as Array<Record<string, unknown>>).map((event) => [String(event.id), event]))
+
+    expect(byId.get("msg-29707-control")?.settlement).toBe("open")
+    expect(byId.get("msg-29707-control")?.owners).toEqual([SEAT])
+  })
+
+  it("reports every owner holding an open ball for one message (per-owner broadcast)", () => {
+    const A = "@dev/broadcast-a"
+    const B = "@dev/broadcast-b"
+    const id = "msg-29707-broadcast"
+    message(id, "req-29707-broadcast-a", A)
+    for (const [requestId, recipient] of [
+      ["req-29707-broadcast-a", A],
+      ["req-29707-broadcast-b", B],
+    ] as const) {
+      stmts.openPendingRequest.run({
+        $request_id: requestId,
+        $recipient: recipient,
+        $sender: SENDER,
+        $opened_at: TS,
+        $expires_at: TS + 60_000,
+        $message_id: id,
+        $fanout: "all",
+      })
+    }
+
+    const res = read([id])
+    const byId = new Map((res.events as Array<Record<string, unknown>>).map((event) => [String(event.id), event]))
+
+    expect(byId.get(id)?.settlement).toBe("open")
+    expect(byId.get(id)?.owners).toEqual([A, B])
+  })
+
+  it("carries no owner set on a settled verdict, so a closed row cannot read as open under someone", () => {
+    closedBall("msg-29707-settled")
+
+    const res = read(["msg-29707-settled"])
+    const byId = new Map((res.events as Array<Record<string, unknown>>).map((event) => [String(event.id), event]))
+
+    expect(byId.get("msg-29707-settled")?.settlement).toBe("settled")
+    expect(byId.get("msg-29707-settled")).not.toHaveProperty("owners")
   })
 })

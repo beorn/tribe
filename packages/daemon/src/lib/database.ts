@@ -3185,7 +3185,7 @@ export function createStatements(db: Database) {
       assertSingleStatement(`
       WITH asked_request(request_id) AS (SELECT value FROM json_each($request_ids)),
            asked_message(message_id) AS (SELECT value FROM json_each($message_ids))
-      SELECT p.request_id AS request_id, p.message_id AS message_id
+      SELECT p.request_id AS request_id, p.message_id AS message_id, p.recipient AS owner
       FROM pending_request p
       WHERE p.request_id IN (SELECT request_id FROM asked_request)
          OR p.message_id IN (SELECT message_id FROM asked_message)
