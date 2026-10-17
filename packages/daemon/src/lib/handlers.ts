@@ -4764,6 +4764,12 @@ export type MessageIdSettlementRead = {
    *  <owner>" otherwise. A set, not a scalar: a per-owner broadcast carries one
    *  ball per owner for the same message id. */
   owners?: string[]
+  /** 29707 — settlement facts already recorded for this ball, from the SAME
+   *  snapshot as `owners`. `owner` is the recipient whose ball closed; every
+   *  entry is a real close (a bounce is a dead-letter delivery, never an
+   *  `event.ball.settled` fact). Present on `open` only, when at least one
+   *  owner's row of a shared ball has already been settled. */
+  settlements?: Array<{ owner: string; settled_by: string; settled_at: string }>
 }
 
 /** What one ids read answered: a verdict for every row it returns, the ids it
@@ -4895,12 +4901,25 @@ function settlementReadInOneSnapshot(
       else if (owners.length > 0) verdicts.set(id, { settlement: "open", owners })
       else verdicts.set(id, { settlement: "settled" })
     }
-    const closedRequests = [...requests.entries()]
-      .filter(([id]) => verdicts.get(id)?.settlement === "settled")
-      .map(([, request]) => request)
-    if (closedRequests.length === 0) return { verdicts, unresolved }
+    // 29707 (@cto 62fd7b3c) — the facts ride the OPEN rows too, from this same
+    // transaction. A per-owner broadcast shares one request id, so owner A's
+    // closed ball and owner B's still-open one are the same request: without the
+    // facts, "open under B" and "A already answered" are indistinguishable and a
+    // consumer would tell A its answered row was reassigned.
+    const factRequestIds = [
+      ...new Set(
+        [...requests.entries()]
+          .filter(([id]) => {
+            const state = verdicts.get(id)?.settlement
+            return state === "open" || state === "settled"
+          })
+          .map(([, request]) => request)
+          .filter((request) => request !== ""),
+      ),
+    ]
+    if (factRequestIds.length === 0) return { verdicts, unresolved }
     const factRows = ctx.stmts.selectSettlementFactsForRequests.all({
-      $request_ids: JSON.stringify(closedRequests),
+      $request_ids: JSON.stringify(factRequestIds),
     }) as BallOutcomeFactRow[]
     // 29327 (@cto verdict 2026-10-17, ruling 2, item (a)) — a fact row this batch
     // cannot use is COUNTED and said out loud at debug, never dropped in silence.
@@ -4909,14 +4928,23 @@ function settlementReadInOneSnapshot(
     // already won the row.
     let offBatchFacts = 0
     let supersededFacts = 0
+    const settlementsByRequest = new Map<string, NonNullable<MessageIdSettlementRead["settlements"]>>()
     for (const factRow of factRows) {
       const fact = parseBallOutcomeFact(factRow)
       if (fact.kind !== "settled") continue
-      const current = verdicts.get(fact.message_id)
-      if (current === undefined || current.settlement !== "settled") {
+      if (!requests.has(fact.message_id)) {
         offBatchFacts += 1
         continue
       }
+      const listed = settlementsByRequest.get(fact.request_id) ?? []
+      listed.push({
+        owner: fact.recipient,
+        settled_by: fact.settled_by,
+        settled_at: new Date(fact.settled_at).toISOString(),
+      })
+      settlementsByRequest.set(fact.request_id, listed)
+      const current = verdicts.get(fact.message_id)
+      if (current === undefined || current.settlement !== "settled") continue
       if (current.settled_at !== undefined && Date.parse(current.settled_at) > fact.settled_at) {
         supersededFacts += 1
         continue
@@ -4927,6 +4955,12 @@ function settlementReadInOneSnapshot(
         settled_at: new Date(fact.settled_at).toISOString(),
         ...(fact.settled_by === fact.recipient ? {} : { by_another_owner: true as const }),
       })
+    }
+    for (const [id, request] of requests) {
+      const current = verdicts.get(id)
+      if (current?.settlement !== "open" || request === "") continue
+      const listed = settlementsByRequest.get(request)
+      if (listed !== undefined && listed.length > 0) verdicts.set(id, { ...current, settlements: listed })
     }
     if (offBatchFacts > 0 || supersededFacts > 0) {
       log.debug?.(

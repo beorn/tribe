@@ -342,4 +342,59 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     expect(byId.get("msg-29707-settled")?.settlement).toBe("settled")
     expect(byId.get("msg-29707-settled")).not.toHaveProperty("owners")
   })
+  it("rides the settlement facts on an open verdict, so a shared ball's answered owner is visible (29707)", () => {
+    const A = "@dev/shared-a"
+    const B = "@dev/shared-b"
+    const id = "msg-29707-shared"
+    const requestId = "req-29707-shared"
+    message(id, requestId, "*")
+    stmts.openPendingRequest.run({
+      $request_id: requestId,
+      $recipient: B,
+      $sender: SENDER,
+      $opened_at: TS,
+      $expires_at: TS + 60_000,
+      $message_id: id,
+      $fanout: "all",
+    })
+    stmts.insertMessage.run({
+      $id: `fact-${requestId}-a`,
+      $type: "event.ball.settled",
+      $sender: "daemon",
+      $recipient: A,
+      $kind: "event",
+      $content: JSON.stringify({
+        schema_version: 1,
+        request_id: requestId,
+        recipient: A,
+        sender: SENDER,
+        opened_at: TS,
+        expires_at: TS + 60_000,
+        message_id: id,
+        fanout: "all",
+        summary: null,
+        settlement: "answered",
+        settled_at: TS + 90_000,
+        settled_by: A,
+      }),
+      $bead_id: null,
+      $ref: requestId,
+      $ts: TS + 90_000,
+      $delivery: "pull",
+      $topic: null,
+      $room_id: null,
+      $request: null,
+      $reply: null,
+      $summary: null,
+    })
+
+    const res = read([id])
+    const byId = new Map((res.events as Array<Record<string, unknown>>).map((event) => [String(event.id), event]))
+
+    expect(byId.get(id)?.settlement).toBe("open")
+    expect(byId.get(id)?.owners).toEqual([B])
+    expect(byId.get(id)?.settlements).toEqual([
+      { owner: A, settled_by: A, settled_at: new Date(TS + 90_000).toISOString() },
+    ])
+  })
 })
