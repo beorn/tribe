@@ -4825,18 +4825,36 @@ function settlementReadForMessageIds(
     const factRows = ctx.stmts.selectSettlementFactsForRequests.all({
       $request_ids: JSON.stringify(closedRequests),
     }) as BallOutcomeFactRow[]
+    // 29327 (@cto verdict 2026-10-17, ruling 2, item (a)) — a fact row this batch
+    // cannot use is COUNTED and said out loud at debug, never dropped in silence.
+    // Two ways a row is skipped: it names a message the batch was not asked about
+    // (the read answers only about the ids it was asked about), or a newer fact
+    // already won the row.
+    let offBatchFacts = 0
+    let supersededFacts = 0
     for (const factRow of factRows) {
       const fact = parseBallOutcomeFact(factRow)
       if (fact.kind !== "settled") continue
       const current = verdicts.get(fact.message_id)
-      if (current === undefined || current.settlement !== "settled") continue
-      if (current.settled_at !== undefined && Date.parse(current.settled_at) > fact.settled_at) continue
+      if (current === undefined || current.settlement !== "settled") {
+        offBatchFacts += 1
+        continue
+      }
+      if (current.settled_at !== undefined && Date.parse(current.settled_at) > fact.settled_at) {
+        supersededFacts += 1
+        continue
+      }
       verdicts.set(fact.message_id, {
         settlement: "settled",
         settled_by: fact.settled_by,
         settled_at: new Date(fact.settled_at).toISOString(),
         ...(fact.settled_by === fact.recipient ? {} : { by_another_owner: true as const }),
       })
+    }
+    if (offBatchFacts > 0 || supersededFacts > 0) {
+      log.debug?.(
+        `settlement facts skipped for "${owner}": ${offBatchFacts} of ${factRows.length} name a message this batch was not asked about, ${supersededFacts} superseded by a newer fact`,
+      )
     }
   } catch (error) {
     return undecidedEverywhere(`open-ball read failed: ${error instanceof Error ? error.message : String(error)}`)
