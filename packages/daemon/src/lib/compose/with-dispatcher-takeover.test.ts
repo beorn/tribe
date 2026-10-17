@@ -962,10 +962,9 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
       }
     ).id
   }
-  // A gen-SUPPLYING verifier (@cto ruling 4a). `identityVerifier` above declares `suppliesGen: false`, so its verdicts'
-  // gens are dropped. A dropped gen is NOT why a refusal arm records `launch_id: null` though (@cto B1 of the combined
-  // REVISE: that null is by name for every kind that refuses before naming an instance), so this verifier exists to
-  // show the arms that DO record the instance a verdict proved.
+  // A gen-SUPPLYING verifier (@cto ruling 4a). A dropped gen is NOT why a refusal arm records `launch_id: null` (@cto
+  // B1 of the combined REVISE: that null is by name for every kind that refuses before naming an instance), so this
+  // verifier exists to show the arms that DO record the instance a verdict proved.
   const genVerifier = {
     path: "/stub/identity-verifier.ts",
     suppliesGen: true,

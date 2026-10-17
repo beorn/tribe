@@ -2106,8 +2106,9 @@ export function withDispatcher<
                 }
               }
             }
-            // A bare request may resolve to a persona through pid/cwd or launch
-            // adoption. Judge the effective name before any row is reused.
+            // A bare request may resolve to a persona through pid/cwd adoption, the
+            // harness's `claudeSessionName`, or the persisted runtime rename re-applied
+            // above. Judge the effective name before any row is reused.
             if (hooks.identityVerifier && identity.personaTokenDefect && isExplicitTribePersonaName(resolvedName)) {
               const refusal = missingPersonaTokenRefusal(resolvedName, identity.personaTokenDefect, "register")
               return refuseRegister(id, resolvedName, refusal, {

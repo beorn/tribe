@@ -31,9 +31,9 @@ const PROJECT_ID = "29686-last-refusal-record"
 /** Every kind the register path composes, each with the site that composes it (@cto's Should item: the list and its
  *  citations both moved with the combined REVISE, and the three kinds it had never named are here now):
  *  with-dispatcher.ts:1321 (token missing), :1367 (verifier fault), :1388 (name mismatch), :1395 (contradicted),
- *  :1416 (undecided), :1923 (the token's sid contradicts the launch id the register presented), :1947 (a verified
- *  token whose verdict proves no usable instance), :2150 (no authority over the launch tuple), :2359 (a duplicate
- *  generation yielding to a live incumbent) and :973/:2414/:2442 (a transport claiming a seat a live holder keeps). */
+ *  :1416 (undecided), :1925 (the token's sid contradicts the launch id the register presented), :1949 (a verified
+ *  token whose verdict proves no usable instance), :2152 (no authority over the launch tuple), :2361 (a duplicate
+ *  generation yielding to a live incumbent) and :973/:2416/:2444 (a transport claiming a seat a live holder keeps). */
 const REGISTER_REFUSAL_KINDS = [
   "identity-token-missing",
   "identity-verifier-fault",
