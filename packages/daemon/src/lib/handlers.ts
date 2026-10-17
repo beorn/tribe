@@ -4653,8 +4653,16 @@ function settlementBatch(ctx: TribeContext, owner: string, rows: readonly FetchR
   if (balled.length === 0) return { labels }
   let open: Set<string>
   try {
-    const openRows = ctx.stmts.selectOpenBallIdsForRecipients.all({
-      $recipients: JSON.stringify([...askedRecipients]),
+    // 29327 — owner-scoped ON PURPOSE, and provably safe here: selectAttention
+    // returns a row only when it is addressed to $name. Its untracked branch
+    // filters `m.recipient = $name`; its tracked branch filters
+    // `p.recipient = $name` (trackedAttentionPredicateSql). So every row in this
+    // batch is $name-addressed and the ball that answers it belongs to $name.
+    // The read where this was wrong is the fetch-ids one below, whose ids come
+    // from the CLIENT and can name messages addressed to another seat (a
+    // watch-role host): that one keys on the recipients the messages name.
+    const openRows = ctx.stmts.selectOpenBallIdsForRecipient.all({
+      $name: owner,
       $limit: SETTLEMENT_LOOKUP_BUDGET + 1,
     }) as Array<{ request_id: string; message_id: string }>
     if (openRows.length > SETTLEMENT_LOOKUP_BUDGET) {
