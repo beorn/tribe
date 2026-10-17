@@ -4781,8 +4781,8 @@ export type MessageIdSettlementBatch = {
 }
 
 /**
- * 29327 (@cto 2026-10-17) — one batched, budgeted verdict for a set of message
- * ids, for ONE owner: the pre-drain settlement read the ag host makes before it
+ * One batched, budgeted verdict for a set of message ids, for ONE owner: the
+ * pre-drain settlement read the ag host makes before it
  * offers a batch of channel events to a turn.
  *
  * `open` / `settled` / `untracked` are decided from the same two durable facts
@@ -4798,8 +4798,7 @@ export type MessageIdSettlementBatch = {
  * when the read stops at its budget or a query fails, and the caller receives
  * the cause. Report nothing silently: an id the daemon has no message for lands
  * in `unresolved` rather than being answered as `untracked`.
- */
-/**
+ *
  * The owner set and the settlement facts that name a settler come from ONE
  * snapshot. A close landing between the open-ball read and the fact read would
  * otherwise let a row report a live owner AND a settler at once. SQLite gives a
@@ -4920,10 +4919,12 @@ function settlementReadInOneSnapshot(
       $request_ids: JSON.stringify(factRequestIds),
     }) as BallOutcomeFactRow[]
     // A fact row this batch cannot use is COUNTED and said out loud at debug,
-    // never dropped in silence. Two ways a row is skipped: it names a request the
-    // batch was not asked about (the read answers only about the ids it was asked
-    // about), or a newer fact already won the row.
+    // never dropped in silence. Three ways a row is skipped: it names a request
+    // the batch was not asked about (the read answers only about the ids it was
+    // asked about), it names a message whose verdict in this batch is not
+    // `settled`, or a newer fact already won the row.
     let offBatchFacts = 0
+    let offVerdictFacts = 0
     let supersededFacts = 0
     const askedRequests = new Set(factRequestIds)
     const newestSettledAt = new Map<string, number>()
@@ -4951,7 +4952,10 @@ function settlementReadInOneSnapshot(
         },
       ])
       const current = verdicts.get(fact.message_id)
-      if (current === undefined || current.settlement !== "settled") continue
+      if (current === undefined || current.settlement !== "settled") {
+        offVerdictFacts += 1
+        continue
+      }
       const newest = newestSettledAt.get(fact.message_id)
       if (newest !== undefined && newest >= fact.settled_at) {
         supersededFacts += 1
@@ -4971,9 +4975,9 @@ function settlementReadInOneSnapshot(
       const listed = settlementsByRequest.get(request)
       if (listed !== undefined && listed.length > 0) verdicts.set(id, { ...current, settlements: listed })
     }
-    if (offBatchFacts > 0 || supersededFacts > 0) {
+    if (offBatchFacts > 0 || offVerdictFacts > 0 || supersededFacts > 0) {
       log.debug?.(
-        `settlement facts skipped for "${owner}": ${offBatchFacts} of ${factRows.length} name a message this batch was not asked about, ${supersededFacts} superseded by a newer fact`,
+        `settlement facts skipped for "${owner}": ${offBatchFacts} of ${factRows.length} name a request this batch was not asked about, ${offVerdictFacts} name a message that is not a settled verdict in this batch, ${supersededFacts} superseded by a newer fact`,
       )
     }
   } catch (error) {

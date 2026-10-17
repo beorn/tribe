@@ -336,8 +336,9 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
   })
 
   // The open verdict must name WHO holds the ball, and the owner set and the
-  // settlement facts must come from one snapshot. Each row below is RED when the
-  // owner column is reverted: `owners` is then undefined.
+  // settlement facts must come from one snapshot. The OPEN rows below are RED
+  // when the owner column is reverted: `owners` is then undefined. The settled
+  // row is the control — it must carry no owner set either way.
   it("names the owner holding the ball on an open verdict (29707 control)", () => {
     openBall("msg-29707-control")
 
@@ -468,5 +469,38 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     // The reader must be able to tell a close from an answer, so the reason
     // rides the fact instead of being dropped.
     expect((byId.get(id)?.settlements as Array<Record<string, unknown>>)[0]?.reason).toBe("gc-expired")
+  })
+
+  // A fact belongs to its REQUEST, not to the one message id the batch happens
+  // to name: the ball can have been opened from another message of the same
+  // request. Admitting by message id drops exactly that fact, and the row then
+  // reads as if nobody had settled my share.
+  it("admits a settlement fact recorded under another message of the same request", () => {
+    const MINE = "@dev/brain"
+    const OTHER = "@dev/shared-other"
+    const id = "msg-29707-other-message"
+    const requestId = "req-29707-other-message"
+    const originMessage = "msg-29707-ball-origin"
+    message(id, requestId, "*")
+    stmts.openPendingRequest.run({
+      $request_id: requestId,
+      $recipient: OTHER,
+      $sender: SENDER,
+      $opened_at: TS,
+      $expires_at: TS + 60_000,
+      $message_id: originMessage,
+      $fanout: "all",
+    })
+    settledFact(requestId, originMessage, MINE, "answered", MINE)
+
+    const res = read([id])
+    const byId = new Map((res.events as Array<Record<string, unknown>>).map((event) => [String(event.id), event]))
+
+    expect(byId.get(id)?.settlement).toBe("open")
+    expect(byId.get(id)?.owners).toEqual([OTHER])
+    expect((byId.get(id)?.settlements as Array<Record<string, unknown>>)[0]).toMatchObject({
+      owner: MINE,
+      reason: "answered",
+    })
   })
 })
