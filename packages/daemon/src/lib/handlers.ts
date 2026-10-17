@@ -1832,6 +1832,11 @@ export type AttentionProjection = {
    *  among them. Cleared by the owner's next canonical read. Rows stay
    *  fetchable by id or history (`ids:` / `with:` union the archive). */
   pruned?: { count: number; before: string; recorded_at: string }
+  /** 29327 - present only when the batch's closed-ball lookup could not decide
+   *  every row (`unavailable`: no tracker read, so no row may be read as owed;
+   *  `partial`: every obligation decided, but a settler name is missing). The
+   *  common path omits it. */
+  settlement_lookup?: { status: "unavailable" | "partial"; budget: number; detail: string }
   actionable_unread: FetchEvent[]
   pending_balls: PendingBall[]
   pending_balls_summary: PendingBallSummary
@@ -4464,6 +4469,13 @@ export type FetchRow = {
   sender_authority?: SenderAuthority | null
   /** Daemon session that inserted this message. It is stable even after that session leaves. */
   session_id?: string | null
+  /**
+   * 29327 -- the request id this row opened a ball with, null when the row
+   * never tracked one (an anonymous or untracked direct actionable). It is the
+   * only column that distinguishes "this row's ball has closed" from "this row
+   * never had a ball", which is why the settled label keys on it.
+   */
+  request?: string | null
 }
 
 export type FetchEvent = {
@@ -4505,9 +4517,37 @@ export type FetchEvent = {
    * send time. Absent on ambient window rows, which are new by construction.
    */
   replay?: boolean
+  /** 29327 - present only when this row's ball has closed: the row stays
+   *  presented (never dropped silently) and says so instead of reading as
+   *  owed work. Absent on a row whose ball is still open, and on a row that
+   *  never had one. */
+  settled?: true
+  /** Who closed it and when, from the durable settlement fact; see
+   *  AttentionSettlement. */
+  settled_by?: string
+  settled_at?: string
+  by_another_owner?: true
 }
 
-export function fetchEvent(row: FetchRow, replay?: boolean): FetchEvent {
+/** 29327 - the settled rendering of one attention row whose ball has closed.
+ *  `settled` is decided by the tracker alone (no `pending_request` row for
+ *  that exact id); the name and time are attached only when the daemon's own
+ *  `event.ball.settled` fact still says so. */
+export type AttentionSettlement = {
+  settled: true
+  /** Who closed it, from the durable settlement fact: the recipient's reply,
+   *  another owner's answer under fanout=first, the emitter's clear, a manual
+   *  close or the pruner. Absent when no fact survives to name them. */
+  settled_by?: string
+  settled_at?: string
+  /** True when the settler is not the ball's own owner (the same reading
+   *  `pendingCloseCause` reports): fanout=first closes the shared request for
+   *  every snapshotted owner, so the row a seat never answered is settled by
+   *  someone else's reply, the emitter's clear or the pruner. */
+  by_another_owner?: true
+}
+
+export function fetchEvent(row: FetchRow, replay?: boolean, settlement?: AttentionSettlement): FetchEvent {
   return {
     id: row.id,
     rowid: row.rowid,
@@ -4526,6 +4566,7 @@ export function fetchEvent(row: FetchRow, replay?: boolean): FetchEvent {
     from_authority: row.sender_authority ?? null,
     from_session_id: row.sender_authority === null ? null : (row.session_id ?? null),
     ...(replay === undefined ? {} : { replay }),
+    ...(settlement === undefined ? {} : settlement),
   }
 }
 
@@ -4565,6 +4606,104 @@ export function readUnackedAttentionRows(ctx: TribeContext, owner: string, upto:
   return readUnackedDirectAttentionRows(ctx, owner, upto, limit)
 }
 
+/** 29327 - how many open balls one attention batch reads before it stops and
+ *  reports the lookup unavailable. `pending_request` holds only OPEN balls (a
+ *  close DELETEs the row), so a seat at this bound is pathological, not busy:
+ *  the bound exists so a presentation never pays an unbounded read, and
+ *  crossing it is REPORTED, never silently read as "owed". */
+export const SETTLEMENT_LOOKUP_BUDGET = 500
+
+type SettlementBatch = {
+  labels: Map<string, AttentionSettlement>
+  /** Present when the batch could not decide every row. A consumer must not
+   *  read an unlabeled request row as owed work when it is set. */
+  unavailable?: { status: "unavailable" | "partial"; budget: number; detail: string }
+}
+
+/** 29327 - one bounded indexed lookup per presentation batch that decides
+ *  "still owed" from the TRACKER ALONE, then names the settler from the
+ *  daemon's own settlement fact when one survives.
+ *
+ *  Only rows carrying a request id are decided: a row that never had a ball is
+ *  ambient and keeps its existing rendering, and a row whose ball is still open
+ *  keeps reading as owed. Everything else is the reported defect -
+ *  `closePendingRequest` DELETEs the tracker row, so the copy that remains in
+ *  `selectAttention`'s untracked branch is a closed ball presented as owed.
+ *
+ *  Nothing here re-derives settlement: the missing tracker row is the ONLY
+ *  authority, and a settlement fact can change the name, never the obligation.
+ *  The settler is read from `event.ball.settled`, the fact the daemon itself
+ *  journals on every close, so no report row becomes a second authority. */
+function settlementBatch(ctx: TribeContext, owner: string, rows: readonly FetchRow[]): SettlementBatch {
+  const labels = new Map<string, AttentionSettlement>()
+  const balled = rows.filter(
+    (row): row is FetchRow & { request: string } => typeof row.request === "string" && row.request.length > 0,
+  )
+  if (balled.length === 0) return { labels }
+  let open: Set<string>
+  try {
+    const openRows = ctx.stmts.selectOpenBallIdsForRecipient.all({
+      $name: owner,
+      $limit: SETTLEMENT_LOOKUP_BUDGET + 1,
+    }) as Array<{ request_id: string; message_id: string }>
+    if (openRows.length > SETTLEMENT_LOOKUP_BUDGET) {
+      return {
+        labels,
+        unavailable: {
+          status: "unavailable",
+          budget: SETTLEMENT_LOOKUP_BUDGET,
+          detail: `${openRows.length} open balls for ${owner} exceed the settlement lookup budget`,
+        },
+      }
+    }
+    open = new Set<string>()
+    for (const row of openRows) {
+      open.add(row.request_id)
+      open.add(row.message_id)
+    }
+  } catch (error) {
+    return {
+      labels,
+      unavailable: {
+        status: "unavailable",
+        budget: SETTLEMENT_LOOKUP_BUDGET,
+        detail: `open-ball read failed: ${error instanceof Error ? error.message : String(error)}`,
+      },
+    }
+  }
+  const closed = balled.filter((row) => !open.has(row.id) && !open.has(row.request))
+  for (const row of closed) labels.set(row.id, { settled: true })
+  if (closed.length === 0) return { labels }
+  const naming = closed.slice(0, SETTLEMENT_LOOKUP_BUDGET)
+  let detail =
+    naming.length < closed.length
+      ? `settler naming covered ${naming.length} of ${closed.length} closed balls in this batch`
+      : undefined
+  try {
+    const factRows = ctx.stmts.selectSettlementFactsForRequests.all({
+      $request_ids: JSON.stringify(naming.map((row) => row.request)),
+    }) as BallOutcomeFactRow[]
+    for (const factRow of factRows) {
+      const fact = parseBallOutcomeFact(factRow)
+      if (fact.kind !== "settled") continue
+      const previous = labels.get(fact.message_id)
+      if (previous === undefined) continue
+      if (previous.settled_at !== undefined && Date.parse(previous.settled_at) > fact.settled_at) continue
+      labels.set(fact.message_id, {
+        settled: true,
+        settled_by: fact.settled_by,
+        settled_at: new Date(fact.settled_at).toISOString(),
+        ...(fact.settled_by === fact.recipient ? {} : { by_another_owner: true as const }),
+      })
+    }
+  } catch (error) {
+    detail = `settlement naming failed: ${error instanceof Error ? error.message : String(error)}`
+  }
+  return detail === undefined
+    ? { labels }
+    : { labels, unavailable: { status: "partial", budget: SETTLEMENT_LOOKUP_BUDGET, detail } }
+}
+
 /** One canonical attention projection for fetch and inbox-wait carriage.
  * Untracked direct rows retire on delivery acknowledgement. Every owned
  * tracked actionable remains until its pending owner sends TAKING or settles
@@ -4583,6 +4722,10 @@ export function readAttentionProjection(
 } {
   const params = { $name: owner }
   const attentionRows = filterRowsByTrust(ctx, ctx.stmts.selectAttention.all(params) as FetchRow[])
+  // 29327 - the tracker's own answer for this batch: which of these rows still
+  // own an open ball. A closed ball leaves no tracker row, so what remains is
+  // settled work and must say so rather than reading as owed.
+  const settlement = settlementBatch(ctx, owner, attentionRows)
   // 27346 - what the mailbox cursor has already shown this seat. The tracked
   // branch of selectAttention keeps an untaken ball visible past the cursor on
   // purpose (22203), so a row at or below it is being RE-presented: it must say
@@ -4671,7 +4814,10 @@ export function readAttentionProjection(
     actionableCount,
     attention: {
       ...pruned,
-      actionable_unread: attentionRows.map((row) => fetchEvent(row, row.rowid <= shownThrough)),
+      actionable_unread: attentionRows.map((row) =>
+        fetchEvent(row, row.rowid <= shownThrough, settlement.labels.get(row.id)),
+      ),
+      ...(settlement.unavailable === undefined ? {} : { settlement_lookup: settlement.unavailable }),
       pending_balls: pendingPreview,
       sent_offline_balls: sentPreview,
       sent_offline_balls_summary: {
