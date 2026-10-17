@@ -91,12 +91,12 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
 
   /** One message row. `request` names the ball it opened, null when it never
    *  opened one (the untracked shape). */
-  function message(id: string, request: string | null): void {
+  function message(id: string, request: string | null, recipient = SEAT): void {
     stmts.insertMessage.run({
       $id: id,
       $type: "request",
       $sender: SENDER,
-      $recipient: SEAT,
+      $recipient: recipient,
       $kind: "direct",
       $content: "please take this",
       $bead_id: null,
@@ -112,11 +112,11 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
   }
 
   /** A balled message whose ball is STILL OPEN for this seat. */
-  function openBall(id: string): void {
-    message(id, id)
+  function openBall(id: string, recipient = SEAT): void {
+    message(id, id, recipient)
     stmts.openPendingRequest.run({
       $request_id: id,
-      $recipient: SEAT,
+      $recipient: recipient,
       $sender: SENDER,
       $opened_at: TS,
       $expires_at: TS + 60_000,
@@ -194,6 +194,22 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     expect(res.settlement_unresolved).toEqual([absent])
     // The absence is not smuggled onto a row as a state.
     expect((res.events as Array<unknown>).length).toBe(0)
+  })
+
+  it("reads the ball by the MESSAGE's recipient, so a watch-role seat is never told a live ball is settled", () => {
+    // @cto verdict 2026-10-17 (ruling 2). A watch-role adapter is NOT a ball's
+    // recipient: the ag adapter registers `watch` whenever its host name differs
+    // from the mirrored persona name (tribe.ts `hostOwnsTargetIdentity`), and that
+    // is the ordinary case for a mirrored seat. Before this, the read was scoped
+    // to the seat ASKING, found no tracker row for work the target still owed, and
+    // answered `settled` — the defect that closes a turn on live owed work.
+    const TARGET = "@dev/luna3"
+    openBall("msg-29327-watched", TARGET)
+
+    const res = read(["msg-29327-watched"])
+    const events = res.events as Array<Record<string, unknown>>
+
+    expect(events[0]?.settlement).toBe("open")
   })
 
   it("answers undecided for EVERY row when the lookup stops at its budget, and names the cause", () => {

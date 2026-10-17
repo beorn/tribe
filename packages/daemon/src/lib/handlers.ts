@@ -4653,8 +4653,8 @@ function settlementBatch(ctx: TribeContext, owner: string, rows: readonly FetchR
   if (balled.length === 0) return { labels }
   let open: Set<string>
   try {
-    const openRows = ctx.stmts.selectOpenBallIdsForRecipient.all({
-      $name: owner,
+    const openRows = ctx.stmts.selectOpenBallIdsForRecipients.all({
+      $recipients: JSON.stringify([...askedRecipients]),
       $limit: SETTLEMENT_LOOKUP_BUDGET + 1,
     }) as Array<{ request_id: string; message_id: string }>
     if (openRows.length > SETTLEMENT_LOOKUP_BUDGET) {
@@ -4765,30 +4765,40 @@ function settlementReadForMessageIds(
     return { verdicts, unresolved, unavailable: { status: "unavailable", budget: SETTLEMENT_LOOKUP_BUDGET, detail } }
   }
   const requests = new Map<string, string>()
+  const askedRecipients = new Set<string>()
   try {
     const placeholders = messageIds.map(() => "?").join(", ")
     const rows = ctx.db
       .prepare(
         assertSingleStatement(`
-        SELECT id, request
+        SELECT id, request, recipient
         FROM messages
         WHERE id IN (${placeholders})
           AND kind != 'event'
       `),
       )
-      .all(...messageIds) as Array<{ id: string; request: string | null }>
-    for (const row of rows) requests.set(row.id, row.request ?? "")
+      .all(...messageIds) as Array<{ id: string; request: string | null; recipient: string }>
+    for (const row of rows) {
+      requests.set(row.id, row.request ?? "")
+      askedRecipients.add(row.recipient)
+    }
   } catch (error) {
     return undecidedEverywhere(`message-id read failed: ${error instanceof Error ? error.message : String(error)}`)
   }
   for (const id of messageIds) if (!requests.has(id)) unresolved.push(id)
   try {
-    const openRows = ctx.stmts.selectOpenBallIdsForRecipient.all({
-      $name: owner,
+    // 29327 (@cto verdict 2026-10-17, ruling 2) — the balls this batch is about
+    // belong to the RECIPIENTS THE MESSAGES NAME, not to the seat asking: a
+    // watch-role adapter is not a ball's recipient, so an owner-scoped read finds
+    // no tracker row for work its target still owes and answers `settled` for it.
+    const openRows = ctx.stmts.selectOpenBallIdsForRecipients.all({
+      $recipients: JSON.stringify([...askedRecipients]),
       $limit: SETTLEMENT_LOOKUP_BUDGET + 1,
     }) as Array<{ request_id: string; message_id: string }>
     if (openRows.length > SETTLEMENT_LOOKUP_BUDGET) {
-      return undecidedEverywhere(`${openRows.length} open balls for ${owner} exceed the settlement lookup budget`)
+      return undecidedEverywhere(
+        `${openRows.length} open balls for the recipients in this batch exceed the settlement lookup budget (asked by "${owner}")`,
+      )
     }
     const open = new Set<string>()
     for (const row of openRows) {

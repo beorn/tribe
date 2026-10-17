@@ -3166,6 +3166,21 @@ export function createStatements(db: Database) {
     `),
     ),
 
+    /** 29327 - the open balls of the RECIPIENTS a batch of messages names, rather
+     *  than of the seat asking (@cto verdict 2026-10-17, ruling 2). A watch-role
+     *  adapter is not a ball's recipient: the ball belongs to the target persona,
+     *  so the owner-scoped read above finds no row for work that persona still
+     *  owes and would answer `settled` for it. Same budget-plus-one detection. */
+    selectOpenBallIdsForRecipients: db.prepare(
+      assertSingleStatement(`
+      WITH asked(recipient) AS (SELECT value FROM json_each($recipients))
+      SELECT p.request_id AS request_id, p.message_id AS message_id
+      FROM asked a CROSS JOIN pending_request p INDEXED BY idx_pending_recipient
+      WHERE p.recipient = a.recipient
+      LIMIT $limit
+    `),
+    ),
+
     /** 29327 - the settlement facts naming who closed the balls of one batch,
      *  by ball id, through the same indexed read
      *  `selectPendingOutcomeFactsForRequest` uses (idx_messages_event_type_ref_ts).
