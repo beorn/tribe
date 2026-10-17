@@ -55,6 +55,12 @@
  *   measure, append and flush — so the file's size IS the occupancy and the
  *   64 MiB pair bound holds instead of approximating. A writer that cannot take
  *   the lock says so loudly and still records its row.
+ *
+ *   A rotation is a rename by one of those processes, and every other writer
+ *   holds a descriptor opened before it: that descriptor follows the inode which
+ *   was renamed aside, so a writer also reopens the live path when the inode it
+ *   is holding is no longer the one at that path. Otherwise its next row would
+ *   be written into `<path>.1` while it measured `<path>`.
  */
 
 import { mkdirSync, renameSync, statSync } from "node:fs"
@@ -89,24 +95,33 @@ export function injectionRecordLockPath(path: string): string {
 export const RECORD_PREVIOUS_SEGMENT_SUFFIX = ".1"
 
 /**
- * Bytes already in the live segment at `path`. Only a genuinely absent file is the empty-file case: an occupancy this
- * process cannot read is named on stderr and reported as the full segment, so the next append rotates rather than
- * growing a record nobody can measure. Reading a failed stat as 0 would reset the accounting against a file that is
- * already past the ceiling, which is how the record grew to 252 MB in the first place.
+ * What the live segment at `path` is right now: its size and the inode it is, absent, or unmeasurable.
+ *
+ * The inode is what tells a writer whether the descriptor it holds is still the file at this path. A rotation is a
+ * rename performed by another hook process, so a peer's rotation leaves this process holding the segment that was
+ * renamed aside — same descriptor, different file from the one at the path it measures.
+ *
+ * Only a genuinely absent file is the empty-file case: an occupancy this process cannot read is named on stderr and
+ * reported as the full segment, so the next append rotates rather than growing a record nobody can measure. Reading a
+ * failed stat as 0 would reset the accounting against a file that is already past the ceiling, which is how the
+ * record grew to 252 MB in the first place.
  */
-function recordBytesOnDisk(path: string): number {
+type LiveSegment = { bytes: number; ino: number } | "absent" | "unmeasurable"
+
+function readLiveSegment(path: string): LiveSegment {
   try {
-    return statSync(path).size
+    const stats = statSync(path)
+    return { bytes: stats.size, ino: stats.ino }
   } catch (error) {
     if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
       // A record that does not exist yet holds zero bytes — the writer creates it on its first write.
       // silent-fallback-allow: absent file, not a masked failure (any other stat error is raised loudly below)
-      return 0
+      return "absent"
     }
     console.error(
       `injection-envelope: could not measure the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
     )
-    return RECORD_SEGMENT_MAX_BYTES
+    return "unmeasurable"
   }
 }
 
@@ -196,27 +211,45 @@ export function installInjectionFileWriter(path: string): () => void {
   _installedWriters.set(writer, path)
 
   /**
-   * Rename the live record aside as its one previous segment, and open a fresh one. Loud on failure: a record
-   * that did not rotate is unbounded, and that must never be silent. The row being appended is unaffected —
-   * it lands in the fresh segment.
+   * The inode of the live segment right now, or `undefined` when there is no file there to hold. Reported through
+   * the same reader as the size, so a stat this process cannot perform is loud once rather than silent twice.
    */
-  const rotate = (): void => {
+  const liveIno = (): number | undefined => {
+    const live = readLiveSegment(path)
+    return typeof live === "object" ? live.ino : undefined
+  }
+
+  /**
+   * The inode this writer's descriptor is holding. A peer's rotation renames the live path, so "the path's inode is
+   * not this one" is exactly "this descriptor now points at the segment that was renamed aside".
+   */
+  let openedIno = liveIno()
+
+  /**
+   * Close the descriptor this writer holds and open the live path again, renaming the segment it held aside as the one
+   * previous when `renameAside`. Loud on failure: a record that did not rotate is unbounded, and a record whose
+   * descriptor could not be reopened is one this process can no longer write to — neither may be silent. The row being
+   * appended is unaffected: it lands in the segment this opens.
+   */
+  const openFresh = (renameAside: boolean): void => {
     const replaced = writer
     try {
       replaced.close()
       // Renaming over an existing previous segment keeps exactly one of them.
-      renameSync(path, path + RECORD_PREVIOUS_SEGMENT_SUFFIX)
+      if (renameAside) renameSync(path, path + RECORD_PREVIOUS_SEGMENT_SUFFIX)
       writer = createFileWriter(path)
       _installedWriters.delete(replaced)
       _installedWriters.set(writer, path)
+      openedIno = liveIno()
     } catch (error) {
       console.error(
-        `injection-envelope: could not rotate the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
+        `injection-envelope: could not ${renameAside ? "rotate" : "reopen"} the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
       )
       try {
         writer = createFileWriter(path)
         _installedWriters.delete(replaced)
         _installedWriters.set(writer, path)
+        openedIno = liveIno()
       } catch (reopenError) {
         console.error(
           `injection-envelope: could not reopen the debug log ${path}: ${reopenError instanceof Error ? reopenError.message : String(reopenError)}`,
@@ -224,6 +257,9 @@ export function installInjectionFileWriter(path: string): () => void {
       }
     }
   }
+
+  /** This writer's own rotation: the live segment becomes the one previous, and the row lands in a fresh one. */
+  const rotate = (): void => openFresh(true)
 
   /**
    * Append one row with the record lock held, so the whole measure-then-append window is exclusive.
@@ -259,7 +295,19 @@ export function installInjectionFileWriter(path: string): () => void {
           `injection-envelope: could not flush before measuring the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
         )
       }
-      const segmentBytes = occupancyKnown ? recordBytesOnDisk(path) : RECORD_SEGMENT_MAX_BYTES
+      // A peer may have rotated the record while this writer sat idle: the descriptor above would then point at the
+      // segment that was renamed aside, and the row below would be written into `<path>.1` while this writer measured
+      // `<path>`. Silent by design — a peer's rotation is the contract working, not a failure.
+      let live = readLiveSegment(path)
+      if (live !== "unmeasurable" && (live === "absent" || live.ino !== openedIno)) {
+        openFresh(false)
+        live = readLiveSegment(path)
+      }
+      // An occupancy we could not establish reads as a full segment, never as an empty one.
+      let segmentBytes: number
+      if (!occupancyKnown || live === "unmeasurable") segmentBytes = RECORD_SEGMENT_MAX_BYTES
+      else if (live === "absent") segmentBytes = 0
+      else segmentBytes = live.bytes
       if (segmentBytes + lineBytes > RECORD_SEGMENT_MAX_BYTES) rotate()
       writer.write(line)
       try {

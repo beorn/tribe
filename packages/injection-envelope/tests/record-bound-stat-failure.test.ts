@@ -1,8 +1,9 @@
 /**
  * @failure The injection record's bound silently disappears when the size of the file cannot be read: debug.ts's
- *          `recordBytesOnDisk` caught EVERY stat error and returned 0, so a record this process could not measure
- *          was appended to blind — the segment could pass its ceiling while the writer claimed it was empty
- *          (/hh/var/@dev-review2/29681-injection-record-verdict.md, P2 "stat failures silently become zero").
+ *          `readLiveSegment` (then named `recordBytesOnDisk`) caught EVERY stat error and returned 0, so a record
+ *          this process could not measure was appended to blind — the segment could pass its ceiling while the
+ *          writer claimed it was empty (/hh/var/@dev-review2/29681-injection-record-verdict.md, P2 "stat failures
+ *          silently become zero").
  * @level l2 — the real writer against a scratch directory, with statSync (and only statSync) made to fail for one path
  * @consumer @ag/hab/29681-every-log-writer-goes-through/bound-the-tribe-injection-record
  * @reach fs-walk <fixture-only: an mkdtemp scratch directory, written by the writer under test>

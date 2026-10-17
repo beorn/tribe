@@ -22,13 +22,22 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process"
-import { appendFileSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs"
+import {
+  appendFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { acquireFlockBlocking, tryAcquireFlock } from "@bearly/flock"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
-import { injectionRecordLockPath } from "../src/debug.ts"
+import { injectionRecordLockPath, RECORD_PREVIOUS_SEGMENT_SUFFIX } from "../src/debug.ts"
 
 const CHILD = fileURLToPath(new URL("./fixtures/injection-record-child.ts", import.meta.url))
 
@@ -171,5 +180,61 @@ describe("injection record — a second process appending at the same time", () 
     const again = tryAcquireFlock(injectionRecordLockPath(path))
     expect(again, "the writer left the record locked after it finished").not.toBeNull()
     again?.release()
+  })
+})
+
+/**
+ * The same shared record, rotated by the OTHER writer. Every hook process keeps one open descriptor for the record
+ * for its whole life, and a rotation is a rename: the process that rotates opens a fresh file, while every peer's
+ * descriptor still points at the inode that was renamed aside. This writer measures `<path>` and appends through its
+ * descriptor, so unless it notices the seam it writes its row into `<path>.1` — a row the reader tailing the live
+ * record never sees, declared in the previous segment by a process that never looked at it. (@dev/review2, 2026-10-16:
+ * "confirm whether the writer is reopened under each lock after peer rotation; the existing persistent FD was part of
+ * the prior finding".)
+ *
+ * @failure A peer rotates the record while this writer is idle; this writer's persistent descriptor follows the
+ *   renamed inode, so its next row lands in `<path>.1` while it measures `<path>`.
+ * @level   l2 — two real bun processes, a real rename, and a real record on disk
+ * @consumer @ag/hab/29681-every-log-writer-goes-through/bound-the-tribe-injection-record, and the reader this writer
+ *           feeds: packages/daemon/src/lib/hook-latency-reader.ts, which tails the live record.
+ * @reach fs-walk <fixture-only: an mkdtemp scratch directory, written by the writer under test>
+ * @testonly none
+ */
+describe("injection record — a peer rotates the record while this writer is idle", () => {
+  /** How many rows in `text` carry `marker`. */
+  function rows(text: string, marker: string): number {
+    return text.split("\n").filter((line) => line.includes(marker)).length
+  }
+
+  test("the next row lands in the live segment, not in the segment the peer renamed aside", async () => {
+    const path = join(dir, "injection.jsonl")
+    const { child, reader, childStderr } = await spawnChild(path)
+
+    // This writer's first row, on the record as installed.
+    child.stdin!.write("emit 1024\n")
+    expect(await reader.next(30_000), `the writer never wrote its first row — stderr: ${childStderr()}`).toBe("written")
+    expect(rows(readFileSync(path, "utf8"), "child-row"), "the first row is in the live record").toBe(1)
+
+    // The peer: a second hook process rotates the record while this writer sits idle — rename the live segment
+    // aside, then open a fresh live record and put its own row in it, which is exactly this writer's own rotate()
+    // one process over.
+    renameSync(path, `${path}${RECORD_PREVIOUS_SEGMENT_SUFFIX}`)
+    writeFileSync(path, `${JSON.stringify({ ts: new Date().toISOString(), reason: "a-peer-opened-this-segment" })}\n`)
+
+    child.stdin!.write("emit 1024\n")
+    expect(
+      await reader.next(30_000),
+      `the writer never finished the row after the peer rotated — stderr: ${childStderr()}`,
+    ).toBe("written")
+
+    const live = readFileSync(path, "utf8")
+    const previous = readFileSync(`${path}${RECORD_PREVIOUS_SEGMENT_SUFFIX}`, "utf8")
+
+    expect(live, "the peer's own row stays in the live record").toContain("a-peer-opened-this-segment")
+    expect(
+      rows(previous, "child-row"),
+      "the row written after the peer's rotation followed the renamed inode into the previous segment",
+    ).toBe(1)
+    expect(rows(live, "child-row"), "the row written after the peer's rotation must land in the live segment").toBe(1)
   })
 })
