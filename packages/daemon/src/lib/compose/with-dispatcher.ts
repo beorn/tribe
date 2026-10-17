@@ -1464,35 +1464,47 @@ export function withDispatcher<
       })
     }
 
-    /** The unit instance id this register can PROVE, or null when it cannot prove both values. ONE spelling only,
-     *  `<sid>@<gen>` through tribe-wire's `formatInstanceId`; a client-sent launch id is never recorded as the current
-     *  instance because it may be a bare sid or a persona key, and no instance id ever equals a bare sid
-     *  (@cto ruling 4 of 43f630c5). A generation the verifier did not supply is UNPROVEN, so it reads null rather than
-     *  being guessed, and `formatInstanceId`'s own throw is never reachable from a verdict. */
-    function provenInstanceId(sid: string | null | undefined, gen: number | null | undefined): string | null {
-      if (typeof sid !== "string" || sid.length === 0) return null
-      if (typeof gen !== "number" || !Number.isSafeInteger(gen) || gen < 0) return null
-      // `formatInstanceId` DOES throw for a sid that cannot be a session id — an empty one, or one carrying `@` — and
-      // a verifier verdict is not constrained to session ids (@cto c81bc71d, fold: `checkedVerdict` accepts any
-      // non-empty sid), so the join is taken HERE: a sid the one spelling refuses proves no instance either, which is
-      // what every caller below already does with null, and a throw out of the register path would be a refusal no
-      // caller can read.
-      try {
-        return formatInstanceId(sid, gen)
-      } catch {
-        return null
+    /** The unit instance id this register can PROVE, or the one spelling's OWN reason for refusing the pair. ONE
+     *  spelling only, `<sid>@<gen>` through tribe-wire's `formatInstanceId`; a client-sent launch id is never recorded
+     *  as the current instance because it may be a bare sid or a persona key, and no instance id ever equals a bare sid
+     *  (@cto ruling 4 of 43f630c5). A sid or a generation the verifier did not SUPPLY is unproven, and named as absent
+     *  rather than guessed. `formatInstanceId`'s throw IS reachable from a verdict — `checkedVerdict` accepts any
+     *  non-empty sid, and the one spelling refuses a sid carrying whitespace, `#` or `@`, and a generation that is not
+     *  a non-negative safe integer — so it is caught below and read as a defect a caller can act on, never as a throw
+     *  out of the register path (@cto c81bc71d fold; B3 of the combined REVISE: the defect is `formatInstanceId`'s own
+     *  cause, because the `@`-only test it replaces called a whitespace-bearing sid a bad GENERATION). */
+    function proveInstanceId(
+      sid: string | null | undefined,
+      gen: number | null | undefined,
+    ): { readonly launch_id: string } | { readonly defect: string } {
+      if (typeof sid !== "string" || sid.length === 0) {
+        return { defect: `no session id was proved (sid=${String(sid)})` }
       }
+      if (typeof gen !== "number") return { defect: `carries no usable gen (gen=${String(gen)})` }
+      try {
+        return { launch_id: formatInstanceId(sid, gen) }
+      } catch (error) {
+        return { defect: error instanceof Error ? error.message : String(error) }
+      }
+    }
+
+    /** The proved instance id, or null when the pair proves none — the ONE predicate, in the one spelling. */
+    function provenInstanceId(sid: string | null | undefined, gen: number | null | undefined): string | null {
+      const proof = proveInstanceId(sid, gen)
+      return "launch_id" in proof ? proof.launch_id : null
     }
 
     /** 29686 (@cto ruling 2): ONE write path for the register path's refusals. It resolves the row the presented
      *  name belongs to, records the last refusal there, then returns the error, so a register refusal cannot reach
      *  a caller without leaving the record a reader needs. For an impersonation the recorded `claimed` is the
-     *  identity the refused transport presented, which is what `foreign_transport.name` has always published. */
+     *  identity the refused transport presented, which is what `foreign_transport.name` has always published. B2 of
+     *  the combined REVISE (@cto 2026-10-17): `launch_id` and `pid` are REQUIRED, with no defaults, so no caller can
+     *  silently record a launch it never proved, or a pid of 0 for a transport that reported one. */
     function refuseRegister(
       id: number | string,
       presented: string,
       refusal: { message: string; data: { kind: string } & Record<string, unknown> },
-      identity: { target?: string | undefined; launch_id?: string | null; pid?: number } = {},
+      identity: { target?: string | undefined; launch_id: string | null; pid: number },
     ): string {
       const reason = typeof refusal.data.reason === "string" ? refusal.data.reason : undefined
       const foreignActor =
@@ -1503,8 +1515,8 @@ export function withDispatcher<
         kind: refusal.data.kind,
         claimed: foreignActor ?? presented,
         ...(reason === undefined ? {} : { reason }),
-        launch_id: identity.launch_id ?? null,
-        pid: identity.pid ?? 0,
+        launch_id: identity.launch_id,
+        pid: identity.pid,
       })
       return makeError(id, -32003, refusal.message, refusal.data)
     }
@@ -1874,17 +1886,17 @@ export function withDispatcher<
               // 29686 (@cto ruling 2): every kind, the impersonation case included, now leaves through the one
               // write path. The impersonation record lands on the presented name's newest durable row and carries
               // the impersonating identity as `claimed`, so `foreign_transport` derives exactly as it always did.
-              // 29686 (@cto B1 of c81bc71d): the recorded launch is the ONE producer's answer over the sid and gen
-              // THIS refusal's own verdict proved — never `launchIdentity.id`, which is proven only on the token-keyed
-              // path, and never a literal. Every kind that refuses before naming a unit instance (the verifier fault,
-              // a name mismatch, a contradicted or undecided verdict, a missing persona token) carries neither value,
-              // so this records NO launch rather than the client-sent string, which may be a bare sid or a persona key
-              // and never equals an instance id (@cto ruling 4 of 43f630c5). A refusal that does publish the pair
-              // records the instance it proved, through no second spelling anywhere in this path.
-              const refusalSid = typeof identity.refusal.data.sid === "string" ? identity.refusal.data.sid : null
-              const refusalGen = typeof identity.refusal.data.gen === "number" ? identity.refusal.data.gen : null
+              // 29686 (@cto B1 of the combined REVISE): the recorded launch is NULL BY NAME, not a producer call over
+              // values that are not there. The sid and gen a verdict carries belong to the seat its TOKEN names, while
+              // this record lands on the PRESENTED seat's newest row, so publishing them would name another seat's
+              // instance as this one's. And no kind that reaches this branch carries either value at all
+              // (identity-verifier-fault, identity-name-mismatch, identity-contradicted, identity-undecided,
+              // identity-token-missing — see verifyRegistrationIdentity), so reading them here was a branch that could
+              // never produce a value. `launchIdentity.id` is proven only on the token-keyed path below, and a
+              // client-sent launch id may be a bare sid or a persona key and never equals an instance id (@cto ruling
+              // 4 of 43f630c5).
               return refuseRegister(id, typeof p.name === "string" ? p.name : "(no name)", identity.refusal, {
-                launch_id: provenInstanceId(refusalSid, refusalGen),
+                launch_id: null,
                 pid: Number(p.pid ?? 0),
               })
             }
@@ -1914,30 +1926,32 @@ export function withDispatcher<
                 },
                 // The record names the instance the TOKEN proved, in the one spelling; the presented launch id stays
                 // in the refusal's own `data`, where it names what the transport claimed rather than what it is.
-                { launch_id: provenInstanceId(verifiedSid, verifiedGen) },
+                { launch_id: provenInstanceId(verifiedSid, verifiedGen), pid: Number(p.pid ?? 0) },
               )
             }
             const tokenKeyed = verifiedSid !== null && (verifiedGen !== null || !hasLaunchId)
             // 29686 generation half (@cto ruling 4 of 43f630c5, his cdeab187 item 2): "this verdict proved no usable
-            // instance" has ONE predicate, `provenInstanceId`, so an ABSENT gen and a present-but-unusable one
-            // (negative or non-integer) take the same loud refusal, which names the generation it could not use.
-            // Testing only `verifiedGen === null` let an unusable gen compose `sid-dev7@-1` at `launchIdRaw` below
-            // and REGISTER a session on it; with that predicate the empty-launchId fallback is unreachable here.
-            if (tokenKeyed && provenInstanceId(verifiedSid, verifiedGen) === null) {
-              // The values the one producer refused are named by CASE: a verdict whose sid cannot be a session id is
-              // not a missing generation, and saying it was would be a diagnostic that lies about its own cause.
-              const instanceDefect =
-                verifiedSid !== null && verifiedSid.includes("@")
-                  ? `sid (${verifiedSid}) is not a session id, so no instance id can be composed from it`
-                  : `carries no usable gen (gen=${String(verifiedGen)})`
+            // instance" has ONE predicate, `proveInstanceId`, so an ABSENT gen and a present-but-unusable pair take
+            // the same loud refusal, which names the cause in the ONE spelling's own words. Testing only
+            // `verifiedGen === null` let an unusable gen compose `sid-dev7@-1` at `launchIdRaw` below and REGISTER a
+            // session on it; with that predicate the empty-launchId fallback is unreachable here.
+            const instanceProof = proveInstanceId(verifiedSid, verifiedGen)
+            if (tokenKeyed && "defect" in instanceProof) {
               const message =
-                `register refused: ${String(p.name)}'s token verified, but the verifier verdict ${instanceDefect}` +
-                `; the daemon cannot key this session without a launch id`
+                `register refused: ${String(p.name)}'s token verified, but the verifier verdict proves no usable ` +
+                `instance — ${instanceProof.defect}; the daemon cannot key this session without a launch id`
               log.warn?.(message)
-              return refuseRegister(id, typeof p.name === "string" ? p.name : "(no name)", {
-                message,
-                data: { kind: "identity-verdict-without-gen", claimed: p.name },
-              })
+              return refuseRegister(
+                id,
+                typeof p.name === "string" ? p.name : "(no name)",
+                {
+                  message,
+                  data: { kind: "identity-verdict-without-gen", claimed: p.name },
+                },
+                // This branch fires only when the proof above found no instance, so the record carries NO launch by
+                // name rather than recomposing a pair the one predicate just refused.
+                { launch_id: null, pid: Number(p.pid ?? 0) },
+              )
             }
             if (tokenKeyed ? !hasLaunchParentPid : hasLaunchId !== hasLaunchParentPid) {
               return makeError(
@@ -2098,6 +2112,7 @@ export function withDispatcher<
               const refusal = missingPersonaTokenRefusal(resolvedName, identity.personaTokenDefect, "register")
               return refuseRegister(id, resolvedName, refusal, {
                 launch_id: provenInstanceId(verifiedSid, verifiedGen),
+                pid: Number(p.pid ?? 0),
               })
             }
             // Class belongs to the resolved identity, not the optional caller
@@ -2136,7 +2151,7 @@ export function withDispatcher<
                       "the current launch tuple was not supplied",
                     data: { kind: "launch-authority-unavailable", reason: "owner-transport-disconnected" },
                   },
-                  { launch_id: provenInstanceId(verifiedSid, verifiedGen) },
+                  { launch_id: provenInstanceId(verifiedSid, verifiedGen), pid: Number(p.pid ?? 0) },
                 )
               }
             }
@@ -2353,7 +2368,7 @@ export function withDispatcher<
                   // own sid@gen, through the one producer. WATCH reads this kind as indeterminate (@cto ef17a16d): a
                   // handoff state the successor's own retry resolves, so the value is the reader's evidence, not a
                   // current-process match.
-                  { launch_id: provenInstanceId(verifiedSid, verifiedGen) },
+                  { launch_id: provenInstanceId(verifiedSid, verifiedGen), pid: clientPid },
                 )
               }
             }

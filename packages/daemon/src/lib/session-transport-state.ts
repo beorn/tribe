@@ -69,8 +69,11 @@ export type RegisterRefusal = {
  *  managed-inbox and launch-takeover refusals name the impersonation `foreign-identity-transport`, and the verifier's
  *  own name mismatch keeps its `identity-name-mismatch` kind — which is what recorded the view against the presented
  *  name before this bead, so dropping it from this set silently stopped a name mismatch publishing `foreign_transport`
- *  (@cto eabd0565). The members wire publishes exactly these as `foreign_transport`, derived from the record, so a
- *  reader of that field sees no change (29686). */
+ *  (@cto eabd0565). The members wire publishes exactly these as `foreign_transport`, derived from the record, so the
+ *  reader still gets the four fields it always had (29686). WHAT DID CHANGE is one field's SPELLING, named here rather
+ *  than left to be discovered (@cto's Should item): `launch_id` is the record's, every refusal site now records a unit
+ *  instance id (`<sid>@<gen>`, through `provenInstanceId`) or null, and the view below therefore publishes either that
+ *  instance or the literal `(no launch)` — never the bare sid a pre-29686 row carried. */
 export const FOREIGN_REFUSAL_KINDS = ["foreign-identity-transport", "identity-name-mismatch"] as const
 
 /** Derive the members wire's `foreign_transport` view from a last refusal: the same four fields it always had, or

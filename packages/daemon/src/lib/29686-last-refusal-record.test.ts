@@ -28,16 +28,22 @@ import { registerSession } from "./session.ts"
 
 const PROJECT_ID = "29686-last-refusal-record"
 
-/** Every kind the register path composes: with-dispatcher.ts:1311 (token missing), :1358 (verifier fault),
- *  :1379 (name mismatch), :1386 (contradicted), :1407 (undecided), :1841 (verdict without gen) and
- *  :2283/:2302 (a transport claiming a seat a live holder keeps). */
+/** Every kind the register path composes, each with the site that composes it (@cto's Should item: the list and its
+ *  citations both moved with the combined REVISE, and the three kinds it had never named are here now):
+ *  with-dispatcher.ts:1321 (token missing), :1367 (verifier fault), :1388 (name mismatch), :1395 (contradicted),
+ *  :1416 (undecided), :1923 (the token's sid contradicts the launch id the register presented), :1947 (a verified
+ *  token whose verdict proves no usable instance), :2150 (no authority over the launch tuple), :2359 (a duplicate
+ *  generation yielding to a live incumbent) and :973/:2414/:2442 (a transport claiming a seat a live holder keeps). */
 const REGISTER_REFUSAL_KINDS = [
   "identity-token-missing",
   "identity-verifier-fault",
   "identity-name-mismatch",
+  "identity-mismatch",
   "identity-contradicted",
   "identity-undecided",
   "identity-verdict-without-gen",
+  "launch-authority-unavailable",
+  "verified-duplicate-join",
   "foreign-identity-transport",
 ] as const
 
@@ -239,45 +245,34 @@ describe("29686 — one bounded last-refusal record per session, published on th
     }
   })
 
-  it("(c) a cleared record still writes last_refusal, as an explicit null, and a connected row carries neither", () => {
+  it("(c) a cleared record still writes last_refusal, as an explicit null", () => {
     const sessionId = "ref-cleared"
     const name = "@agent/cleared"
     addSession(db, stmts, sessionId, name, { id: "launch-cleared", parentPid: 60_104 })
-    // The daemon's REAL store (@cto required item 4): the registry's own map, cleared by ITS OWN paths —
-    // markTransportConnected and forgetTransportSessions (with-client-registry.ts:288-315). A local Map this test
-    // deleted from by hand proved neither path: reverting either one left this case green.
+    // The daemon's REAL store (@cto required item 4): the registry's own map, cleared by ITS OWN reaper —
+    // forgetTransportSessions (with-client-registry.ts:305-312). A local Map this test deleted from by hand proved
+    // nothing: reverting that delete left this case green. The wire effect of BOTH clearers, driven through the
+    // production register path, is pinned in with-dispatcher-takeover.test.ts:1553; this row keeps only what that one
+    // cannot state — that the key is PRESENT after a clear rather than absent (@cto B5).
     const deferred: Array<() => void> = []
     const { registry } = withClientRegistry()({
       scope: { defer: (fn: () => void) => deferred.push(fn) },
       startedAt: 0,
     } as never)
-    const connected = new Set<string>()
     const opCtx = makeContext(db, stmts, "operator", "@operator")
     const opts = baseOpts({
       getExpectedMembers: () => roster([{ name, expected: true }]),
-      getActiveSessionIds: () => connected,
       getLastRefusal: (candidate) => registry.getRegisterRefusal(candidate),
     })
 
     registry.recordRegisterRefusal(sessionId, refusalFor("identity-name-mismatch", name))
     expect(entryFor(membersReply(opCtx, opts), name)?.last_refusal).toMatchObject({ kind: "identity-name-mismatch" })
 
-    // A real transport connects: markTransportConnected drops the record and the row becomes active.
-    connected.add(sessionId)
-    registry.markTransportConnected(sessionId)
-    const afterConnect = membersReply(opCtx, opts)
-    expect(entryFor(afterConnect, name)).toBeUndefined()
-    expect(rowFor(afterConnect, name), `${name} connected row`).not.toHaveProperty("last_refusal")
-
-    // Same for the reaper: forgetTransportSessions drops the record of a session whose durable row is gone.
-    connected.delete(sessionId)
-    registry.recordRegisterRefusal(sessionId, refusalFor("identity-verifier-fault", name))
-    expect(entryFor(membersReply(opCtx, opts), name)?.last_refusal).toMatchObject({ kind: "identity-verifier-fault" })
+    // The reaper drops the record of a session whose durable row is gone, and what it leaves behind is a NULL, not a gap.
     registry.forgetTransportSessions([sessionId])
-    const afterForget = membersReply(opCtx, opts)
+    const clearedEntry = entryFor(membersReply(opCtx, opts), name)
     // The rollout contract (@cto): the key is PRESENT and null, so a reader can tell "the daemon holds no refusal for
     // this seat" from "this daemon predates the field". Reading a dropped bridge out of an absent key is the bug.
-    const clearedEntry = entryFor(afterForget, name)
     expect(clearedEntry, `${name} after forgetTransportSessions`).toHaveProperty("last_refusal")
     expect(clearedEntry?.last_refusal, `${name} cleared last_refusal`).toBeNull()
   })
@@ -287,12 +282,16 @@ describe("29686 — one bounded last-refusal record per session, published on th
     const name = "@dev/7"
     addSession(db, stmts, sessionId, name, { id: "launch-dev7", parentPid: 60_105 })
     const refusedAt = "2026-10-17T03:14:15.926Z"
-    const foreignTransport = { name: "@dev/8", launch_id: "sid-dev8", pid: 4_801, refused_at: refusedAt }
+    // The one spelling (@cto B6 of the combined REVISE): every refusal site records a unit instance id through
+    // `provenInstanceId`, so a bare sid is not a shape this field can hold — `session-transport-state.ts:83` publishes
+    // `refusal.launch_id ?? "(no launch)"`, and the fixture must be what the daemon would write.
+    const foreignInstance = "sid-dev8@1"
+    const foreignTransport = { name: "@dev/8", launch_id: foreignInstance, pid: 4_801, refused_at: refusedAt }
     const refusal: LastRefusal = {
       kind: "foreign-identity-transport",
       claimed: "@dev/8",
       reason: "identity-precedence",
-      launch_id: "sid-dev8",
+      launch_id: foreignInstance,
       pid: 4_801,
       refused_at: refusedAt,
     }
