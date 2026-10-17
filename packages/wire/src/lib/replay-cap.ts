@@ -491,6 +491,25 @@ export function replayEnvelopeMeta(event: { ts?: string; replay?: boolean }): {
 }
 
 /**
+ * 29327 — the settlement facts ride the envelope META beside the replay facts.
+ *
+ * A settled ball is not owed work, and the daemon knows that at drain time.
+ * Dropping the facts at the pane boundary is what let a request settled 78 ms
+ * after it was sent open a turn looking owed (live specimen 5e8b, 2026-10-17).
+ * `settled` is the flag that decides the type marker; `settled_by` names the
+ * seat when the daemon's own settlement record has one. Both are absent on an
+ * unsettled row, so an ordinary envelope is byte-for-byte what it was.
+ */
+export function settledEnvelopeMeta(event: { settled?: boolean; settled_by?: string | null }): {
+  settled?: string
+  settled_by?: string
+} {
+  if (event.settled !== true) return {}
+  const by = typeof event.settled_by === "string" && event.settled_by.length > 0 ? event.settled_by : undefined
+  return { settled: "true", ...(by ? { settled_by: by } : {}) }
+}
+
+/**
  * Bound the legacy `channel` content-push burst a pre-`wakeup` daemon dumps
  * right after (re)connect (km 19442).
  *

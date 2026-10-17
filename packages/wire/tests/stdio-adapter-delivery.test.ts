@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeError, makeNotification, makeResponse } from "../src/rpc.ts"
 import { MAX_REPLAY_EVENTS } from "../src/lib/replay-cap.ts"
+import { NOTIFICATION_ONLY_MARKER } from "../src/lib/notification-only.ts"
 import { loadDeliveryLedger } from "../src/lib/delivery-ledger.ts"
 import { buildFleetDeliveryReport } from "../src/lib/delivery-report.ts"
 import { launchEnvironment } from "./launch-token.ts"
@@ -3504,7 +3505,25 @@ describe("stdio adapter delivery modes", () => {
     )
     const settled = channels.find((line) => JSON.stringify(line).includes("29327 PROBE SETTLED"))
     const open = channels.find((line) => JSON.stringify(line).includes("29327 PROBE CONTROL"))
-    expect(JSON.stringify(settled)).toContain("[settled by @dev/brain — not owed]")
-    expect(JSON.stringify(open)).not.toContain("[settled")
+    type EnvelopeParams = {
+      content?: string
+      meta?: { type?: string; settled?: string; settled_by?: string }
+    }
+    const settledParams = settled?.params as EnvelopeParams | undefined
+    const openParams = open?.params as EnvelopeParams | undefined
+
+    // The type is the envelope attribute a pane renders, and the seat
+    // instructions bind it: a settled `request` must not read as actionable,
+    // and says so through the marker every ambient row already uses.
+    expect(settledParams?.meta?.type).toBe(`${NOTIFICATION_ONLY_MARKER}:request`)
+    expect(settledParams?.meta?.settled).toBe("true")
+    expect(settledParams?.meta?.settled_by).toBe("@dev/brain")
+    // The body is the sender's words and is never rewritten for the pane.
+    expect(settledParams?.content).toBe("29327 PROBE SETTLED")
+
+    expect(openParams?.meta?.type).toBe("request")
+    expect(openParams?.meta?.settled).toBeUndefined()
+    expect(openParams?.meta?.settled_by).toBeUndefined()
+    expect(openParams?.content).toBe("29327 PROBE CONTROL")
   })
 })
