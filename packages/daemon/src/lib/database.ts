@@ -1767,7 +1767,8 @@ const TRACKED_ATTENTION_FETCH_COLUMNS_SQL = `COALESCE(m.id, a.id) AS id,
   COALESCE(m.attention_required, a.attention_required) AS attention_required,
   COALESCE(m.is_incident, a.is_incident) AS is_incident,
   COALESCE(m.sender_authority, a.sender_authority) AS sender_authority,
-  COALESCE(m.session_id, a.session_id) AS session_id`
+  COALESCE(m.session_id, a.session_id) AS session_id,
+  COALESCE(m.request, a.request) AS request`
 
 /** Tracked attention belongs to a mailbox through its existing pending owner
  * row, independent of whether the original message was direct or broadcast.
@@ -3149,6 +3150,69 @@ export function createStatements(db: Database) {
     `),
     ),
 
+    /** 29327 - the tracker's own answer to "which balls are still open for
+     *  this seat", read ONCE per attention projection so a row whose ball has
+     *  closed renders settled instead of owed. A closed ball leaves no
+     *  `pending_request` row at all (`closePendingRequest` DELETEs it), so
+     *  absence from this set is the settlement evidence; the journal fact read
+     *  below only names the settler. Read with LIMIT $limit = budget + 1 so the
+     *  caller can DETECT the overflow and report an unavailable lookup rather
+     *  than reading the surplus as "still owed". */
+    selectOpenBallIdsForRecipient: db.prepare(
+      assertSingleStatement(`
+      SELECT request_id, message_id FROM pending_request INDEXED BY idx_pending_recipient
+      WHERE recipient = $name
+      LIMIT $limit
+    `),
+    ),
+
+    /** 29327 - which of the ids a batch names still own an open ball, decided by
+     *  the IDS ALONE (@cto verdict 2026-10-17, ruling 2, corrected against C1).
+     *
+     *  Not by `recipient = $name`, the way `selectOpenBallIdsForRecipient` above
+     *  asks: a watch-role adapter is not a ball's recipient, so an owner-scoped
+     *  read finds no row for work its target still owes and answers `settled`.
+     *  And not by "the recipients these messages name" either: a `*` broadcast's
+     *  ball is opened ONCE PER OWNER (`messaging.ts` inserts with `$recipient:
+     *  owner`), so `p.recipient` is a seat and never `*`, and keying on the
+     *  message's recipient misses every open broadcast ball the same way.
+     *
+     *  So the read asks about the identities themselves — the request ids the
+     *  batch's messages name, and the message ids — through the two indexes those
+     *  columns already have (the `pending_request` primary key and
+     *  idx_pending_message_id). Same budget-plus-one over-run detection as above. */
+    selectOpenBallIdsForMessageIds: db.prepare(
+      assertSingleStatement(`
+      WITH asked_request(request_id) AS (SELECT value FROM json_each($request_ids)),
+           asked_message(message_id) AS (SELECT value FROM json_each($message_ids))
+      SELECT p.request_id AS request_id, p.message_id AS message_id
+      FROM pending_request p
+      WHERE p.request_id IN (SELECT request_id FROM asked_request)
+         OR p.message_id IN (SELECT message_id FROM asked_message)
+      LIMIT $limit
+    `),
+    ),
+
+    /** 29327 - the settlement facts naming who closed the balls of one batch,
+     *  by ball id, through the same indexed read
+     *  `selectPendingOutcomeFactsForRequest` uses (idx_messages_event_type_ref_ts).
+     *  NAMING ONLY: the tracker's missing row has already decided that the ball
+     *  is not owed, so a fact that is missing, malformed or archived away
+     *  changes the name, never the obligation. */
+    selectSettlementFactsForRequests: db.prepare(
+      assertSingleStatement(`
+      WITH closed(request_id) AS (SELECT value FROM json_each($request_ids))
+      SELECT m.id AS id, m.type AS type, m.content AS content, m.ts AS ts
+      FROM closed r CROSS JOIN messages m INDEXED BY idx_messages_event_type_ref_ts
+      WHERE m.ref = r.request_id AND m.kind = 'event' AND m.type = 'event.ball.settled'
+      UNION ALL
+      SELECT m.id, m.type, m.content, m.ts
+      FROM closed r CROSS JOIN messages_archive m INDEXED BY idx_messages_archive_event_type_ref_ts
+      WHERE m.ref = r.request_id AND m.kind = 'event' AND m.type = 'event.ball.settled'
+      ORDER BY ts, id
+    `),
+    ),
+
     /**
      * Read-only turn-attention view (17199, 21757): every unacknowledged
      * actionable direct, owned untaken tracked actionable message, plus newly classified direct
@@ -3160,10 +3224,10 @@ export function createStatements(db: Database) {
     selectAttention: db.prepare(
       assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required, is_incident, sender_authority, session_id
+             attention_required, is_incident, sender_authority, session_id, request
       FROM (
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-               attention_required, is_incident, sender_authority, session_id
+               attention_required, is_incident, sender_authority, session_id, m.request AS request
         FROM messages AS m
         WHERE m.recipient = $name
           AND m.kind = 'direct'

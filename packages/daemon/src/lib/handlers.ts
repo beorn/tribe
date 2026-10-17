@@ -1837,6 +1837,11 @@ export type AttentionProjection = {
    *  among them. Cleared by the owner's next canonical read. Rows stay
    *  fetchable by id or history (`ids:` / `with:` union the archive). */
   pruned?: { count: number; before: string; recorded_at: string }
+  /** 29327 - present only when the batch's closed-ball lookup could not decide
+   *  every row (`unavailable`: no tracker read, so no row may be read as owed;
+   *  `partial`: every obligation decided, but a settler name is missing). The
+   *  common path omits it. */
+  settlement_lookup?: { status: "unavailable" | "partial"; budget: number; detail: string }
   actionable_unread: FetchEvent[]
   pending_balls: PendingBall[]
   pending_balls_summary: PendingBallSummary
@@ -4487,6 +4492,13 @@ export type FetchRow = {
   sender_authority?: SenderAuthority | null
   /** Daemon session that inserted this message. It is stable even after that session leaves. */
   session_id?: string | null
+  /**
+   * 29327 -- the request id this row opened a ball with, null when the row
+   * never tracked one (an anonymous or untracked direct actionable). It is the
+   * only column that distinguishes "this row's ball has closed" from "this row
+   * never had a ball", which is why the settled label keys on it.
+   */
+  request?: string | null
 }
 
 export type FetchEvent = {
@@ -4528,9 +4540,48 @@ export type FetchEvent = {
    * send time. Absent on ambient window rows, which are new by construction.
    */
   replay?: boolean
+  /** 29327 - present only when this row's ball has closed: the row stays
+   *  presented (never dropped silently) and says so instead of reading as
+   *  owed work. Absent on a row whose ball is still open, and on a row that
+   *  never had one. */
+  settled?: true
+  /** Who closed it and when, from the durable settlement fact; see
+   *  AttentionSettlement. */
+  settled_by?: string
+  settled_at?: string
+  by_another_owner?: true
+  /**
+   * 29327 — the daemon's verdict for this row's ball, present on EVERY row an
+   * ids read (`fetch --ids`) returns. That read is the ag host's PRE-DRAIN
+   * settlement read, so the four answers are always explicit: `open` owns a
+   * ball, `settled`'s ball has closed (naming it above when the fact survives),
+   * `untracked` never opened one, and `undecided` is what a stopped or failed
+   * lookup answers for EVERY row of its batch. A consumer must never read a
+   * MISSING label as a state — absent means this read did not answer for that
+   * row, which is the shape that once let settled work read as owed.
+   */
+  settlement?: MessageIdSettlementState
 }
 
-export function fetchEvent(row: FetchRow, replay?: boolean): FetchEvent {
+/** 29327 - the settled rendering of one attention row whose ball has closed.
+ *  `settled` is decided by the tracker alone (no `pending_request` row for
+ *  that exact id); the name and time are attached only when the daemon's own
+ *  `event.ball.settled` fact still says so. */
+export type AttentionSettlement = {
+  settled: true
+  /** Who closed it, from the durable settlement fact: the recipient's reply,
+   *  another owner's answer under fanout=first, the emitter's clear, a manual
+   *  close or the pruner. Absent when no fact survives to name them. */
+  settled_by?: string
+  settled_at?: string
+  /** True when the settler is not the ball's own owner (the same reading
+   *  `pendingCloseCause` reports): fanout=first closes the shared request for
+   *  every snapshotted owner, so the row a seat never answered is settled by
+   *  someone else's reply, the emitter's clear or the pruner. */
+  by_another_owner?: true
+}
+
+export function fetchEvent(row: FetchRow, replay?: boolean, settlement?: AttentionSettlement): FetchEvent {
   return {
     id: row.id,
     rowid: row.rowid,
@@ -4549,6 +4600,7 @@ export function fetchEvent(row: FetchRow, replay?: boolean): FetchEvent {
     from_authority: row.sender_authority ?? null,
     from_session_id: row.sender_authority === null ? null : (row.session_id ?? null),
     ...(replay === undefined ? {} : { replay }),
+    ...(settlement === undefined ? {} : settlement),
   }
 }
 
@@ -4588,6 +4640,251 @@ export function readUnackedAttentionRows(ctx: TribeContext, owner: string, upto:
   return readUnackedDirectAttentionRows(ctx, owner, upto, limit)
 }
 
+/** 29327 - how many open balls one attention batch reads before it stops and
+ *  reports the lookup unavailable. `pending_request` holds only OPEN balls (a
+ *  close DELETEs the row), so a seat at this bound is pathological, not busy:
+ *  the bound exists so a presentation never pays an unbounded read, and
+ *  crossing it is REPORTED, never silently read as "owed". */
+export const SETTLEMENT_LOOKUP_BUDGET = 500
+
+type SettlementBatch = {
+  labels: Map<string, AttentionSettlement>
+  /** Present when the batch could not decide every row. A consumer must not
+   *  read an unlabeled request row as owed work when it is set. */
+  unavailable?: { status: "unavailable" | "partial"; budget: number; detail: string }
+}
+
+/** 29327 - one bounded indexed lookup per presentation batch that decides
+ *  "still owed" from the TRACKER ALONE, then names the settler from the
+ *  daemon's own settlement fact when one survives.
+ *
+ *  Only rows carrying a request id are decided: a row that never had a ball is
+ *  ambient and keeps its existing rendering, and a row whose ball is still open
+ *  keeps reading as owed. Everything else is the reported defect -
+ *  `closePendingRequest` DELETEs the tracker row, so the copy that remains in
+ *  `selectAttention`'s untracked branch is a closed ball presented as owed.
+ *
+ *  Nothing here re-derives settlement: the missing tracker row is the ONLY
+ *  authority, and a settlement fact can change the name, never the obligation.
+ *  The settler is read from `event.ball.settled`, the fact the daemon itself
+ *  journals on every close, so no report row becomes a second authority. */
+function settlementBatch(ctx: TribeContext, owner: string, rows: readonly FetchRow[]): SettlementBatch {
+  const labels = new Map<string, AttentionSettlement>()
+  const balled = rows.filter(
+    (row): row is FetchRow & { request: string } => typeof row.request === "string" && row.request.length > 0,
+  )
+  if (balled.length === 0) return { labels }
+  let open: Set<string>
+  try {
+    // 29327 — owner-scoped ON PURPOSE, and provably safe here: selectAttention
+    // returns a row only when it is addressed to $name. Its untracked branch
+    // filters `m.recipient = $name`; its tracked branch filters
+    // `p.recipient = $name` (trackedAttentionPredicateSql). So every row in this
+    // batch is $name-addressed and the ball that answers it belongs to $name.
+    // The read where this was wrong is the fetch-ids one below, whose ids come
+    // from the CLIENT and can name messages addressed to another seat (a
+    // watch-role host): that one keys on the recipients the messages name.
+    const openRows = ctx.stmts.selectOpenBallIdsForRecipient.all({
+      $name: owner,
+      $limit: SETTLEMENT_LOOKUP_BUDGET + 1,
+    }) as Array<{ request_id: string; message_id: string }>
+    if (openRows.length > SETTLEMENT_LOOKUP_BUDGET) {
+      const detail = `${openRows.length} open balls for ${owner} exceed the settlement lookup budget`
+      // 29327 (@cto): this is a FALLBACK, and a fallback without a cause is a
+      // silent error. The batch could not decide every row because the read
+      // stopped at the budget — the caller must never read that absence as
+      // "nothing is owed", and the daemon's own log must say why it happened.
+      log.warn?.(`attention settlement lookup stopped for "${owner}": ${detail}`)
+      return { labels, unavailable: { status: "unavailable", budget: SETTLEMENT_LOOKUP_BUDGET, detail } }
+    }
+    open = new Set<string>()
+    for (const row of openRows) {
+      open.add(row.request_id)
+      open.add(row.message_id)
+    }
+  } catch (error) {
+    const detail = `open-ball read failed: ${error instanceof Error ? error.message : String(error)}`
+    log.warn?.(`attention settlement lookup failed for "${owner}": ${detail}`)
+    return { labels, unavailable: { status: "unavailable", budget: SETTLEMENT_LOOKUP_BUDGET, detail } }
+  }
+  const closed = balled.filter((row) => !open.has(row.id) && !open.has(row.request))
+  for (const row of closed) labels.set(row.id, { settled: true })
+  if (closed.length === 0) return { labels }
+  const naming = closed.slice(0, SETTLEMENT_LOOKUP_BUDGET)
+  let detail =
+    naming.length < closed.length
+      ? `settler naming covered ${naming.length} of ${closed.length} closed balls in this batch`
+      : undefined
+  if (detail !== undefined) log.warn?.(`attention settler naming is partial for "${owner}": ${detail}`)
+  try {
+    const factRows = ctx.stmts.selectSettlementFactsForRequests.all({
+      $request_ids: JSON.stringify(naming.map((row) => row.request)),
+    }) as BallOutcomeFactRow[]
+    for (const factRow of factRows) {
+      const fact = parseBallOutcomeFact(factRow)
+      if (fact.kind !== "settled") continue
+      const previous = labels.get(fact.message_id)
+      if (previous === undefined) continue
+      if (previous.settled_at !== undefined && Date.parse(previous.settled_at) > fact.settled_at) continue
+      labels.set(fact.message_id, {
+        settled: true,
+        settled_by: fact.settled_by,
+        settled_at: new Date(fact.settled_at).toISOString(),
+        ...(fact.settled_by === fact.recipient ? {} : { by_another_owner: true as const }),
+      })
+    }
+  } catch (error) {
+    detail = `settlement naming failed: ${error instanceof Error ? error.message : String(error)}`
+    log.warn?.(`attention settler naming failed for "${owner}": ${detail}`)
+  }
+  return detail === undefined
+    ? { labels }
+    : { labels, unavailable: { status: "partial", budget: SETTLEMENT_LOOKUP_BUDGET, detail } }
+}
+
+/** 29327 — the four answers one ids read may give about a message's ball. */
+export type MessageIdSettlementState = "open" | "settled" | "untracked" | "undecided"
+
+/** One row's verdict from an ids read, plus the settler naming that rides the
+ *  SAME durable fact `settlementBatch` reads for the attention projection. */
+export type MessageIdSettlementRead = {
+  settlement: MessageIdSettlementState
+  settled_by?: string
+  settled_at?: string
+  by_another_owner?: true
+}
+
+/** What one ids read answered: a verdict for every row it returns, the ids it
+ *  was asked about and the daemon knows nothing of, and — when it could not
+ *  decide — the bounded cause the caller must render and log. */
+export type MessageIdSettlementBatch = {
+  verdicts: Map<string, MessageIdSettlementRead>
+  unresolved: string[]
+  unavailable?: { status: "unavailable"; budget: number; detail: string }
+}
+
+/**
+ * 29327 (@cto 2026-10-17) — one batched, budgeted verdict for a set of message
+ * ids, for ONE owner: the pre-drain settlement read the ag host makes before it
+ * offers a batch of channel events to a turn.
+ *
+ * `open` / `settled` / `untracked` are decided from the same two durable facts
+ * the attention projection uses, never from a synthesis: `pending_request` holds
+ * every OPEN ball (a close DELETEs the row, so a balled message with no open row
+ * for this owner has closed — the same reading `settlementBatch` reports), and
+ * the daemon's own `event.ball.settled` fact names the settler. `untracked` is
+ * `messages.request` being NULL — the message never opened a ball — and it is
+ * reported EXPLICITLY, because a consumer that inferred state from a missing
+ * label would read an untracked request as owed.
+ *
+ * `undecided` is not a fifth fact: it is what EVERY row of the batch answers
+ * when the read stops at its budget or a query fails, and the caller receives
+ * the cause. Report nothing silently: an id the daemon has no message for lands
+ * in `unresolved` rather than being answered as `untracked`.
+ */
+function settlementReadForMessageIds(
+  ctx: TribeContext,
+  owner: string,
+  messageIds: readonly string[],
+): MessageIdSettlementBatch {
+  const verdicts = new Map<string, MessageIdSettlementRead>()
+  const unresolved: string[] = []
+  if (messageIds.length === 0) return { verdicts, unresolved }
+  const undecidedEverywhere = (detail: string): MessageIdSettlementBatch => {
+    for (const id of messageIds) verdicts.set(id, { settlement: "undecided" })
+    log.warn?.(`attention settlement read could not decide ${messageIds.length} id(s) for "${owner}": ${detail}`)
+    return { verdicts, unresolved, unavailable: { status: "unavailable", budget: SETTLEMENT_LOOKUP_BUDGET, detail } }
+  }
+  const requests = new Map<string, string>()
+  try {
+    const placeholders = messageIds.map(() => "?").join(", ")
+    const rows = ctx.db
+      .prepare(
+        assertSingleStatement(`
+        SELECT id, request
+        FROM messages
+        WHERE id IN (${placeholders})
+          AND kind != 'event'
+      `),
+      )
+      .all(...messageIds) as Array<{ id: string; request: string | null }>
+    for (const row of rows) requests.set(row.id, row.request ?? "")
+  } catch (error) {
+    return undecidedEverywhere(`message-id read failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  for (const id of messageIds) if (!requests.has(id)) unresolved.push(id)
+  try {
+    // 29327 (@cto verdict 2026-10-17, ruling 2, corrected against C1) — decide
+    // owed-ness from the IDS ALONE. Owner-scoping fails for a watch-role adapter
+    // (the ball belongs to the target persona, not to the seat asking), and
+    // recipient-scoping fails for a `*` broadcast, whose ball is opened once per
+    // owner and so never carries `*` as a recipient. The ids are what the batch
+    // is actually asking about; ask the tracker about exactly those.
+    const askedRequestIds = [...new Set([...requests.values()].filter((request) => request !== ""))]
+    const openRows = ctx.stmts.selectOpenBallIdsForMessageIds.all({
+      $request_ids: JSON.stringify(askedRequestIds),
+      $message_ids: JSON.stringify(messageIds),
+      $limit: SETTLEMENT_LOOKUP_BUDGET + 1,
+    }) as Array<{ request_id: string; message_id: string }>
+    if (openRows.length > SETTLEMENT_LOOKUP_BUDGET) {
+      return undecidedEverywhere(
+        `${openRows.length} open balls for the ids in this batch exceed the settlement lookup budget (asked by "${owner}")`,
+      )
+    }
+    const open = new Set<string>()
+    for (const row of openRows) {
+      open.add(row.request_id)
+      open.add(row.message_id)
+    }
+    for (const [id, request] of requests) {
+      if (request === "") verdicts.set(id, { settlement: "untracked" })
+      else if (open.has(id) || open.has(request)) verdicts.set(id, { settlement: "open" })
+      else verdicts.set(id, { settlement: "settled" })
+    }
+    const closedRequests = [...requests.entries()]
+      .filter(([id]) => verdicts.get(id)?.settlement === "settled")
+      .map(([, request]) => request)
+    if (closedRequests.length === 0) return { verdicts, unresolved }
+    const factRows = ctx.stmts.selectSettlementFactsForRequests.all({
+      $request_ids: JSON.stringify(closedRequests),
+    }) as BallOutcomeFactRow[]
+    // 29327 (@cto verdict 2026-10-17, ruling 2, item (a)) — a fact row this batch
+    // cannot use is COUNTED and said out loud at debug, never dropped in silence.
+    // Two ways a row is skipped: it names a message the batch was not asked about
+    // (the read answers only about the ids it was asked about), or a newer fact
+    // already won the row.
+    let offBatchFacts = 0
+    let supersededFacts = 0
+    for (const factRow of factRows) {
+      const fact = parseBallOutcomeFact(factRow)
+      if (fact.kind !== "settled") continue
+      const current = verdicts.get(fact.message_id)
+      if (current === undefined || current.settlement !== "settled") {
+        offBatchFacts += 1
+        continue
+      }
+      if (current.settled_at !== undefined && Date.parse(current.settled_at) > fact.settled_at) {
+        supersededFacts += 1
+        continue
+      }
+      verdicts.set(fact.message_id, {
+        settlement: "settled",
+        settled_by: fact.settled_by,
+        settled_at: new Date(fact.settled_at).toISOString(),
+        ...(fact.settled_by === fact.recipient ? {} : { by_another_owner: true as const }),
+      })
+    }
+    if (offBatchFacts > 0 || supersededFacts > 0) {
+      log.debug?.(
+        `settlement facts skipped for "${owner}": ${offBatchFacts} of ${factRows.length} name a message this batch was not asked about, ${supersededFacts} superseded by a newer fact`,
+      )
+    }
+  } catch (error) {
+    return undecidedEverywhere(`open-ball read failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  return { verdicts, unresolved }
+}
+
 /** One canonical attention projection for fetch and inbox-wait carriage.
  * Untracked direct rows retire on delivery acknowledgement. Every owned
  * tracked actionable remains until its pending owner sends TAKING or settles
@@ -4606,6 +4903,10 @@ export function readAttentionProjection(
 } {
   const params = { $name: owner }
   const attentionRows = filterRowsByTrust(ctx, ctx.stmts.selectAttention.all(params) as FetchRow[])
+  // 29327 - the tracker's own answer for this batch: which of these rows still
+  // own an open ball. A closed ball leaves no tracker row, so what remains is
+  // settled work and must say so rather than reading as owed.
+  const settlement = settlementBatch(ctx, owner, attentionRows)
   // 27346 - what the mailbox cursor has already shown this seat. The tracked
   // branch of selectAttention keeps an untaken ball visible past the cursor on
   // purpose (22203), so a row at or below it is being RE-presented: it must say
@@ -4694,7 +4995,10 @@ export function readAttentionProjection(
     actionableCount,
     attention: {
       ...pruned,
-      actionable_unread: attentionRows.map((row) => fetchEvent(row, row.rowid <= shownThrough)),
+      actionable_unread: attentionRows.map((row) =>
+        fetchEvent(row, row.rowid <= shownThrough, settlement.labels.get(row.id)),
+      ),
+      ...(settlement.unavailable === undefined ? {} : { settlement_lookup: settlement.unavailable }),
       pending_balls: pendingPreview,
       sent_offline_balls: sentPreview,
       sent_offline_balls_summary: {
@@ -4882,6 +5186,10 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
   const to = typeof a.to === "string" && a.to.length > 0 ? a.to : null
   const snapshotFilters = { currentName, since, withPeer, from, to, topics: topics ?? [] }
 
+  // 29327 — an ids read is a SNAPSHOT the caller may ask about specific
+  // messages with, so it is also where the ag host reads the state of the balls
+  // behind the batch it is about to present. One verdict per returned row.
+  let idsSettlement: MessageIdSettlementBatch | undefined
   const ids = normalizeStringArray(a.ids)
   if (a.ids !== undefined && ids === null) {
     return jsonResult({ error: "ids must be an array of strings." })
@@ -4948,6 +5256,9 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
       .map((id) => byId.get(id))
       .filter((r): r is FetchRow => !!r)
       .filter((r) => rowMatchesSnapshotFilters(r, snapshotFilters))
+    // Resolved ids, so an id that names no persisted message is REPORTED
+    // (`settlement_unresolved`) instead of being answered as untracked.
+    idsSettlement = settlementReadForMessageIds(ctx, currentName, lookupIds)
   } else if (withPeer !== null || from !== null || to !== null || since !== null || topicsAreSnapshot) {
     rows = querySnapshotRows(ctx, { ...snapshotFilters, limit })
     shouldAdvance = !topicsAreSnapshot && since !== null && a.advance === true
@@ -5055,8 +5366,28 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
   // `filtered`, so this changes only what the caller sees, never what the read
   // acknowledges.
   const attentionIds = new Set((attention?.actionable_unread ?? []).map((row) => row.id))
-  const events = filtered.filter((row) => !attentionIds.has(row.id)).map((row) => fetchEvent(row))
-  return jsonResult(attention === null ? { events, cursor: outputCursor } : { attention, events, cursor: outputCursor })
+  const events = filtered
+    .filter((row) => !attentionIds.has(row.id))
+    .map((row) => {
+      const event = fetchEvent(row)
+      const ballState = idsSettlement?.verdicts.get(row.id)
+      return ballState === undefined ? event : { ...event, ...ballState }
+    })
+  // 29327 — an ids read answers for the batch as well as for its rows: the
+  // cause when it could not decide, and the ids it knows no message for. Both
+  // are named here rather than silently folded into an absence.
+  const settlementBatch =
+    idsSettlement === undefined
+      ? {}
+      : {
+          ...(idsSettlement.unavailable === undefined ? {} : { settlement_lookup: idsSettlement.unavailable }),
+          ...(idsSettlement.unresolved.length === 0 ? {} : { settlement_unresolved: idsSettlement.unresolved }),
+        }
+  return jsonResult(
+    attention === null
+      ? { events, cursor: outputCursor, ...settlementBatch }
+      : { attention, events, cursor: outputCursor, ...settlementBatch },
+  )
 }
 
 function normalizeStringArray(value: unknown): string[] | null {
