@@ -46,6 +46,38 @@ export type ForeignIdentityTransport = {
   readonly refused_at: string
 }
 
+/**
+ * The daemon keeps ONE record per session: the LAST refusal the register path gave it (29686, @cto ruling 1 of
+ * 6c1953dd). It replaces the foreign-transport-only record, so every kind the register path composes can be read
+ * back instead of only the impersonation case. `claimed` is the name the refused transport presented, which is not
+ * the row's own name when a transport carried another seat's identity.
+ */
+export type RegisterRefusal = {
+  readonly kind: string
+  readonly claimed: string
+  readonly reason?: string
+  readonly launch_id: string | null
+  readonly pid: number
+  readonly refused_at: string
+}
+
+/** The refusal kinds that mean "this transport carried another seat's identity" (24767). The members wire publishes
+ *  exactly these as `foreign_transport`, derived from the record, so a reader of that field sees no change (29686). */
+export const FOREIGN_REFUSAL_KINDS = ["foreign-identity-transport"] as const
+
+/** Derive the members wire's `foreign_transport` view from a last refusal: the same four fields it always had, or
+ *  undefined when the refusal is not a foreign one. */
+export function foreignTransportView(refusal: RegisterRefusal | undefined): ForeignIdentityTransport | undefined {
+  if (refusal === undefined) return undefined
+  if (!(FOREIGN_REFUSAL_KINDS as readonly string[]).includes(refusal.kind)) return undefined
+  return {
+    name: refusal.claimed,
+    launch_id: refusal.launch_id ?? "(no launch)",
+    pid: refusal.pid,
+    refused_at: refusal.refused_at,
+  }
+}
+
 export type SessionAnswerCapability = "observed" | "not-observed"
 
 export type SessionAnswerReason =

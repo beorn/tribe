@@ -163,6 +163,7 @@ describe("29686 — one bounded last-refusal record per session, published on th
   afterEach(() => {
     vi.useRealTimers()
     db.close()
+    // raw-delete-allow: this test's own mkdtempSync scratch directory under tmpdir (29686)
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
