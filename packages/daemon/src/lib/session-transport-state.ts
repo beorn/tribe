@@ -66,16 +66,16 @@ export type RegisterRefusal = {
   readonly refused_at: string
 }
 
-/** The refusal kinds that mean "this transport carried another seat's identity" (24767), RE-EXPORTED from the wire
+/** The refusal kinds that mean "this transport carried another seat's identity" (24767), IMPORTED from the wire
  *  (`tribe-wire/lib/foreign-refusal-kinds`) since @cto's R3 ruling of 29686: agent-rig's WATCH keys its bridge verdict
- *  on the same set and had been reading a COPY of it, so the set now has one owner and both sides import it. The
+ *  on the same set and had been reading a COPY of it, so the set now has one owner and both sides import it. @cto's R4
+ *  ruling removed the re-export that stood here, because nothing imported the name from this module: a second door to
+ *  one set is a second place to drift from it, so this file only reads the wire's set. The
  *  members wire publishes exactly these as `foreign_transport`, derived from the record, so the reader still gets the
  *  four fields it always had. WHAT DID CHANGE is one field's SPELLING, named rather than left to be discovered (@cto's
  *  Should item): `launch_id` is the record's, every refusal site now records a unit instance id (`<sid>@<gen>`, through
  *  `provenInstanceId`) or null, and the view below therefore publishes either that instance or the literal `(no launch)`
  *  — never the bare sid a pre-29686 row carried. */
-export { FOREIGN_REFUSAL_KINDS }
-
 /** Derive the members wire's `foreign_transport` view from a last refusal: the same four fields it always had, or
  *  undefined when the refusal is not a foreign one. */
 export function foreignTransportView(refusal: RegisterRefusal | undefined): ForeignIdentityTransport | undefined {

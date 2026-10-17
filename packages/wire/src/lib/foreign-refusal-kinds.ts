@@ -1,10 +1,15 @@
 /**
- * Register-refusal kinds, and the TWO questions they answer. They live in the wire because two sides read them: the
- * daemon's transport projection and agent-rig's WATCH bridge classifier.
+ * Register-refusal kinds, and the ONE question this module answers: which refusals mean "this transport carried ANOTHER
+ * seat's identity". They live in the wire because two sides read them: the daemon's transport projection and
+ * agent-rig's WATCH bridge classifier.
  *
- * This file exists because the two answers are NOT one question, and the estate had drifted into exactly the shape that
- * hides a difference: one set was copied between the sides (a copy drifts silently) while the other was written inline
- * where nobody would compare it (@cto's R3 blocking item 1 of 29686).
+ * This file exists because the estate had drifted into exactly the shape that hides a difference: the set was copied
+ * between the sides (a copy drifts silently) while the other question — which refusals a RETRY cannot change — was
+ * written inline where nobody would compare it (@cto's R3 blocking item 1 of 29686).
+ *
+ * @cto's R4 ruling on that item keeps this module to the ONE set he approved. The unretryable set is NOT here: it is
+ * derived in its only consumer, the wire's stdio adapter, from this one plus the single kind that concerns the
+ * connector's own identity.
  */
 
 /**
@@ -14,22 +19,10 @@
  * name mismatch keeps `identity-name-mismatch`, the kind that recorded the view against the presented name before 29686,
  * so dropping it from this set would silently stop a name mismatch publishing `foreign_transport`.
  *
- * Neither kind proves WHOSE connector was refused. A refusal lands on the row the presented name belongs to, with no
- * live-holder proof, so a seat's own relaunch presenting its name with a foreign token is refused on its own connector
- * (@cto's correction to his own 1fcb6a7a premise).
+ * Neither kind proves WHOSE connector was refused. "No live-holder proof" holds for the name-mismatch writer, which
+ * files the record on the row the presented name belongs to; the managed-inbox writer records
+ * `foreign-identity-transport` on the row whose LAUNCH id was presented, and the fence and precedence writers target the
+ * live holder. So a seat's own relaunch presenting its name with a foreign token can be refused on its OWN connector
+ * (@cto's correction to his own 1fcb6a7a premise; the per-writer split is his R4 item 2).
  */
 export const FOREIGN_REFUSAL_KINDS = ["foreign-identity-transport", "identity-name-mismatch"] as const
-
-/**
- * A different question with a different answer: the register refusals a RETRY cannot change, because the identity this
- * connector presented is itself what the daemon refused, so every tool call would be refused the same way.
- *
- * It adds `identity-contradicted` — the verifier contradicting the token it was shown — which FOREIGN_REFUSAL_KINDS must
- * NOT carry. That set answers whose identity was carried, and a contradicted token is a fault in this connector's OWN
- * identity, not another seat's; a verifier FAULT is in neither set, because it may clear and is worth retrying.
- */
-export const UNRETRYABLE_REGISTER_REFUSAL_KINDS = [
-  "foreign-identity-transport",
-  "identity-contradicted",
-  "identity-name-mismatch",
-] as const

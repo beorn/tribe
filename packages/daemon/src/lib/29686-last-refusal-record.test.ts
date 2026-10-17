@@ -24,19 +24,9 @@ import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { logSessionLeft } from "./messaging.ts"
 import { parseExpectedMembers, type DeclaredRoster } from "./membership-declared-roster.ts"
 import { type RegisterRefusal } from "./session-transport-state.ts"
-import { FOREIGN_REFUSAL_KINDS } from "./session-transport-state.ts"
-import { FOREIGN_REFUSAL_KINDS as WIRE_FOREIGN_REFUSAL_KINDS } from "tribe-wire/lib/foreign-refusal-kinds"
 import { registerSession } from "./session.ts"
 
 const PROJECT_ID = "29686-last-refusal-record"
-
-describe("29686 the foreign-refusal set has one owner", () => {
-  it("re-exports the WIRE's array rather than a copy of it (@cto's R3 blocking item 1)", () => {
-    // `toBe` is identity, not deep equality: a re-declared literal of the same two strings fails here, which is exactly
-    // the drift this item exists to end — agent-rig's WATCH had been reading a copy of this set.
-    expect(FOREIGN_REFUSAL_KINDS).toBe(WIRE_FOREIGN_REFUSAL_KINDS)
-  })
-})
 
 /** Every kind the register path composes, each with the site that composes it (@cto's Should item: the list and its
  *  citations both moved with the combined REVISE, and the three kinds it had never named are here now. Every cite was

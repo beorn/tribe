@@ -60,7 +60,7 @@ import { isExplicitTribePersonaName, isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } 
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
-import { UNRETRYABLE_REGISTER_REFUSAL_KINDS } from "./lib/foreign-refusal-kinds.ts"
+import { FOREIGN_REFUSAL_KINDS } from "./lib/foreign-refusal-kinds.ts"
 import {
   createConnectReplayGate,
   createDeliveryCounter,
@@ -587,18 +587,30 @@ function isManagedPersonaRegistrationConflict(err: unknown): boolean {
  * config baked the other identity into this connector's env). Retrying cannot
  * change who this connector claims to be, so every tool call answers with the
  * refusal at once instead of waiting on a registration that will not come.
+ *
+ * 29686 (@cto's R4 nits): the NAME follows the set it is filled from. This holds every refusal
+ * `isUnretryableRegisterRefusal` accepts, so it carries a contradicted token — a fault in this connector's OWN
+ * identity — as well as the foreign kinds; `foreignIdentityRefusal` claimed the foreign half alone.
  */
-let foreignIdentityRefusal: string | null = null
+let unretryableRegisterRefusal: string | null = null
+
+/**
+ * 29686 (@cto's R4 ruling on item 1): this set is NOT the daemon's foreign classification, and it is NOT published —
+ * it is derived here, in the wire's stdio adapter, its only consumer, from the wire's one approved owner. It answers a
+ * different question: the register refusals a RETRY cannot change, because the identity this connector presented is
+ * itself what the daemon refused, so every tool call would be refused the same way. It adds `identity-contradicted` —
+ * the verifier contradicting the token it was shown — which FOREIGN_REFUSAL_KINDS must NOT carry: that set answers whose
+ * identity was carried, and a contradicted token is a fault in this connector's OWN identity, not another seat's; a
+ * verifier FAULT is in neither set, because it may clear and is worth retrying.
+ */
+const UNRETRYABLE_REGISTER_REFUSAL_KINDS: readonly string[] = [...FOREIGN_REFUSAL_KINDS, "identity-contradicted"]
 
 function isUnretryableRegisterRefusal(err: unknown): boolean {
   const data = (err as { data?: unknown } | null)?.data
   // 25074 3b — a token the daemon's verifier contradicts, or one naming another actor, is refused the same way:
   // retrying cannot change what the token proves. A verifier fault is not here; it may clear, so it retries.
   const kind = typeof data === "object" && data !== null ? (data as { kind?: unknown }).kind : undefined
-  // 29686 (@cto R3 blocking item 1): this set is NOT the daemon's foreign classification — it adds
-  // `identity-contradicted`, a fault in this connector's OWN identity — so it is a distinctly named set in
-  // tribe-wire/lib/foreign-refusal-kinds rather than three literals that read like a copy of that one.
-  return typeof kind === "string" && (UNRETRYABLE_REGISTER_REFUSAL_KINDS as readonly string[]).includes(kind)
+  return typeof kind === "string" && UNRETRYABLE_REGISTER_REFUSAL_KINDS.includes(kind)
 }
 
 let fatalRegistrationRefusal: string | null = null
@@ -899,9 +911,9 @@ function startDaemonConnection(): Promise<DaemonClient> {
           setRequiredMcpTransportHealth("closed", errorMessage(err))
         }
         if (isUnretryableRegisterRefusal(err)) {
-          foreignIdentityRefusal = errorMessage(err)
-          log.warn?.(foreignIdentityRefusal)
-          setRequiredMcpTransportHealth("closed", foreignIdentityRefusal)
+          unretryableRegisterRefusal = errorMessage(err)
+          log.warn?.(unretryableRegisterRefusal)
+          setRequiredMcpTransportHealth("closed", unretryableRegisterRefusal)
         }
         throw err
       }
@@ -917,7 +929,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
       registeredDaemonPid = nextDaemonPid
       hasRegistered = true
       protocolMismatchReason = null
-      foreignIdentityRefusal = null
+      unretryableRegisterRefusal = null
       managedRegistrationConflicts = 0
       setRequiredMcpTransportHealth("live", "registered with tribe daemon")
       reconnectWatchdog.markConnected()
@@ -1261,8 +1273,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
       }
     }
-    if (foreignIdentityRefusal !== null) {
-      return { content: [{ type: "text", text: foreignIdentityRefusal }], isError: true }
+    if (unretryableRegisterRefusal !== null) {
+      return { content: [{ type: "text", text: unretryableRegisterRefusal }], isError: true }
     }
     // Degraded: an earlier connect failed. Before reporting either managed
     // transport health or solo mode, self-heal — the daemon may be up now.
