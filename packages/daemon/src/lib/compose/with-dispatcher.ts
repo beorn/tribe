@@ -87,7 +87,7 @@ import {
   sendMessage,
 } from "../messaging.ts"
 import { registerSession, NameConflictError, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
-import { readProcessStartTime } from "../session-transport-state.ts"
+import { foreignTransportView, readProcessStartTime } from "../session-transport-state.ts"
 import {
   adoptByPidCwd,
   adoptIdentity,
@@ -965,11 +965,11 @@ export function withDispatcher<
           const exact = rightful.filter((row) => row.launch_id === launchId)
           const target = exact.length === 1 ? exact[0] : rightful.length === 1 ? rightful[0] : undefined
           if (target !== undefined && (claimedSid !== verifiedSid || target.name !== verified.verdict.actor)) {
-            registry.recordForeignIdentityTransport(target.id, {
-              name: verified.verdict.actor,
+            recordRegisterRefusal(target.id, {
+              kind: "foreign-identity-transport",
+              claimed: verified.verdict.actor,
               launch_id: verifiedSid,
               pid: clients.get(connId)?.pid ?? 0,
-              refused_at: new Date().toISOString(),
             })
           }
         }
@@ -1220,7 +1220,10 @@ export function withDispatcher<
       getActiveSessionIds: () => registry.getActiveSessionIds(),
       hasActiveTransport: (sessionId: string) => registry.hasActiveTransport(sessionId),
       getActiveSessionInfo: () => registry.getActiveSessionInfo(),
-      getForeignIdentityTransport: (sessionId: string) => registry.getForeignIdentityTransport(sessionId),
+      // 29686 (@cto ruling 1): the store holds the last register refusal, and the wire's `foreign_transport` is
+      // DERIVED from it, so a reader of that field sees exactly the shape it saw before this change.
+      getLastRefusal: (sessionId: string) => registry.getRegisterRefusal(sessionId),
+      getForeignIdentityTransport: (sessionId: string) => foreignTransportView(registry.getRegisterRefusal(sessionId)),
       getLifecycleStore: () => lifecycleStore,
       inboxWait,
       notifyWakeupForReplay,
@@ -1301,7 +1304,9 @@ export function withDispatcher<
       throw new NameConflictError(name, connectedNames, holder.pid || null)
     }
 
-    type RegistrationRefusal = { readonly message: string; readonly data: Record<string, unknown> }
+    /** 29686 (@cto ruling 2): every register refusal names its KIND, because the one write path stores that kind as
+     *  the last refusal's `kind` on the presented name's newest row. */
+    type RegistrationRefusal = { readonly message: string; readonly data: { kind: string } & Record<string, unknown> }
     type PersonaTokenDefect = "missing" | "malformed" | "absent"
 
     function missingPersonaTokenRefusal(claimed: string, reason: PersonaTokenDefect, action: string) {
@@ -1427,6 +1432,57 @@ export function withDispatcher<
     function findSamePidNameHolder(name: string, clientPid: number, connId: string): ClientSession | null {
       if (!clientPid || clientPid <= 0) return null
       return Array.from(clients.values()).find((c) => c.id !== connId && c.name === name && c.pid === clientPid) ?? null
+    }
+
+    /** The newest non-tombstoned durable row a presented name belongs to: 29686 (@cto ruling 5) keeps the key the
+     *  impersonation record has always used, the claimed name as presented, never the transport. */
+    function newestDurableRowId(claimed: string): string | undefined {
+      const rows = db
+        .prepare("SELECT id, name FROM sessions WHERE name = $name ORDER BY updated_at DESC")
+        .all({ $name: claimed }) as Array<{ id: string; name: string }>
+      return rows.find((row) => !isTombstonedSessionName(row.name))?.id
+    }
+
+    /** The daemon's single record, written: one entry per session, the newest refusal replacing the previous one
+     *  (@cto ruling 1). A foreign refusal is recorded against the seat whose authority was carried (ruling 5). */
+    function recordRegisterRefusal(
+      targetId: string | undefined,
+      refusal: { kind: string; claimed: string; reason?: string; launch_id: string | null; pid: number },
+    ): void {
+      if (targetId === undefined) return
+      registry.recordRegisterRefusal(targetId, {
+        kind: refusal.kind,
+        claimed: refusal.claimed,
+        ...(refusal.reason === undefined ? {} : { reason: refusal.reason }),
+        launch_id: refusal.launch_id,
+        pid: refusal.pid,
+        refused_at: new Date().toISOString(),
+      })
+    }
+
+    /** 29686 (@cto ruling 2): ONE write path for the register path's refusals. It resolves the row the presented
+     *  name belongs to, records the last refusal there, then returns the error, so a register refusal cannot reach
+     *  a caller without leaving the record a reader needs. For an impersonation the recorded `claimed` is the
+     *  identity the refused transport presented, which is what `foreign_transport.name` has always published. */
+    function refuseRegister(
+      id: number | string,
+      presented: string,
+      refusal: { message: string; data: { kind: string } & Record<string, unknown> },
+      identity: { target?: string | undefined; launch_id?: string | null; pid?: number } = {},
+    ): string {
+      const reason = typeof refusal.data.reason === "string" ? refusal.data.reason : undefined
+      const foreignActor =
+        refusal.data.kind === "identity-name-mismatch" && typeof refusal.data.actor === "string"
+          ? refusal.data.actor
+          : undefined
+      recordRegisterRefusal(identity.target ?? newestDurableRowId(presented), {
+        kind: refusal.data.kind,
+        claimed: foreignActor ?? presented,
+        ...(reason === undefined ? {} : { reason }),
+        launch_id: identity.launch_id ?? null,
+        pid: identity.pid ?? 0,
+      })
+      return makeError(id, -32003, refusal.message, refusal.data)
     }
 
     type LaunchIdentity = { id: string; parentPid: number }
@@ -1791,22 +1847,13 @@ export function withDispatcher<
               log.warn?.(identity.refusal.message)
               // A transport carrying seat B's token as seat A is a foreign transport on A (24767): A's owner reads
               // the roster, not this log, so A's newest session row carries it (@cto eabd0565, kept through 3d-3).
-              if (identity.refusal.data.kind === "identity-name-mismatch" && typeof p.name === "string") {
-                const rightful = (
-                  db
-                    .prepare("SELECT id, name FROM sessions WHERE name = $name ORDER BY updated_at DESC")
-                    .all({ $name: p.name }) as Array<{ id: string; name: string }>
-                ).find((row) => !isTombstonedSessionName(row.name))
-                if (rightful !== undefined) {
-                  registry.recordForeignIdentityTransport(rightful.id, {
-                    name: String(identity.refusal.data.actor),
-                    launch_id: typeof p.launchId === "string" ? p.launchId : "(no launch)",
-                    pid: Number(p.pid ?? 0),
-                    refused_at: new Date().toISOString(),
-                  })
-                }
-              }
-              return makeError(id, -32003, identity.refusal.message, identity.refusal.data)
+              // 29686 (@cto ruling 2): every kind, the impersonation case included, now leaves through the one
+              // write path. The impersonation record lands on the presented name's newest durable row and carries
+              // the impersonating identity as `claimed`, so `foreign_transport` derives exactly as it always did.
+              return refuseRegister(id, typeof p.name === "string" ? p.name : "(no name)", identity.refusal, {
+                launch_id: typeof p.launchId === "string" ? p.launchId : null,
+                pid: Number(p.pid ?? 0),
+              })
             }
             const verifiedSid = identity.sid
             const verifiedGen = identity.gen
@@ -1825,12 +1872,15 @@ export function withDispatcher<
                 `register refused: ${String(p.name)}'s token verifies as sid ${verifiedSid}, ` +
                 `but it was sent with launch ${String(p.launchId)}, which belongs to another launch`
               log.warn?.(message)
-              return makeError(id, -32003, message, {
-                kind: "identity-mismatch",
-                claimed: p.name,
-                launch_id: String(p.launchId),
-                sid: verifiedSid,
-              })
+              return refuseRegister(
+                id,
+                typeof p.name === "string" ? p.name : "(no name)",
+                {
+                  message,
+                  data: { kind: "identity-mismatch", claimed: p.name, launch_id: String(p.launchId), sid: verifiedSid },
+                },
+                { launch_id: String(p.launchId) },
+              )
             }
             const tokenKeyed = verifiedSid !== null && (verifiedGen !== null || !hasLaunchId)
             if (tokenKeyed && verifiedGen === null) {
@@ -1838,7 +1888,10 @@ export function withDispatcher<
                 `register refused: ${String(p.name)}'s token verified, but the verifier verdict carries no gen; ` +
                 "the daemon cannot key this session without a launch id"
               log.warn?.(message)
-              return makeError(id, -32003, message, { kind: "identity-verdict-without-gen", claimed: p.name })
+              return refuseRegister(id, typeof p.name === "string" ? p.name : "(no name)", {
+                message,
+                data: { kind: "identity-verdict-without-gen", claimed: p.name },
+              })
             }
             if (tokenKeyed ? !hasLaunchParentPid : hasLaunchId !== hasLaunchParentPid) {
               return makeError(
@@ -1997,7 +2050,7 @@ export function withDispatcher<
             // adoption. Judge the effective name before any row is reused.
             if (hooks.identityVerifier && identity.personaTokenDefect && isExplicitTribePersonaName(resolvedName)) {
               const refusal = missingPersonaTokenRefusal(resolvedName, identity.personaTokenDefect, "register")
-              return makeError(id, -32003, refusal.message, refusal.data)
+              return refuseRegister(id, resolvedName, refusal)
             }
             // Class belongs to the resolved identity, not the optional caller
             // name. PID/cwd adoption and persisted renames must not turn an
@@ -2026,11 +2079,12 @@ export function withDispatcher<
                   hasLaunchAuthority(prior),
               )
               if (!authorized) {
-                return makeError(
-                  id,
-                  -32003,
-                  `launch authority for ${resolvedName} is unavailable; its service owner is disconnected or the current launch tuple was not supplied`,
-                )
+                return refuseRegister(id, resolvedName, {
+                  message:
+                    `launch authority for ${resolvedName} is unavailable; its service owner is disconnected or ` +
+                    "the current launch tuple was not supplied",
+                  data: { kind: "launch-authority-unavailable", reason: "owner-transport-disconnected" },
+                })
               }
             }
             const launchFanIn = findLaunchFanIn(
@@ -2230,11 +2284,14 @@ export function withDispatcher<
                     }
                   }
                 }
-                return makeError(id, -32003, `register refused: ${summary}`, {
-                  kind: "verified-duplicate-join",
-                  reason: proofGap ?? "incumbent-yield-pending",
-                  incumbentGeneration: held.gen,
-                  successorGeneration: verifiedGen,
+                return refuseRegister(id, resolvedName, {
+                  message: `register refused: ${summary}`,
+                  data: {
+                    kind: "verified-duplicate-join",
+                    reason: proofGap ?? "incumbent-yield-pending",
+                    incumbentGeneration: held.gen,
+                    successorGeneration: verifiedGen,
+                  },
                 })
               }
             }
@@ -2267,43 +2324,47 @@ export function withDispatcher<
                 verifiedGen <= held.gen
               ) {
                 const stale = verifiedGen < held.gen
-                registry.recordForeignIdentityTransport(holder.ctx.sessionId, {
-                  name: resolvedName,
-                  launch_id: launchIdentity?.id ?? "(no launch)",
-                  pid: clientPid,
-                  refused_at: new Date().toISOString(),
-                })
                 const message = stale
                   ? `register refused: ${resolvedName} generation ${verifiedGen} is older than the live ` +
                     `holder's generation ${held.gen} (pid ${holder.pid}); a stale instance never displaces its successor`
                   : `register refused: ${resolvedName} generation ${verifiedGen} is already held by a live instance ` +
                     `(pid ${holder.pid}) under another launch parent`
                 log.warn?.(message)
-                return makeError(id, -32003, message, {
-                  kind: "foreign-identity-transport",
-                  reason: stale ? "identity-generation-stale" : "identity-generation-duplicate",
-                  transport: { name: resolvedName, gen: verifiedGen },
-                  holder: { name: holder.name, gen: held.gen },
-                })
+                return refuseRegister(
+                  id,
+                  resolvedName,
+                  {
+                    message,
+                    data: {
+                      kind: "foreign-identity-transport",
+                      reason: stale ? "identity-generation-stale" : "identity-generation-duplicate",
+                      transport: { name: resolvedName, gen: verifiedGen },
+                      holder: { name: holder.name, gen: held.gen },
+                    },
+                  },
+                  { target: holder.ctx.sessionId, launch_id: launchIdentity?.id ?? null, pid: clientPid },
+                )
               }
               if (displacementRule(holderAuthority, claimantAuthority) === "allowed") return null
-              registry.recordForeignIdentityTransport(holder.ctx.sessionId, {
-                name: resolvedName,
-                launch_id: launchIdentity?.id ?? "(no launch)",
-                pid: clientPid,
-                refused_at: new Date().toISOString(),
-              })
               const message =
                 `register refused: this transport claims ${resolvedName} with ${claimantAuthority} authority, ` +
                 `but a live ${holderAuthority} session holds it (pid ${holder.pid}), and it never displaces a live ` +
                 "session that outranks it; start this transport from the seat's own managed launch."
               log.warn?.(message)
-              return makeError(id, -32003, message, {
-                kind: "foreign-identity-transport",
-                reason: "identity-precedence",
-                transport: { name: resolvedName, authority: claimantAuthority },
-                holder: { name: holder.name, authority: holderAuthority },
-              })
+              return refuseRegister(
+                id,
+                resolvedName,
+                {
+                  message,
+                  data: {
+                    kind: "foreign-identity-transport",
+                    reason: "identity-precedence",
+                    transport: { name: resolvedName, authority: claimantAuthority },
+                    holder: { name: holder.name, authority: holderAuthority },
+                  },
+                },
+                { target: holder.ctx.sessionId, launch_id: launchIdentity?.id ?? null, pid: clientPid },
+              )
             }
             if (claimantAuthority === "verified") {
               for (const holder of Array.from(clients.values())) {
@@ -3148,7 +3209,7 @@ export function withDispatcher<
                     registry.getActiveSessionIds(),
                     registry.getActiveSessionInfo(),
                     { stmts, hasLiveWaiter: inboxWait.hasLiveWaiter },
-                    registry.getForeignIdentityTransport(target.sessionRow.id),
+                    foreignTransportView(registry.getRegisterRefusal(target.sessionRow.id)),
                   ).evidence
             // Round-trip the daemon-authoritative launch tuple so a managed
             // one-shot CLI can register its send connection under the SAME
