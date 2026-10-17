@@ -18,10 +18,11 @@
 
 import { existsSync, readFileSync } from "node:fs"
 import { parseProcStatLine } from "tribe-wire/lib/process-parent"
-// The refusal kinds that mean "this transport carried another seat's identity" (24767) are IMPORTED from the wire
-// (`tribe-wire/lib/foreign-refusal-kinds`), never re-exported (@cto's R3 and R4 rulings of 29686): agent-rig's WATCH
-// keys its bridge verdict on the same set and had been reading a COPY of it, so the set has one owner and both sides
-// import it — a second door to one set is a second place to drift from it, so this file only reads the wire's set. The
+// The refusal kinds the daemon CLASSIFIES as foreign (24767) are IMPORTED from the wire
+// (`tribe-wire/lib/foreign-refusal-kinds`), never re-exported: the label is the daemon's own classification of the KIND
+// and never says whose connector was refused. agent-rig's WATCH keys its bridge verdict on the same set and had been
+// reading a COPY of it, so the set has one owner and both sides import it — a second door to one set is a second place
+// to drift from it, so this file only reads the wire's set. The
 // wire publishes these kinds as `foreign_transport` derived from the record, so a reader still gets the same four
 // fields. What DID change is one field's SPELLING, named rather than left to be discovered: `launch_id` is the record's,
 // every refusal site now records a unit instance id (`<sid>@<gen>`, through `provenInstanceId`) or null, and

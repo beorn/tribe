@@ -201,6 +201,7 @@ describe("membership projection: a finished launch is history, not a degraded me
           name: "@agent/10",
           launch_id: "launch-10",
           launch_parent_pid: 10010,
+          last_refusal: null,
           state: "missing-transport",
         },
       ],
@@ -256,6 +257,7 @@ describe("membership projection: a finished launch is history, not a degraded me
           name: "@agent/11",
           launch_id: "launch-11",
           launch_parent_pid: 11011,
+          last_refusal: null,
           state: "missing-transport",
         },
       ])
@@ -346,6 +348,7 @@ describe("membership projection: a finished launch is history, not a degraded me
           name: "@agent/12-restarted",
           launch_id: "launch-12-new",
           launch_parent_pid: 12013,
+          last_refusal: null,
           state: "missing-transport",
         },
       ])

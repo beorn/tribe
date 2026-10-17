@@ -166,6 +166,7 @@ describe("membership projection: declared-roster membership is a function of a p
             name: "@agent/restart-always",
             launch_id: "launch-exp-1",
             launch_parent_pid: 30001,
+            last_refusal: null,
             state: "exited-not-remounted",
             left_at: new Date(leftAt).toISOString(),
           },
@@ -220,6 +221,7 @@ describe("membership projection: declared-roster membership is a function of a p
           name: "@agent/restart-onfailure",
           launch_id: "launch-exp-2",
           launch_parent_pid: 30002,
+          last_refusal: null,
           state: "missing-transport",
         },
       ])
@@ -716,6 +718,7 @@ describe("membership projection: declared-roster membership is a function of a p
             name: "@agent/nodecl-10",
             launch_id: "launch-nodecl-10",
             launch_parent_pid: 40010,
+            last_refusal: null,
             state: "missing-transport",
           },
         ],

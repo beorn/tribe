@@ -588,20 +588,21 @@ function isManagedPersonaRegistrationConflict(err: unknown): boolean {
  * change who this connector claims to be, so every tool call answers with the
  * refusal at once instead of waiting on a registration that will not come.
  *
- * 29686 (@cto's R4 nits): the NAME follows the set it is filled from. This holds every refusal
+ * 29686: the NAME follows the set it is filled from. This holds every refusal
  * `isUnretryableRegisterRefusal` accepts, so it carries a contradicted token — a fault in this connector's OWN
  * identity — as well as the foreign kinds; `foreignIdentityRefusal` claimed the foreign half alone.
  */
 let unretryableRegisterRefusal: string | null = null
 
 /**
- * 29686 (@cto's R4 ruling on item 1): this set is NOT the daemon's foreign classification, and it is NOT published —
- * it is derived here, in the wire's stdio adapter, its only consumer, from the wire's one approved owner. It answers a
- * different question: the register refusals a RETRY cannot change, because the identity this connector presented is
- * itself what the daemon refused, so every tool call would be refused the same way. It adds `identity-contradicted` —
- * the verifier contradicting the token it was shown — which FOREIGN_REFUSAL_KINDS must NOT carry: that set answers whose
- * identity was carried, and a contradicted token is a fault in this connector's OWN identity, not another seat's; a
- * verifier FAULT is in neither set, because it may clear and is worth retrying.
+ * 29686: this set is NOT the daemon's foreign classification, and it is NOT published — it is derived here, in the
+ * wire's stdio adapter, its only consumer, from the wire's one owner (`FOREIGN_REFUSAL_KINDS`). It answers a different
+ * question: the register refusals a RETRY cannot change, because the identity this connector presented is itself what
+ * the daemon refused, so every tool call would be refused the same way. It adds `identity-contradicted` — the verifier
+ * contradicting the token it was shown — which FOREIGN_REFUSAL_KINDS must NOT carry: that set is the daemon's
+ * classification of the kinds it files as foreign, and it says nothing about whose identity was carried, while a
+ * contradicted token is a fault in this connector's OWN identity, not another seat's. A verifier FAULT is in neither
+ * set, because it may clear and is worth retrying.
  */
 const UNRETRYABLE_REGISTER_REFUSAL_KINDS: readonly string[] = [...FOREIGN_REFUSAL_KINDS, "identity-contradicted"]
 
