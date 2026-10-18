@@ -222,8 +222,7 @@ export function createInboxWaitManager(
     if (info.kind === "event") return
     for (const waiter of Array.from(waiters)) {
       const directForWaiter = info.kind === "direct" && waiter.session === info.recipient
-      const trackedBroadcastForWaiter =
-        info.kind === "broadcast" && info.pendingOwners?.includes(waiter.session) === true
+      const trackedBroadcastForWaiter = info.pendingOwners?.includes(waiter.session) === true
       if (!directForWaiter && !trackedBroadcastForWaiter) continue
       if (info.rowid <= waiter.baselineSeq) continue
       // SQL excludes quiet incidents even from opt-in correlated replies; match that durable qualification.
@@ -249,7 +248,9 @@ export function createInboxWaitManager(
       // Self-sends are excluded (same filter as getUnreadDms: sender != name).
       // 25662 P3 3: an incident edge wakes the same way (wakePredicateSql is the SQL half of this test).
       if (
-        (info.wakesOwner === true || (ACTIONABLE_TYPES.has(info.type) && info.isIncident !== true)) &&
+        (info.wakesOwner === true ||
+          info.pendingOwners?.includes(waiter.session) === true ||
+          (ACTIONABLE_TYPES.has(info.type) && info.isIncident !== true)) &&
         info.sender !== waiter.session
       ) {
         settle(waiter, { timedOut: false, aborted: false }, info.rowid)

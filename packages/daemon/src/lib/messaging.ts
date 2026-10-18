@@ -821,7 +821,7 @@ export function sendMessage(
     if (resolvedKind === "direct") {
       if (requestId) {
         const openRequest = incidentRequestId === null ? ctx.stmts.openPendingRequest : ctx.stmts.openIncidentRequest
-        openRequest.run({
+        const opened = openRequest.run({
           $request_id: requestId,
           $recipient: ballTracker.owner ?? recipient,
           $sender: sender,
@@ -830,6 +830,12 @@ export function sendMessage(
           $message_id: id,
           $fanout: ballTracker.fanout ?? "first",
         })
+        // 30029: a direct row that actually opens a ball reports its owner through the
+        // same pendingOwners fact broadcasts use, so the wait manager can wake the
+        // owner whatever the row's type. A conflict that opens nothing reports nothing.
+        if (incidentRequestId === null && opened.changes > 0) {
+          openedOwners.push(ballTracker.owner ?? recipient)
+        }
       }
       // Stage 2(d) clearing edge: the watcher reports the condition no longer
       // holds, so the standing obligation ends without an operator verb. This
@@ -933,7 +939,7 @@ export function sendMessage(
     delivery,
     topic: classification.topic ?? null,
     roomId: classification.roomId ?? null,
-    ...(resolvedKind === "broadcast" && requestId !== null ? { pendingOwners: openedOwners } : {}),
+    ...(openedOwners.length > 0 ? { pendingOwners: openedOwners } : {}),
     correlatedReply,
     refBoundOpenRequest,
     wakesOwner: wakesOwner === true,

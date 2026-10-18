@@ -1799,8 +1799,10 @@ function trackedResponseCursorGateSql(ownerParameter: string): string {
       (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ${ownerParameter}), 0))`
 }
 
-const TRACKED_ACTIONABLE_TYPE_SQL = `(COALESCE(m.type, a.type) IN (${ACTIONABLE_TYPES_SQL})
-  OR COALESCE(m.attention_required, a.attention_required) = 1)`
+// 30029: the tracked branch carries no type filter. Pending ownership is the
+// obligation; a row that opened a ball owned by the waiter is attention and a
+// wake whatever its type. The untracked direct branch above keeps its
+// actionable-type/attention_required classification.
 
 /** One attention projection for both a mailbox and the fleet health read. */
 function unreadAttentionSql(recipient: string): string {
@@ -1819,7 +1821,6 @@ function unreadAttentionSql(recipient: string): string {
     ${TRACKED_ATTENTION_MESSAGE_JOIN_SQL}
     WHERE ${trackedAttentionPredicateSql(recipient)}
       AND COALESCE(m.sender, a.sender) != ${recipient}
-      AND ${TRACKED_ACTIONABLE_TYPE_SQL}
   `
 }
 
@@ -2855,8 +2856,7 @@ export function createStatements(db: Database) {
       ${TRACKED_ATTENTION_MESSAGE_JOIN_SQL}
       WHERE ${trackedAttentionPredicateSql()}
         AND COALESCE(m.sender, a.sender) != $name
-        AND ${TRACKED_ACTIONABLE_TYPE_SQL}
-      HAVING COUNT(*) > 0
+        HAVING COUNT(*) > 0
     `),
     ),
 
@@ -2897,8 +2897,7 @@ export function createStatements(db: Database) {
       ${TRACKED_ATTENTION_MESSAGE_JOIN_SQL}
       WHERE ${trackedAttentionPredicateSql()}
         AND COALESCE(m.sender, a.sender) != $name
-        AND ${TRACKED_ACTIONABLE_TYPE_SQL}
-        AND ${TRACKED_ATTENTION_SEQUENCE_SQL} = $seq
+          AND ${TRACKED_ATTENTION_SEQUENCE_SQL} = $seq
         AND COALESCE(m.id, a.id) = $id
       LIMIT 1
     `),
@@ -3254,8 +3253,7 @@ export function createStatements(db: Database) {
         ${TRACKED_ATTENTION_MESSAGE_JOIN_SQL}
         WHERE ${trackedAttentionPredicateSql()}
           AND COALESCE(m.sender, a.sender) != $name
-          AND ${TRACKED_ACTIONABLE_TYPE_SQL}
-      )
+          )
       ORDER BY rowid ASC
     `),
     ),
@@ -3279,8 +3277,7 @@ export function createStatements(db: Database) {
         ${TRACKED_ATTENTION_MESSAGE_JOIN_SQL}
         WHERE ${trackedAttentionPredicateSql()}
           AND COALESCE(m.sender, a.sender) != $name
-          AND ${TRACKED_ACTIONABLE_TYPE_SQL}
-      )
+          )
     `),
     ),
 
