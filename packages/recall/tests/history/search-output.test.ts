@@ -638,6 +638,44 @@ describe("recall search output", () => {
     }
   })
 
+  // @failure Raw JSON omits message UUIDs, making message-level matches unidentifiable.
+  // @level l1
+  // @consumer cmdSearch raw JSON for Claude and Codex message hits
+  test("raw JSON preserves Claude UUID and Codex line identity", async () => {
+    const db = getDb()
+    const now = Date.now()
+    const identities = [
+      { sourceId: "claude-session", uuid: "claude-message-uuid", line: 17 },
+      { sourceId: "codex:session", uuid: null, line: 29 },
+    ]
+    for (const row of identities) {
+      db.prepare(
+        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run(row.sourceId, "/test/km", `/fixture/${row.sourceId}.jsonl`, now, now, 1, row.sourceId)
+      db.prepare(
+        "INSERT INTO messages (uuid, session_id, type, content, timestamp, line) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(row.uuid, row.sourceId, "user", "messageidentityneedle", now, row.line)
+    }
+    setIndexMeta(db, "last_rebuild", new Date().toISOString())
+    const previousExitCode = process.exitCode
+    try {
+      process.exitCode = 0
+      await cmdSearch("messageidentityneedle", { raw: true, json: true, project: "*", since: "1d" })
+      const payload = jsonStdout<{ total: number; results: { sourceId: string; uuid: string | null; line: number }[] }>(
+        logSpy,
+      )
+      expect(process.exitCode).toBe(0)
+      expect(payload.total).toBe(2)
+      expect(
+        payload.results
+          .map(({ sourceId, uuid, line }) => ({ sourceId, uuid, line }))
+          .sort((a, b) => a.sourceId.localeCompare(b.sourceId)),
+      ).toEqual(identities)
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
   test("degraded index provenance preserves useful positive JSON hits", async () => {
     seedMessage("stalepositive evidence remains useful even when freshness is degraded")
     setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
