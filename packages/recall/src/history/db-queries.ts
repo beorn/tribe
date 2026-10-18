@@ -349,6 +349,8 @@ export type MessageSearchHit = MessageRecord & {
   project_path: string
   cwd?: string | null
   rank: number
+  /** uuid-NULL collapse group size under the current key; uuid-bearing rows omit it (no count on the SQL uuid collapse). */
+  collapsedCopyCount?: number
 }
 
 /** Hook mode's account of its candidate search (@ag/tribe/25071 row 2). */
@@ -410,10 +412,14 @@ function sha256Hex(content: string): string {
   return createHash("sha256").update(content).digest("hex")
 }
 
-/** Keep the first ranked uuid-NULL row per (line, content hash); uuid-bearing rows already collapsed in SQL (29964). */
-function collapseNullUuidCopies<T extends { uuid?: string | null; line?: number | null; content?: string | null }>(
-  rows: readonly T[],
-): T[] {
+/** Keep the first ranked uuid-NULL row per content hash; uuid-bearing rows already collapsed in SQL (29964 C2). */
+function collapseNullUuidCopies<T extends { uuid?: string | null; content?: string | null }>(rows: readonly T[]): T[] {
+  const sizes = new Map<string, number>()
+  for (const row of rows) {
+    if (row.uuid != null) continue
+    const key = sha256Hex(row.content ?? "")
+    sizes.set(key, (sizes.get(key) ?? 0) + 1)
+  }
   const seen = new Set<string>()
   const out: T[] = []
   for (const row of rows) {
@@ -421,10 +427,10 @@ function collapseNullUuidCopies<T extends { uuid?: string | null; line?: number 
       out.push(row)
       continue
     }
-    const key = `${String(row.line ?? "")}\0${sha256Hex(row.content ?? "")}`
+    const key = sha256Hex(row.content ?? "")
     if (seen.has(key)) continue
     seen.add(key)
-    out.push(row)
+    out.push({ ...row, collapsedCopyCount: sizes.get(key) ?? 1 })
   }
   return out
 }

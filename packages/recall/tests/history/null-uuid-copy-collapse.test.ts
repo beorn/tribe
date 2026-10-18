@@ -53,6 +53,7 @@ describe("null-uuid copy collapse (29964)", () => {
     const contents = page.results.map((row) => row.content)
     expect(page.total).toBe(11)
     expect(contents.filter((c) => c === COPY)).toHaveLength(1)
+    expect(page.results.find((row) => row.content === COPY)?.collapsedCopyCount).toBe(10)
     expect(contents).toContain(OTHER)
     expect(new Set(page.results.map((row) => `${String(row.line)}\0${snippetHash(row.content)}`)).size).toBeGreaterThan(
       1,
@@ -88,6 +89,14 @@ describe("null-uuid copy collapse (29964)", () => {
     expect(second.capped).toBeUndefined()
     const past = ftsSearchWithSnippet(db, TOKEN, { limit: 1, offset: 2 })
     expect(past.results).toHaveLength(0)
+  })
+
+  test("exact collapses same content at different lines for uuid-NULL rows and names the group size", () => {
+    const db = seedForkCopies(1, [{ content: COPY, line: 9999 }])
+    const page = ftsSearchWithSnippet(db, TOKEN, { limit: 10 })
+    expect(page.total).toBe(2)
+    expect(page.results.filter((row) => row.content === COPY)).toHaveLength(1)
+    expect(page.results[0]?.collapsedCopyCount).toBe(2)
   })
 
   test("exact UUID-only deep pages keep SQL OFFSET and do not inherit the hook 1000 cap", () => {

@@ -162,6 +162,8 @@ export interface RecallSearchResult {
   rank: number
   line?: number | null
   duplicateLine?: number | null
+  /** uuid-NULL collapse group size; null when the SQL uuid collapse has no count to reuse. */
+  collapsedCopyCount?: number | null
 }
 
 // ============================================================================

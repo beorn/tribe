@@ -665,6 +665,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         rank: r.rank / corroborationBoost,
         line: r.line ?? null,
         duplicateLine: (r as { duplicate_line?: number | null }).duplicate_line ?? null,
+        collapsedCopyCount: r.collapsedCopyCount ?? null,
         parentSessionId: r.parent_session_id ?? null,
         agentId: r.agent_id ?? null,
       })
