@@ -86,6 +86,8 @@ describe("null-uuid copy collapse (29964)", () => {
     expect([COPY, OTHER]).toContain(first.results[0]?.content)
     expect([COPY, OTHER]).toContain(second.results[0]?.content)
     expect(second.capped).toBeUndefined()
+    const past = ftsSearchWithSnippet(db, TOKEN, { limit: 1, offset: 2 })
+    expect(past.results).toHaveLength(0)
   })
 
   test("exact UUID-only deep pages keep SQL OFFSET and do not inherit the hook 1000 cap", () => {
