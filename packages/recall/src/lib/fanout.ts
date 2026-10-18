@@ -139,6 +139,7 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
       totalQueries++
       rawHits += res.results.length
       for (const r of res.results) {
+        // 29981: omit collapsedCopyLocations — synonym fanout keys by session; not the --json page.
         ingest(`message:${r.session_id}`, {
           type: "message",
           sessionId: r.session_id,

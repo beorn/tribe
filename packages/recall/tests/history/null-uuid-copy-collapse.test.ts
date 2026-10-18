@@ -1,7 +1,7 @@
 /**
  * @failure recall exact top-N fills with forked-codex copies that share uuid NULL, hiding later distinct hits
  * @level l2
- * @consumer @ag/recall/29964-codex-null-uuid-copies-fill
+ * @consumer @ag/recall/29981-copy-locations
  * @testonly none
  *
  * Specimen class (item-119-lexical): ten forked sessions, same text at the same line, uuid NULL,
@@ -117,5 +117,28 @@ describe("null-uuid copy collapse (29964)", () => {
     const wide = ftsSearchWithSnippet(db, TOKEN, { limit: 1001 })
     expect(wide.results).toHaveLength(1001)
     expect(wide.capped).toBeUndefined()
+  })
+
+  test("survivor lists its own location first, then copies in rank order; count is length", () => {
+    const db = seedForkCopies(3)
+    const page = ftsSearchWithSnippet(db, TOKEN, { limit: 10 })
+    const hit = page.results.find((row) => row.content === COPY)
+    expect(hit?.collapsedCopyLocations).toEqual([
+      { session_id: "codex:parent", line: COPY_LINE },
+      { session_id: "codex:fork-1", line: COPY_LINE },
+      { session_id: "codex:fork-2", line: COPY_LINE },
+    ])
+    expect(hit?.collapsedCopyCount).toBe(hit?.collapsedCopyLocations?.length)
+  })
+
+  test("same content at different lines lists both locations", () => {
+    const db = seedForkCopies(1, [{ content: COPY, line: 9999 }])
+    const page = ftsSearchWithSnippet(db, TOKEN, { limit: 10 })
+    const hit = page.results[0]
+    expect(hit?.collapsedCopyCount).toBe(2)
+    expect(hit?.collapsedCopyLocations).toEqual([
+      { session_id: "codex:parent", line: COPY_LINE },
+      { session_id: "codex:other-0", line: 9999 },
+    ])
   })
 })

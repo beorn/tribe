@@ -15,7 +15,7 @@ import {
   type RecallSearchResult,
   type SynthesisDiagnostics,
 } from "../history/recall"
-import { DEFAULT_SYNTHESIS_TIMEOUT_MS } from "../history/recall-shared.ts"
+import { DEFAULT_SYNTHESIS_TIMEOUT_MS, type RecallSkip } from "../history/recall-shared.ts"
 import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
 import { retrieveCandidates, searchLiveSession } from "../history/search"
@@ -429,6 +429,7 @@ function probeLiteralRawMatches(query: string, base: RecallOptions): { token: st
       },
     })
 
+    // 29981: omit collapsedCopyLocations — literal-raw probe, not the --json page the KPI reads.
     const results: RecallSearchResult[] = [
       ...messageResults.results.map((r) => ({
         type: "message" as const,
@@ -915,11 +916,17 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
       cwd?: string | null
       rank: number
       collapsedCopyCount?: number
+      collapsedCopyLocations?: { session_id: string; line: number | null }[]
     })[]
     total: number
+    capped?: RecallSkip
   } = { results: [], total: 0 }
   if (searchMessages && query) {
-    messageResults = { results: candidates.messages.results, total: candidates.messages.total ?? 0 }
+    messageResults = {
+      results: candidates.messages.results,
+      total: candidates.messages.total ?? 0,
+      capped: "capped" in candidates.messages ? candidates.messages.capped : undefined,
+    }
   } else if (searchMessages && !query) {
     const recentQuery = `
       SELECT m.*, s.project_path, s.cwd,
@@ -1012,7 +1019,8 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         line: r.line ?? null,
         uuid: r.uuid ?? null,
         duplicateLine: (r as { duplicate_line?: number | null }).duplicate_line ?? null,
-        collapsedCopyCount: r.collapsedCopyCount ?? null,
+        collapsedCopyCount: r.collapsedCopyLocations?.length ?? r.collapsedCopyCount ?? null,
+        collapsedCopyLocations: r.collapsedCopyLocations ?? null,
       })),
       ...contentResults.results.map((r) => ({
         contentType: r.content_type,
@@ -1047,6 +1055,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
           total: unprovenEmpty ? null : total,
           durationMs: duration,
           results: unprovenEmpty ? null : allResults,
+          ...(messageResults.capped ? { skipped: [messageResults.capped] } : {}),
           ...(vault !== null && vaultDb !== null
             ? {
                 vaultQuery: {

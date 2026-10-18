@@ -526,6 +526,7 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
 
         // Build minimal results for context
         const sessionTitles = getAllSessionTitles()
+        // 29981: omit collapsedCopyLocations — review-race fakeResults, not the --json page.
         const fakeResults: RecallSearchResult[] = [
           ...msgResults.results.slice(0, 5).map((r) => ({
             type: "message" as ContentType,

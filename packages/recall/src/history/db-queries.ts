@@ -10,7 +10,8 @@ import * as fs from "fs"
 import type { SessionRecord, MessageRecord, ContentType, ContentRecord, SessionIndexEntry } from "./types.ts"
 import { PROJECTS_DIR } from "./db-schema.ts"
 import { HOOK_CANDIDATE_LIMIT } from "./recall-budget.ts"
-import type { HookSearchSummary, RecallSkip, SearchMode } from "./recall-shared.ts"
+import type { CollapsedCopyLocation, HookSearchSummary, RecallSkip, SearchMode } from "./recall-shared.ts"
+export type { CollapsedCopyLocation }
 
 // Assistant rows containing tool_use blocks mix prose with serialized tool
 // inputs. Keep them searchable for --tool and forensic lookup, but prevent a
@@ -349,8 +350,10 @@ export type MessageSearchHit = MessageRecord & {
   project_path: string
   cwd?: string | null
   rank: number
-  /** uuid-NULL collapse group size under the current key; uuid-bearing rows omit it (no count on the SQL uuid collapse). */
+  /** uuid-NULL collapse group size under the current key; uuid-bearing rows omit it (no count on the SQL uuid collapse). Derived as locations.length. */
   collapsedCopyCount?: number
+  /** uuid-NULL copies this survivor stands for, survivor first then rank order (29981). */
+  collapsedCopyLocations?: CollapsedCopyLocation[]
 }
 
 /** Hook mode's account of its candidate search (@ag/tribe/25071 row 2). */
@@ -412,18 +415,21 @@ function sha256Hex(content: string): string {
   return createHash("sha256").update(content).digest("hex")
 }
 
-/** Keep the first ranked uuid-NULL row per content hash; uuid-bearing rows already collapsed in SQL (29964 C2). */
-function collapseNullUuidCopies<T extends { uuid?: string | null; content?: string | null }>(
-  rows: readonly T[],
-): (T & { collapsedCopyCount?: number })[] {
-  const sizes = new Map<string, number>()
+/** Keep the first ranked uuid-NULL row per content hash; uuid-bearing rows already collapsed in SQL (29964 C2). Locations are rank order, survivor first; count is length (29981). */
+function collapseNullUuidCopies<
+  T extends { uuid?: string | null; content?: string | null; session_id?: string; line?: number | null },
+>(rows: readonly T[]): (T & { collapsedCopyCount?: number; collapsedCopyLocations?: CollapsedCopyLocation[] })[] {
+  const groups = new Map<string, CollapsedCopyLocation[]>()
   for (const row of rows) {
     if (row.uuid != null) continue
     const key = sha256Hex(row.content ?? "")
-    sizes.set(key, (sizes.get(key) ?? 0) + 1)
+    const loc: CollapsedCopyLocation = { session_id: row.session_id ?? "", line: row.line ?? null }
+    const list = groups.get(key)
+    if (list) list.push(loc)
+    else groups.set(key, [loc])
   }
   const seen = new Set<string>()
-  const out: (T & { collapsedCopyCount?: number })[] = []
+  const out: (T & { collapsedCopyCount?: number; collapsedCopyLocations?: CollapsedCopyLocation[] })[] = []
   for (const row of rows) {
     if (row.uuid != null) {
       out.push(row)
@@ -432,7 +438,8 @@ function collapseNullUuidCopies<T extends { uuid?: string | null; content?: stri
     const key = sha256Hex(row.content ?? "")
     if (seen.has(key)) continue
     seen.add(key)
-    out.push({ ...row, collapsedCopyCount: sizes.get(key) ?? 1 })
+    const locations = groups.get(key) ?? []
+    out.push({ ...row, collapsedCopyLocations: locations, collapsedCopyCount: locations.length })
   }
   return out
 }
@@ -625,6 +632,7 @@ function hookMessageSearch(
         rank: t.rank,
         snippet: contentSnippet(row.content ?? "", query, snippetTokens),
         collapsedCopyCount: t.collapsedCopyCount,
+        collapsedCopyLocations: t.collapsedCopyLocations,
       })
     }
   }

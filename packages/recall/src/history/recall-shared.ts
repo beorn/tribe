@@ -151,6 +151,12 @@ export interface RecallResult {
   synthesisFailure?: SynthesisDiagnostics
 }
 
+/** One uuid-NULL copy in a content-hash collapse group, in rank order (29981). */
+export type CollapsedCopyLocation = {
+  session_id: string
+  line: number | null
+}
+
 export interface RecallSearchResult {
   type: ContentType
   sessionId: string
@@ -162,8 +168,10 @@ export interface RecallSearchResult {
   rank: number
   line?: number | null
   duplicateLine?: number | null
-  /** uuid-NULL collapse group size; null when the SQL uuid collapse has no count to reuse. */
+  /** uuid-NULL collapse group size; null when the SQL uuid collapse has no count to reuse. Derived as locations.length. */
   collapsedCopyCount?: number | null
+  /** uuid-NULL copies this survivor stands for, survivor first then rank order (29981). */
+  collapsedCopyLocations?: CollapsedCopyLocation[] | null
 }
 
 // ============================================================================

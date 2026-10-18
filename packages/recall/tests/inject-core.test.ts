@@ -56,6 +56,8 @@ function mockRecall(
     snippet: string
     rank?: number
     timestamp?: number
+    collapsedCopyLocations?: { session_id: string; line: number | null }[]
+    collapsedCopyCount?: number
   }>,
   skipped?: Array<{ phase: string; anchor: string; message: string }>,
 ): void {
@@ -887,5 +889,40 @@ describe("Phase 3: call A searches the vault on the anchor, call B the rest on t
     expect(parseInjectedContext(result.additionalContext)[0]?.items[0]?.body).toMatch(
       /^recall: nothing found; searched the vault for "Jev memory system" in \d+ ms, and messages and titles for the prompt in \d+ ms \(25071\)$/,
     )
+  })
+})
+
+describe("runInjectDelta — 29981 locations stay out of injected text", () => {
+  beforeEach(() => {
+    recallMock.mockReset()
+    ensureProjectSourcesIndexedMock.mockReset()
+  })
+
+  test("injected hook text is byte-identical with and without collapsedCopyLocations", async () => {
+    const prompt = "what did we decide about km-storage-sync layering?"
+    const snippet = "A descriptive snippet that is plenty long enough to pass the minimum filter."
+    const base = {
+      sessionId: "sess-abcd1234",
+      sessionTitle: "sess-title",
+      type: "message" as const,
+      snippet,
+    }
+    mockRecall([base])
+    const without = await runInjectDelta(prompt, createMemorySeenStore())
+    mockRecall([
+      {
+        ...base,
+        collapsedCopyLocations: [
+          { session_id: "sess-abcd1234", line: 10 },
+          { session_id: "sess-fork", line: 11 },
+        ],
+        collapsedCopyCount: 2,
+      },
+    ])
+    const withLoc = await runInjectDelta(prompt, createMemorySeenStore())
+    expect(without.skipped).toBe(false)
+    expect(withLoc.skipped).toBe(false)
+    if (without.skipped || withLoc.skipped) throw new Error("expected injected text")
+    expect(withLoc.additionalContext).toBe(without.additionalContext)
   })
 })
