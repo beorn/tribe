@@ -2276,6 +2276,22 @@ describe("reply and taking convenience commands (25028)", () => {
     expect(listed.pending[0]?.expires_at).toBe(expiresAtIso)
   })
 
+  // @failure send-json-empty-on-anonymous-refusal: --anonymous + tracked type + --json exits 2 with empty stdout
+  // @level l2 @consumer tribe send CLI --json
+  test("json --anonymous tracked send fails loud and names the limit", async () => {
+    const error =
+      "tribe.send: invalid options - --anonymous is limited to untracked messages; it cannot be combined with reply/request/incident tracking or request, query, or assign types."
+    const sent = await runMockDaemon(
+      ["send", "@chief", "hello", "--anonymous", "--type", "request", "--json", "--summary", "anon"],
+      {},
+    )
+    expect(sent.code).toBe(2)
+    expect(sent.stderr).toContain("--anonymous is limited to untracked messages")
+    const body = JSON.parse(sent.stdout) as { sent?: boolean; error?: string }
+    expect(body.sent).toBeUndefined()
+    expect(body.error).toBe(error)
+  })
+
   test("tribe taking fails loudly when request id cannot be resolved", async () => {
     const res = await runMockDaemon(["taking", "req-unknown"], { pendingRows: [] })
     expect(res.code).toBe(1)

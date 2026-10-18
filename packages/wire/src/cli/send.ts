@@ -646,9 +646,10 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     type === "query" ||
     type === "assign"
   if (input.anonymous && anonymousWouldTrack) {
-    console.error(
-      "tribe.send: invalid options - --anonymous is limited to untracked messages; it cannot be combined with reply/request/incident tracking or request, query, or assign types.",
-    )
+    const error =
+      "tribe.send: invalid options - --anonymous is limited to untracked messages; it cannot be combined with reply/request/incident tracking or request, query, or assign types."
+    console.error(error)
+    if (input.json) await writeJsonStdout({ error })
     process.exit(2)
   }
   const caller = await resolveSendCaller(input.reply, input.anonymous)
