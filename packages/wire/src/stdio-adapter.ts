@@ -64,11 +64,11 @@ import { defangModelInput } from "./lib/defang.ts"
 import { composeForwardedRowContent } from "./lib/wake-read-directive.ts"
 import { FOREIGN_REFUSAL_KINDS } from "./lib/foreign-refusal-kinds.ts"
 import {
-  createConnectReplayGate,
   createDeliveryCounter,
   createForwardedAttentionTracker,
   decidePendingBallSummary,
   directiveEnvelopeMeta,
+  escapeEnvelopeMeta,
   MAX_REPLAY_EVENTS,
   replayEnvelopeMeta,
   selectReplayEvents,
@@ -284,15 +284,6 @@ if (LAUNCH_READ.malformedToken !== null) {
 }
 const LAUNCH_IDENTITY = LAUNCH_READ.identity
 
-// km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped
-// by selectReplayEvents, but a stale/old daemon that still pushes message BODIES
-// as `channel` notifications bypasses that cap. This gate bounds the post-(re)connect
-// `channel` burst to MAX_REPLAY_EVENTS; dropped rows stay durable + fetchable. Knobs
-// exist for tests (small cap/window → deterministic burst assertions).
-const CHANNEL_REPLAY_MAX = Number(process.env.TRIBE_CHANNEL_REPLAY_MAX) || undefined
-const CHANNEL_REPLAY_WINDOW_MS = Number(process.env.TRIBE_CHANNEL_REPLAY_WINDOW_MS) || undefined
-const connectReplayGate = createConnectReplayGate({ maxEvents: CHANNEL_REPLAY_MAX, windowMs: CHANNEL_REPLAY_WINDOW_MS })
-
 // Worktree-isolation guardrail (km-bearly.tribe-codex-cwd-worktree-guardrail):
 // standalone codex / non-launcher MCP clients inherit the user's invocation
 // cwd. If that cwd is the main repo while a `<basename>-wtN` pool exists,
@@ -364,7 +355,13 @@ function sendChannel(content: string, meta: Record<string, string | undefined>):
   if (!CLAUDE_CHANNEL_ENABLED) return undefined
   if (!mcp) return undefined // Not yet initialized
   const safeContent = defangModelInput(content)
-  return mcp.notification({ method: "notifications/claude/channel", params: { content: safeContent, meta } })
+  // 29327 row 5 (@cto 66ffa581 req 2): the ONE place envelope meta is assembled
+  // before it reaches the host, so every sender-set value is escaped here once —
+  // a quote in a summary, bead or topic must not close the attribute it rides.
+  return mcp.notification({
+    method: "notifications/claude/channel",
+    params: { content: safeContent, meta: escapeEnvelopeMeta(meta) },
+  })
 }
 
 /**
@@ -796,8 +793,8 @@ function requestPacedReexec(reason: string, supervisedExitCode: () => number | n
 /**
  * 29162 — the reconnect watchdog's threshold, with a test seam. The shipped
  * value is 60s; a test that must WITNESS the fire (not wait a minute for it)
- * overrides it, exactly as TRIBE_CHANNEL_REPLAY_* and TRIBE_DAEMON_CALL_TIMEOUT
- * are already overridable. An unset/nonsensical value keeps the shipped 60s.
+ * overrides it, exactly as TRIBE_DAEMON_CALL_TIMEOUT already is. An
+ * unset/nonsensical value keeps the shipped 60s.
  */
 function reconnectWatchdogThresholdMs(): number {
   const raw = process.env.TRIBE_RECONNECT_WATCHDOG_MS
@@ -862,9 +859,6 @@ function startDaemonConnection(): Promise<DaemonClient> {
         await timers.delay(reconnectRegistrationJitterMs())
       }
       hasAttemptedRegistration = true
-      // km 19442 — open a fresh connect-replay window so a stale daemon's body-push
-      // burst on (re)connect is bounded (see connectReplayGate + the `channel` handler).
-      connectReplayGate.reset(Date.now())
       let reg: {
         sessionId: string
         name: string
@@ -1003,8 +997,6 @@ function startDaemonConnection(): Promise<DaemonClient> {
     },
     onReconnect() {
       log.info?.(`Reconnected to daemon`)
-      // km 19442 — a reconnect can replay the daemon's pending body-push burst; rebound it.
-      connectReplayGate.reset(Date.now())
     },
     maxAttempts: Number.POSITIVE_INFINITY,
   }).then((client) => {
@@ -1909,6 +1901,15 @@ function drainDaemonInbox(): void {
   })()
 }
 
+/**
+ * 29327 row 5 (@cto 66ffa581 req 4) — a daemon method this adapter does not
+ * handle is named ONCE per method, never dropped in silence: a stale daemon has
+ * pushed bodies as `channel` before (km 19442), and an unhandled method is the
+ * only symptom such a producer leaves here. The rows it would have carried stay
+ * durable in the daemon journal and are fetchable with `tribe.fetch`.
+ */
+const loggedUnknownDaemonMethods = new Set<string>()
+
 function handleDaemonNotification(method: string, params?: Record<string, unknown>): void {
   if (method === "wakeup") {
     drainDaemonInbox()
@@ -1924,6 +1925,13 @@ function handleDaemonNotification(method: string, params?: Record<string, unknow
   if (method === "session.joined" || method === "session.left") {
     const action = method === "session.joined" ? "joined" : "left"
     sendChannelDetached(`${String(params?.name ?? "unknown")} ${action} the tribe`, { from: "daemon", type: "status" })
+    return
+  }
+  if (!loggedUnknownDaemonMethods.has(method)) {
+    loggedUnknownDaemonMethods.add(method)
+    log.warn?.(
+      `tribe stdio adapter: unknown daemon notification method "${method}" ignored; its rows stay durable and fetchable via tribe.fetch`,
+    )
   }
 }
 

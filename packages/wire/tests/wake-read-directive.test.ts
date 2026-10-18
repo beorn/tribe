@@ -22,7 +22,7 @@ import {
   wakeReadDirective,
 } from "../src/lib/wake-read-directive.ts"
 import { markedType } from "../src/lib/notification-only.ts"
-import { directiveEnvelopeMeta } from "../src/lib/replay-cap.ts"
+import { directiveEnvelopeMeta, escapeEnvelopeMeta } from "../src/lib/replay-cap.ts"
 
 const ID = "1e058f4a-4721-40d6-af91-867a3ce7075f"
 
@@ -62,14 +62,32 @@ describe("forwarded row content", () => {
     })
   })
 
-  it("a directive carries the sender's summary as an escaped envelope attribute", () => {
+  it("a directive carries the sender's summary as an envelope attribute", () => {
     // Req 1: the directive carries id, sender, kind, summary and sent_at. The
     // id/sender/kind/sent_at are attributes the caller already sets; summary is
-    // the one free-text value, so it is escaped for the attribute context.
-    expect(directiveEnvelopeMeta({ summary: 'ETA "now" <b>' })).toEqual({ summary: "ETA &quot;now&quot; &lt;b&gt;" })
-    expect(directiveEnvelopeMeta({ summary: "line one\nline two" })).toEqual({ summary: "line one line two" })
+    // the value a directive row would otherwise have shown inline.
+    expect(directiveEnvelopeMeta({ summary: "  ETA now  " })).toEqual({ summary: "ETA now" })
     // No summary, no attribute — a row without one stays as it was.
     expect(directiveEnvelopeMeta({ summary: "" })).toEqual({})
     expect(directiveEnvelopeMeta({})).toEqual({})
+  })
+
+  it("every sender-set meta value is escaped once, at the one assembly point", () => {
+    // @cto 66ffa581 req 2: summary, bead and topic are all sender-set and reach
+    // the host as attributes, so the escaper sits where the meta is assembled
+    // and applies to every value — not to the summary alone.
+    const hostile = 'q"a< b>\nnext'
+    const escaped = escapeEnvelopeMeta({ summary: hostile, bead: hostile, topic: hostile })
+    for (const value of Object.values(escaped)) expect(value).toBe("q&quot;a&lt; b&gt; next")
+    // A value with none of those characters is byte-identical, so ordinary
+    // envelopes do not change.
+    expect(
+      escapeEnvelopeMeta({ from: "@chief", type: "request", message_id: ID, sent_at: "2026-10-18T03:56:56.647Z" }),
+    ).toEqual({
+      from: "@chief",
+      type: "request",
+      message_id: ID,
+      sent_at: "2026-10-18T03:56:56.647Z",
+    })
   })
 })

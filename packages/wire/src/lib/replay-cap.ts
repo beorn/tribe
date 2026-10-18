@@ -62,13 +62,6 @@ export function selectReplayEvents<T extends ReplayCandidate>(
   return { forward, skippedOld, capped }
 }
 
-/**
- * How long after a (re)connect the legacy `channel` content-push burst is bounded.
- * The flood (km 19442) is a connect-time replay storm, so the window only needs to
- * cover the burst — steady-state live traffic arrives later and passes freely.
- */
-export const CONNECT_REPLAY_WINDOW_MS = 5_000
-
 /** Bound on remembered forwarded attention ids (insertion-ordered eviction). */
 export const MAX_FORWARDED_ATTENTION_IDS = 10_000
 
@@ -453,15 +446,6 @@ export function decidePendingBallSummary(
   return { send, state: retained, readFromPreview }
 }
 
-export type ConnectReplayGate = {
-  /** Reset the window — call on every (re)connect. */
-  reset(now: number): void
-  /** Decide whether a `channel`-pushed event should be forwarded right now. */
-  admit(now: number): boolean
-  /** Events dropped within the current window (for a summary log). */
-  readonly dropped: number
-}
-
 /**
  * 27346 - channel-envelope metadata for one forwarded attention row.
  *
@@ -515,16 +499,32 @@ export function settledEnvelopeMeta(event: { settled?: boolean; settled_by?: str
  * body travel in the envelope META: `from`, `type`, `message_id` and `sent_at`
  * are set by the caller, and the sender's SUMMARY rides here.
  *
- * Free text in an attribute is the one value the host renders verbatim, so it
- * is escaped for that context before it leaves the wire: a summary containing
- * `"` or `<` must not be able to close the attribute or the envelope. Newlines
- * collapse to a space because an attribute is one line. Absent on every row
- * that is not a directive, so those envelopes stay byte-for-byte what they were.
+ * Free text in an attribute is the one value the host renders verbatim; it is
+ * escaped for that context by `escapeEnvelopeMeta`, the single place the meta
+ * is assembled before it leaves the wire. Absent on every row that is not a
+ * directive, so those envelopes stay byte-for-byte what they were.
  */
 export function directiveEnvelopeMeta(event: { summary?: string | null }): { summary?: string } {
   const summary = typeof event.summary === "string" ? event.summary.trim() : ""
   if (summary.length === 0) return {}
-  return { summary: attributeSafe(summary) }
+  return { summary }
+}
+
+/**
+ * 29327 row 5 (@cto 66ffa581 req 2) — ONE attribute escaper, applied where the
+ * envelope meta is assembled, to every value that reaches the host: summary,
+ * bead and topic are sender-set, and `from`/`type`/`message_id`/`sent_at` pass
+ * through unchanged because they can never contain an attribute-breaking
+ * character. If the host renders attributes verbatim, an unescaped quote in a
+ * sender's bead can close the envelope just as a summary can. Values with none
+ * of those characters come out byte-identical.
+ */
+export function escapeEnvelopeMeta(meta: Record<string, string | undefined>): Record<string, string | undefined> {
+  const safe: Record<string, string | undefined> = {}
+  for (const [key, value] of Object.entries(meta)) {
+    safe[key] = value === undefined ? undefined : attributeSafe(value)
+  }
+  return safe
 }
 
 function attributeSafe(text: string): string {
@@ -534,47 +534,4 @@ function attributeSafe(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/[\r\n]+/g, " ")
-}
-
-/**
- * Bound the legacy `channel` content-push burst a pre-`wakeup` daemon dumps
- * right after (re)connect (km 19442).
- *
- * In the wakeup-only delivery model the daemon never pushes content — it sends
- * `wakeup` nudges and the client drains via the (already capped) `selectReplayEvents`
- * path. This gate is the compat backstop for the OTHER path: a stale/old daemon
- * that still pushes message bodies as `channel` notifications. Within `windowMs`
- * of a (re)connect it forwards at most `maxEvents` and drops the rest — the dropped
- * rows stay durable in the daemon journal and remain fetchable via `tribe.fetch`.
- *
- * Outside the window — steady state — it forwards freely so a live actionable DM
- * is NEVER withheld. The gate only fires on the connect-burst it is named for.
- */
-export function createConnectReplayGate(opts?: { maxEvents?: number; windowMs?: number }): ConnectReplayGate {
-  const maxEvents = opts?.maxEvents ?? MAX_REPLAY_EVENTS
-  const windowMs = opts?.windowMs ?? CONNECT_REPLAY_WINDOW_MS
-  let connectAt = Number.NEGATIVE_INFINITY
-  let forwarded = 0
-  let droppedInWindow = 0
-  return {
-    reset(now: number): void {
-      connectAt = now
-      forwarded = 0
-      droppedInWindow = 0
-    },
-    admit(now: number): boolean {
-      // Steady state (outside the connect window, or before the first connect):
-      // never withhold a live message.
-      if (now - connectAt >= windowMs) return true
-      if (forwarded >= maxEvents) {
-        droppedInWindow++
-        return false
-      }
-      forwarded++
-      return true
-    },
-    get dropped(): number {
-      return droppedInWindow
-    },
-  }
 }

@@ -1482,7 +1482,7 @@ describe("stdio adapter delivery modes", () => {
     expect(daemon.requests.filter((msg) => msg.method === "tribe.inbox.wait")).toHaveLength(1)
   })
 
-  it("push delivery registers explicit persona as pull, says so, and suppresses channel notifications until tribe.join", async () => {
+  it("push delivery registers explicit persona as pull, says so, and suppresses channel pushes", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const joinAck: Record<string, unknown> = { joined: false, error: "join refused" }
     daemon = await spawnFakeDaemon(socketPath, { joinAck })
@@ -1545,9 +1545,15 @@ describe("stdio adapter delivery modes", () => {
     const listAfterJoin = await writeJsonAndWaitForLine(child, toolsListPayload(6), (line) => line.id === 6)
     expect(inboxWaitCapability(listAfterJoin)?.delivery).toBe(joinRequest?.params?.delivery)
 
-    daemon.clients[0]?.write(makeNotification("channel", { from: "chief", type: "request", content: "after" }))
-    const channel = await waitForLine(child, (line) => line.method === "notifications/claude/channel")
-    expect(JSON.stringify(channel)).toContain("after")
+    // 29327 row 5: the daemon no longer pushes bodies (producer census in
+    // handleDaemonNotification), so a joined seat's live path is the wakeup
+    // drain. Prove the join gate opened THAT path.
+    const fetchesBefore = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+    daemon!.clients[0]?.write(makeNotification("wakeup", {}))
+    await waitForCondition(
+      () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > fetchesBefore,
+      "post-join wakeup drain",
+    )
   })
 
   it("a push persona starts conservatively and confirms push only after its own registration ACK", async () => {
@@ -1584,7 +1590,7 @@ describe("stdio adapter delivery modes", () => {
     expect(inboxWaitCapability(list)?.delivery).toBe(register?.params?.delivery)
   })
 
-  it("bounds a connect-time channel-push burst to the cap (km 19442 push-path backstop)", async () => {
+  it("names an unknown daemon method once and forwards nothing for it (29327 row 5)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
@@ -1593,9 +1599,6 @@ describe("stdio adapter delivery modes", () => {
         ...process.env,
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
-        // Tiny cap + a wide window so the whole burst lands inside one connect window.
-        TRIBE_CHANNEL_REPLAY_MAX: "3",
-        TRIBE_CHANNEL_REPLAY_WINDOW_MS: "60000",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },
       stdio: ["pipe", "pipe", "pipe"],
@@ -1609,23 +1612,25 @@ describe("stdio adapter delivery modes", () => {
     // Join so push-mode channel forwarding is enabled.
     await writeJsonAndWaitForLine(child, callToolPayload(3, "join", { name: "@agent/test" }), (line) => line.id === 3)
 
-    // Simulate a stale daemon dumping a 12-event message-BODY backlog on connect.
-    for (let i = 0; i < 12; i++) {
+    // A stale daemon that still pushes bodies as `channel` (km 19442). Nothing at
+    // this pin produces it (producer census in handleDaemonNotification), so the
+    // adapter names the method once instead of forwarding — never in silence.
+    for (let i = 0; i < 3; i++) {
       daemon.clients[0]?.write(makeNotification("channel", { from: "chief", type: "notify", content: `burst-${i}` }))
     }
-    // Wait for the first forwarded burst event, then let the rest settle.
-    await waitForLine(
-      child,
-      (line) => line.method === "notifications/claude/channel" && JSON.stringify(line).includes("burst-"),
+    await waitForCondition(
+      () => readFileSync(join(tmpDir, "adapter.log"), "utf8").includes('unknown daemon notification method "channel"'),
+      "unknown-method log",
     )
     await new Promise((resolveTick) => setTimeout(resolveTick, 400))
 
     const forwarded = stdout.filter(
       (line) => line.method === "notifications/claude/channel" && JSON.stringify(line).includes("burst-"),
     )
-    // Cap=3 → exactly 3 of the 12 surface; the other 9 are dropped (still durable in
-    // the daemon journal, fetchable via tribe.fetch). Without the gate, all 12 flood in.
-    expect(forwarded.length).toBe(3)
+    expect(forwarded.length).toBe(0)
+    // Once per method name, not once per row.
+    const log = readFileSync(join(tmpDir, "adapter.log"), "utf8")
+    expect(log.split('unknown daemon notification method "channel"').length - 1).toBe(1)
   })
 
   // 19442 reframe note: with the mailbox-cursor daemon the drain returns only
@@ -2598,55 +2603,6 @@ describe("stdio adapter delivery modes", () => {
     expect(afterRetry.counters.deliveries).toBe(2)
   })
 
-  // #28378 REVIEW (@dev/6) — the LIVE channel-push path. A push with no message
-  // id fails open (nothing to record), but its rejection must still be consumed
-  // and surfaced: an unhandled rejection here exited the adapter. The next
-  // healthy ID-less push must reach the host on the same running adapter.
-  it("survives a rejected ID-less channel push and still forwards the next one (#28378)", async () => {
-    const socketPath = join(tmpDir, "tribe.sock")
-    const adapterLog = join(tmpDir, "adapter.log")
-    const faultLog = join(tmpDir, "fault-attempts.jsonl")
-    daemon = await spawnFakeDaemon(socketPath, { fetchAttention: { actionable_unread: [], pending_balls: [] } })
-    child = spawn(BUN_BIN, [FAULT_ENTRY, "--socket", socketPath, "--name", "@agent/test"], {
-      cwd: tmpDir,
-      env: {
-        ...process.env,
-        TRIBE_DELIVERY: "push",
-        TRIBE_NO_AUTOSTART: "1",
-        TRIBE_DELIVERY_LEDGER: join(tmpDir, "push-ledger.json"),
-        PROBE_FAULT_LOG: faultLog,
-        DEBUG_LOG: adapterLog,
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    })
-    const stdout = collectStdoutJson(child)
-    const channelText = () =>
-      stdout.filter((line) => line.method === "notifications/claude/channel").map((line) => JSON.stringify(line))
-
-    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
-    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
-
-    daemon.clients
-      .at(-1)
-      ?.write(makeNotification("channel", { from: "chief", type: "request", content: "FAULT-ROW id-less push" }))
-    await waitForCondition(() => existsSync(faultLog), "the ID-less push attempted")
-    await waitForCondition(
-      () => existsSync(adapterLog) && readFileSync(adapterLog, "utf8").includes("TEST_FAULT_SEND_REJECTED"),
-      "the ID-less push cause surfaced on the adapter log",
-    )
-    expect(child.exitCode).toBeNull()
-
-    daemon.clients
-      .at(-1)
-      ?.write(makeNotification("channel", { from: "chief", type: "request", content: "HEALTHY-IDLESS-PUSH" }))
-    await waitForCondition(
-      () => channelText().some((line) => line.includes("HEALTHY-IDLESS-PUSH")),
-      "the next healthy ID-less push forwarded",
-    )
-    expect(child.exitCode).toBeNull()
-  })
-
   // #27459 REVISE (@dev/11): a restart RESUMES the in-flight 4h window, so the
   // first persist after it must carry the ledger cumulative same-window totals
   // forward — not overwrite them from the fresh in-memory counter. Before the
@@ -3128,7 +3084,7 @@ describe("stdio adapter delivery modes", () => {
   // already holds — must hand each message id to the pane exactly once. Every
   // path (attention drain, ambient events, and the live `channel` push) shares
   // ONE forwarded-id record, and the durable ledger keeps it across restarts.
-  it("hands each id to the pane once across 20 drains, 2 restarts, and a reconnect re-push (#27459 gap-1)", async () => {
+  it("hands each id to the pane once across 20 drains and 2 restarts (#27459 gap-1)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const recentTs = new Date().toISOString()
     const fetchAttention = {
@@ -3216,37 +3172,9 @@ describe("stdio adapter delivery modes", () => {
     expect(count("GAP1-ATTENTION-B")).toBe(1)
     expect(count("GAP1-AMBIENT-C")).toBe(1)
 
-    // A reconnect re-push of ids this pane already holds must not re-present
-    // them; a genuinely new pushed id still forwards, exactly once.
-    daemon.clients.at(-1)?.write(
-      makeNotification("channel", {
-        from: "chief",
-        type: "notify",
-        content: "GAP1-RECONNECT-A",
-        message_id: "gap1-attention-a",
-      }),
-    )
-    daemon.clients.at(-1)?.write(
-      makeNotification("channel", {
-        from: "chief",
-        type: "notify",
-        content: "GAP1-RECONNECT-C",
-        message_id: "gap1-ambient-c",
-      }),
-    )
-    daemon.clients.at(-1)?.write(
-      makeNotification("channel", {
-        from: "chief",
-        type: "notify",
-        content: "GAP1-RECONNECT-NEW",
-        message_id: "gap1-pushed-d",
-      }),
-    )
-    await waitForCondition(() => count("GAP1-RECONNECT-NEW") === 1, "new pushed row forwarded")
-    await new Promise((resolveTick) => setTimeout(resolveTick, 300))
-    expect(count("GAP1-RECONNECT-A")).toBe(0)
-    expect(count("GAP1-RECONNECT-C")).toBe(0)
-    expect(count("GAP1-RECONNECT-NEW")).toBe(1)
+    // 29327 row 5: the daemon no longer re-pushes ids on reconnect — the drain is
+    // the only path — so this test no longer injects a `channel` re-push. The
+    // one-handoff-per-id guarantee is proven by the 20 drains and 2 restarts above.
 
     const ledgerPath = join(tmpDir, "tribe-delivery-v2-@agent%2Ftest.json")
     await waitForCondition(() => existsSync(ledgerPath), "gap-1 delivery ledger written")
@@ -3254,7 +3182,7 @@ describe("stdio adapter delivery modes", () => {
       ids: string[]
       counters: Record<string, number>
     }
-    expect([...ledger.ids].sort()).toEqual(["gap1-ambient-c", "gap1-attention-a", "gap1-attention-b", "gap1-pushed-d"])
+    expect([...ledger.ids].sort()).toEqual(["gap1-ambient-c", "gap1-attention-a", "gap1-attention-b"])
     expect(ledger.counters.duplicateDeliveries).toBe(0)
   })
 
