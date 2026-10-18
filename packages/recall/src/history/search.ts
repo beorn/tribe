@@ -496,6 +496,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const msgMs = phases.messages ?? 0
     hookSearch = messageResults.hook
     if (hookSearch?.capped) skipped.push(hookSearch.capped)
+    else if (messageResults.capped) skipped.push(messageResults.capped)
     if (!runs("messages")) {
       log(`FTS5 messages: not run (phases ${String(options.phases?.join(","))})`)
     } else if (hookSearch) {
@@ -505,7 +506,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       )
     } else {
       log(
-        `FTS5 messages: ${String(messageResults.total)} total, ${messageResults.results.length} returned (${msgMs}ms)`,
+        `FTS5 messages: ${String(messageResults.total)} total (raw, before null-uuid copy collapse), ` +
+          `${messageResults.results.length} returned (${msgMs}ms)`,
       )
     }
 
