@@ -411,8 +411,11 @@ export function pendingCloseCause(ctx: TribeContext, requestId: string, owner: s
     const matches = ctx.stmts.selectOpenBallIdsByPrefix.all({ $name: owner, $prefix: requestId }) as Array<{
       request_id: string
     }>
-    if (matches.length === 1) return { kind: "prefix-of-open", full_id: matches[0].request_id }
-    if (matches.length > 1) return { kind: "prefix-ambiguous" }
+    const first = matches.at(0)
+    if (first !== undefined) {
+      if (matches.length === 1) return { kind: "prefix-of-open", full_id: first.request_id }
+      return { kind: "prefix-ambiguous" }
+    }
     return { kind: "never-tracked" }
   }
   const facts = rows.map(parseBallOutcomeFact)
