@@ -133,7 +133,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   // Time filter (reuse the existing parser so the UI contract is identical)
   // ──────────────────────────────────────────────────────────────────────
   let sinceTime: number | undefined
-  if (since) {
+  if (since !== undefined) {
     const parsed = parseTimeToMs(since)
     if (parsed === undefined) {
       log(`agent: invalid time filter "${since}" — falling through`)

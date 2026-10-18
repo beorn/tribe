@@ -409,12 +409,11 @@ describe("recall integration", () => {
     }
   }, 15_000)
 
-  test("returns empty when since is invalid", async () => {
+  test("rejects an invalid since window instead of reporting zero matches", async () => {
     const recall = await getRecall()
-    // Invalid since should cause early return with empty results
-    const result = await recall("test", { raw: true, since: "invalid" })
-    expect(result.results).toHaveLength(0)
-    expect(result.synthesis).toBeNull()
+    await expect(recall("test", { raw: true, since: "invalid" })).rejects.toThrow(
+      'Invalid --since "invalid"; expected Nh, Nd, Nw, today, or yesterday',
+    )
   }, 15_000)
 
   test("result items have correct shape", async () => {
