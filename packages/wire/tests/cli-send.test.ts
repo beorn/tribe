@@ -1904,6 +1904,7 @@ describe("reply and taking convenience commands (25028)", () => {
       expires_at?: string | null
     }>
     sendAppliedDue?: { request_id: string; previous_expires_at: number | null; expires_at: number }
+    sendError?: string
     fleetPendingRows?: Array<{
       request_id?: string
       message_id?: string
@@ -2002,11 +2003,14 @@ describe("reply and taking convenience commands (25028)", () => {
           } else if (request.method === "tribe.send") {
             sent.push(request.params ?? {})
             const reply = request.params?.reply as string | undefined
-            result = {
-              sent: true,
-              tracker: reply ? { request_id: reply, closed: 1 } : undefined,
-              ...(opts.sendAppliedDue === undefined ? {} : { applied_due: opts.sendAppliedDue }),
-            }
+            result =
+              opts.sendError !== undefined
+                ? { error: opts.sendError }
+                : {
+                    sent: true,
+                    tracker: reply ? { request_id: reply, closed: 1 } : undefined,
+                    ...(opts.sendAppliedDue === undefined ? {} : { applied_due: opts.sendAppliedDue }),
+                  }
           } else if (request.method === "cli_protocol") {
             result = { protocol_version: 10 }
           } else if (request.method === "cli_inbox_wait_by_launch_v1" || request.method === "cli_inbox_wait") {
@@ -2225,6 +2229,51 @@ describe("reply and taking convenience commands (25028)", () => {
     const listed = JSON.parse(pending.stdout) as { pending: Array<{ expires_at?: string }> }
     expect(listed.pending[0]?.expires_at).toBe(expiresAtIso)
     expect(Date.parse(listed.pending[0]!.expires_at!)).toBe(body.applied_due!.expires_at)
+  })
+
+  // @failure 29921: refused due on --json leaves stdout empty, so a JSON client never sees the named limit
+  // @level l2 @consumer tribe send CLI --json
+  test("json TAKING past the due limit fails loud, names the limit, and leaves pending expires_at (29921 AC3)", async () => {
+    const expiresAtIso = "2026-10-18T01:14:27.593Z"
+    const pendingRows = [
+      {
+        request_id: "req-29921-ac3",
+        recipient: "@dev/8",
+        sender: "@chief",
+        summary: "AC3",
+        status: "active",
+        expires_at: expiresAtIso,
+      },
+    ]
+    const limitError = "tribe.send: invalid expires_in_ms - must be a positive integer no greater than 86400000"
+    const sent = await runMockDaemon(
+      [
+        "send",
+        "@chief",
+        "TAKING req-29921-ac3",
+        "--type",
+        "status",
+        "--ref",
+        "req-29921-ac3",
+        "--expires-in-ms",
+        "86400001",
+        "--json",
+        "--summary",
+        "taking",
+      ],
+      { pendingRows, sendError: limitError },
+    )
+    expect(sent.code).toBe(1)
+    expect(sent.stderr).toContain("86400000")
+    const body = JSON.parse(sent.stdout) as { sent?: boolean; error?: string; applied_due?: unknown }
+    expect(body.sent).toBeUndefined()
+    expect(body.applied_due).toBeUndefined()
+    expect(body.error).toBe(limitError)
+
+    const pending = await runMockDaemon(["pending", "--owner", "@dev/8", "--json"], { pendingRows })
+    expect(pending.code).toBe(0)
+    const listed = JSON.parse(pending.stdout) as { pending: Array<{ expires_at?: string }> }
+    expect(listed.pending[0]?.expires_at).toBe(expiresAtIso)
   })
 
   test("tribe taking fails loudly when request id cannot be resolved", async () => {

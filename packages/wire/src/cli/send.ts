@@ -685,6 +685,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     if (input.verbose && typeof result.detail === "string" && result.detail.length > 0) {
       console.error(`  detail: ${result.detail}`)
     }
+    if (input.json) await writeJsonStdout({ error: result.error })
     process.exit(1)
   }
   if (input.reply && caller) {
