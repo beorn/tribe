@@ -868,7 +868,8 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   const searchMessages = !types || types.includes("message")
   const contentTypes = types?.filter((t) => t !== "message") as ContentType[] | undefined
   // Content rows have no message role, including when both roles are selected.
-  const searchContent = !question && !response && (!types || (contentTypes && contentTypes.length > 0))
+  const searchContent =
+    session === undefined && !question && !response && (!types || (contentTypes && contentTypes.length > 0))
   // Project source types are persistent knowledge and ignore the raw time filter.
   const projectSourceTypes = new Set(["bead", "session_memory", "project_memory", "doc", "claude_md"])
   const contentSinceTime = contentTypes?.every((t) => projectSourceTypes.has(t)) ? undefined : sinceTime
@@ -966,6 +967,17 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
       rank: number
     })[]
     messageResults = { results, total: results.length }
+  }
+
+  if (session !== undefined && messageResults.total === 0) {
+    console.error(
+      `recall: session ${session} has no indexed messages matching query ${JSON.stringify(query)} ` +
+        `in ${db.filename} (since ${since ?? "30d"}, project ${project ?? "all"}, types ${include ?? "messages"}); ` +
+        `non-session content, vault rows and unrelated live sessions were excluded`,
+    )
+    process.exitCode = 1
+    closeDb()
+    return
   }
 
   const contentResults: { results: (ContentRecord & { snippet: string; rank: number })[]; total: number } = {
@@ -1076,7 +1088,8 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   }
 
   // Search live session (current, not yet indexed)
-  const liveResults = query && searchMessages ? searchLiveSession(query, Math.min(5, limit)) : []
+  const liveResults =
+    query && searchMessages && session === undefined ? searchLiveSession(query, Math.min(5, limit)) : []
   const totalWithLive = total + liveResults.length
 
   if (totalWithLive === 0) {

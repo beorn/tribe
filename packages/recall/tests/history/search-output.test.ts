@@ -510,7 +510,7 @@ describe("recall search output", () => {
     ["--question", { question: true }],
     ["--response", { response: true }],
     ["--tool", { tool: "Read" }],
-    ["--session", { session: "session-filter" }],
+    ["--session", { session: "sess-a" }],
     ["--include messages", { include: "messages" }],
   ])("raw mode excludes unfilterable vault rows with %s", async (_label, filter) => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-raw-vault-filter-"))
@@ -518,6 +518,7 @@ describe("recall search output", () => {
     try {
       seedVaultDb(dbPath, "vaultfilterneedle only lives in the km vault")
       bindVaultDb(dbPath)
+      if ("session" in filter) seedMessage("vaultfilterneedle selected session")
 
       await cmdSearch("vaultfilterneedle", { raw: true, json: true, project: "*", ...filter })
 
@@ -525,6 +526,71 @@ describe("recall search output", () => {
       expect(payload.results?.some((result) => result.contentType === "vault") ?? false).toBe(false)
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // A session filter must constrain every source, including plain output's live supplement.
+  // The vault-only filter case cannot catch unrelated indexed research or a live-session hit.
+  test("keeps a raw session query inside the requested session and reports misses loudly", async () => {
+    const previousExitCode = process.exitCode
+    const previousDbPath = process.env.RECALL_DB_PATH
+    const dir = mkdtempSync(join(tmpdir(), "recall-session-scope-"))
+    process.env.RECALL_DB_PATH = join(dir, "index.db")
+    const history = await import("../../src/history/search")
+    const live = vi.spyOn(history, "searchLiveSession").mockReturnValue([
+      {
+        type: "message",
+        sessionId: "foreign-live-session",
+        sessionTitle: "foreign live session",
+        timestamp: Date.now(),
+        snippet: "foreign live session scopefilterneedle",
+        rank: -100,
+      },
+    ])
+    try {
+      seedMessage("scopefilterneedle selected session")
+      seedMessage("scopefilterneedle unrelated session", "other")
+      const db = getDb()
+      setIndexMeta(db, "last_rebuild", new Date().toISOString())
+      db.prepare(
+        `INSERT INTO content (content_type, source_id, project_path, title, content, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run("llm_research", "unrelated-research", "/test/km", "unrelated research", "scopefilterneedle", Date.now())
+
+      process.exitCode = 0
+      await cmdSearch("scopefilterneedle", { session: "sess-a", json: true })
+      const payload = jsonStdout<{ results: Array<{ contentType: string; sourceId: string }> }>(logSpy)
+      expect(payload.results.map(({ contentType, sourceId }) => ({ contentType, sourceId }))).toEqual([
+        { contentType: "message", sourceId: "sess-a" },
+      ])
+      expect(process.exitCode ?? 0).toBe(0)
+
+      logSpy.mockClear()
+      await cmdSearch("scopefilterneedle", { session: "sess-a" })
+      expect(callsText(logSpy)).toContain("selected session")
+      expect(callsText(logSpy)).not.toContain("unrelated")
+      expect(callsText(logSpy)).not.toContain("foreign live session")
+
+      for (const [session, query] of [
+        ["absent-session", "scopefilterneedle"],
+        ["sess-a", "missing-session-token"],
+      ]) {
+        logSpy.mockClear()
+        errSpy.mockClear()
+        process.exitCode = 0
+        await cmdSearch(query, { session, json: true })
+        expect(process.exitCode).toBe(1)
+        expect(callsText(errSpy)).toContain(session)
+        expect(callsText(errSpy)).toContain(join(dir, "index.db"))
+        expect(callsText(errSpy)).toContain(query)
+        expect(callsText(logSpy)).toBe("")
+      }
+    } finally {
+      live.mockRestore()
+      closeDb()
+      process.env.RECALL_DB_PATH = previousDbPath
+      safeRemoveSync(dir, { within: tmpdir(), allowMissing: true })
+      process.exitCode = previousExitCode
     }
   })
 
