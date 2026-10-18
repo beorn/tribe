@@ -959,6 +959,78 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(readFileSync(ownSink, "utf8")).toContain("operator-lifecycle.sock")
   }, 120_000)
 
+  /** @failure A consuming inbox piped to tail hides which verdicts were acknowledged (30096).
+   * @level l4 @consumer the actual CLI's human output and its downstream tail process. */
+  it("retains consumed verdict identities after tail truncates bodies", async () => {
+    const socketPath = join(tmpDir, "tailed-verdict.sock")
+    const dbPath = join(tmpDir, "tailed-verdict.db")
+    const name = "@test/30096-tail"
+    const launchId = "tailed-verdict-launch"
+    daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: launchVerifier() })
+    await waitForDaemonSocket(daemonProc, socketPath)
+    const reader = await spawnLaunchAdapter(socketPath, "tailed-verdict-reader.log", launchId, { name })
+    await callLaunchToolWhenRegistered(reader, 600, "members", {})
+    const sender = await connectToDaemon(socketPath)
+    try {
+      await sender.call("register", {
+        name: "@cto",
+        idToken: launchToken("tailed-verdict-sender", "@cto"),
+        launchId: "tailed-verdict-sender",
+        launchParentPid: process.pid,
+        role: "member",
+        domains: ["test"],
+        project: tmpDir,
+        projectName: "test",
+        protocolVersion: TRIBE_PROTOCOL_VERSION,
+        pid: process.pid,
+        delivery: "pull",
+      })
+      const acknowledgedIds: string[] = []
+      for (const message of [
+        "GO variant-neutral half\nREVISE placement seam\n" +
+          Array.from({ length: 30 }, (_, i) => `review condition ${i}`).join("\n") +
+          "\nFinal rule: scoped resources; no new timer or service.",
+        "Other work merged.\nMerge identity proved.\nFull acceptance remains open.",
+      ]) {
+        const sent = (await sender.call("tribe.send", {
+          to: name,
+          type: "verdict",
+          message,
+          summary: "review verdict",
+        })) as { structuredContent: { sent: boolean; id: string } }
+        expect(sent.structuredContent.sent).toBe(true)
+        acknowledgedIds.push(sent.structuredContent.id)
+      }
+      const read = await runCli(
+        ["inbox"],
+        {
+          ...BASE_ENV,
+          TRIBE_SOCKET: socketPath,
+          HAB_ID_TOKEN: launchToken(launchId, name),
+          TRIBE_NO_AUTOSTART: "1",
+        },
+        { throughParent: true },
+      )
+      expect(read.exitCode, read.stderr).toBe(0)
+      const tail = Bun.spawn(["tail", "-12"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
+      tail.stdin.write(read.stdout)
+      tail.stdin.end()
+      const [tailed, tailCode] = await Promise.all([new Response(tail.stdout).text(), tail.exited])
+      expect(tailCode).toBe(0)
+      expect(read.stdout).toContain("GO variant-neutral half")
+      expect(read.stdout).toContain("REVISE placement seam")
+      expect(tailed).not.toContain("GO variant-neutral half")
+      expect(tailed).not.toContain("REVISE placement seam")
+      expect(tailed).toContain("2 actionable unread")
+      for (const id of acknowledgedIds) expect(tailed).toContain(`${id} verdict from @cto`)
+      const after = (await callLaunchTool(reader, 601, "fetch", {})) as { attention: { actionable_unread: unknown[] } }
+      expect(after.attention.actionable_unread).toEqual([])
+      console.log("30096 actual tail reproduction", JSON.stringify({ full: read.stdout, tailed, after }))
+    } finally {
+      sender.close()
+    }
+  }, 120_000)
+
   it("drains the managed launch mailbox instead of a foreign environment identity when MCP is unavailable", async () => {
     const socketPath = join(tmpDir, "managed-cli-inbox.sock")
     const dbPath = join(tmpDir, "managed-cli-inbox.db")

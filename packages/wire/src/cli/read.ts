@@ -2158,6 +2158,11 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean; 
     console.log(
       `[CONSUMED] inbox: ${actionable.length} actionable unread; ${pendingTotal} pending ball(s); cursor ${result.cursor ?? 0}.`,
     )
+    if (actionable.length > 0) {
+      console.log(
+        `Acknowledged actionables: ${actionable.map((event) => `${event.id ?? "(id unavailable)"} ${event.type ?? "(type unavailable)"} from ${event.from ?? "(sender unavailable)"}`).join("; ")}.`,
+      )
+    }
     console.log(
       `\n(Note: this read consumed the messages and advanced the cursor. Use --peek to read without consuming.)`,
     )
