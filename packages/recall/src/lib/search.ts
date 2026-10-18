@@ -914,6 +914,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
       project_path: string
       cwd?: string | null
       rank: number
+      collapsedCopyCount?: number
     })[]
     total: number
   } = { results: [], total: 0 }
@@ -1011,6 +1012,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         line: r.line ?? null,
         uuid: r.uuid ?? null,
         duplicateLine: (r as { duplicate_line?: number | null }).duplicate_line ?? null,
+        collapsedCopyCount: r.collapsedCopyCount ?? null,
       })),
       ...contentResults.results.map((r) => ({
         contentType: r.content_type,
