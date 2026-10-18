@@ -18,9 +18,23 @@
 import { isAbsolute, join } from "node:path"
 import { existsSync } from "node:fs"
 import { createLogger } from "loggily"
-import { runBoundedProcessCommand, type BoundedProcessCommandResult } from "../../../recall/src/lib/bounded-process.ts"
+import {
+  runBoundedProcessCommand,
+  type BoundedProcessCommandResult,
+  type ReadBoundedProcessCompletion,
+} from "../../../recall/src/lib/bounded-process.ts"
 
 const log = createLogger("tribe:identity-verifier")
+
+// Explicit production call, never a side table keyed by a Promise somebody may wrap.
+const TRACKED_VERIFY = Symbol("trackedIdentityVerification")
+type TrackedVerification = {
+  readonly promise: Promise<IdentityVerdict>
+  readonly readCompletion: ReadBoundedProcessCompletion
+}
+type TrackedIdentityVerifier = LoadedIdentityVerifier & {
+  readonly [TRACKED_VERIFY]: (token: string) => TrackedVerification
+}
 
 export const IDENTITY_VERIFIER_INTERFACE_VERSION = 1
 /** The one marker a verifier child puts on its stderr, so the parent can tell a NAMED reason from a harness fault. */
@@ -152,7 +166,10 @@ export function boundedIdentityVerifier(
   const inFlight = new Map<string, Promise<IdentityVerdict>>()
   // Each probe's start and whether some caller already stopped waiting on it, keyed by the probe
   // promise itself: when an outlived probe lands, the composition is told how long it took (28947).
-  const probes = new Map<Promise<IdentityVerdict>, { startedAt: number; outlived: boolean }>()
+  const probes = new Map<
+    Promise<IdentityVerdict>,
+    { startedAt: number; outlived: boolean; readCompletion?: ReadBoundedProcessCompletion }
+  >()
 
   const fresh = (token: string): IdentityVerdict | undefined => {
     const held = cache.get(token)
@@ -163,8 +180,9 @@ export function boundedIdentityVerifier(
     const existing = inFlight.get(token)
     if (existing !== undefined) return existing
     const startedAt = now()
+    const tracked = TRACKED_VERIFY in loaded ? (loaded as TrackedIdentityVerifier)[TRACKED_VERIFY](token) : undefined
     const started = (async (): Promise<IdentityVerdict> => {
-      const verdict = await loaded.verify(token)
+      const verdict = await (tracked === undefined ? loaded.verify(token) : tracked.promise)
       if (cache.size >= VERDICT_CACHE_MAX) {
         for (const [key, held] of cache) {
           if (now() - held.at >= ttlMs) cache.delete(key)
@@ -179,7 +197,11 @@ export function boundedIdentityVerifier(
       return verdict
     })()
     inFlight.set(token, started)
-    probes.set(started, { startedAt, outlived: false })
+    probes.set(started, {
+      startedAt,
+      outlived: false,
+      ...(tracked === undefined ? {} : { readCompletion: tracked.readCompletion }),
+    })
     const settle = (): void => {
       if (inFlight.get(token) === started) inFlight.delete(token)
     }
@@ -227,8 +249,18 @@ export function boundedIdentityVerifier(
       const landed = fresh(token)
       if (landed !== undefined) return landed
       const seen = probes.get(pending)
+      const completion = seen?.readCompletion?.()
+      // Proven exited BY CALLBACK TIME, not necessarily before the original wall-clock cutoff. Still await the
+      // same bounded capture/drain and checked verdict: process exit alone never authenticates anybody.
+      if (completion?.state === "exited") return pending
       if (seen !== undefined) seen.outlived = true
-      return { result: "undecided", reason: `no verdict within ${String(waitMs)}ms` }
+      const reason =
+        completion?.state === "unknown"
+          ? `; child completion ${completion.evidence}: ${completion.reason}`
+          : completion?.state === "running"
+            ? "; verifier child still running at callback time"
+            : ""
+      return { result: "undecided", reason: `no verdict within ${String(waitMs)}ms${reason}` }
     },
   }
 }
@@ -394,7 +426,11 @@ function policyFaultOf(
 }
 
 /** One bounded, captured child call. The request travels on stdin so a token never reaches the process table. */
-async function verifierChild(path: string, request: VerifierChildRequest): Promise<unknown> {
+async function verifierChild(
+  path: string,
+  request: VerifierChildRequest,
+  trackCompletion?: (read: ReadBoundedProcessCompletion) => void,
+): Promise<unknown> {
   if (process.versions.bun === undefined) {
     throw new Error(
       `cannot spawn a verifier child: this daemon is not running under bun (execPath ${process.execPath})`,
@@ -415,7 +451,11 @@ async function verifierChild(path: string, request: VerifierChildRequest): Promi
       // The composing module reads its habitat from the process environment (HAB_SESSION_HABITAT_ROOT/NAME), exactly
       // as it did while it was imported, and Bun.spawn only carries the environment this process started with unless
       // it is handed one (measured 2026-10-14). So the child gets the daemon's CURRENT environment.
-      { stdin: JSON.stringify(request), env: { ...process.env } },
+      {
+        stdin: JSON.stringify(request),
+        env: { ...process.env },
+        ...(trackCompletion === undefined ? {} : { trackCompletion }),
+      },
     )
   } catch (error) {
     throw new Error(`its child did not settle: ${error instanceof Error ? error.message : String(error)}`)
@@ -461,17 +501,32 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
   // with them, so a repaired policy stops being reported as broken (28921 review).
   let emitters = bootEmitters ?? []
   let policyFault = bootPolicyFault
-  const call = async (request: VerifierChildRequest): Promise<unknown> => {
+  const call = async (
+    request: VerifierChildRequest,
+    trackCompletion?: (read: ReadBoundedProcessCompletion) => void,
+  ): Promise<unknown> => {
     try {
-      return await verifierChild(path, request)
+      return await verifierChild(path, request, trackCompletion)
     } catch (error) {
       throw new Error(`identity verifier ${path}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
-  return {
+  const trackedVerify = (token: string): TrackedVerification => {
+    let readCompletion: ReadBoundedProcessCompletion = () => ({
+      state: "unknown",
+      evidence: "unavailable",
+      reason: `identity verifier ${path} has not exposed its owned child`,
+    })
+    const promise = call({ op: "verify", token }, (read) => {
+      readCompletion = read
+    }).then((value) => checkedVerdict(value, path))
+    return { promise, readCompletion: () => readCompletion() }
+  }
+  const loaded: TrackedIdentityVerifier = {
     path,
     suppliesGen: hello.suppliesGen === true,
-    verify: async (token) => checkedVerdict(await call({ op: "verify", token }), path),
+    verify: (token) => trackedVerify(token).promise,
+    [TRACKED_VERIFY]: trackedVerify,
     readIncidentPolicy: (): LoadedIncidentPolicy => {
       // Never throws (28921 review): a boot-time fault is carried as health data, and the operation path re-reads
       // the CURRENT module, so a repaired policy is adopted on the next call instead of refused forever.
@@ -520,6 +575,7 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
       }
     },
   }
+  return loaded
 }
 
 /** A verdict outside the contract is the verifier's fault, surfaced like a throw — never read as "unreadable". */

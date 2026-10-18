@@ -16,8 +16,7 @@
  * last-seen age is activity evidence, not liveness.
  */
 
-import { existsSync, readFileSync } from "node:fs"
-import { parseProcStatLine } from "tribe-wire/lib/process-parent"
+import { readProcessStat } from "tribe-wire/lib/process-parent"
 // The refusal kinds the daemon CLASSIFIES as foreign (24767) are IMPORTED from the wire
 // (`tribe-wire/lib/foreign-refusal-kinds`), never re-exported: the label is the daemon's own classification of the KIND
 // and never says whose connector was refused. agent-rig's WATCH keys its bridge verdict on the same set and had been
@@ -128,19 +127,12 @@ export type SessionTransportEvidence = SessionTransportProjection & {
  * readable stat, which is a process that is gone.
  */
 export function readProcessStartTime(pid: number): string | null | "unsupported" {
-  if (!existsSync("/proc/self/stat")) return "unsupported"
-  if (!Number.isSafeInteger(pid) || pid <= 0) return null
-  let stat: string
-  try {
-    stat = readFileSync(`/proc/${pid}/stat`, "utf8")
-  } catch (error) {
-    // Only an absent process reads as gone; any other failure is not evidence either way.
-    if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ESRCH") {
-      return null
-    }
-    throw error
-  }
-  return parseProcStatLine(stat)?.startTime ?? null
+  const reading = readProcessStat(pid)
+  if ("fields" in reading) return reading.fields.startTime
+  if (reading.unsupported) return "unsupported"
+  // Preserve this adapter's contract: absent/invalid/malformed is null; unreadable is an error, never death.
+  if (reading.error !== undefined && reading.kind !== "gone") throw reading.error
+  return null
 }
 
 /** Probe OS process existence without turning an unfamiliar error into death. */

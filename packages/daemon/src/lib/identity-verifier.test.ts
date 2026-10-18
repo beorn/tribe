@@ -2,7 +2,17 @@
  * The identity-verifier load contract (25074 3b, @cto 4a194bbf): the daemon refuses startup, naming the path, for a
  * module it cannot use, and a verdict outside the contract is a fault, never read as "unreadable".
  */
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
+import { connect, createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
@@ -405,6 +415,131 @@ describe("loadIdentityVerifier", () => {
  */
 describe("boundedIdentityVerifier", () => {
   const verified: IdentityVerdict = { result: "verified", actor: "@dev/7", sid: "s1" }
+
+  /** @failure A socket dispatcher delays the deadline callback until after the real child has exited, but the
+   * caller returns undecided before Bun delivers its exit notification (30030).
+   * @level l2 @consumer Managed registration, bootstrap and inbox-wait on Bun/Linux.
+   * Existing deferred-promise tests cannot witness kernel exit before JavaScript completion delivery. */
+  it.skipIf(process.platform !== "linux" || process.versions.bun === undefined).each([
+    { name: "verified", action: `return ${JSON.stringify(verified)}`, error: null },
+    { name: "nonzero", action: "process.exit(7)", error: "child exited 7" },
+    { name: "malformed", action: "return { result: 'made-up' }", error: "outside the contract" },
+    {
+      name: "oversized",
+      action: `return { result: 'verified', actor: 'x'.repeat(70000), sid: 's1' }`,
+      error: "exceeded 65536 bytes",
+    },
+  ])(
+    "uses the real exited verifier when a socket callback delays the 1000ms deadline ($name)",
+    async ({ name, action, error }) => {
+      const pidPath = join(dir, `deadline-child-${name}.pid`)
+      const path = moduleAt(
+        `deadline-child-${name}.ts`,
+        `
+        import { writeFileSync } from "node:fs"
+        export const IDENTITY_VERIFIER_INTERFACE = 1
+        export async function verifyIdentity() {
+          writeFileSync(${JSON.stringify(pidPath)}, String(process.pid))
+          ${action}
+        }
+      `,
+      )
+      const loaded = await loadIdentityVerifier(path)
+      const wrapped = boundedIdentityVerifier(loaded)
+      let completionDelivered = false
+      let deliveredDuringBlock = false
+      let witnessedZombie = false
+      const result = Promise.withResolvers<{ verdict: IdentityVerdict } | { error: unknown }>()
+      const server = createServer((socket) => {
+        socket.once("data", () => {
+          const pending = wrapped.verify("deadline-token")
+          void pending.then(
+            () => {
+              completionDelivered = true
+            },
+            () => {
+              completionDelivered = true
+            },
+          )
+          // Reproduce the poll/dispatcher block, not a timer callback (which delivers child exit first on Bun).
+          // The 1200ms block crosses the unchanged caller bound and remains below the runner's 6000ms bound.
+          const until = performance.now() + 1200
+          while (performance.now() < until) {
+            if (!witnessedZombie && existsSync(pidPath)) {
+              const pid = Number(readFileSync(pidPath, "utf8"))
+              const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+              witnessedZombie = stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z ")
+            }
+          }
+          deliveredDuringBlock = completionDelivered
+          socket.end()
+          void pending.then(
+            (verdict) => result.resolve({ verdict }),
+            (error) => result.resolve({ error }),
+          )
+        })
+      })
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+      const address = server.address()
+      if (address === null || typeof address === "string") throw new Error("test server has no TCP address")
+      const client = connect(address.port, "127.0.0.1", () => client.write("probe"))
+      try {
+        const outcome = await result.promise
+        expect(witnessedZombie, `requires Bun ${process.versions.bun} exited-but-undelivered child`).toBe(true)
+        expect(deliveredDuringBlock).toBe(false)
+        expect(completionDelivered).toBe(true)
+        if (error === null) expect(outcome).toEqual({ verdict: verified })
+        else {
+          expect(outcome).toHaveProperty("error")
+          expect("error" in outcome && String(outcome.error)).toContain(error)
+        }
+      } finally {
+        client.destroy()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    },
+    15_000,
+  )
+
+  /** @failure The production loader loses its explicit completion channel, silently restoring deadline races.
+   * @level l2 @consumer The real bounded verifier, whose custom/stub adapters remain untracked. */
+  it("the production verifier exposes a tracked call that returns its checked promise and completion reader", async () => {
+    const path = moduleAt(
+      "tracked-call.ts",
+      `export const IDENTITY_VERIFIER_INTERFACE = 1
+      export async function verifyIdentity() { await Bun.sleep(100); return ${JSON.stringify(verified)} }`,
+    )
+    const loaded = await loadIdentityVerifier(path)
+    const symbol = Object.getOwnPropertySymbols(loaded).find((key) => key.description === "trackedIdentityVerification")
+    expect(symbol, "production loader must expose its explicit private tracked call").toBeTypeOf("symbol")
+    const start = Reflect.get(loaded, symbol!) as (token: string) => {
+      promise: Promise<IdentityVerdict>
+      readCompletion: () => { state: string }
+    }
+    const tracked = start("tracked-token")
+    expect(tracked.readCompletion().state).toBe("running")
+    await expect(tracked.promise).resolves.toEqual(verified)
+    expect(tracked.readCompletion().state).toBe("exited")
+  })
+
+  /** @failure Checking process completion turns a still-running real verifier into a grant or drops its later cache.
+   * @level l2 @consumer Cold identity calls whose child legitimately outlives the caller. */
+  it("a real running verifier remains undecided and later caches only its checked verdict", async () => {
+    const path = moduleAt(
+      "running-child.ts",
+      `export const IDENTITY_VERIFIER_INTERFACE = 1
+      export async function verifyIdentity() { await Bun.sleep(150); return ${JSON.stringify(verified)} }`,
+    )
+    const loaded = await loadIdentityVerifier(path)
+    const landed = Promise.withResolvers<void>()
+    const wrapped = boundedIdentityVerifier(loaded, { waitMs: 30, onOutlivedProbe: () => landed.resolve() })
+    await expect(wrapped.verify("running-token")).resolves.toMatchObject({
+      result: "undecided",
+      reason: expect.stringContaining("still running"),
+    })
+    await landed.promise
+    await expect(wrapped.verify("running-token")).resolves.toEqual(verified)
+  })
 
   function stub(verify: LoadedIdentityVerifier["verify"]): LoadedIdentityVerifier {
     return { path: "/stub/verifier.ts", suppliesGen: false, verify }

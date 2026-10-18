@@ -6,6 +6,15 @@
  * and warning copy; daemon health owns circuit breaking and unavailable reasons.
  */
 
+import { readProcessStat } from "tribe-wire/lib/process-parent"
+
+export type BoundedProcessCompletion =
+  | { readonly state: "exited"; readonly evidence: "runtime" | "zombie" }
+  | { readonly state: "running"; readonly evidence: "live" }
+  | { readonly state: "unknown"; readonly evidence: "gone" | "recycled" | "unavailable"; readonly reason: string }
+
+export type ReadBoundedProcessCompletion = () => BoundedProcessCompletion
+
 export type BoundedProcessCommandResult = {
   readonly exitCode: number
   readonly stderr: string
@@ -39,6 +48,8 @@ export type BoundedProcessInput = {
    * see what the parent sees now.
    */
   readonly env?: Readonly<Record<string, string | undefined>>
+  /** Internal callers may observe completion, without taking ownership of the child or its streams. */
+  readonly trackCompletion?: (read: ReadBoundedProcessCompletion) => void
 }
 
 export type BoundedProcessCommandFailure =
@@ -306,6 +317,44 @@ export async function runBoundedProcessCommand(
   const timeout = Promise.withResolvers<{ readonly kind: "timeout" }>()
   const timeoutTimer = setTimeout(() => timeout.resolve({ kind: "timeout" }), bounds.timeoutMs)
   ;(timeoutTimer as { unref?: () => void }).unref?.()
+  if (input.trackCompletion !== undefined) {
+    const birth = readProcessStat(child.pid)
+    const readCompletion: ReadBoundedProcessCompletion = () => {
+      if (child.exitCode !== null || child.signalCode !== null) return { state: "exited", evidence: "runtime" }
+      if (!("fields" in birth) || birth.fields.startTime === null || !/^\d+$/u.test(birth.fields.startTime)) {
+        return {
+          state: "unknown",
+          evidence: "unavailable",
+          reason:
+            "cannot bind child birth: " +
+            ("reason" in birth ? birth.reason : `/proc/${child.pid}/stat has no start time`),
+        }
+      }
+      const current = readProcessStat(child.pid)
+      if (!("fields" in current)) {
+        return { state: "unknown", evidence: current.kind, reason: current.reason }
+      }
+      if (current.fields.startTime !== birth.fields.startTime) {
+        return { state: "unknown", evidence: "recycled", reason: `/proc/${child.pid}/stat start time changed` }
+      }
+      return current.kind === "zombie"
+        ? { state: "exited", evidence: "zombie" }
+        : { state: "running", evidence: "live" }
+    }
+    try {
+      input.trackCompletion(readCompletion)
+    } catch (error) {
+      clearTimeout(timeoutTimer)
+      await terminate()
+      drainAbort.abort()
+      await capturesDone
+      throw new BoundedProcessCommandError({
+        kind: "settlement-failed",
+        message: label + " completion observer setup failed: " + describeError(error),
+        settlementFailures,
+      })
+    }
+  }
   const first = await Promise.race([
     child.exited.then((exitCode) => ({ exitCode, kind: "exit" as const })),
     timeout.promise,

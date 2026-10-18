@@ -14,6 +14,7 @@ import { existsSync, readFileSync } from "node:fs"
 const PS_TIMEOUT_MS = 500
 
 export interface ProcStatFields {
+  readonly state: string
   readonly ppid: number
   /** Field 22: the start time in clock ticks since boot, null when the line ends before it. */
   readonly startTime: string | null
@@ -32,7 +33,45 @@ export function parseProcStatLine(line: string): ProcStatFields | null {
     .split(" ")
   const ppidText = fields[1] ?? ""
   if (!/^\d+$/u.test(ppidText)) return null
-  return { ppid: Number(ppidText), startTime: fields[19] ?? null }
+  return { state: fields[0] ?? "", ppid: Number(ppidText), startTime: fields[19] ?? null }
+}
+
+export type ProcessStatReading =
+  | { readonly kind: "live" | "zombie"; readonly fields: ProcStatFields }
+  | {
+      readonly kind: "gone" | "unavailable"
+      readonly reason: string
+      readonly unsupported?: true
+      readonly error?: unknown
+    }
+
+/** One synchronous kernel read; missing or unreadable evidence never proves that an owned child exited. */
+export function readProcessStat(pid: number, procRoot = "/proc"): ProcessStatReading {
+  if (!existsSync(`${procRoot}/self/stat`)) {
+    return {
+      kind: "unavailable",
+      unsupported: true,
+      reason: `${procRoot}/self/stat is unavailable; synchronous process state is unsupported`,
+    }
+  }
+  const invalid = invalidPid(pid)
+  if (invalid !== null) return { kind: "unavailable", reason: invalid.reason }
+  const path = `${procRoot}/${pid}/stat`
+  let line: string
+  try {
+    line = readFileSync(path, "utf8")
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    return {
+      kind: code === "ENOENT" || code === "ESRCH" ? "gone" : "unavailable",
+      reason: `${path} is unreadable (${code ?? (error instanceof Error ? error.message : String(error))})`,
+      error,
+    }
+  }
+  const fields = parseProcStatLine(line)
+  return fields === null
+    ? { kind: "unavailable", reason: `${path} has no parent field` }
+    : { kind: fields.state === "Z" || fields.state === "X" ? "zombie" : "live", fields }
 }
 
 /** A process's parent, or why it could not be read: an errno, a ps exit status, a ps timeout, an unparseable line. */
@@ -55,19 +94,8 @@ export function readParentPid(pid: number, sources: ParentPidSources = SYSTEM_SO
   const invalid = invalidPid(pid)
   if (invalid !== null) return invalid
   if (!existsSync(`${sources.procRoot}/self/stat`)) return readParentPidFromPs(pid, sources.ps)
-  const path = `${sources.procRoot}/${pid}/stat`
-  let line: string
-  try {
-    line = readFileSync(path, "utf8")
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code
-    return {
-      ppid: null,
-      reason: `${path} is unreadable (${code ?? (error instanceof Error ? error.message : String(error))})`,
-    }
-  }
-  const fields = parseProcStatLine(line)
-  return fields === null ? { ppid: null, reason: `${path} has no parent field` } : { ppid: fields.ppid }
+  const reading = readProcessStat(pid, sources.procRoot)
+  return "fields" in reading ? { ppid: reading.fields.ppid } : { ppid: null, reason: reading.reason }
 }
 
 /** `ps -o ppid= -p <pid>`: the reader where there is no /proc. Exported so Linux tests exercise it too. */
@@ -103,6 +131,6 @@ export function readParentPidFromPs(pid: number, ps: string = SYSTEM_SOURCES.ps)
   return /^\d+$/u.test(text) ? { ppid: Number(text) } : { ppid: null, reason: `ps printed no parent for pid ${pid}` }
 }
 
-function invalidPid(pid: number): ParentPidReading | null {
+function invalidPid(pid: number): Extract<ParentPidReading, { ppid: null }> | null {
   return Number.isSafeInteger(pid) && pid > 0 ? null : { ppid: null, reason: `${pid} is not a process id` }
 }

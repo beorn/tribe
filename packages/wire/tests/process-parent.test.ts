@@ -18,7 +18,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { describe, expect, test } from "vitest"
-import { parseProcStatLine, readParentPid, readParentPidFromPs } from "../src/lib/process-parent.ts"
+import { parseProcStatLine, readParentPid, readParentPidFromPs, readProcessStat } from "../src/lib/process-parent.ts"
 
 /** A stat line in the kernel's shape: pid, (comm), then state and fields 4.. ; field 22 is the start time. */
 function statLine(comm: string, ppid: number, startTime: string): string {
@@ -29,7 +29,11 @@ function statLine(comm: string, ppid: number, startTime: string): string {
 
 describe("parseProcStatLine", () => {
   test("reads ppid and start time after a command name holding spaces and parentheses", () => {
-    expect(parseProcStatLine(statLine("we) (ird ) name", 1717, "998877"))).toEqual({ ppid: 1717, startTime: "998877" })
+    expect(parseProcStatLine(statLine("we) (ird ) name", 1717, "998877"))).toEqual({
+      state: "S",
+      ppid: 1717,
+      startTime: "998877",
+    })
   })
 
   test("a line with no command-name close is not a stat line", () => {
@@ -37,7 +41,7 @@ describe("parseProcStatLine", () => {
   })
 
   test("a line cut short before the start time keeps the parent and has no start time", () => {
-    expect(parseProcStatLine("4242 (bun) S 1717 1 1")).toEqual({ ppid: 1717, startTime: null })
+    expect(parseProcStatLine("4242 (bun) S 1717 1 1")).toEqual({ state: "S", ppid: 1717, startTime: null })
   })
 })
 
@@ -131,6 +135,31 @@ describe("readParentPid", () => {
       expect(rows.map((row) => readParentPid(row.pid, row.sources))).toEqual(
         rows.map((row) => ({ ppid: null, reason: row.reason })),
       )
+      // The synchronous owner-state reader never converts missing/unsupported/malformed evidence into exit.
+      expect(readProcessStat(4343, linux)).toMatchObject({
+        kind: "gone",
+        reason: `${linux}/4343/stat is unreadable (ENOENT)`,
+      })
+      expect(readProcessStat(4242, linux)).toMatchObject({
+        kind: "unavailable",
+        reason: `${linux}/4242/stat has no parent field`,
+      })
+      expect(readProcessStat(4242, noProc)).toMatchObject({
+        kind: "unavailable",
+        unsupported: true,
+        reason: expect.stringContaining(noProc),
+      })
+      writeFileSync(join(linux, "4242", "stat"), statLine("exited) child", 1717, "998877").replace(") S ", ") Z "))
+      expect(readProcessStat(4242, linux)).toEqual({
+        kind: "zombie",
+        fields: { state: "Z", ppid: 1717, startTime: "998877" },
+      })
+      mkdirSync(join(linux, "4343"))
+      mkdirSync(join(linux, "4343", "stat"))
+      expect(readProcessStat(4343, linux)).toMatchObject({
+        kind: "unavailable",
+        reason: expect.stringContaining("EISDIR"),
+      })
     } finally {
       safeRemoveSync(root, { within: tmpdir() })
     }
