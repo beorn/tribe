@@ -109,7 +109,7 @@ export interface GitHubEvent {
   created_at: string
 }
 
-interface WorkflowRun {
+export interface WorkflowRun {
   id: number
   name: string
   status: string
@@ -685,6 +685,119 @@ export function formatEvent(event: GitHubEvent, eventTypes: string[]): Formatted
 }
 
 // ---------------------------------------------------------------------------
+// Workflow run incident routing
+// ---------------------------------------------------------------------------
+
+export const GITHUB_WORKFLOW_INCIDENT_EMITTER = "github"
+export const GITHUB_WORKFLOW_INCIDENT_CONDITION = "failing"
+export const GITHUB_WORKFLOW_INCIDENT_OWNER = "@dev/fixer"
+
+/** True when `branch` is `main` or a release tag (`v1.2.3` or `<pkg>-v1.2.3`). Task branches (`task/...`) are false. */
+export function isMainOrReleaseTag(branch: string): boolean {
+  return branch === "main" || /^(?:[a-z0-9][a-z0-9._-]*-)?v\d+\.\d+\.\d+(?:-[\w.-]+)?$/iu.test(branch)
+}
+
+/** Incident subject for one repo + workflow (`:` replaced by `/` so the 3-part incident key never collides). */
+export function workflowIncidentSubject(repo: string, workflowName: string): string {
+  return `${repo}/${workflowName}`.replaceAll(":", "/")
+}
+
+export interface WorkflowIncidentRouter {
+  handleRun(repo: string, run: WorkflowRun, workflowNotify?: "all" | "failure" | "success"): void
+}
+
+/**
+ * Route completed workflow runs on owned repos:
+ * - Failing runs on `main` or a release tag go to `@dev/fixer` as an incident (`emitter: "github"`,
+ *   `subject: "<repo>/<workflow>"`, `condition: "failing"`), opening one standing ball that wakes fixer and upserting
+ *   on repeat failures.
+ * - The next success of the same `repo + workflow + branch` clears that standing incident (`active: false`).
+ * - Task-branch failures (and other conclusions when `workflowNotify` matches) stay pull broadcasts to `*`.
+ */
+export function createWorkflowIncidentRouter(
+  api: Pick<TribeClientApi, "broadcast" | "listOpenIncidents" | "send">,
+): WorkflowIncidentRouter {
+  const failingBranches = new Map<string, string>()
+
+  return {
+    handleRun(repo, run, workflowNotify = "failure") {
+      const status =
+        run.conclusion === "success"
+          ? "PASSED"
+          : run.conclusion === "failure"
+            ? "FAILED"
+            : String(run.conclusion).toUpperCase()
+      const emoji = run.conclusion === "success" ? "✓" : run.conclusion === "failure" ? "✗" : "?"
+      const line = `[workflow] ${repo}: ${emoji} ${run.name} #${run.run_number} ${status} on ${run.head_branch} (${run.actor.login})`
+      const content = `${line} ${run.html_url}`
+      const subject = workflowIncidentSubject(repo, run.name)
+
+      if (isMainOrReleaseTag(run.head_branch)) {
+        if (run.conclusion === "failure") {
+          failingBranches.set(subject, run.head_branch)
+          api.send(
+            GITHUB_WORKFLOW_INCIDENT_OWNER,
+            content,
+            "github:workflow",
+            undefined,
+            {
+              delivery: "push",
+              topic: "github:workflow:failure",
+              summary: `${repo} ${run.name} failing on ${run.head_branch}`,
+            },
+            {
+              emitter: GITHUB_WORKFLOW_INCIDENT_EMITTER,
+              subject,
+              condition: GITHUB_WORKFLOW_INCIDENT_CONDITION,
+              active: true,
+            },
+          )
+          return
+        }
+        if (run.conclusion === "success") {
+          const trackedBranch = failingBranches.get(subject)
+          const openInTracker =
+            trackedBranch === undefined &&
+            (api
+              .listOpenIncidents?.(GITHUB_WORKFLOW_INCIDENT_EMITTER, GITHUB_WORKFLOW_INCIDENT_CONDITION)
+              .some((inc) => inc.subject === subject) ??
+              false)
+          if (trackedBranch === run.head_branch || openInTracker) {
+            failingBranches.delete(subject)
+            api.send(
+              GITHUB_WORKFLOW_INCIDENT_OWNER,
+              content,
+              "github:workflow",
+              undefined,
+              {
+                delivery: "push",
+                topic: "github:workflow:success",
+                summary: `${repo} ${run.name} passed on ${run.head_branch}`,
+              },
+              {
+                emitter: GITHUB_WORKFLOW_INCIDENT_EMITTER,
+                subject,
+                condition: GITHUB_WORKFLOW_INCIDENT_CONDITION,
+                active: false,
+              },
+            )
+            return
+          }
+        }
+      }
+
+      const shouldNotify = workflowNotify === "all" || run.conclusion === workflowNotify
+      if (shouldNotify) {
+        api.broadcast(content, "github:workflow", undefined, {
+          delivery: "pull",
+          topic: `github:workflow:${run.conclusion}`,
+        })
+      }
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Plugin factory
 // ---------------------------------------------------------------------------
 
@@ -734,6 +847,7 @@ export const githubPlugin: TribePluginApi = {
     // Dedup sets — prevent duplicate delivery across reloads
     const seenEventIds = new Set<string>()
     const seenWorkflowUrls = new Set<string>()
+    const workflowRouter = createWorkflowIncidentRouter(api)
 
     // CI state tracking per repo — consecutive failures trigger escalation
     const ciState = new Map<string, { consecutiveFailures: number }>()
@@ -883,31 +997,12 @@ export const githubPlugin: TribePluginApi = {
           const cutoff = Date.now() - 5 * 60 * 1000
           const recent = runs.filter((run) => run.conclusion !== null && new Date(run.updated_at).getTime() > cutoff)
 
-          for (const run of recent.slice(0, 5)) {
+          for (const run of recent.slice(0, 5).reverse()) {
             if (seenWorkflowUrls.has(run.html_url)) continue
             seenWorkflowUrls.add(run.html_url)
             if (seenWorkflowUrls.size > 1000) seenWorkflowUrls.clear()
 
-            // Broadcast based on workflowNotify filter
-            const shouldNotify = workflowNotify === "all" || run.conclusion === workflowNotify
-            if (shouldNotify) {
-              const status =
-                run.conclusion === "success"
-                  ? "PASSED"
-                  : run.conclusion === "failure"
-                    ? "FAILED"
-                    : String(run.conclusion).toUpperCase()
-              const emoji = run.conclusion === "success" ? "✓" : run.conclusion === "failure" ? "✗" : "?"
-              const line = `[workflow] ${r}: ${emoji} ${run.name} #${run.run_number} ${status} on ${run.head_branch} (${run.actor.login})`
-              // km-tribe.event-classification: a single workflow conclusion is
-              // ambient — only the escalated `CI ALERT` (3+ consecutive
-              // failures) is actionable, fired separately below. The reply
-              // hint is derived at delivery time on the channel envelope.
-              api.broadcast(`${line} ${run.html_url}`, `github:workflow`, undefined, {
-                delivery: "pull",
-                topic: `github:workflow:${run.conclusion}`,
-              })
-            }
+            workflowRouter.handleRun(r, run, workflowNotify)
 
             // Track CI state per repo for escalation (always, regardless of notify filter)
             const key = `${r}:${run.name}`

@@ -11,13 +11,23 @@
  * @level L2 — classification + pause/backoff state machine + warn dedup.
  * @consumer summarizePollErrors / createPollHealth / detectRateLimit in github-plugin.ts
  */
-import { describe, expect, test } from "vitest"
+import type { Database } from "bun:sqlite"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, beforeEach, describe, expect, test } from "vitest"
+import { createTribeContext } from "./context.ts"
+import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import {
   createPollHealth,
+  createWorkflowIncidentRouter,
   detectRateLimit,
   formatEvent,
   formatLateEventsWarning,
   GITHUB_LATE_HORIZON_MS,
+  GITHUB_WORKFLOW_INCIDENT_CONDITION,
+  GITHUB_WORKFLOW_INCIDENT_EMITTER,
+  GITHUB_WORKFLOW_INCIDENT_OWNER,
   gitHubTokenSourceLabel,
   partitionLateEvents,
   rateLimitInfoOf,
@@ -26,7 +36,10 @@ import {
   type GitHubEvent,
   type PollError,
   type RateLimitInfo,
+  type WorkflowRun,
 } from "./github-plugin.ts"
+import { readOpenIncidents, sendMessage } from "./messaging.ts"
+import type { TribeClientApi } from "./plugin-api.ts"
 
 const auth401: PollError = { repo: "beorn/bearly", message: "GitHub API 401: Bad credentials" }
 const forbidden403: PollError = { repo: "beorn/termless", message: "GitHub API 403: Resource not accessible" }
@@ -508,5 +521,209 @@ describe("formatEvent — the Events API PR payload carries no title or html_url
     expect(formatEvent({ ...slimPr("7", "opened", 16), type: "WatchEvent" }, ["pull_request"])).toEqual({
       kind: "unsubscribed",
     })
+  })
+})
+
+describe("createWorkflowIncidentRouter — main and release-tag failures route to @dev/fixer as incidents", () => {
+  let dir: string
+  let db: Database
+  let stmts: TribeStatements
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "github-workflow-incident-"))
+    db = openDatabase(join(dir, "tribe.db"))
+    stmts = createStatements(db)
+  })
+  afterEach(() => {
+    db.close()
+    rmSync(dir, { force: true, recursive: true })
+  })
+
+  function daemonApi(): {
+    api: TribeClientApi
+    broadcasts: Array<{ content: string; type: string; classification: unknown }>
+  } {
+    const daemonCtx = createTribeContext({
+      claudeSessionId: null,
+      claudeSessionName: null,
+      db,
+      domains: [],
+      initialName: "daemon",
+      sessionId: "sess-daemon",
+      sessionRole: "daemon",
+      stmts,
+    })
+    const broadcasts: Array<{ content: string; type: string; classification: unknown }> = []
+    const unused = (): never => {
+      throw new Error("not used by workflow incident routing")
+    }
+    const api: TribeClientApi = {
+      broadcast(content, type, beadId, classification) {
+        broadcasts.push({ content, type, classification })
+        sendMessage(daemonCtx, "*", content, type, beadId, undefined, "broadcast", classification ?? {})
+      },
+      claimDedup: unused,
+      getActiveSessions: unused,
+      getSessionNames: unused,
+      getUnreadDms: unused,
+      hasRecentMessage: unused,
+      listOpenIncidents: (emitter, condition) => readOpenIncidents(stmts, emitter, condition),
+      send(recipient, content, type, beadId, classification, incident) {
+        sendMessage(
+          daemonCtx,
+          recipient,
+          content,
+          type,
+          beadId,
+          undefined,
+          recipient === "*" ? "broadcast" : "direct",
+          classification ?? {},
+          incident === undefined ? {} : { incident },
+        )
+      },
+    }
+    return { api, broadcasts }
+  }
+
+  const makeRun = (
+    overrides: Partial<WorkflowRun> & Pick<WorkflowRun, "conclusion" | "head_branch" | "name" | "run_number">,
+  ): WorkflowRun => ({
+    id: overrides.run_number,
+    status: "completed",
+    html_url: `https://github.com/beorn/yrd/actions/runs/${overrides.run_number}`,
+    head_sha: "abcdef0123456789",
+    created_at: "2026-10-18T22:00:00Z",
+    updated_at: "2026-10-18T22:01:00Z",
+    actor: { login: "beorn" },
+    ...overrides,
+  })
+
+  const ballsFor = (recipient: string): Array<{ request_id: string; message_id: string }> =>
+    stmts.selectPendingForRecipient.all({ $recipient: recipient }) as Array<{
+      request_id: string
+      message_id: string
+    }>
+
+  const openIncidents = () =>
+    readOpenIncidents(stmts, GITHUB_WORKFLOW_INCIDENT_EMITTER, GITHUB_WORKFLOW_INCIDENT_CONDITION)
+
+  test("fail opens: a failing run on main or a release tag opens one standing incident ball to @dev/fixer that wakes the owner", () => {
+    const { api, broadcasts } = daemonApi()
+    const router = createWorkflowIncidentRouter(api)
+
+    router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 752, conclusion: "failure", head_branch: "main" }))
+    router.handleRun(
+      "beorn/bearly",
+      makeRun({
+        name: "Release",
+        run_number: 31,
+        conclusion: "failure",
+        head_branch: "cli-process-v0.1.0",
+        html_url: "https://github.com/beorn/bearly/actions/runs/31",
+      }),
+    )
+
+    expect(broadcasts).toEqual([])
+    expect(openIncidents()).toEqual([
+      { subject: "beorn/bearly/Release", recipient: GITHUB_WORKFLOW_INCIDENT_OWNER },
+      { subject: "beorn/yrd/ci", recipient: GITHUB_WORKFLOW_INCIDENT_OWNER },
+    ])
+    expect(
+      ballsFor(GITHUB_WORKFLOW_INCIDENT_OWNER)
+        .map((b) => b.request_id)
+        .sort(),
+    ).toEqual(["github:beorn/bearly/Release:failing", "github:beorn/yrd/ci:failing"])
+    const rows = db
+      .query("SELECT recipient, type, topic, delivery, is_incident, wakes_owner FROM messages ORDER BY rowid")
+      .all()
+    expect(rows).toEqual([
+      {
+        recipient: "@dev/fixer",
+        type: "github:workflow",
+        topic: "github:workflow:failure",
+        delivery: "push",
+        is_incident: 1,
+        wakes_owner: 1,
+      },
+      {
+        recipient: "@dev/fixer",
+        type: "github:workflow",
+        topic: "github:workflow:failure",
+        delivery: "push",
+        is_incident: 1,
+        wakes_owner: 1,
+      },
+    ])
+  })
+
+  test("repeat upserts: a repeat failure on the same repo + workflow + branch upserts the standing ball without opening a second", () => {
+    const { api } = daemonApi()
+    const router = createWorkflowIncidentRouter(api)
+
+    router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 752, conclusion: "failure", head_branch: "main" }))
+    const firstBall = ballsFor(GITHUB_WORKFLOW_INCIDENT_OWNER)
+    expect(firstBall).toHaveLength(1)
+
+    router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 753, conclusion: "failure", head_branch: "main" }))
+    const secondBall = ballsFor(GITHUB_WORKFLOW_INCIDENT_OWNER)
+    expect(secondBall).toHaveLength(1)
+    expect(secondBall[0]?.request_id).toBe("github:beorn/yrd/ci:failing")
+    expect(secondBall[0]?.message_id).not.toBe(firstBall[0]?.message_id)
+
+    const latestContent = db
+      .query("SELECT content, wakes_owner FROM messages WHERE id = ?")
+      .get(secondBall[0]?.message_id ?? "") as { content: string; wakes_owner: number }
+    expect(latestContent.content).toContain("#753 FAILED on main")
+    expect(latestContent.wakes_owner).toBe(0)
+  })
+
+  test("success clears: the next success of the same repo + workflow + branch clears the standing incident (active: false)", () => {
+    const { api } = daemonApi()
+    const router = createWorkflowIncidentRouter(api)
+
+    router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 752, conclusion: "failure", head_branch: "main" }))
+    expect(openIncidents()).toEqual([{ subject: "beorn/yrd/ci", recipient: GITHUB_WORKFLOW_INCIDENT_OWNER }])
+
+    // A task-branch success on the same workflow does NOT clear the main incident.
+    router.handleRun(
+      "beorn/yrd",
+      makeRun({ name: "ci", run_number: 753, conclusion: "success", head_branch: "task/30072-yrd" }),
+    )
+    expect(openIncidents()).toEqual([{ subject: "beorn/yrd/ci", recipient: GITHUB_WORKFLOW_INCIDENT_OWNER }])
+
+    // A success on the same repo + workflow + branch (main) clears it.
+    router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 754, conclusion: "success", head_branch: "main" }))
+    expect(openIncidents()).toEqual([])
+    expect(ballsFor(GITHUB_WORKFLOW_INCIDENT_OWNER)).toEqual([])
+  })
+
+  test("task branch ignored: task-branch failures stay pull broadcasts to * and open no incident ball", () => {
+    const { api, broadcasts } = daemonApi()
+    const router = createWorkflowIncidentRouter(api)
+
+    router.handleRun(
+      "beorn/terminfo.dev",
+      makeRun({
+        name: "macos-measurement",
+        run_number: 84,
+        conclusion: "failure",
+        head_branch: "task/29629-freeze-c24025ea22fc",
+        html_url: "https://github.com/beorn/terminfo.dev/actions/runs/39171870174",
+      }),
+    )
+
+    expect(openIncidents()).toEqual([])
+    expect(ballsFor(GITHUB_WORKFLOW_INCIDENT_OWNER)).toEqual([])
+    expect(broadcasts).toEqual([
+      {
+        content:
+          "[workflow] beorn/terminfo.dev: ✗ macos-measurement #84 FAILED on task/29629-freeze-c24025ea22fc (beorn) https://github.com/beorn/terminfo.dev/actions/runs/39171870174",
+        type: "github:workflow",
+        classification: {
+          delivery: "pull",
+          topic: "github:workflow:failure",
+        },
+      },
+    ])
   })
 })
