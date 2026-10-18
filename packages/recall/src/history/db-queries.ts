@@ -334,7 +334,8 @@ export interface MessageSearchOptions {
   sinceTime?: number // Filter messages after this timestamp
   messageType?: "user" | "assistant" // Filter by message type
   toolName?: string // Filter by tool name
-  sessionId?: string // Filter by session ID
+  /** A session identity always names whether its direct children belong in the search. */
+  session?: { id: string; scope: "exact" | "family" }
   snippetTokens?: number // Snippet window size (default 64)
   /**
    * "exact" (the default) ranks and counts every match in the window. "hook" selects at most
@@ -372,7 +373,7 @@ export interface HookMessageSearch extends HookSearchSummary {
  * window, project, type, tool and session. Both modes use this one statement of them.
  */
 function messageFilterSql(options: MessageSearchOptions): { sql: string; params: (string | number)[] } {
-  const { projectFilter, sinceTime, messageType, toolName, sessionId } = options
+  const { projectFilter, sinceTime, messageType, toolName, session } = options
   const clauses = [
     "m.duplicate_of IS NULL",
     `(m.uuid IS NULL OR m.id = (
@@ -400,9 +401,14 @@ function messageFilterSql(options: MessageSearchOptions): { sql: string; params:
     clauses.push("m.tool_name = ?")
     params.push(toolName)
   }
-  if (sessionId) {
-    clauses.push("(m.session_id = ? OR m.session_id IN (SELECT id FROM sessions WHERE parent_session_id = ?))")
-    params.push(sessionId, sessionId)
+  if (session !== undefined) {
+    if (session.scope === "exact") {
+      clauses.push("m.session_id = ?")
+      params.push(session.id)
+    } else {
+      clauses.push("(m.session_id = ? OR m.session_id IN (SELECT id FROM sessions WHERE parent_session_id = ?))")
+      params.push(session.id, session.id)
+    }
   }
   return { sql: clauses.join(" AND "), params }
 }

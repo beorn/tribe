@@ -153,15 +153,17 @@ describe("Subagent Migration Witness (CTO Ruling 25158)", () => {
     initSchema(db)
     await rebuildIndex(db, { incremental: true })
 
-    // 1. Search with sessionId = 'parent-sess' matches BOTH parent and subagent messages
-    const searchParent = ftsSearchWithSnippet(db, "question", { sessionId: "parent-sess" })
+    // 1. Family scope matches BOTH parent and subagent messages.
+    const searchParent = ftsSearchWithSnippet(db, "question", { session: { id: "parent-sess", scope: "family" } })
     expect(searchParent.results.length).toBe(1)
     const parentHit = searchParent.results[0]!
     expect(parentHit.session_id).toBe("parent-sess")
     expect(parentHit.parent_session_id).toBeNull()
     expect(parentHit.agent_id).toBeNull()
 
-    const searchSubagentUnderParent = ftsSearchWithSnippet(db, "subagent instructions", { sessionId: "parent-sess" })
+    const searchSubagentUnderParent = ftsSearchWithSnippet(db, "subagent instructions", {
+      session: { id: "parent-sess", scope: "family" },
+    })
     expect(searchSubagentUnderParent.results.length).toBe(1)
     const subHitUnderParent = searchSubagentUnderParent.results[0]!
     expect(subHitUnderParent.session_id).toBe("parent-sess:agent-sub1")

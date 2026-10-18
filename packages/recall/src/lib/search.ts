@@ -882,7 +882,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     sinceTime,
     messageType,
     toolName: tool,
-    sessionId: session,
+    session: session === undefined ? undefined : { id: session, scope: "exact" },
   }
 
   if (project) {
