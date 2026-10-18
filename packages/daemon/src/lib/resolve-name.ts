@@ -276,17 +276,22 @@ export function adoptByPidCwd(
 }
 
 // ---------------------------------------------------------------------------
-// resolveName — the main entry point. Layered fallback:
+// resolveName — the main entry point. Three branches, in order:
 //
-//   1. p.name is a flavor default → assign <flavor><N>
-//   2. p.name is explicit (non-flavor-default) → return verbatim
+//   1. p.name is set and is a flavor default → assign <flavor><N>
+//   2. p.name is set and is not a flavor default → return it verbatim
 //   3. claudeSessionName is set → return it
-//   4. adopted (identity-token) → return adopted.name
-//   5. prior claude-session row (non-auto) → return its name
-//   6. project-and-role adopted → return its name
-//   7. chief role → "chief"
-//   8. fallback: `unknown-<rand>` placeholder when there is no other signal
-//      — the session is unidentified and renames itself from inside.
+//
+// Otherwise → `unknown-<rand>` placeholder: the session is unidentified and
+// renames itself from inside via tribe.rename / tribe.join.
+//
+// Adoption is NOT decided here, and this function reads no database. The
+// register path in `compose/with-dispatcher.ts` resolves a prior row first —
+// launch identity (launch_id + launch_parent_pid), then (pid, cwd) [15413],
+// then the weak identityToken only when there is no launch identity — and, for
+// a (pid, cwd) match alone, injects the adopted name into `p.name` so branch 2
+// returns it. Adoption by identityToken never overrides the name (2026-05-14
+// ban; see the note on `resolveName` below) — it can still supply the role.
 //
 // The "currently-taken names" set is passed in by the caller (read from the
 // live clients map). This is intentional: only count *connected* sessions,
@@ -296,14 +301,8 @@ export function adoptByPidCwd(
 // ---------------------------------------------------------------------------
 
 export interface ResolveNameContext {
-  db: import("bun:sqlite").Database
   p: Record<string, unknown>
-  adopted: PriorSession | null
   claudeSessionName: string | null
-  claudeSessionId: string | null
-  role: TribeRole
-  isActive: (sessionId: string) => boolean
-  projectId: string | null
   /** Names currently held by connected clients. Used for flavor-number assignment. */
   takenNames: ReadonlySet<string>
 }
