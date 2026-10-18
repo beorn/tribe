@@ -6,12 +6,19 @@
  * @consumer Recall stale-index refresh and Tribe managed health acquisition
  */
 
-import { afterEach, describe, expect, test } from "vitest"
+import { afterEach, describe, expect, test, vi } from "vitest"
+import { connect, createServer } from "node:net"
+import * as processStat from "tribe-wire/lib/process-parent"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { BoundedProcessCommandError, runBoundedProcessCommand } from "../src/lib/bounded-process.ts"
+import {
+  BoundedProcessCommandError,
+  runBoundedProcessCommand,
+  type ReadBoundedProcessCompletion,
+  type BoundedProcessCompletion,
+} from "../src/lib/bounded-process.ts"
 
 const scratch: string[] = []
 const fixturePids = new Set<number>()
@@ -92,6 +99,107 @@ afterEach(async () => {
 })
 
 describe("runBoundedProcessCommand", () => {
+  /** @failure Missing trusted state or a recycled pid is converted into exit, leaving the real owned child alive.
+   * @level l2 @consumer Every bounded command's conservative timeout settlement. No test-only production seam. */
+  test.skipIf(process.platform !== "linux").each(["unavailable", "recycled"] as const)(
+    "%s completion remains unknown and terminates the owned child",
+    async (arm) => {
+      const original = processStat.readProcessStat
+      let pid: number | undefined
+      let birth: processStat.ProcessStatReading | undefined
+      const reader = vi.spyOn(processStat, "readProcessStat").mockImplementation((value, root) => {
+        if (pid === undefined) {
+          pid = value
+          birth = original(value, root)
+          return birth
+        }
+        if (value !== pid) return original(value, root)
+        if (arm === "unavailable") {
+          return { kind: "unavailable", reason: `/proc/${value}/stat fixture unreadable (EACCES)` }
+        }
+        if (birth === undefined || !("fields" in birth) || birth.fields.startTime === null) {
+          throw new Error("fixture birth unavailable")
+        }
+        return { kind: "live", fields: { ...birth.fields, startTime: String(BigInt(birth.fields.startTime) + 1n) } }
+      })
+      try {
+        const result = await runBoundedProcessCommand(["/bin/sh", "-c", "exec sleep 5"], {
+          timeoutMs: 100,
+          killGraceMs: 100,
+          reapGraceMs: 500,
+          drainGraceMs: 500,
+          maxOutputBytes: 1024,
+        }).catch((error: unknown) => error)
+        expect(result).toBeInstanceOf(BoundedProcessCommandError)
+        expect(result).toMatchObject({
+          failure: { kind: "timeout" },
+          message: expect.stringContaining(`completion arm unknown/${arm}`),
+        })
+        expect(pid).toBeTypeOf("number")
+        expect(await waitDead(pid!)).toBe(true)
+      } finally {
+        reader.mockRestore()
+      }
+    },
+  )
+
+  /** @failure A child already exited before the delayed execution timer is called hung and killed (30030 slice3).
+   * @level l2 @consumer Identity verifier and every captured command sharing this bounded owner.
+   * Deferred promises do not reproduce Bun/Linux poll ordering; observe the actual execution timer unchanged. */
+  test.skipIf(process.platform !== "linux" || process.versions.bun === undefined)(
+    "consumes the existing exit and output when the execution timeout callback witnesses a zombie",
+    async () => {
+      const original = globalThis.setTimeout
+      let read: ReadBoundedProcessCompletion | undefined
+      let atTimeout: BoundedProcessCompletion | undefined
+      const timeout = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+        fn: (...args: unknown[]) => void,
+        ms: number,
+        ...args: unknown[]
+      ) =>
+        original(() => {
+          if (ms === 100 && atTimeout === undefined) atTimeout = read?.()
+          fn(...args)
+        }, ms)) as typeof setTimeout)
+      const answer = Promise.withResolvers<unknown>()
+      const server = createServer((socket) =>
+        socket.once("data", () => {
+          const pending = runBoundedProcessCommand(
+            ["/bin/sh", "-c", "printf result; exit 3"],
+            { timeoutMs: 100, killGraceMs: 100, reapGraceMs: 500, drainGraceMs: 500, maxOutputBytes: 1024 },
+            {
+              trackCompletion: (value) => {
+                read = value
+              },
+            },
+          )
+          // Socket poll callback stalls JS dispatch across the execution bound, while the real child exits.
+          const until = performance.now() + 250
+          while (performance.now() < until) {}
+          socket.end()
+          void pending.then(answer.resolve, (error) => answer.resolve(error))
+        }),
+      )
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+      const address = server.address()
+      if (address === null || typeof address === "string") throw new Error("test socket has no TCP address")
+      const client = connect(address.port, "127.0.0.1", () => client.write("probe"))
+      try {
+        const result = await answer.promise
+        expect(
+          atTimeout,
+          `Bun ${process.versions.bun}: actual callback must observe the demonstrated zombie order`,
+        ).toEqual({ state: "exited", evidence: "zombie" })
+        expect(result).toEqual({ exitCode: 3, stdout: "result", stderr: "" })
+      } finally {
+        timeout.mockRestore()
+        client.destroy()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    },
+    10_000,
+  )
+
   test("returns exit code and independently captured stdout/stderr", async () => {
     const result = await runBoundedProcessCommand(["sh", "-c", "printf out; printf err >&2; exit 3"], {
       timeoutMs: 5_000,

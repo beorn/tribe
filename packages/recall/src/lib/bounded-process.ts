@@ -215,6 +215,26 @@ export async function runBoundedProcessCommand(
 ): Promise<BoundedProcessCommandResult> {
   validateRequest(argv, bounds)
   const child = spawnPiped(argv, input.stdin === undefined ? "ignore" : "pipe", input.env)
+  // Every command records the owned incarnation, not only callers which ask to observe completion.
+  const birth = readProcessStat(child.pid)
+  const readCompletion: ReadBoundedProcessCompletion = () => {
+    if (child.exitCode !== null || child.signalCode !== null) return { state: "exited", evidence: "runtime" }
+    if (!("fields" in birth) || birth.fields.startTime === null || !/^\d+$/u.test(birth.fields.startTime)) {
+      return {
+        state: "unknown",
+        evidence: "unavailable",
+        reason:
+          "cannot bind child birth: " +
+          ("reason" in birth ? birth.reason : `/proc/${child.pid}/stat has no start time`),
+      }
+    }
+    const current = readProcessStat(child.pid)
+    if (!("fields" in current)) return { state: "unknown", evidence: current.kind, reason: current.reason }
+    if (current.fields.startTime !== birth.fields.startTime) {
+      return { state: "unknown", evidence: "recycled", reason: `/proc/${child.pid}/stat start time changed` }
+    }
+    return current.kind === "zombie" ? { state: "exited", evidence: "zombie" } : { state: "running", evidence: "live" }
+  }
   const label = commandLabel(argv)
   const settlementFailures: string[] = []
   let usedSigkill = false
@@ -314,33 +334,14 @@ export async function runBoundedProcessCommand(
   }
   const capturesDone = Promise.all([capture(child.stdout, "stdout"), capture(child.stderr, "stderr")])
 
-  const timeout = Promise.withResolvers<{ readonly kind: "timeout" }>()
-  const timeoutTimer = setTimeout(() => timeout.resolve({ kind: "timeout" }), bounds.timeoutMs)
+  const timeout = Promise.withResolvers<{ readonly kind: "timeout"; readonly completion: BoundedProcessCompletion }>()
+  // Observe at the callback, before another microtask can reap the child and erase its kernel evidence.
+  const timeoutTimer = setTimeout(
+    () => timeout.resolve({ kind: "timeout", completion: readCompletion() }),
+    bounds.timeoutMs,
+  )
   ;(timeoutTimer as { unref?: () => void }).unref?.()
   if (input.trackCompletion !== undefined) {
-    const birth = readProcessStat(child.pid)
-    const readCompletion: ReadBoundedProcessCompletion = () => {
-      if (child.exitCode !== null || child.signalCode !== null) return { state: "exited", evidence: "runtime" }
-      if (!("fields" in birth) || birth.fields.startTime === null || !/^\d+$/u.test(birth.fields.startTime)) {
-        return {
-          state: "unknown",
-          evidence: "unavailable",
-          reason:
-            "cannot bind child birth: " +
-            ("reason" in birth ? birth.reason : `/proc/${child.pid}/stat has no start time`),
-        }
-      }
-      const current = readProcessStat(child.pid)
-      if (!("fields" in current)) {
-        return { state: "unknown", evidence: current.kind, reason: current.reason }
-      }
-      if (current.fields.startTime !== birth.fields.startTime) {
-        return { state: "unknown", evidence: "recycled", reason: `/proc/${child.pid}/stat start time changed` }
-      }
-      return current.kind === "zombie"
-        ? { state: "exited", evidence: "zombie" }
-        : { state: "running", evidence: "live" }
-    }
     try {
       input.trackCompletion(readCompletion)
     } catch (error) {
@@ -355,7 +356,7 @@ export async function runBoundedProcessCommand(
       })
     }
   }
-  const first = await Promise.race([
+  let first = await Promise.race([
     child.exited.then((exitCode) => ({ exitCode, kind: "exit" as const })),
     timeout.promise,
     outputFault.promise,
@@ -372,6 +373,24 @@ export async function runBoundedProcessCommand(
     drainAbort.abort()
     await capturesDone
     return null
+  }
+
+  if (first.kind === "timeout" && first.completion.state === "exited") {
+    const completion = first.completion
+    const delivered = await Promise.race([
+      child.exited.then((exitCode) => ({ kind: "exit" as const, exitCode })),
+      outputFault.promise,
+      delay(bounds.reapGraceMs).then(() => null),
+    ])
+    if (delivered === null) {
+      const captured = await drain()
+      throw new BoundedProcessCommandError({
+        kind: "settlement-failed",
+        message: `${label}: completion arm exited/${completion.evidence} at execution timeout; direct-child exit was not delivered within ${bounds.reapGraceMs}ms${captured === null ? "; output drain also expired" : ""}`,
+        settlementFailures,
+      })
+    }
+    first = delivered
   }
 
   if ("exitCode" in first) {
@@ -416,11 +435,15 @@ export async function runBoundedProcessCommand(
   }
 
   if (first.kind === "timeout") {
+    const completion = first.completion
+    const arm = `; completion arm ${completion.state}/${completion.evidence}${completion.state === "unknown" ? ": " + completion.reason : ""}`
     const message =
       label +
       " exceeded " +
       bounds.timeoutMs +
-      "ms; sent SIGTERM" +
+      "ms" +
+      arm +
+      "; sent SIGTERM" +
       (usedSigkill ? " then SIGKILL after " + bounds.killGraceMs + "ms" : "") +
       (settlementFailures.length === 0 ? "" : "; settlement uncertain: " + settlementFailures.join("; "))
     throw new BoundedProcessCommandError({

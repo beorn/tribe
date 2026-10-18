@@ -16,6 +16,7 @@ import { connect, createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it, vi } from "vitest"
+import { addWriter, getLogLevel, setLogLevel } from "loggily"
 import {
   boundedIdentityVerifier,
   displacementRule,
@@ -446,6 +447,19 @@ describe("boundedIdentityVerifier", () => {
       )
       const loaded = await loadIdentityVerifier(path)
       const wrapped = boundedIdentityVerifier(loaded)
+      const completionLog = vi.spyOn(console, "error").mockImplementation(() => {})
+      const previousLevel = getLogLevel()
+      setLogLevel("info")
+      const completionEvents: unknown[] = []
+      const unsubscribe = addWriter((_formatted, _level, _namespace, event) => {
+        if (
+          event.namespace === "tribe:identity-verifier" &&
+          "message" in event &&
+          event.message === "verifier exited by deadline callback"
+        ) {
+          completionEvents.push(event)
+        }
+      })
       let completionDelivered = false
       let deliveredDuringBlock = false
       let witnessedZombie = false
@@ -464,11 +478,20 @@ describe("boundedIdentityVerifier", () => {
           // Reproduce the poll/dispatcher block, not a timer callback (which delivers child exit first on Bun).
           // The 1200ms block crosses the unchanged caller bound and remains below the runner's 6000ms bound.
           const until = performance.now() + 1200
-          while (performance.now() < until) {
+          const cap = performance.now() + 5500
+          while (performance.now() < cap && (performance.now() < until || !witnessedZombie)) {
             if (!witnessedZombie && existsSync(pidPath)) {
-              const pid = Number(readFileSync(pidPath, "utf8"))
-              const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
-              witnessedZombie = stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z ")
+              const text = readFileSync(pidPath, "utf8")
+              // Creation and writing are separate syscalls: an empty/partial readiness file is not PID zero.
+              if (!/^[1-9]\d*$/u.test(text)) continue
+              const pid = Number(text)
+              try {
+                const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+                witnessedZombie = stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z ")
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+                // No zombie witness yet; keep the readiness wait, never certify exit from absence.
+              }
             }
           }
           deliveredDuringBlock = completionDelivered
@@ -488,12 +511,17 @@ describe("boundedIdentityVerifier", () => {
         expect(witnessedZombie, `requires Bun ${process.versions.bun} exited-but-undelivered child`).toBe(true)
         expect(deliveredDuringBlock).toBe(false)
         expect(completionDelivered).toBe(true)
+        expect(completionEvents).toHaveLength(1)
+        expect(completionEvents[0]).toMatchObject({ props: { elapsedMs: expect.any(Number), evidence: "zombie" } })
         if (error === null) expect(outcome).toEqual({ verdict: verified })
         else {
           expect(outcome).toHaveProperty("error")
           expect("error" in outcome && String(outcome.error)).toContain(error)
         }
       } finally {
+        completionLog.mockRestore()
+        unsubscribe()
+        setLogLevel(previousLevel)
         client.destroy()
         await new Promise<void>((resolve) => server.close(() => resolve()))
       }

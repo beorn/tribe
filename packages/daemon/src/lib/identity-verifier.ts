@@ -168,7 +168,12 @@ export function boundedIdentityVerifier(
   // promise itself: when an outlived probe lands, the composition is told how long it took (28947).
   const probes = new Map<
     Promise<IdentityVerdict>,
-    { startedAt: number; outlived: boolean; readCompletion?: ReadBoundedProcessCompletion }
+    {
+      startedAt: number
+      outlived: boolean
+      completionReported?: boolean
+      readCompletion?: ReadBoundedProcessCompletion
+    }
   >()
 
   const fresh = (token: string): IdentityVerdict | undefined => {
@@ -243,16 +248,26 @@ export function boundedIdentityVerifier(
       if (timer !== undefined) clearTimeout(timer)
       if ("verdict" in outcome) return outcome.verdict
       if ("error" in outcome) throw outcome.error
-      // Past the bounded wait: a verdict that landed in the same instant still serves; otherwise the
-      // call is answered undecided at once and the probe finishes in the background. The synthesised
-      // undecided is returned, never cached: only a verdict the probe itself returns may be cached.
+      // At the deadline callback, a landed verdict serves immediately. A proven-exited child finishes through
+      // the same bounded checked result; running or unknown children finish in the background after undecided.
+      // Only the probe's checked verdict is cached, never the synthesized undecided result.
       const landed = fresh(token)
       if (landed !== undefined) return landed
       const seen = probes.get(pending)
       const completion = seen?.readCompletion?.()
       // Proven exited BY CALLBACK TIME, not necessarily before the original wall-clock cutoff. Still await the
       // same bounded capture/drain and checked verdict: process exit alone never authenticates anybody.
-      if (completion?.state === "exited") return pending
+      if (completion?.state === "exited") {
+        if (seen !== undefined && seen.completionReported !== true) {
+          seen.completionReported = true
+          log.info?.("verifier exited by deadline callback", {
+            elapsedMs: now() - seen.startedAt,
+            evidence: completion.evidence,
+            path: loaded.path,
+          })
+        }
+        return pending
+      }
       if (seen !== undefined) seen.outlived = true
       const reason =
         completion?.state === "unknown"
