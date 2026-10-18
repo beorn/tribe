@@ -101,7 +101,7 @@ afterEach(async () => {
 describe("runBoundedProcessCommand", () => {
   /** @failure Missing trusted state or a recycled pid is converted into exit, leaving the real owned child alive.
    * @level l2 @consumer Every bounded command's conservative timeout settlement. No test-only production seam. */
-  test.skipIf(process.platform !== "linux").each(["unavailable", "recycled"] as const)(
+  test.skipIf(process.platform !== "linux").each(["gone", "unavailable", "recycled"] as const)(
     "%s completion remains unknown and terminates the owned child",
     async (arm) => {
       const original = processStat.readProcessStat
@@ -114,6 +114,9 @@ describe("runBoundedProcessCommand", () => {
           return birth
         }
         if (value !== pid) return original(value, root)
+        if (arm === "gone") {
+          return { kind: "gone", reason: `/proc/${value}/stat fixture absent (ENOENT)` }
+        }
         if (arm === "unavailable") {
           return { kind: "unavailable", reason: `/proc/${value}/stat fixture unreadable (EACCES)` }
         }
@@ -152,6 +155,7 @@ describe("runBoundedProcessCommand", () => {
       const original = globalThis.setTimeout
       let read: ReadBoundedProcessCompletion | undefined
       let atTimeout: BoundedProcessCompletion | undefined
+      let witnessedZombie = false
       const timeout = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
         fn: (...args: unknown[]) => void,
         ms: number,
@@ -175,7 +179,11 @@ describe("runBoundedProcessCommand", () => {
           )
           // Socket poll callback stalls JS dispatch across the execution bound, while the real child exits.
           const until = performance.now() + 250
-          while (performance.now() < until) {}
+          const cap = performance.now() + 7500
+          while (performance.now() < cap && (performance.now() < until || !witnessedZombie)) {
+            const seen = read?.()
+            witnessedZombie = seen?.state === "exited" && seen.evidence === "zombie"
+          }
           socket.end()
           void pending.then(answer.resolve, (error) => answer.resolve(error))
         }),
@@ -186,6 +194,9 @@ describe("runBoundedProcessCommand", () => {
       const client = connect(address.port, "127.0.0.1", () => client.write("probe"))
       try {
         const result = await answer.promise
+        expect(witnessedZombie, "fixture did not witness an exited/zombie child within the 7500ms readiness cap").toBe(
+          true,
+        )
         expect(
           atTimeout,
           `Bun ${process.versions.bun}: actual callback must observe the demonstrated zombie order`,
