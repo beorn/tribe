@@ -1599,11 +1599,13 @@ describe("stdio adapter delivery modes", () => {
         ...process.env,
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
-        DEBUG_LOG: join(tmpDir, "adapter.log"),
       },
       stdio: ["pipe", "pipe", "pipe"],
     })
     const stdout = collectStdoutJson(child)
+    // Default env: no DEBUG_LOG/LOG_FILE, so only a direct stderr write is
+    // visible — the production case (@dev/review2 6a418128 item 4).
+    const stderrText = collectStderrText(child)
 
     await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
@@ -1619,8 +1621,8 @@ describe("stdio adapter delivery modes", () => {
       daemon.clients[0]?.write(makeNotification("channel", { from: "chief", type: "notify", content: `burst-${i}` }))
     }
     await waitForCondition(
-      () => readFileSync(join(tmpDir, "adapter.log"), "utf8").includes('unknown daemon notification method "channel"'),
-      "unknown-method log",
+      () => stderrText().includes('unknown daemon notification method "channel"'),
+      "unknown-method line on stderr",
     )
     await new Promise((resolveTick) => setTimeout(resolveTick, 400))
 
@@ -1629,8 +1631,7 @@ describe("stdio adapter delivery modes", () => {
     )
     expect(forwarded.length).toBe(0)
     // Once per method name, not once per row.
-    const log = readFileSync(join(tmpDir, "adapter.log"), "utf8")
-    expect(log.split('unknown daemon notification method "channel"').length - 1).toBe(1)
+    expect(stderrText().split('unknown daemon notification method "channel"').length - 1).toBe(1)
   })
 
   // 19442 reframe note: with the mailbox-cursor daemon the drain returns only

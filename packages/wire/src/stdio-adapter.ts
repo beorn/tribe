@@ -1929,8 +1929,12 @@ function handleDaemonNotification(method: string, params?: Record<string, unknow
   }
   if (!loggedUnknownDaemonMethods.has(method)) {
     loggedUnknownDaemonMethods.add(method)
-    log.warn?.(
-      `tribe stdio adapter: unknown daemon notification method "${method}" ignored; its rows stay durable and fetchable via tribe.fetch`,
+    // Written DIRECTLY to stderr, never through log.warn: setSuppressConsole(true)
+    // drops the console sink unless DEBUG_LOG/LOG_FILE is set, so a log.warn here
+    // would be silent in exactly the production case the line exists for
+    // (@dev/review2 6a418128 item 4, same idiom as the summary-preview line below).
+    process.stderr.write(
+      `tribe stdio adapter: unknown daemon notification method "${method}" ignored; its rows stay durable and fetchable via tribe.fetch\n`,
     )
   }
 }
