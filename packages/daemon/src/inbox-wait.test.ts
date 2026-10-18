@@ -903,6 +903,47 @@ describe("createInboxWaitManager", () => {
     }
   })
 
+  it("does not retire the row it reports: the wait leaves it fetch-visible and the mailbox cursor unmoved", async () => {
+    // 28542 — a wait reports the row; it never consumes it. The follow-up
+    // fetch is the read that acknowledges, so after a woken chunk the row must
+    // still be unread and the mailbox cursor must not have moved.
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-non-retiring-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const readStatus = realUnreadReader(stmts)
+    const manager = createInboxWaitManager(
+      readStatus,
+      realAttentionReader(db, stmts),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply, true),
+    )
+    const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
+    const seat = "@dev/1"
+    const cursorBefore = stmts.getMailboxCursor.get({ $recipient: seat }) as
+      | { last_actionable_seq: number }
+      | undefined
+
+    try {
+      sendMessage(chief, seat, "the wait reports this row but must not consume it", "verdict", undefined, undefined, "direct")
+
+      await expect(manager.wait(seat, "conn-non-retiring", 2_000)).resolves.toMatchObject({
+        status: "woken",
+        session: seat,
+        timed_out: false,
+        aborted: false,
+      })
+
+      const cursorAfter = stmts.getMailboxCursor.get({ $recipient: seat }) as
+        | { last_actionable_seq: number }
+        | undefined
+      expect(cursorAfter?.last_actionable_seq ?? 0).toBe(cursorBefore?.last_actionable_seq ?? 0)
+      expect(readStatus(seat).unread_count).toBe(1)
+    } finally {
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it("re-armed wait returns immediately when assign landed between chunks (reconnect gap)", async () => {
     // CLI wait closes the socket after each chunk (callInboxWaitChunk finally
     // client.close → cancelConnection). An assign that arrives in the gap
