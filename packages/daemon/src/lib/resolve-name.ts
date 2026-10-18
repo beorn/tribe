@@ -286,12 +286,14 @@ export function adoptByPidCwd(
 // renames itself from inside via tribe.rename / tribe.join.
 //
 // Adoption is NOT decided here, and this function reads no database. The
-// register path in `compose/with-dispatcher.ts` resolves a prior row first —
-// launch identity (launch_id + launch_parent_pid), then (pid, cwd) [15413],
-// then the weak identityToken only when there is no launch identity — and, for
-// a (pid, cwd) match alone, injects the adopted name into `p.name` so branch 2
-// returns it. Adoption by identityToken never overrides the name (2026-05-14
-// ban; see the note on `resolveName` below) — it can still supply the role.
+// register path in `compose/with-dispatcher.ts` resolves a prior row first:
+// a (pid, cwd) match [15413], but only for a caller whose launch token did
+// not verify; otherwise a row matching that launch's name + launch_id +
+// launch_parent_pid; otherwise, when there is no launch identity at all, the
+// weak identityToken. Only the (pid, cwd) match injects the adopted name into
+// `p.name`, so branch 2 returns it. The launch-identity and identityToken
+// matches never override the name (2026-05-14 ban; see the note on
+// `resolveName` below) — they can still supply the role and session id.
 //
 // The "currently-taken names" set is passed in by the caller (read from the
 // live clients map). This is intentional: only count *connected* sessions,
