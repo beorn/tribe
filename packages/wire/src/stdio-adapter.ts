@@ -68,6 +68,7 @@ import {
   createDeliveryCounter,
   createForwardedAttentionTracker,
   decidePendingBallSummary,
+  directiveEnvelopeMeta,
   MAX_REPLAY_EVENTS,
   replayEnvelopeMeta,
   selectReplayEvents,
@@ -388,6 +389,10 @@ type TribeFetchResultRow = {
   bead?: string | null
   topic?: string | null
   ts?: string
+  /** 29327 row 5 — the sender's one-line summary. A ball-opening row cannot
+   *  carry a body, so this is the only preview of what the directive names;
+   *  every other row carries its body inline and forwards it unchanged. */
+  summary?: string | null
   from_authority?: string | null
   /** 27488 phase 1 — the row's durable kind. True on a watcher incident row,
    *  which is state in `pending_balls`, never a message the pane is handed as
@@ -1535,6 +1540,9 @@ async function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]
     // 29327 - a settled row names itself settled in the envelope, not in the
     // sender's words: the type marker says no reply is owed and this says why.
     ...settledEnvelopeMeta(event),
+    // 29327 row 5 - a directive carries no body, so the summary that would have
+    // introduced it travels as an attribute instead (never on any other kind).
+    ...(composed.directive ? directiveEnvelopeMeta(event) : {}),
   })
   if (handoff === undefined) return false
   await handoff

@@ -22,6 +22,7 @@ import {
   wakeReadDirective,
 } from "../src/lib/wake-read-directive.ts"
 import { markedType } from "../src/lib/notification-only.ts"
+import { directiveEnvelopeMeta } from "../src/lib/replay-cap.ts"
 
 const ID = "1e058f4a-4721-40d6-af91-867a3ce7075f"
 
@@ -59,5 +60,16 @@ describe("forwarded row content", () => {
       directive: false,
       unnameable: true,
     })
+  })
+
+  it("a directive carries the sender's summary as an escaped envelope attribute", () => {
+    // Req 1: the directive carries id, sender, kind, summary and sent_at. The
+    // id/sender/kind/sent_at are attributes the caller already sets; summary is
+    // the one free-text value, so it is escaped for the attribute context.
+    expect(directiveEnvelopeMeta({ summary: 'ETA "now" <b>' })).toEqual({ summary: "ETA &quot;now&quot; &lt;b&gt;" })
+    expect(directiveEnvelopeMeta({ summary: "line one\nline two" })).toEqual({ summary: "line one line two" })
+    // No summary, no attribute — a row without one stays as it was.
+    expect(directiveEnvelopeMeta({ summary: "" })).toEqual({})
+    expect(directiveEnvelopeMeta({})).toEqual({})
   })
 })

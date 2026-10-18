@@ -510,6 +510,33 @@ export function settledEnvelopeMeta(event: { settled?: boolean; settled_by?: str
 }
 
 /**
+ * 29327 row 5 (@cto 1eb4c66c req 1) — a ball-opening row's directive names only
+ * the message it re-presents, so the facts a reader would have got from the
+ * body travel in the envelope META: `from`, `type`, `message_id` and `sent_at`
+ * are set by the caller, and the sender's SUMMARY rides here.
+ *
+ * Free text in an attribute is the one value the host renders verbatim, so it
+ * is escaped for that context before it leaves the wire: a summary containing
+ * `"` or `<` must not be able to close the attribute or the envelope. Newlines
+ * collapse to a space because an attribute is one line. Absent on every row
+ * that is not a directive, so those envelopes stay byte-for-byte what they were.
+ */
+export function directiveEnvelopeMeta(event: { summary?: string | null }): { summary?: string } {
+  const summary = typeof event.summary === "string" ? event.summary.trim() : ""
+  if (summary.length === 0) return {}
+  return { summary: attributeSafe(summary) }
+}
+
+function attributeSafe(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/[\r\n]+/g, " ")
+}
+
+/**
  * Bound the legacy `channel` content-push burst a pre-`wakeup` daemon dumps
  * right after (re)connect (km 19442).
  *
