@@ -2,6 +2,7 @@
  * Database query functions — prepared statement wrappers, getters, setters, search.
  */
 
+import { createHash } from "node:crypto"
 import { Database } from "bun:sqlite"
 import { assertSingleStatement } from "@bearly/sqlite"
 import * as path from "path"
@@ -405,6 +406,36 @@ function messageFilterSql(options: MessageSearchOptions): { sql: string; params:
 const MESSAGE_HIT_COLUMNS_SQL = `m.*, s.project_path, s.cwd, s.parent_session_id, s.agent_id,
            (SELECT d.line FROM messages d WHERE d.session_id = m.session_id AND d.duplicate_of = m.line LIMIT 1) as duplicate_line`
 
+function sha256Hex(content: string): string {
+  return createHash("sha256").update(content).digest("hex")
+}
+
+/** Keep the first ranked uuid-NULL row per (line, content hash); uuid-bearing rows already collapsed in SQL (29964). */
+function collapseNullUuidCopies<T extends { uuid?: string | null; line?: number | null; content?: string | null }>(
+  rows: readonly T[],
+): T[] {
+  const seen = new Set<string>()
+  const out: T[] = []
+  for (const row of rows) {
+    if (row.uuid != null) {
+      out.push(row)
+      continue
+    }
+    const key = `${String(row.line ?? "")}\0${sha256Hex(row.content ?? "")}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(row)
+  }
+  return out
+}
+
+/** Ranked rows from OFFSET 0 so uuid-NULL copies collapse before the page slice (29964). No hook 1000 clamp. */
+const EXACT_NULL_UUID_OVERFETCH_K = 4
+
+function exactCopyOverFetch(limit: number, offset: number): number {
+  return Math.max(1, offset + limit) * EXACT_NULL_UUID_OVERFETCH_K
+}
+
 export function ftsSearchWithSnippet(
   db: Database,
   query: string,
@@ -414,22 +445,24 @@ export function ftsSearchWithSnippet(
   db: Database,
   query: string,
   options?: MessageSearchOptions & { mode?: "exact" },
-): { results: MessageSearchHit[]; total: number }
+): { results: MessageSearchHit[]; total: number; capped?: RecallSkip }
 export function ftsSearchWithSnippet(
   db: Database,
   query: string,
   options: MessageSearchOptions,
-): { results: MessageSearchHit[]; total: number | null; hook?: HookMessageSearch }
+): { results: MessageSearchHit[]; total: number | null; hook?: HookMessageSearch; capped?: RecallSkip }
 export function ftsSearchWithSnippet(
   db: Database,
   query: string,
   options: MessageSearchOptions = {},
-): { results: MessageSearchHit[]; total: number | null; hook?: HookMessageSearch } {
+): { results: MessageSearchHit[]; total: number | null; hook?: HookMessageSearch; capped?: RecallSkip } {
   if (options.mode === "hook") return hookMessageSearch(db, query, options)
   const { limit = 50, offset = 0, snippetTokens = 64 } = options
   const ftsQuery = toFts5Query(query)
   const filter = messageFilterSql(options)
   const where = `WHERE messages_fts MATCH ? AND ${filter.sql}`
+  const overFetch = exactCopyOverFetch(limit, offset)
+  const pageNeed = offset + limit
 
   const searchQuery = `
     SELECT ${MESSAGE_HIT_COLUMNS_SQL},
@@ -443,9 +476,23 @@ export function ftsSearchWithSnippet(
   `
   const params = [ftsQuery, ...filter.params]
   const total = countMessages(db, ftsQuery, filter)
-  const results = db.prepare(assertSingleStatement(searchQuery)).all(...params, limit, offset) as MessageSearchHit[]
+  const ranked = db.prepare(assertSingleStatement(searchQuery)).all(...params, overFetch, 0) as MessageSearchHit[]
+  const distinct = collapseNullUuidCopies(ranked)
+  const results = distinct.slice(offset, offset + limit)
+  const capped: RecallSkip | undefined =
+    ranked.length === overFetch && distinct.length < pageNeed
+      ? {
+          kind: "candidate-cap",
+          phase: "messages",
+          anchor: query,
+          message:
+            `recall messages capped after null-uuid copy collapse at ${String(overFetch)} ranked rows ` +
+            `(${String(EXACT_NULL_UUID_OVERFETCH_K)}× page need ${String(pageNeed)}): ` +
+            `${String(distinct.length)} distinct in window, offset ${String(offset)} limit ${String(limit)}; page is approximate (29964)`,
+        }
+      : undefined
 
-  return { results, total }
+  return { results, total, ...(capped ? { capped } : {}) }
 }
 
 /** Every match that meets the filter, counted: exact mode's total, and hook mode's only when asked for. */
@@ -476,7 +523,13 @@ function hookMessageSearch(
   const { limit = 50, offset = 0, snippetTokens = 64, withTotal = false } = options
   const ftsQuery = toFts5Query(query)
   const filter = messageFilterSql(options)
-  type Candidate = { id: number; session_id: string }
+  type Candidate = {
+    id: number
+    session_id: string
+    uuid?: string | null
+    line?: number | null
+    content?: string | null
+  }
   const selectCandidates = (toolFilter: string, candidateLimit: number): Candidate[] =>
     db
       .prepare(
@@ -507,7 +560,8 @@ function hookMessageSearch(
       ? []
       : (db
           .prepare(
-            assertSingleStatement(`SELECT m.id AS id, m.session_id AS session_id, ${MESSAGE_RANK_SQL} AS rank
+            assertSingleStatement(`SELECT m.id AS id, m.session_id AS session_id, m.uuid AS uuid, m.line AS line,
+         m.content AS content, ${MESSAGE_RANK_SQL} AS rank
        FROM messages_fts f
        JOIN messages m ON f.rowid = m.id
        JOIN sessions s ON m.session_id = s.id
@@ -518,13 +572,14 @@ function hookMessageSearch(
           .all(ftsQuery, ...filter.params, JSON.stringify(held.map((row) => row.id))) as (Candidate & {
           rank: number
         })[])
+  const collapsed = collapseNullUuidCopies(survivors)
   const anchor = query
 
   const sessionDepths = new Map<string, number>()
-  for (const c of survivors) sessionDepths.set(c.session_id, (sessionDepths.get(c.session_id) ?? 0) + 1)
+  for (const c of collapsed) sessionDepths.set(c.session_id, (sessionDepths.get(c.session_id) ?? 0) + 1)
   const hook: HookMessageSearch = {
     candidateLimit: HOOK_CANDIDATE_LIMIT,
-    survivors: survivors.length,
+    survivors: collapsed.length,
     sessionDepths,
     // Loud, because a cut window is the one case where hook can differ from exact (@cto 4b15f0bc).
     ...(candidates.length > HOOK_CANDIDATE_LIMIT
@@ -543,7 +598,7 @@ function hookMessageSearch(
   }
   const total = withTotal ? countMessages(db, ftsQuery, filter) : null
 
-  const top = survivors.slice(offset, offset + limit)
+  const top = collapsed.slice(offset, offset + limit)
   if (top.length === 0) return { results: [], total, hook }
   const rows = db
     .prepare(
