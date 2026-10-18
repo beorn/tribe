@@ -50,6 +50,7 @@
     "./lib/cwd-guardrail": "./src/lib/cwd-guardrail.ts",
     "./lib/transcript": "./src/lib/transcript.ts",
     "./lib/defang": "./src/lib/defang.ts",
+    "./lib/wake-read-directive": "./src/lib/wake-read-directive.ts",
     "./lib/persona-name": "./src/lib/persona-name.ts",
     "./lib/persona-launch-identity": "./src/lib/persona-launch-identity.ts",
     "./lib/foreign-refusal-kinds": "./src/lib/foreign-refusal-kinds.ts",
@@ -144,6 +145,10 @@
       "./lib/defang": {
         "types": "./dist/lib/defang.d.mts",
         "import": "./dist/lib/defang.mjs"
+      },
+      "./lib/wake-read-directive": {
+        "types": "./dist/lib/wake-read-directive.d.mts",
+        "import": "./dist/lib/wake-read-directive.mjs"
       },
       "./lib/persona-name": {
         "types": "./dist/lib/persona-name.d.mts",
@@ -254,6 +259,7 @@
       "src/lib/cwd-guardrail.ts",
       "src/lib/transcript.ts",
       "src/lib/defang.ts",
+      "src/lib/wake-read-directive.ts",
       "src/lib/persona-name.ts",
       "src/lib/persona-launch-identity.ts",
       "src/lib/foreign-refusal-kinds.ts",

@@ -61,6 +61,7 @@ import { isExplicitTribePersonaName, isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } 
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
+import { composeForwardedRowContent } from "./lib/wake-read-directive.ts"
 import { FOREIGN_REFUSAL_KINDS } from "./lib/foreign-refusal-kinds.ts"
 import {
   createConnectReplayGate,
@@ -1121,7 +1122,7 @@ function repairPrimaryInPlace(): Promise<boolean> {
 const joinInstruction = `Call tribe.join with your launch name and no role: the daemon registers every session as a plain member, and chief is a hat the coordination layer assigns, never a daemon role.`
 const initialDeliveryCapability = currentDeliveryCapability()
 const channelEnvelopeIntro =
-  'After the startup banner confirms acknowledged transportDelivery=push, tribe messages arrive inline as <channel source="tribe" from="..." type="..." bead="..."> envelopes.'
+  'After the startup banner confirms acknowledged transportDelivery=push, tribe messages arrive inline as <channel source="tribe" from="..." type="..." message_id="..."> envelopes. A request, query or assign arrives as the read directive "read your tribe inbox now: <message id>" and carries NO body: its text, and whether it is still owed, come from your own read (tribe.fetch or tribe.inbox), never from the envelope. Verdict, response, notify and status rows keep their body inline.'
 const deliveryInstruction = `${deliveryCapabilityInstruction(initialDeliveryCapability)} Read your turn-start inbox until the startup banner confirms your acknowledged transportDelivery${REQUIRE_EXPLICIT_JOIN ? "; push stays unavailable until tribe.join is acknowledged" : ""}. An unacknowledged banner names the cause.`
 const attentionProjectionInstruction =
   "- A default fetch returns `attention.actionable_unread` (request/query/verdict/assign, direct responses, and a direct status/notify whose ref names an open ball you are party to) and up to 10 `attention.pending_balls` ahead of ambient events; `tribe.pending` returns the full pile. A row with `replay: true` was already shown: not new, never re-acknowledge it."
@@ -1510,14 +1511,20 @@ function tryAutoRenameOnClaim(content: string): void {
 }
 
 async function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[number]): Promise<boolean> {
-  const content = String(event.content ?? "")
-  const type = markedType(String(event.type ?? "notify"), event.settled === true)
+  const kind = String(event.type ?? "notify")
+  const type = markedType(kind, event.settled === true)
+  const rowId = event.id === undefined ? undefined : String(event.id)
+  const composed = composeForwardedRowContent(event)
+  if (composed.unnameable) {
+    log.warn?.(`tribe drain: ${kind} row ${rowId} cannot be named in a read directive; forwarding its body unchanged`)
+  }
+  const content = composed.content
   if (type === "bead:claimed") tryAutoRenameOnClaim(content)
   const handoff = sendChannel(content, {
     from: String(event.from ?? "unknown"),
     type,
     bead: event.bead ? String(event.bead) : undefined,
-    message_id: event.id ? String(event.id) : undefined,
+    message_id: rowId,
     // 25074 3d-1a (@cto 2bfc1935 Q0): whether the sender is verified, a bearer, or only claims its name. A row from
     // before the daemon recorded it, or one the daemon sent, carries none.
     authority: event.from_authority ? String(event.from_authority) : undefined,
@@ -1899,66 +1906,14 @@ function handleDaemonNotification(method: string, params?: Record<string, unknow
     drainDaemonInbox()
     return
   }
-  if (method === "channel") {
-    const content = String(params?.content ?? "")
-    const type = markedType(String(params?.type ?? "notify"))
-    // Auto-rename on bead claim by this session — runs even when the forward is
-    // capped below; the rename is opportunistic and idempotent (durable in the DB).
-    if (type === "bead:claimed") tryAutoRenameOnClaim(content)
-    // km 19442 — bound a stale daemon's connect-time body-push burst. Steady-state
-    // live messages pass freely; only an over-cap (re)connect storm is dropped here
-    // (the rows stay durable in the daemon journal and remain fetchable via tribe.fetch).
-    if (!connectReplayGate.admit(Date.now())) {
-      if (connectReplayGate.dropped === 1) {
-        log.warn?.(
-          `tribe channel-push: connect-replay burst over cap ${MAX_REPLAY_EVENTS} — dropping excess body-pushes (durable + fetchable). Likely a stale tribe plugin/daemon; see km 19442.`,
-        )
-      }
-      return
-    }
-    // #27459 gap-1 — the live push path is the SAME pane inbox as the drain
-    // paths. A reconnect re-push of a row this pane already holds must not
-    // re-present it: the daemon's `replay` flag is cursor-relative and is NOT
-    // that fact (see createForwardedAttentionTracker), so the one forwarded-id
-    // record decides. A push with no message id fails open, and a suppressed
-    // push stays durable in the mailbox for the model's own read (21757: a
-    // model-backed receipt, not transport, retires custody).
-    const pushedId = params?.message_id ? String(params.message_id) : undefined
-    if (pushedId !== undefined && forwardedAttention.has(pushedId)) return
-    const pushMeta = {
-      from: String(params?.from ?? "unknown"),
-      type,
-      bead: params?.bead_id ? String(params.bead_id) : undefined,
-      message_id: params?.message_id ? String(params.message_id) : undefined,
-    }
-    if (pushedId === undefined) {
-      // A push with no message id fails open: there is nothing to record, but
-      // the rejection must still be surfaced and consumed (#28378 — an
-      // unhandled rejection from here took the whole adapter down).
-      sendChannelDetached(content, pushMeta)
-      return
-    }
-    const pushHandoff = sendChannel(content, pushMeta)
-    if (pushHandoff === undefined) return
-    // Marked only AFTER the handoff, and persisted, so an adapter restart
-    // cannot make the daemon's reconnect re-push read as a fresh delivery.
-    // #28378 — a rejected push is not a handoff: nothing is remembered or
-    // counted, the cause is surfaced, and a later drain or push can still
-    // forward the row.
-    void (async () => {
-      try {
-        await pushHandoff
-        ensureDeliveryLedger(Date.now())
-        forwardedAttention.remember(pushedId)
-        deliveryCounter.deliver(pushedId, Buffer.byteLength(content, "utf8"))
-        persistDeliveryLedger(Date.now())
-      } catch (error) {
-        log.warn?.(
-          `tribe channel-push: notification for ${pushedId} was rejected and is not recorded as delivered; it can be forwarded again: ${errorMessage(error)}`,
-        )
-      }
-    })()
-  } else if (method === "session.joined" || method === "session.left") {
+  // 29327 row 5 (@cto 1eb4c66c requirement 4): the body-pushing `channel`
+  // branch is gone. Producer census at this pin: the daemon emits only
+  // `wakeup` and `successor_yield` (with-broadcast.ts:42,52;
+  // with-dispatcher.ts:1200,2333), so nothing reaches this handler with
+  // method=channel. A future body producer must reopen the settled-at-drain
+  // question with its own facts rather than resurrect a push that cannot
+  // re-mark a row after it was composed.
+  if (method === "session.joined" || method === "session.left") {
     const action = method === "session.joined" ? "joined" : "left"
     sendChannelDetached(`${String(params?.name ?? "unknown")} ${action} the tribe`, { from: "daemon", type: "status" })
   }
