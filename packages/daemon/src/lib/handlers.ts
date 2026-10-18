@@ -1962,7 +1962,13 @@ function pendingFactWasAnswered(
  * replies come from durable messages, and non-reply terminal reasons come from
  * journal facts. The journal's ball.expired row is only an observation echo;
  * it is never misreported as a terminal settlement. */
-function expiredPendingBalls(ctx: TribeContext, now: number): PendingOutcomeBall[] {
+function expiredPendingBalls(ctx: TribeContext, now: number, owed = false, owner?: string): PendingOutcomeBall[] {
+  const live = allPendingBalls(ctx, now).filter(
+    (ball): ball is PendingBall & { status: "expired" } => ball.status === "expired",
+  )
+  // History can enrich a live generation's age and conflicts, but cannot
+  // create a live obligation. Apply only owner scope here, never stale age.
+  if (owed && !live.some((ball) => owner === undefined || ball.recipient === owner)) return []
   const rows = ctx.stmts.selectPendingOutcomeFacts.all() as BallOutcomeFactRow[]
   const replies = ctx.stmts.selectPendingReplyFacts.all() as PendingReplyFactRow[]
   const respondersByRef = indexPendingReplies(replies)
@@ -1976,9 +1982,6 @@ function expiredPendingBalls(ctx: TribeContext, now: number): PendingOutcomeBall
     facts.filter((fact): fact is BallSettlementFact => fact.kind === "settled"),
   )
 
-  const live = allPendingBalls(ctx, now).filter(
-    (ball): ball is PendingBall & { status: "expired" } => ball.status === "expired",
-  )
   const liveKeys = new Set(live.map(pendingFactKey))
   // A live pending_request row is the ownership authority. A malformed or
   // wrong-owner reply may be durably recorded with closed=0, but it must never
@@ -2777,7 +2780,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
     const rows = expired
       ? withQuestionBodies(
           ctx,
-          expiredPendingBalls(ctx, now).filter(
+          expiredPendingBalls(ctx, now, owed).filter(
             (row) => (!owed || row.backing === "live") && (staleMs === null || row.age_ms >= staleMs),
           ),
         )
@@ -2802,7 +2805,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
   const rows = expired
     ? withQuestionBodies(
         ctx,
-        expiredPendingBalls(ctx, now).filter(
+        expiredPendingBalls(ctx, now, owed, owner).filter(
           (row) =>
             row.recipient === owner && (!owed || row.backing === "live") && (staleMs === null || row.age_ms >= staleMs),
         ),

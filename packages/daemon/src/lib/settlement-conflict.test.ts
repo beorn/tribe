@@ -25,7 +25,7 @@
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase } from "./database.ts"
@@ -188,6 +188,97 @@ describe("25654 one ball with two settlement facts", () => {
     expect(owed.error).toBeUndefined()
     expect((owed.pending ?? []).map((row) => row.request_id)).toEqual(["live-req"])
     expect(owed.warning).toBeUndefined()
+  })
+
+  it("owed preserves a live generation's older reply and conflicting settlement history", () => {
+    const { db, ctx, stmts } = setup()
+    const now = Date.UTC(2026, 0, 1)
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now)
+    try {
+      journalSettlement(ctx, "live-history", "@chief", "manual-close", now - 3000, now - 7_200_000)
+      journalSettlement(ctx, "live-history", "@chief", "answered", now - 2000, now - 7_200_000)
+      openExpired(stmts, "live-history", "@chief", now)
+      db.run("UPDATE pending_request SET message_id = ? WHERE request_id = ?", ["live-history-m2", "live-history"])
+      handleToolCall(
+        ctx,
+        "tribe.send",
+        { to: "@yrd", type: "response", message: "Earlier generation answered", reply: "live-history-m1" },
+        makeOpts(),
+      )
+
+      const view = parseToolJson(
+        handleToolCall(ctx, "tribe.pending", { owner: "@chief", expired: true, owed: true }, makeOpts()),
+      )
+      expect(view.pending).toMatchObject([
+        {
+          request_id: "live-history",
+          backing: "live",
+          settlement: null,
+          opened_at: new Date(now - 7_200_000).toISOString(),
+          age_ms: 7_200_000,
+          superseded_count: 1,
+          settlement_conflict: [{ settlement: "manual-close" }, { settlement: "answered" }],
+        },
+      ])
+      expect(JSON.stringify(view)).toMatchInlineSnapshot(
+        `"{"owner":"@chief","expired":true,"owed":true,"pending":[{"request_id":"live-history","recipient":"@chief","sender":"@yrd","opened_at":"2025-12-31T22:00:00.000Z","expires_at":"2025-12-31T23:59:00.000Z","age_ms":7200000,"message_id":"live-history-m2","fanout":"first","request_kind":"request","summary":null,"status":"expired","settlement":null,"settled_at":null,"backing":"live","superseded_count":1,"settlement_conflict":[{"settlement":"manual-close","settled_at":"2025-12-31T23:59:57.000Z","settled_by":"@chief"},{"settlement":"answered","settled_at":"2025-12-31T23:59:58.000Z","settled_by":"@chief"}],"content":null,"owner_transport_registered":false,"owner_transport_state":"disconnected","owner_state":"unknown","owner_answer_capability":"not-observed","owner_transport_reason":"no-session-record","owner_last_mailbox_read_age_ms":null,"owner_transport_observed_at":"2026-01-01T00:00:00.000Z","owner_transport_live":false,"owner_transport_offline_since":null}],"count":1,"warning":"1 ball(s) carry settlement facts that disagree; each row's settlement is the latest and settlement_conflict holds every fact: live-history (manual-close by @chief at 2025-12-31T23:59:57.000Z; answered by @chief at 2025-12-31T23:59:58.000Z)"}"`,
+      )
+      const staleView = parseToolJson(
+        handleToolCall(
+          ctx,
+          "tribe.pending",
+          { owner: "@chief", expired: true, owed: true, stale_ms: 5_400_000 },
+          makeOpts(),
+        ),
+      )
+      expect(staleView.pending).toHaveLength(1)
+      expect(JSON.stringify(staleView)).toBe(JSON.stringify(view))
+      journalSettlement(ctx, "live-history", "@chief", "manual-close", now - 4000, now - 10_800_000)
+      db.run("UPDATE messages SET content = json_set(content, '$.message_id', ?) WHERE ref = ? AND ts = ?", [
+        "live-history-m0",
+        "live-history",
+        now - 4000,
+      ])
+      db.run("DELETE FROM pending_request WHERE request_id = ?", ["live-history"])
+      openExpired(stmts, "other-owner-live", "@dev/2", now)
+      const outcomes = vi.spyOn(stmts.selectPendingOutcomeFacts, "all")
+      const replies = vi.spyOn(stmts.selectPendingReplyFacts, "all")
+      try {
+        const empty = parseToolJson(
+          handleToolCall(ctx, "tribe.pending", { owner: "@chief", expired: true, owed: true }, makeOpts()),
+        )
+        expect(JSON.stringify(empty)).toBe(
+          JSON.stringify({ owner: "@chief", expired: true, owed: true, pending: [], count: 0 }),
+        )
+        expect(outcomes).not.toHaveBeenCalled()
+        expect(replies).not.toHaveBeenCalled()
+        db.run("DELETE FROM pending_request WHERE request_id = ?", ["other-owner-live"])
+        const all = parseToolJson(
+          handleToolCall(ctx, "tribe.pending", { all: true, expired: true, owed: true }, makeOpts()),
+        )
+        expect(JSON.stringify(all)).toBe(
+          JSON.stringify({
+            all: true,
+            expired: true,
+            owed: true,
+            scope: "all",
+            pending: [],
+            owners: [],
+            owner_count: 0,
+            oldest_age_ms: 0,
+            count: 0,
+          }),
+        )
+        expect(outcomes).not.toHaveBeenCalled()
+        expect(replies).not.toHaveBeenCalled()
+      } finally {
+        outcomes.mockRestore()
+        replies.mockRestore()
+      }
+    } finally {
+      clock.mockRestore()
+      db.close()
+    }
   })
 
   it("folds the bead's order too: answered, then closed by hand", () => {
