@@ -1025,7 +1025,6 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       for (const id of acknowledgedIds) expect(tailed).toContain(`${id} verdict from @cto`)
       const after = (await callLaunchTool(reader, 601, "fetch", {})) as { attention: { actionable_unread: unknown[] } }
       expect(after.attention.actionable_unread).toEqual([])
-      console.log("30096 actual tail reproduction", JSON.stringify({ full: read.stdout, tailed, after }))
     } finally {
       sender.close()
     }
