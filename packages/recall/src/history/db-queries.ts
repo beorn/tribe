@@ -413,7 +413,9 @@ function sha256Hex(content: string): string {
 }
 
 /** Keep the first ranked uuid-NULL row per content hash; uuid-bearing rows already collapsed in SQL (29964 C2). */
-function collapseNullUuidCopies<T extends { uuid?: string | null; content?: string | null }>(rows: readonly T[]): T[] {
+function collapseNullUuidCopies<T extends { uuid?: string | null; content?: string | null }>(
+  rows: readonly T[],
+): (T & { collapsedCopyCount?: number })[] {
   const sizes = new Map<string, number>()
   for (const row of rows) {
     if (row.uuid != null) continue
@@ -421,7 +423,7 @@ function collapseNullUuidCopies<T extends { uuid?: string | null; content?: stri
     sizes.set(key, (sizes.get(key) ?? 0) + 1)
   }
   const seen = new Set<string>()
-  const out: T[] = []
+  const out: (T & { collapsedCopyCount?: number })[] = []
   for (const row of rows) {
     if (row.uuid != null) {
       out.push(row)
@@ -617,7 +619,14 @@ function hookMessageSearch(
   const results: MessageSearchHit[] = []
   for (const t of top) {
     const row = byId.get(t.id)
-    if (row) results.push({ ...row, rank: t.rank, snippet: contentSnippet(row.content ?? "", query, snippetTokens) })
+    if (row) {
+      results.push({
+        ...row,
+        rank: t.rank,
+        snippet: contentSnippet(row.content ?? "", query, snippetTokens),
+        collapsedCopyCount: t.collapsedCopyCount,
+      })
+    }
   }
   return { results, total, hook }
 }

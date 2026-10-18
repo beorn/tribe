@@ -65,6 +65,7 @@ describe("null-uuid copy collapse (29964)", () => {
     const page = ftsSearchWithSnippet(db, TOKEN, { mode: "hook", limit: 10 })
     const contents = page.results.map((row) => row.content)
     expect(contents.filter((c) => c === COPY)).toHaveLength(1)
+    expect(page.results.find((row) => row.content === COPY)?.collapsedCopyCount).toBe(10)
     expect(contents).toContain(OTHER)
   })
 
