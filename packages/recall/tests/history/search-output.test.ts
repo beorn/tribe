@@ -550,7 +550,9 @@ describe("recall search output", () => {
     try {
       seedMessage("scopefilterneedle selected session")
       seedMessage("scopefilterneedle unrelated session", "other")
+      seedMessage("scopefilterneedle ".repeat(20) + "childonlyscope", "child")
       const db = getDb()
+      db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run("sess-a", "sess-child")
       setIndexMeta(db, "last_rebuild", new Date().toISOString())
       db.prepare(
         `INSERT INTO content (content_type, source_id, project_path, title, content, timestamp)
@@ -558,11 +560,12 @@ describe("recall search output", () => {
       ).run("llm_research", "unrelated-research", "/test/km", "unrelated research", "scopefilterneedle", Date.now())
 
       process.exitCode = 0
-      await cmdSearch("scopefilterneedle", { session: "sess-a", json: true })
-      const payload = jsonStdout<{ results: Array<{ contentType: string; sourceId: string }> }>(logSpy)
+      await cmdSearch("scopefilterneedle", { session: "sess-a", json: true, limit: "1" })
+      const payload = jsonStdout<{ total: number; results: Array<{ contentType: string; sourceId: string }> }>(logSpy)
       expect(payload.results.map(({ contentType, sourceId }) => ({ contentType, sourceId }))).toEqual([
         { contentType: "message", sourceId: "sess-a" },
       ])
+      expect(payload.total).toBe(1)
       expect(process.exitCode ?? 0).toBe(0)
 
       logSpy.mockClear()
@@ -574,6 +577,7 @@ describe("recall search output", () => {
       for (const [session, query] of [
         ["absent-session", "scopefilterneedle"],
         ["sess-a", "missing-session-token"],
+        ["sess-a", "childonlyscope"],
       ]) {
         logSpy.mockClear()
         errSpy.mockClear()
