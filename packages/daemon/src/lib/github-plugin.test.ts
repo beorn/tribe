@@ -667,7 +667,7 @@ describe("createWorkflowIncidentRouter — per-branch incident routing on main a
 
   test("rerun through the poller seam: same html_url failing on attempt 1 then passing on attempt 2 clears the incident", () => {
     const { api } = daemonApi()
-    const router = createWorkflowIncidentRouter(api, { incidentOwner: OWNER, stateDir: dir })
+    const router = createWorkflowIncidentRouter(api, { incidentOwner: OWNER })
     const nowMs = Date.parse("2026-10-18T22:02:00Z")
     const sharedUrl = "https://github.com/beorn/terminfo.dev/actions/runs/39173749850"
 
