@@ -429,11 +429,11 @@ function collapseNullUuidCopies<T extends { uuid?: string | null; line?: number 
   return out
 }
 
-/** Extra ranked rows at the requested SQL OFFSET so uuid-NULL copies can collapse before the page (29964). */
+/** Ranked rows from OFFSET 0 so uuid-NULL copies collapse before the page slice (29964). No hook 1000 clamp. */
 const EXACT_NULL_UUID_OVERFETCH_K = 4
 
-function exactCopyOverFetch(limit: number): number {
-  return Math.max(1, limit) * EXACT_NULL_UUID_OVERFETCH_K
+function exactCopyOverFetch(limit: number, offset: number): number {
+  return Math.max(1, offset + limit) * EXACT_NULL_UUID_OVERFETCH_K
 }
 
 export function ftsSearchWithSnippet(
@@ -461,7 +461,8 @@ export function ftsSearchWithSnippet(
   const ftsQuery = toFts5Query(query)
   const filter = messageFilterSql(options)
   const where = `WHERE messages_fts MATCH ? AND ${filter.sql}`
-  const overFetch = exactCopyOverFetch(limit)
+  const overFetch = exactCopyOverFetch(limit, offset)
+  const pageNeed = offset + limit
 
   const searchQuery = `
     SELECT ${MESSAGE_HIT_COLUMNS_SQL},
@@ -475,19 +476,19 @@ export function ftsSearchWithSnippet(
   `
   const params = [ftsQuery, ...filter.params]
   const total = countMessages(db, ftsQuery, filter)
-  const ranked = db.prepare(assertSingleStatement(searchQuery)).all(...params, overFetch, offset) as MessageSearchHit[]
+  const ranked = db.prepare(assertSingleStatement(searchQuery)).all(...params, overFetch, 0) as MessageSearchHit[]
   const distinct = collapseNullUuidCopies(ranked)
-  const results = distinct.slice(0, limit)
+  const results = distinct.slice(offset, offset + limit)
   const capped: RecallSkip | undefined =
-    ranked.length === overFetch && distinct.length < limit
+    ranked.length === overFetch && distinct.length < pageNeed
       ? {
           kind: "candidate-cap",
           phase: "messages",
           anchor: query,
           message:
             `recall messages capped after null-uuid copy collapse at ${String(overFetch)} ranked rows ` +
-            `(${String(EXACT_NULL_UUID_OVERFETCH_K)}× limit ${String(limit)} at SQL offset ${String(offset)}): ` +
-            `${String(distinct.length)} distinct in window; page is approximate (29964)`,
+            `(${String(EXACT_NULL_UUID_OVERFETCH_K)}× page need ${String(pageNeed)}): ` +
+            `${String(distinct.length)} distinct in window, offset ${String(offset)} limit ${String(limit)}; page is approximate (29964)`,
         }
       : undefined
 

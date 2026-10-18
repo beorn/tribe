@@ -76,6 +76,18 @@ describe("null-uuid copy collapse (29964)", () => {
     expect(page.capped?.message).toMatch(/null-uuid copy collapse/)
   })
 
+  test("exact offset 1 after two null-uuid copies returns the next distinct row", () => {
+    const db = seedForkCopies(2, [{ content: OTHER, line: 100 }])
+    const first = ftsSearchWithSnippet(db, TOKEN, { limit: 1, offset: 0 })
+    const second = ftsSearchWithSnippet(db, TOKEN, { limit: 1, offset: 1 })
+    expect(first.results).toHaveLength(1)
+    expect(second.results).toHaveLength(1)
+    expect(first.results[0]?.content).not.toBe(second.results[0]?.content)
+    expect([COPY, OTHER]).toContain(first.results[0]?.content)
+    expect([COPY, OTHER]).toContain(second.results[0]?.content)
+    expect(second.capped).toBeUndefined()
+  })
+
   test("exact UUID-only deep pages keep SQL OFFSET and do not inherit the hook 1000 cap", () => {
     const db = new Database(":memory:")
     db.exec("PRAGMA journal_mode = MEMORY")
