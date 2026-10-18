@@ -72,13 +72,16 @@ describe("forwarded row content", () => {
     expect(directiveEnvelopeMeta({})).toEqual({})
   })
 
-  it("every sender-set meta value is escaped once, at the one assembly point", () => {
-    // @cto 66ffa581 req 2: summary, bead and topic are all sender-set and reach
-    // the host as attributes, so the escaper sits where the meta is assembled
-    // and applies to every value — not to the summary alone.
-    const hostile = 'q"a< b>\nnext'
-    const escaped = escapeEnvelopeMeta({ summary: hostile, bead: hostile, topic: hostile })
-    for (const value of Object.values(escaped)) expect(value).toBe("q&quot;a&lt; b&gt; next")
+  it("every sender-set meta value reaches the host unchanged, except newlines", () => {
+    // @cto 51217743 GO (a): the host escapes attributes itself — Claude Code
+    // 2.1.302 escapes & < > " ' in meta values, measured on probe c5bd4ebb —
+    // so escaping here as well only double-escapes what the reader sees.
+    // Summary, bead and topic are all sender-set and reach the host as
+    // attributes; each goes through the one assembly point unchanged, and only
+    // a newline is folded because an attribute cannot carry one.
+    const hostile = "q\"a< b> & 'x'\nnext"
+    const safe = escapeEnvelopeMeta({ summary: hostile, bead: hostile, topic: hostile })
+    for (const value of Object.values(safe)) expect(value).toBe("q\"a< b> & 'x' next")
     // A value with none of those characters is byte-identical, so ordinary
     // envelopes do not change.
     expect(

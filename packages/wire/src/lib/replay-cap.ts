@@ -511,13 +511,21 @@ export function directiveEnvelopeMeta(event: { summary?: string | null }): { sum
 }
 
 /**
- * 29327 row 5 (@cto 66ffa581 req 2) — ONE attribute escaper, applied where the
- * envelope meta is assembled, to every value that reaches the host: summary,
- * bead and topic are sender-set, and `from`/`type`/`message_id`/`sent_at` pass
- * through unchanged because they can never contain an attribute-breaking
- * character. If the host renders attributes verbatim, an unescaped quote in a
- * sender's bead can close the envelope just as a summary can. Values with none
- * of those characters come out byte-identical.
+ * 29327 row 5 (@cto 66ffa581 req 2, amended by @cto 51217743 GO (a)) — ONE
+ * attribute escaper, applied where the envelope meta is assembled, to every
+ * value that reaches the host: summary, bead and topic are sender-set, and
+ * `from`/`type`/`message_id`/`sent_at` pass through unchanged because they can
+ * never contain an attribute-breaking character.
+ *
+ * The host escapes attributes, so the wire does not. Measured in the installed
+ * Claude Code 2.1.302 channel renderer: every attribute is built as
+ * ` ${key}="${Ks(value)}"`, where `Ks` escapes `&` `<` `>` `"` `'`, so the
+ * host escapes `& < > " '` in meta values before the envelope reaches the pane.
+ * Probe `c5bd4ebb` showed the old entities arriving double-escaped (`&quot;`
+ * read back as `&amp;quot;`), which is the same fact from the other side: the
+ * host was escaping what we had already escaped. One home per truth — rendering
+ * and escaping belong to the host, so the wire only folds newlines, which an
+ * attribute cannot carry.
  */
 export function escapeEnvelopeMeta(meta: Record<string, string | undefined>): Record<string, string | undefined> {
   const safe: Record<string, string | undefined> = {}
@@ -528,10 +536,5 @@ export function escapeEnvelopeMeta(meta: Record<string, string | undefined>): Re
 }
 
 function attributeSafe(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/[\r\n]+/g, " ")
+  return text.replace(/[\r\n]+/g, " ")
 }
