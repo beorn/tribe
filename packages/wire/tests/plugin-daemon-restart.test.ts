@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { Database } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { connectToDaemon, type DaemonClient } from "../src/client.ts"
+import { connectToDaemon, isDaemonCallTimeoutError, type DaemonClient } from "../src/client.ts"
 import { deriveTribePersonaLaunchIdentity, formatInstanceId } from "../src/lib/persona-launch-identity.ts"
 import { RELOAD_REJOIN_MAX_MS, RELOAD_SLOT_MS } from "../src/lib/reload-pacing.ts"
 import { REEXEC_BACKOFF_BASE_MS, REEXEC_BACKOFF_MAX_MS } from "../../../plugins/claude/supervisor-policy.ts"
@@ -158,6 +158,32 @@ function mcpToolJson(lines: JsonObject[], id: number): ToolJson {
   return parseToolJson(lines.find((line) => line.id === id)?.result)
 }
 
+/**
+ * The per-call budget for assertions taken after attribution. The one second below exists to fail
+ * fast on an unresponsive socket while attributing a generation; an assertion over a live daemon
+ * needs the settle window to own the bound instead (25236). This is a POLICY choice — one third of
+ * `waitFor`'s 15 s window, so several polls can fit — not a measured daemon bound.
+ */
+const SETTLE_CALL_TIMEOUT_MS = 5_000
+
+/**
+ * One roster read inside a settle wait. A daemon-call timeout means "not answered yet", never a
+ * failed assertion: the wait owns the bound, so a single slow reply must not abort it (25236).
+ */
+async function readRosterOrPending(client: DaemonClient): Promise<ToolJson | undefined> {
+  try {
+    return await readRosterSettled(client)
+  } catch (error) {
+    if (isDaemonCallTimeoutError(error)) return undefined
+    throw error
+  }
+}
+
+/** A roster read that asserts, not waits: it takes the settled budget and surfaces every failure. */
+async function readRosterSettled(client: DaemonClient): Promise<ToolJson> {
+  return parseToolJson(await client.call("tribe.members", { all: true }, { timeoutMs: SETTLE_CALL_TIMEOUT_MS }))
+}
+
 async function connectToGeneration(
   socketPath: string,
   predicate: (pid: number) => boolean = () => true,
@@ -165,20 +191,52 @@ async function connectToGeneration(
   let lastError: unknown
   const deadline = Date.now() + 15_000
   while (Date.now() < deadline) {
-    let client: DaemonClient | undefined
+    let probe: DaemonClient | undefined
     try {
-      client = await connectToDaemon(socketPath, { callTimeoutMs: 1_000 })
-      const status = (await client.call("cli_daemon")) as { pid: number }
-      if (predicate(status.pid)) return { client, pid: status.pid }
-      client.close()
+      probe = await connectToDaemon(socketPath, { callTimeoutMs: 1_000 })
+      const status = (await probe.call("cli_daemon")) as { pid: number }
+      if (predicate(status.pid)) return { client: probe, pid: status.pid }
+      probe.close()
     } catch (error) {
       lastError = error
-      client?.close()
+      probe?.close()
     }
     await new Promise((resolveTick) => setTimeout(resolveTick, 50))
   }
   throw new Error(`timed out connecting to expected daemon generation: ${String(lastError)}`)
 }
+
+// 25236: on a loaded runner a roster read can outlive a bounded call. That is the condition the wait
+// is waiting on, not a failed assertion, so the read must be retried and the wait must still settle.
+it("a roster read that times out is retried inside the settle wait (25236)", async () => {
+  let calls = 0
+  const budgets: Array<number | undefined> = []
+  const client = {
+    call: async (_method: string, _params: unknown, opts?: { timeoutMs?: number }) => {
+      calls += 1
+      budgets.push(opts?.timeoutMs)
+      if (calls === 1) {
+        throw Object.assign(new Error("Request tribe.members timed out after 1000ms"), {
+          name: "DaemonCallTimeoutError",
+          code: "TRIBE_DAEMON_CALL_TIMEOUT",
+        })
+      }
+      return { content: [{ text: JSON.stringify({ sessions: [{ name: "@agent/settled" }] }) }] }
+    },
+  } as unknown as DaemonClient
+  await waitFor(async () => (await readRosterOrPending(client)) !== undefined, "roster after a timed-out read", 1_000)
+  expect(calls).toBe(2)
+  // The settle budget travels with every read, so the probe's one second never bounds an assertion.
+  expect(budgets).toEqual([SETTLE_CALL_TIMEOUT_MS, SETTLE_CALL_TIMEOUT_MS])
+  // A non-timeout error is still a failure: only the bounded-call condition is retried.
+  await expect(
+    readRosterOrPending({
+      call: async () => {
+        throw new Error("daemon refused the request")
+      },
+    } as unknown as DaemonClient),
+  ).rejects.toThrow("daemon refused the request")
+})
 
 function pidExists(pid: number): boolean {
   try {
@@ -476,7 +534,9 @@ process.exit(await child.exited)
         await waitFor(() => stdout.some((line) => line.id === index + 1), `plugin initialization for ${persona}`)
         writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
         await waitFor(async () => {
-          const rosterRows = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+          const roster = await readRosterOrPending(generation.client)
+          if (roster === undefined) return false
+          const rosterRows = roster.sessions ?? []
           const member = rosterRows.find(
             (session) => session.name === persona && session.transport_state === "connected",
           )
@@ -485,13 +545,17 @@ process.exit(await child.exited)
         }, `initial membership for ${persona}`)
       }
     } catch (error) {
-      const rosterRows = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+      // Diagnostics must not mask the failure they describe: an unreadable roster is named, not thrown.
+      let rosterText: string
+      try {
+        rosterText = JSON.stringify((await readRosterSettled(generation.client)).sessions ?? [])
+      } catch (rosterError) {
+        rosterText = `unreadable: ${String(rosterError)}`
+      }
       const diagnostics = harnesses
         .map(({ persona, stderr, logPath }) => `${persona}: stderr=${stderr()} log=${readFileSync(logPath, "utf8")}`)
         .join("\n")
-      throw new Error(
-        `${error instanceof Error ? error.message : String(error)}\nroster=${JSON.stringify(rosterRows)}\n${diagnostics}`,
-      )
+      throw new Error(`${error instanceof Error ? error.message : String(error)}\nroster=${rosterText}\n${diagnostics}`)
     }
 
     let priorTransportPids = new Map(
@@ -520,7 +584,9 @@ process.exit(await child.exited)
       const rejoined = new Map<string, Member>()
       await waitFor(
         async () => {
-          const rosterRows = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+          const roster = await readRosterOrPending(generation.client)
+          if (roster === undefined) return false
+          const rosterRows = roster.sessions ?? []
           for (const persona of expectedPersonas) {
             const candidate = rosterRows.find(
               (session) =>
@@ -567,7 +633,7 @@ process.exit(await child.exited)
       ).toEqual([null, null])
 
       if (restart === 2) {
-        afterRestart2Roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+        afterRestart2Roster = await readRosterSettled(generation.client)
       }
     }
 
@@ -586,7 +652,7 @@ process.exit(await child.exited)
       },
     })
 
-    const finalRoster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+    const finalRoster = (await readRosterSettled(generation.client)).sessions ?? []
     expect(
       finalRoster
         .filter((session) => session.transport_state === "connected")
