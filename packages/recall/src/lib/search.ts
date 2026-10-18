@@ -814,11 +814,10 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
 
   // Parse time filter
   let sinceTime: number | undefined
-  if (since) {
+  if (since !== undefined) {
     sinceTime = parseTime(since)
     if (sinceTime === undefined) {
-      console.error(`Invalid time format: ${since}`)
-      console.error("Valid formats: 1h, 1d, 1w, today, yesterday")
+      console.error(`Invalid --since ${JSON.stringify(since)}; expected Nh, Nd, Nw, today, or yesterday`)
       process.exit(1)
     }
   } else {

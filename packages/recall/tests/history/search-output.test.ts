@@ -2,7 +2,9 @@ import { assertSingleStatement } from "@bearly/sqlite"
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { Database } from "bun:sqlite"
+import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 
 process.env.RECALL_DB_PATH = ":memory:"
@@ -261,6 +263,52 @@ describe("recall search output", () => {
     stderrWriteSpy.mockRestore()
     closeDb()
   })
+
+  // The CLI must distinguish a rejected window from a complete empty search.
+  // Pure parser tests and the raw-only refusal missed synthesis mode's silent zero.
+  test("the CLI rejects invalid since windows and preserves a valid window's hits", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "recall-since-"))
+    const dbPath = join(dir, "index.db")
+    try {
+      seedMessage("sincewindowneedle")
+      setIndexMeta(getDb(), "last_rebuild", new Date().toISOString())
+      getDb().prepare("VACUUM INTO ?").run(dbPath)
+      const run = async (since: string, flags: string[]) => {
+        const child = Bun.spawn(
+          [
+            process.execPath,
+            fileURLToPath(new URL("../../src/cli.ts", import.meta.url)),
+            "sincewindowneedle",
+            "--since",
+            since,
+            "--json",
+            ...flags,
+          ],
+          { env: { ...process.env, RECALL_DB_PATH: dbPath, RECALL_AGENT: "0" }, stdout: "pipe", stderr: "pipe" },
+        )
+        const [stdout, stderr, code] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ])
+        return { stdout, stderr, code }
+      }
+      for (const since of ["2026-10-17T00:00:00Z", "2days", ""]) {
+        for (const flags of [[], ["--raw"], ["--agent"]]) {
+          const result = await run(since, flags)
+          expect(result.code, JSON.stringify({ since, flags, ...result })).not.toBe(0)
+          expect(result.stdout).toBe("")
+          expect(result.stderr).toContain(JSON.stringify(since))
+          expect(result.stderr).toMatch(/Nh.*Nd.*Nw.*today.*yesterday/)
+        }
+      }
+      const valid = await run("1d", ["--raw"])
+      expect(valid.code, valid.stderr).toBe(0)
+      expect(JSON.parse(valid.stdout)).toMatchObject({ total: 1, results: [{ sourceId: "sess-a" }] })
+    } finally {
+      safeRemoveSync(dir, { within: tmpdir() })
+    }
+  }, 15_000)
 
   // Receipt creation is covered by real SQLite fanout/agent tests. This is the
   // distinct CLI transport boundary, including its early synthesis-failure path.

@@ -452,17 +452,10 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
   try {
     // Parse time filter (default: 30 days)
     let sinceTime: number | undefined
-    if (since) {
+    if (since !== undefined) {
       sinceTime = parseTimeToMs(since)
       if (sinceTime === undefined) {
-        log(`invalid time filter: "${since}"`)
-        return {
-          query,
-          provenance,
-          synthesis: null,
-          results: [],
-          durationMs: Date.now() - startTime,
-        }
+        throw new Error(`Invalid --since ${JSON.stringify(since)}; expected Nh, Nd, Nw, today, or yesterday`)
       }
     } else {
       sinceTime = Date.now() - THIRTY_DAYS_MS

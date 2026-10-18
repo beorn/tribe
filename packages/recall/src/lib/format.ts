@@ -38,39 +38,7 @@ export const THIRTY_DAYS_MS = 30 * ONE_DAY_MS
  * Parse time string to timestamp (milliseconds since epoch).
  * Supports: 1h, 2d, 3w, today, yesterday
  */
-export function parseTime(timeStr: string): number | undefined {
-  const now = Date.now()
-  const str = timeStr.toLowerCase().trim()
-
-  const match = str.match(/^(\d+)([hdw])$/)
-  if (match) {
-    const amount = parseInt(match[1]!, 10)
-    const unit = match[2]
-    switch (unit) {
-      case "h":
-        return now - amount * ONE_HOUR_MS
-      case "d":
-        return now - amount * ONE_DAY_MS
-      case "w":
-        return now - amount * 7 * ONE_DAY_MS
-    }
-  }
-
-  switch (str) {
-    case "today": {
-      const midnight = new Date()
-      midnight.setHours(0, 0, 0, 0)
-      return midnight.getTime()
-    }
-    case "yesterday": {
-      const midnight = new Date()
-      midnight.setHours(0, 0, 0, 0)
-      return midnight.getTime() - ONE_DAY_MS
-    }
-  }
-
-  return undefined
-}
+export { parseTimeToMs as parseTime } from "../history/search.ts"
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`
