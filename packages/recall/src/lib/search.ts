@@ -1010,6 +1010,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         rank: r.rank,
         type: r.type,
         line: r.line ?? null,
+        uuid: r.uuid ?? null,
         duplicateLine: (r as { duplicate_line?: number | null }).duplicate_line ?? null,
       })),
       ...contentResults.results.map((r) => ({
