@@ -75,4 +75,23 @@ describe("null-uuid copy collapse (29964)", () => {
     expect(page.capped?.kind).toBe("candidate-cap")
     expect(page.capped?.message).toMatch(/null-uuid copy collapse/)
   })
+
+  test("exact UUID-only deep pages keep SQL OFFSET and do not inherit the hook 1000 cap", () => {
+    const db = new Database(":memory:")
+    db.exec("PRAGMA journal_mode = MEMORY")
+    initSchema(db)
+    const now = Date.now()
+    for (let i = 0; i < 1001; i++) {
+      const id = `uuid-sess-${String(i)}`
+      upsertSession(db, id, "/test", `/tmp/${id}.jsonl`, now, now, 1, id)
+      insertMessage(db, `uuid-${String(i)}`, id, "user", `${TOKEN} distinct uuid row ${String(i)}`, null, null, now + i)
+    }
+    const page = ftsSearchWithSnippet(db, TOKEN, { limit: 1, offset: 1000 })
+    expect(page.total).toBe(1001)
+    expect(page.results).toHaveLength(1)
+    expect(page.capped).toBeUndefined()
+    const wide = ftsSearchWithSnippet(db, TOKEN, { limit: 1001 })
+    expect(wide.results).toHaveLength(1001)
+    expect(wide.capped).toBeUndefined()
+  })
 })
