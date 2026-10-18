@@ -355,9 +355,10 @@ function sendChannel(content: string, meta: Record<string, string | undefined>):
   if (!CLAUDE_CHANNEL_ENABLED) return undefined
   if (!mcp) return undefined // Not yet initialized
   const safeContent = defangModelInput(content)
-  // 29327 row 5 (@cto 66ffa581 req 2): the ONE place envelope meta is assembled
-  // before it reaches the host, so every sender-set value is escaped here once —
-  // a quote in a summary, bead or topic must not close the attribute it rides.
+  // 29327 row 5 (@cto 66ffa581 req 2, amended by @cto 51217743 GO (a)): the ONE
+  // place envelope meta is assembled before it reaches the host. The host escapes
+  // attributes itself (Claude Code 2.1.302 escapes & < > " '), so the wire only
+  // folds newlines — see escapeEnvelopeMeta; a raw quote cannot close the attribute.
   return mcp.notification({
     method: "notifications/claude/channel",
     params: { content: safeContent, meta: escapeEnvelopeMeta(meta) },
