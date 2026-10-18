@@ -22,6 +22,7 @@ import { mkdirSync, readdirSync, realpathSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
+import { pinTribeLogGuards } from "./tribe-log-guards.ts"
 
 // realpathSync: /tmp is a symlink to /private/tmp on macOS — tools that
 // compare resolved paths against fixture paths (e.g. the ripgrep-backed
@@ -29,6 +30,10 @@ import { safeRemoveSync } from "removely"
 mkdirSync(`/tmp/tribe-vitest-${process.getuid?.() ?? 0}`, { recursive: true })
 const TEST_TMP_BASE = realpathSync(`/tmp/tribe-vitest-${process.getuid?.() ?? 0}`)
 process.env.TMPDIR = TEST_TMP_BASE
+// The two HOME-fallback log paths (@i/17-test-system/25264) — the same module the root
+// `vendor` project composes through tools/test-tribe-log-setup.ts, called here AFTER the
+// TMPDIR redirect so both guards' files land under the swept base.
+pinTribeLogGuards()
 const STALE_CUTOFF_MS = Date.now() - 24 * 60 * 60 * 1000
 for (const name of readdirSync(TEST_TMP_BASE)) {
   const stale = join(TEST_TMP_BASE, name)
@@ -63,40 +68,6 @@ for (const name of readdirSync(TEST_TMP_BASE)) {
 const TRIBE_GUARD_DIR = join(TEST_TMP_BASE, "tribe-guard", randomUUID())
 mkdirSync(TRIBE_GUARD_DIR, { recursive: true })
 process.env.TRIBE_SOCKET = join(TRIBE_GUARD_DIR, "tribe.sock")
-
-// Daemon-stderr tee guard (@ag/tribe/24159) — the standalone supervisor tees
-// each daemon child's stderr to $TRIBE_DAEMON_STDERR_LOG, defaulting (when
-// unset) to a dated file under the REAL ~/.local/share/tribe. A test that
-// spawns the supervisor (supervisor-child-failure.test.ts and friends)
-// without setting this itself would otherwise write live daemon diagnostics
-// straight into the operator's real activity-log directory — discovered
-// live during 24159's own verification: a single `vitest run` left a
-// same-day daemon-stderr-*.log full of fixture text sitting next to the
-// real activity-*.jsonl files. Same class of hazard as the socket guard
-// above, same fix shape: point the fallback at a hermetic path. Explicit
-// always wins — a test that wants to assert against this file itself still
-// sets TRIBE_DAEMON_STDERR_LOG per-test.
-if (!process.env.TRIBE_DAEMON_STDERR_LOG) {
-  process.env.TRIBE_DAEMON_STDERR_LOG = join(TEST_TMP_BASE, "daemon-stderr-log-guard.log")
-}
-
-// Activity-log guard — the identical hazard, one level up: activityLogPath()
-// (packages/daemon/src/lib/activity-log.ts) falls back to a dated file
-// under the REAL ~/.local/share/tribe whenever $TRIBE_ACTIVITY_LOG is
-// unset. Any test that drives a real writeActivity() call without setting
-// it itself — e.g. packages/daemon/src/lib/compose/with-broadcast.test.ts —
-// writes straight into the operator's live activity log. Caught live during
-// 24159's own verification: a `vitest run` left thousands of fixture rows
-// ("tribe:subsystem-N: distinct failure N") in that day's real
-// activity-*.jsonl. Not "off" — tests that assert on the activity log's own
-// content (rather than just avoiding the real one) still need a real file
-// to read back, so the default points at a hermetic one instead of
-// disabling the write outright. Explicit always wins — a test that wants
-// its own path (or truly wants logging off) still sets
-// TRIBE_ACTIVITY_LOG itself.
-if (!process.env.TRIBE_ACTIVITY_LOG) {
-  process.env.TRIBE_ACTIVITY_LOG = join(TEST_TMP_BASE, "activity-log-guard.jsonl")
-}
 
 // Injection-record guard — the identical hazard, a fourth time: the record writer
 // (packages/injection-envelope/src/debug.ts, ensureFileWriter) falls back to

@@ -18,6 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 import { readPinSidecar } from "../src/lib/spawn-pin-gate.ts"
+import { carryTribeLogPins } from "../../../tests/setup/tribe-log-guards.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLIENT = resolve(HERE, "../src/client.ts")
@@ -330,7 +331,9 @@ process.exitCode = await (await import(${JSON.stringify(pathToFileURL(DAEMON).hr
     for (const key of Object.keys(env)) {
       if (key.startsWith("HAB_") || key.startsWith("TRIBE_")) delete env[key]
     }
-    return { ...env, TRIBE_NO_AUTORELOAD: "1", TRIBE_NO_PLUGINS: "1", ...extra }
+    // The two log-path pins name fixtures, not live state (@i/17-test-system/25264); a
+    // supervisor started from this env would otherwise tee into the HOME the suite runs in.
+    return carryTribeLogPins({ ...env, TRIBE_NO_AUTORELOAD: "1", TRIBE_NO_PLUGINS: "1", ...extra })
   }
 
   function habServiceEnv(): NodeJS.ProcessEnv {

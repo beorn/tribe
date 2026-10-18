@@ -16,6 +16,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { connectToDaemon, type DaemonClient } from "tribe-wire"
+import { carryTribeLogPins } from "../../../../tests/setup/tribe-log-guards.ts"
 import { RECALL_ERRORS, RECALL_PROTOCOL_VERSION, TRIBE_METHODS } from "../../../../plugins/claude/recall/lib/rpc.ts"
 
 const DAEMON = resolve(import.meta.dirname, "../daemon.ts")
@@ -57,6 +58,9 @@ describe("a daemon whose --vault-db names no file boots with the recall vault RE
     const missing = join(dir, "moved", "state.db")
     const env: NodeJS.ProcessEnv = { ...process.env }
     for (const key of Object.keys(env)) if (key.startsWith("HAB_") || key.startsWith("TRIBE_")) delete env[key]
+    // The daemon logs session activity; the two log-path pins name fixtures, not live state
+    // (@i/17-test-system/25264), so carry them back rather than falling back to HOME.
+    carryTribeLogPins(env)
     Object.assign(env, { TRIBE_NO_AUTORELOAD: "1", TRIBE_NO_PLUGINS: "1", XDG_DATA_HOME: join(dir, "xdg-data") })
 
     daemon = spawn(
