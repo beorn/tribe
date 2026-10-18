@@ -439,7 +439,6 @@ describe("stdio adapter delivery modes", () => {
     ) as { result?: { isError?: boolean; content?: Array<{ text?: string }> } }
     const result = reply.result
     const text = result?.content?.[0]?.text ?? ""
-    console.info("30082 diagnostic MCP reply", JSON.stringify(reply))
     expect(daemon.requests.filter((row) => row.method === "tribe.send").length).toBeGreaterThan(0)
     if (result?.isError === true) {
       expect(text).toMatch(/closed|accepted|reconnect/)
