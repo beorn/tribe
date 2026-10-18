@@ -3166,6 +3166,19 @@ export function createStatements(db: Database) {
     `),
     ),
 
+    /** 29969 - the id a close or reply was handed is not a full id, but it is an
+     *  unambiguous prefix of ONE ball this owner still owes. Read only for the
+     *  refusal sentence: no path resolves prefixes, and `substr` keeps `%` and
+     *  `_` literal. LIMIT 2 answers "unique or ambiguous" without reading the
+     *  rest, so an owner with thousands of balls pays the same two rows. */
+    selectOpenBallIdsByPrefix: db.prepare(
+      assertSingleStatement(`
+      SELECT request_id FROM pending_request
+      WHERE recipient = $name AND substr(request_id, 1, length($prefix)) = $prefix
+      LIMIT 2
+    `),
+    ),
+
     /** 29327 - which of the ids a batch names still own an open ball, decided by
      *  the IDS ALONE (@cto verdict 2026-10-17, ruling 2, corrected against C1).
      *

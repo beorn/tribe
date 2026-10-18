@@ -362,6 +362,13 @@ export function settlePendingRows(
  *     owner; only for a different recipient. Distinct from never-tracked: the
  *     id is real, it just never named this caller.
  *   - `never-tracked`          — no row, no fact, for anyone, in either tier.
+ *   - `prefix-of-open`         — the id is not a full id, but it is the unique
+ *     prefix of ONE ball this owner still owes (29969). The refusal keeps
+ *     refusing, because no path resolves prefixes; it just names the full id
+ *     instead of claiming no ball was ever opened for an id the owner can see.
+ *   - `prefix-ambiguous`       — the id is the prefix of MORE than one ball this
+ *     owner owes; naming any one of them would be a guess, so it names none
+ *     (29969).
  */
 export type PendingCloseCause =
   | {
@@ -387,6 +394,8 @@ export type PendingCloseCause =
       recipient: string
       fanout: "first" | "all"
     }
+  | { kind: "prefix-of-open"; full_id: string }
+  | { kind: "prefix-ambiguous" }
   | { kind: "never-tracked" }
 
 /** Fold the journal for one request id, across both retention tiers, into the
@@ -396,7 +405,16 @@ export function pendingCloseCause(ctx: TribeContext, requestId: string, owner: s
   const rows = ctx.stmts.selectPendingOutcomeFactsForRequest.all({
     $request_id: requestId,
   }) as BallOutcomeFactRow[]
-  if (rows.length === 0) return { kind: "never-tracked" }
+  if (rows.length === 0) {
+    // 29969: the miss sentence must not contradict the same command's own
+    // pending list. One matching open ball turns the shrug into its full id.
+    const matches = ctx.stmts.selectOpenBallIdsByPrefix.all({ $name: owner, $prefix: requestId }) as Array<{
+      request_id: string
+    }>
+    if (matches.length === 1) return { kind: "prefix-of-open", full_id: matches[0].request_id }
+    if (matches.length > 1) return { kind: "prefix-ambiguous" }
+    return { kind: "never-tracked" }
+  }
   const facts = rows.map(parseBallOutcomeFact)
 
   let ownerSettlement: BallSettlementFact | undefined
@@ -470,6 +488,15 @@ export function settlementCauseVerb(cause: { settlement: BallSettlementReason; s
  * a list of possibilities the owner has to rule out themselves. */
 export function formatPendingCloseCause(cause: PendingCloseCause, requestId: string, owner: string): string {
   const lead = `closed 0 rows for ${requestId}: `
+  if (cause.kind === "prefix-ambiguous") {
+    return `${lead}that is a prefix of more than one open ball — pass the full id ` + `(tribe pending --owner ${owner})`
+  }
+  if (cause.kind === "prefix-of-open") {
+    return (
+      `${lead}that is a prefix of the open ball ${cause.full_id} — pass the full id ` +
+      `(tribe pending --owner ${owner})`
+    )
+  }
   if (cause.kind === "never-tracked") {
     return (
       `${lead}never tracked — no ball was ever opened for this id to ${owner} ` +

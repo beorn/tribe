@@ -388,6 +388,83 @@ describe("a closed: 0 ball result names its exact cause from the journal", () =>
     ])
   })
 
+  it("an id that is the unique prefix of an open ball names that ball, never 'never tracked'", () => {
+    // 29969: @chief's specimens (luna2's f6c0c1d6 and 636ed35f) watched the
+    // refusal say "no ball was ever opened" one clause after pending listed that
+    // ball. The refusal is right — no path resolves prefixes — but it must name
+    // the full id the owner can already see.
+    const full = "req-prefix-8f3a2b1c"
+    parseToolJson(
+      handleToolCall(
+        ci,
+        "tribe.send",
+        { to: "@dev/3", message: "please review", type: "request", request: full },
+        makeOpts(ALL_ACTIVE),
+      ),
+    )
+
+    const closeResult = parseToolJson(
+      handleToolCall(dev3, "tribe.pending", { owner: "@dev/3", close: ["req-prefix-8f3a"] }, makeOpts(ALL_ACTIVE)),
+    )
+    const results = closeResult.results as Array<{ request_id: string; closed: number; reason?: string }>
+    expect(results).toEqual([
+      {
+        request_id: "req-prefix-8f3a",
+        closed: 0,
+        reason:
+          `closed 0 rows for req-prefix-8f3a: that is a prefix of the open ball ${full} — pass the full id ` +
+          "(tribe pending --owner @dev/3)",
+      },
+    ])
+
+    // The reply path reads the same cause, so the two refusals cannot drift.
+    const reply = parseToolJson(
+      handleToolCall(
+        dev3,
+        "tribe.send",
+        { to: "@ci", message: "responding with a prefix", type: "response", reply: "req-prefix-8f3a" },
+        makeOpts(ALL_ACTIVE),
+      ),
+    )
+    const tracker = reply.tracker as TrackerJson
+    expect(tracker.closed).toBe(0)
+    expect(tracker.cause_fact).toEqual({ kind: "prefix-of-open", full_id: full })
+    expect(tracker.cause).toBe(
+      `closed 0 rows for req-prefix-8f3a: that is a prefix of the open ball ${full} — pass the full id ` +
+        "(tribe pending --owner @dev/3)",
+    )
+  })
+
+  it("an id that is the prefix of two open balls names neither, because naming one would be a guess", () => {
+    // 29969: LIMIT 2 already tells uniqueness from ambiguity without reading the
+    // rest of the owner's balls, so the refusal must not fall back to "never
+    // tracked" once it knows two candidates exist.
+    for (const full of ["req-amb-91c4aaaa", "req-amb-91c4bbbb"]) {
+      parseToolJson(
+        handleToolCall(
+          ci,
+          "tribe.send",
+          { to: "@dev/3", message: "please review", type: "request", request: full },
+          makeOpts(ALL_ACTIVE),
+        ),
+      )
+    }
+
+    const closeResult = parseToolJson(
+      handleToolCall(dev3, "tribe.pending", { owner: "@dev/3", close: ["req-amb-91c4"] }, makeOpts(ALL_ACTIVE)),
+    )
+    const results = closeResult.results as Array<{ request_id: string; closed: number; reason?: string }>
+    expect(results).toEqual([
+      {
+        request_id: "req-amb-91c4",
+        closed: 0,
+        reason:
+          "closed 0 rows for req-amb-91c4: that is a prefix of more than one open ball — pass the full id " +
+          "(tribe pending --owner @dev/3)",
+      },
+    ])
+  })
+
   it("finds the cause after its settlement fact has moved into the archive tier", () => {
     parseToolJson(
       handleToolCall(
