@@ -971,9 +971,8 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
 
   if (session !== undefined && messageResults.total === 0) {
     console.error(
-      `recall: session ${session} has no indexed messages matching query ${JSON.stringify(query)} ` +
-        `in ${db.filename} (since ${since ?? "30d"}, project ${project ?? "all"}, types ${include ?? "messages"}); ` +
-        `non-session content, vault rows and unrelated live sessions were excluded`,
+      `recall: session ${session} has no indexed messages matching ${searchDesc.join(" ")} in ${db.filename}; ` +
+        `non-session content and vault rows were excluded; this process's live, not-yet-indexed session was not searched`,
     )
     process.exitCode = 1
     closeDb()
