@@ -89,6 +89,9 @@
   "trustedDependencies": [
     "tribe-recall",
   ],
+  "patchedDependencies": {
+    "@tobilu/qmd@2.8.3": "patches/@tobilu%2Fqmd@2.8.3.patch",
+  },
   "packages": {
     "@bearly/durable-file": ["@bearly/durable-file@0.1.0", "", {}, "sha512-mHCRg+rzye+/1OxHbZREcqUjtnABJRvChOjDNBiiC8uvcfstTywxGNsLgH3i48iVoey/ofT3pe9oNyJDTJfzAA=="],
 

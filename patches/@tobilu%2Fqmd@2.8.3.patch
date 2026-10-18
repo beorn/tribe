@@ -1,0 +1,214 @@
+diff --git a/dist/store.js b/dist/store.js
+--- a/dist/store.js
++++ b/dist/store.js
+@@ -1436,6 +1436,54 @@
+         }
+     }
+ }
++// Local patch bound: QMD 2.8.3 chunk policy and existing model/fingerprint identity.
++// Changing QMD or model bytes requires a new generation and re-embedding; this
++// patch does not establish identity for unknown model bytes or chunk policies.
++function pairedEmbeddingPredicate(db, keyed = false) {
++    return db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vectors_vec'").get()
++        ? keyed
++            ? "EXISTS (SELECT 1 FROM vectors_vec WHERE hash_seq = (cv.hash || '_' || cv.seq))"
++            : "(cv.hash || '_' || cv.seq) IN (SELECT hash_seq FROM vectors_vec)"
++        : "0";
++}
++function embeddingCompletionQuery(db) {
++    return `SELECT cv.hash,
++        (MIN(cv.total_chunks) > 0 AND MIN(cv.total_chunks) = MAX(cv.total_chunks)
++         AND MIN(cv.seq) = 0 AND MAX(cv.seq) = MAX(cv.total_chunks) - 1
++         AND COUNT(*) = MAX(cv.total_chunks)
++         AND SUM(CASE WHEN ${pairedEmbeddingPredicate(db)} THEN 1 ELSE 0 END) = MAX(cv.total_chunks)) AS complete
++        FROM content_vectors cv WHERE cv.model = ? AND cv.embed_fingerprint = ?
++        GROUP BY cv.hash`;
++}
++function repairEmbeddingPairs(db, model, fingerprint, hash, chunks) {
++    return withLazyContentVectorMigration(db, () => db.transaction(() => {
++        const scope = "cv.model = ? AND cv.embed_fingerprint = ?" + (hash === undefined ? "" : " AND cv.hash = ?");
++        const args = hash === undefined ? [model, fingerprint] : [model, fingerprint, hash];
++        const rows = db.prepare(`SELECT cv.hash, cv.seq, cv.pos, cv.total_chunks,
++            CASE WHEN ${pairedEmbeddingPredicate(db, hash !== undefined)} THEN 1 ELSE 0 END AS paired
++            FROM content_vectors cv WHERE ${scope}`).all(...args);
++        const reasons = { "orphan metadata": 0, "seq mismatch": 0, "pos mismatch": 0, "count mismatch": 0 };
++        let invalidReason;
++        if (chunks) {
++            if (rows.some(row => !Number.isInteger(row.seq) || row.seq < 0 || row.seq >= chunks.length)) invalidReason = "seq mismatch";
++            else if (rows.some(row => row.pos !== chunks[row.seq].pos)) invalidReason = "pos mismatch";
++            else if (rows.some(row => row.total_chunks !== chunks.length)) invalidReason = "count mismatch";
++        }
++        const removed = invalidReason ? rows : rows.filter(row => !row.paired);
++        const deleteMetadata = db.prepare("DELETE FROM content_vectors WHERE hash = ? AND seq = ? AND model = ? AND embed_fingerprint = ?");
++        const deleteVector = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vectors_vec'").get()
++            ? db.prepare("DELETE FROM vectors_vec WHERE hash_seq = ?") : undefined;
++        for (const row of removed) {
++            deleteVector?.run(`${row.hash}_${row.seq}`);
++            deleteMetadata.run(row.hash, row.seq, model, fingerprint);
++            reasons[invalidReason ?? "orphan metadata"]++;
++        }
++        if (hash === undefined || removed.length) {
++            console.warn(`QMD embedding repair: model=${model} fingerprint=${fingerprint}${hash === undefined ? "" : ` hash=${hash}`} removed=${removed.length} reasons=${JSON.stringify(reasons)}`);
++        }
++        return new Set(invalidReason ? [] : rows.filter(row => row.paired).map(row => row.seq));
++    }).immediate());
++}
+ function getPendingEmbeddingDocs(db, collection, model = DEFAULT_EMBED_MODEL) {
+     const collectionFilter = collection ? `AND d.collection = ?` : ``;
+     const fingerprint = getEmbeddingFingerprint(model);
+@@ -1445,13 +1493,10 @@
+       FROM documents d
+       JOIN content c ON d.hash = c.hash
+       LEFT JOIN (
+-        SELECT hash, model, COUNT(*) AS chunk_count, MAX(total_chunks) AS expected_chunks
+-        FROM content_vectors
+-        WHERE model = ? AND embed_fingerprint = ?
+-        GROUP BY hash, model, embed_fingerprint
++        ${embeddingCompletionQuery(db)}
+       ) v ON d.hash = v.hash
+       WHERE d.active = 1
+-        AND (v.hash IS NULL OR v.chunk_count < v.expected_chunks)
++        AND (v.hash IS NULL OR v.complete != 1)
+         ${collectionFilter}
+       GROUP BY d.hash
+       ORDER BY MIN(d.path)
+@@ -1497,7 +1542,7 @@
+ }
+ /**
+  * Generate vector embeddings for documents that need them.
+- * Pure function — no console output, no db lifecycle management.
++ * Reports scoped repair counts; does not manage the database lifecycle.
+  * Uses the store's LlamaCpp instance if set, otherwise the global singleton.
+  */
+ export async function generateEmbeddings(store, options) {
+@@ -1513,6 +1558,7 @@
+     }
+     const docsToEmbed = getPendingEmbeddingDocs(db, options?.collection, model);
+     if (docsToEmbed.length === 0) {
++        repairEmbeddingPairs(db, model, fingerprint);
+         return { docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 0 };
+     }
+     const totalBytes = docsToEmbed.reduce((sum, doc) => sum + Math.max(0, doc.bytes), 0);
+@@ -1610,14 +1656,15 @@
+             }
+             const batchDocs = getEmbeddingDocsForBatch(db, batchMeta);
+             const batchChunks = [];
+-            const expectedChunksByHash = new Map();
+             const batchBytes = batchMeta.reduce((sum, doc) => sum + Math.max(0, doc.bytes), 0);
+             for (const doc of batchDocs) {
+                 if (!doc.body.trim())
+                     continue;
+                 const title = extractTitle(doc.body, doc.path);
+                 const chunks = await chunkDocumentByTokens(doc.body, undefined, undefined, undefined, doc.path, options?.chunkStrategy, session.signal);
++                const persisted = repairEmbeddingPairs(db, model, fingerprint, doc.hash, chunks);
+                 for (let seq = 0; seq < chunks.length; seq++) {
++                    if (persisted.has(seq)) continue;
+                     batchChunks.push({
+                         hash: doc.hash,
+                         path: doc.path,
+@@ -1630,7 +1677,6 @@
+                         expectedTotalChunks: chunks.length,
+                     });
+                 }
+-                expectedChunksByHash.set(doc.hash, chunks.length);
+             }
+             totalChunks += batchChunks.length;
+             if (batchChunks.length === 0) {
+@@ -1720,15 +1766,12 @@
+                 });
+             }
+             await retryFailedChunks(true);
+-            const removedPartialChunks = removeIncompleteEmbeddings(db, expectedChunksByHash, model);
+-            if (removedPartialChunks > 0) {
+-                chunksEmbedded = Math.max(0, chunksEmbedded - removedPartialChunks);
+-            }
+             bytesProcessed += batchBytes;
+             options?.onProgress?.({ chunksEmbedded, totalChunks, bytesProcessed, totalBytes, errors: activeErrorCount(), failures: failureList() });
+         }
+         return { chunksEmbedded, errors: activeErrorCount(), failures: failureList() };
+     }, { maxDuration: options?.maxDurationMs ?? DEFAULT_EMBED_MAX_DURATION_MS, name: 'generateEmbeddings' });
++    repairEmbeddingPairs(db, model, fingerprint);
+     return {
+         docsProcessed: totalDocs,
+         chunksEmbedded: result.chunksEmbedded,
+@@ -1895,13 +1938,10 @@
+       SELECT COUNT(DISTINCT d.hash) as count
+       FROM documents d
+       LEFT JOIN (
+-        SELECT hash, model, COUNT(*) AS chunk_count, MAX(total_chunks) AS expected_chunks
+-        FROM content_vectors
+-        WHERE model = ? AND embed_fingerprint = ?
+-        GROUP BY hash, model, embed_fingerprint
++        ${embeddingCompletionQuery(db)}
+       ) v ON d.hash = v.hash
+       WHERE d.active = 1
+-        AND (v.hash IS NULL OR v.chunk_count < v.expected_chunks)
++        AND (v.hash IS NULL OR v.complete != 1)
+         ${collectionFilter}
+     `);
+         const result = (collection ? stmt.get(model, fingerprint, collection) : stmt.get(model, fingerprint));
+@@ -3431,13 +3471,10 @@
+     FROM documents d
+     JOIN content c ON d.hash = c.hash
+     LEFT JOIN (
+-      SELECT hash, model, COUNT(*) AS chunk_count, MAX(total_chunks) AS expected_chunks
+-      FROM content_vectors
+-      WHERE model = ? AND embed_fingerprint = ?
+-      GROUP BY hash, model, embed_fingerprint
++      ${embeddingCompletionQuery(db)}
+     ) v ON d.hash = v.hash
+     WHERE d.active = 1
+-      AND (v.hash IS NULL OR v.chunk_count < v.expected_chunks)
++      AND (v.hash IS NULL OR v.complete != 1)
+     GROUP BY d.hash
+   `).all(model, fingerprint));
+ }
+@@ -3505,16 +3542,16 @@
+  * Insert a single embedding into both content_vectors and vectors_vec tables.
+  * The hash_seq key is formatted as "hash_seq" for the vectors_vec table.
+  *
+- * content_vectors is inserted first so that getHashesForEmbedding (which checks
+- * only content_vectors) won't re-select the hash on a crash between the two inserts.
++ * Metadata and vector writes commit together for each chunk. Failed writes and
++ * process termination preserve the previous pair or leave neither new row.
+  *
+  * vectors_vec uses DELETE + INSERT instead of INSERT OR REPLACE because sqlite-vec's
+  * vec0 virtual tables silently ignore the OR REPLACE conflict clause.
+  */
+ export function insertEmbedding(db, hash, seq, pos, embedding, model, embeddedAt, totalChunks = 1, fingerprint = getEmbeddingFingerprint(model)) {
+     const hashSeq = `${hash}_${seq}`;
+-    withLazyContentVectorMigration(db, () => {
+-        // Insert content_vectors first — crash-safe ordering (see getHashesForEmbedding)
++    withLazyContentVectorMigration(db, () => db.transaction(() => {
++        // Both tables participate in this per-chunk transaction.
+         const insertContentVectorStmt = db.prepare(`INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embed_fingerprint, total_chunks, embedded_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+         insertContentVectorStmt.run(hash, seq, pos, model, fingerprint, totalChunks, embeddedAt);
+         // vec0 virtual tables don't support OR REPLACE — use DELETE + INSERT
+@@ -3522,26 +3559,7 @@
+         const insertVecStmt = db.prepare(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`);
+         deleteVecStmt.run(hashSeq);
+         insertVecStmt.run(hashSeq, embedding);
+-    });
+-}
+-function removeIncompleteEmbeddings(db, expectedChunksByHash, model) {
+-    return withLazyContentVectorMigration(db, () => {
+-        let removed = 0;
+-        const rowsStmt = db.prepare(`SELECT seq FROM content_vectors WHERE hash = ? AND model = ?`);
+-        const deleteContentStmt = db.prepare(`DELETE FROM content_vectors WHERE hash = ? AND model = ?`);
+-        const deleteVecStmt = db.prepare(`DELETE FROM vectors_vec WHERE hash_seq = ?`);
+-        for (const [hash, expectedChunks] of expectedChunksByHash) {
+-            const rows = rowsStmt.all(hash, model);
+-            if (rows.length === 0 || rows.length === expectedChunks)
+-                continue;
+-            for (const row of rows) {
+-                deleteVecStmt.run(`${hash}_${row.seq}`);
+-            }
+-            deleteContentStmt.run(hash, model);
+-            removed += rows.length;
+-        }
+-        return removed;
+-    });
++    }).immediate());
+ }
+ // =============================================================================
+ // Query expansion
