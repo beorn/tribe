@@ -23,23 +23,24 @@ import {
   createWorkflowIncidentRouter,
   detectRateLimit,
   formatEvent,
+  formatGitHubPluginStartLine,
   formatLateEventsWarning,
   GITHUB_LATE_HORIZON_MS,
   GITHUB_WORKFLOW_INCIDENT_CONDITION,
   GITHUB_WORKFLOW_INCIDENT_EMITTER,
-  GITHUB_WORKFLOW_INCIDENT_OWNER,
   gitHubTokenSourceLabel,
   partitionLateEvents,
   rateLimitInfoOf,
+  resolveWorkflowIncidentOwner,
   selectNewEvents,
   summarizePollErrors,
   type GitHubEvent,
   type PollError,
   type RateLimitInfo,
+  type WorkflowIncidentRouterApi,
   type WorkflowRun,
 } from "./github-plugin.ts"
 import { readOpenIncidents, sendMessage } from "./messaging.ts"
-import type { TribeClientApi } from "./plugin-api.ts"
 
 const auth401: PollError = { repo: "beorn/bearly", message: "GitHub API 401: Bad credentials" }
 const forbidden403: PollError = { repo: "beorn/termless", message: "GitHub API 403: Resource not accessible" }
@@ -524,7 +525,8 @@ describe("formatEvent — the Events API PR payload carries no title or html_url
   })
 })
 
-describe("createWorkflowIncidentRouter — main and release-tag failures route to @dev/fixer as incidents", () => {
+describe("createWorkflowIncidentRouter — per-branch incident routing on main and release tags", () => {
+  const OWNER = "@dev/fixer"
   let dir: string
   let db: Database
   let stmts: TribeStatements
@@ -536,11 +538,12 @@ describe("createWorkflowIncidentRouter — main and release-tag failures route t
   })
   afterEach(() => {
     db.close()
+    // raw-delete-allow: test cleanup of mkdtempSync fixture directory
     rmSync(dir, { force: true, recursive: true })
   })
 
   function daemonApi(): {
-    api: TribeClientApi
+    api: WorkflowIncidentRouterApi
     broadcasts: Array<{ content: string; type: string; classification: unknown }>
   } {
     const daemonCtx = createTribeContext({
@@ -554,19 +557,11 @@ describe("createWorkflowIncidentRouter — main and release-tag failures route t
       stmts,
     })
     const broadcasts: Array<{ content: string; type: string; classification: unknown }> = []
-    const unused = (): never => {
-      throw new Error("not used by workflow incident routing")
-    }
-    const api: TribeClientApi = {
+    const api: WorkflowIncidentRouterApi = {
       broadcast(content, type, beadId, classification) {
         broadcasts.push({ content, type, classification })
         sendMessage(daemonCtx, "*", content, type, beadId, undefined, "broadcast", classification ?? {})
       },
-      claimDedup: unused,
-      getActiveSessions: unused,
-      getSessionNames: unused,
-      getUnreadDms: unused,
-      hasRecentMessage: unused,
       listOpenIncidents: (emitter, condition) => readOpenIncidents(stmts, emitter, condition),
       send(recipient, content, type, beadId, classification, incident) {
         sendMessage(
@@ -592,114 +587,202 @@ describe("createWorkflowIncidentRouter — main and release-tag failures route t
     status: "completed",
     html_url: `https://github.com/beorn/yrd/actions/runs/${overrides.run_number}`,
     head_sha: "abcdef0123456789",
+    run_attempt: 1,
     created_at: "2026-10-18T22:00:00Z",
     updated_at: "2026-10-18T22:01:00Z",
     actor: { login: "beorn" },
     ...overrides,
   })
 
-  const ballsFor = (recipient: string): Array<{ request_id: string; message_id: string }> =>
+  const ballsFor = (recipient: string): Array<{ request_id: string; message_id: string; summary: string | null }> =>
     stmts.selectPendingForRecipient.all({ $recipient: recipient }) as Array<{
       request_id: string
       message_id: string
+      summary: string | null
     }>
 
   const openIncidents = () =>
     readOpenIncidents(stmts, GITHUB_WORKFLOW_INCIDENT_EMITTER, GITHUB_WORKFLOW_INCIDENT_CONDITION)
 
-  test("fail opens: a failing run on main or a release tag opens one standing incident ball to @dev/fixer that wakes the owner", () => {
+  test("per-branch subject (<repo>/<workflow>@<branch>): main fail, repeat upsert, tag fail, reload, tag success leaves main open, main success clears main, and ordinary green sends nothing", () => {
     const { api, broadcasts } = daemonApi()
-    const router = createWorkflowIncidentRouter(api)
+    const router = createWorkflowIncidentRouter(api, { incidentOwner: OWNER })
 
+    // 1. main fail opens github:beorn/yrd/ci@main:failing and wakes owner.
     router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 752, conclusion: "failure", head_branch: "main" }))
-    router.handleRun(
-      "beorn/bearly",
-      makeRun({
-        name: "Release",
-        run_number: 31,
-        conclusion: "failure",
-        head_branch: "cli-process-v0.1.0",
-        html_url: "https://github.com/beorn/bearly/actions/runs/31",
-      }),
-    )
+    const firstMainBall = ballsFor(OWNER)
+    expect(firstMainBall).toHaveLength(1)
+    expect(firstMainBall[0]?.request_id).toBe("github:beorn/yrd/ci@main:failing")
 
-    expect(broadcasts).toEqual([])
-    expect(openIncidents()).toEqual([
-      { subject: "beorn/bearly/Release", recipient: GITHUB_WORKFLOW_INCIDENT_OWNER },
-      { subject: "beorn/yrd/ci", recipient: GITHUB_WORKFLOW_INCIDENT_OWNER },
-    ])
-    expect(
-      ballsFor(GITHUB_WORKFLOW_INCIDENT_OWNER)
-        .map((b) => b.request_id)
-        .sort(),
-    ).toEqual(["github:beorn/bearly/Release:failing", "github:beorn/yrd/ci:failing"])
-    const rows = db
-      .query("SELECT recipient, type, topic, delivery, is_incident, wakes_owner FROM messages ORDER BY rowid")
-      .all()
-    expect(rows).toEqual([
-      {
-        recipient: "@dev/fixer",
-        type: "github:workflow",
-        topic: "github:workflow:failure",
-        delivery: "push",
-        is_incident: 1,
-        wakes_owner: 1,
-      },
-      {
-        recipient: "@dev/fixer",
-        type: "github:workflow",
-        topic: "github:workflow:failure",
-        delivery: "push",
-        is_incident: 1,
-        wakes_owner: 1,
-      },
-    ])
-  })
-
-  test("repeat upserts: a repeat failure on the same repo + workflow + branch upserts the standing ball without opening a second", () => {
-    const { api } = daemonApi()
-    const router = createWorkflowIncidentRouter(api)
-
-    router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 752, conclusion: "failure", head_branch: "main" }))
-    const firstBall = ballsFor(GITHUB_WORKFLOW_INCIDENT_OWNER)
-    expect(firstBall).toHaveLength(1)
-
+    // 2. Repeat failure on main upserts the standing ball without waking again.
     router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 753, conclusion: "failure", head_branch: "main" }))
-    const secondBall = ballsFor(GITHUB_WORKFLOW_INCIDENT_OWNER)
-    expect(secondBall).toHaveLength(1)
-    expect(secondBall[0]?.request_id).toBe("github:beorn/yrd/ci:failing")
-    expect(secondBall[0]?.message_id).not.toBe(firstBall[0]?.message_id)
-
-    const latestContent = db
+    const secondMainBall = ballsFor(OWNER)
+    expect(secondMainBall).toHaveLength(1)
+    expect(secondMainBall[0]?.message_id).not.toBe(firstMainBall[0]?.message_id)
+    const repeatRow = db
       .query("SELECT content, wakes_owner FROM messages WHERE id = ?")
-      .get(secondBall[0]?.message_id ?? "") as { content: string; wakes_owner: number }
-    expect(latestContent.content).toContain("#753 FAILED on main")
-    expect(latestContent.wakes_owner).toBe(0)
-  })
+      .get(secondMainBall[0]?.message_id ?? "") as { content: string; wakes_owner: number }
+    expect(repeatRow.content).toContain("#753 FAILED on main")
+    expect(repeatRow.wakes_owner).toBe(0)
 
-  test("success clears: the next success of the same repo + workflow + branch clears the standing incident (active: false)", () => {
-    const { api } = daemonApi()
-    const router = createWorkflowIncidentRouter(api)
-
-    router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 752, conclusion: "failure", head_branch: "main" }))
-    expect(openIncidents()).toEqual([{ subject: "beorn/yrd/ci", recipient: GITHUB_WORKFLOW_INCIDENT_OWNER }])
-
-    // A task-branch success on the same workflow does NOT clear the main incident.
+    // 3. Release tag failure opens a separate incident github:beorn/yrd/ci@cli-process-v0.1.0:failing.
     router.handleRun(
       "beorn/yrd",
-      makeRun({ name: "ci", run_number: 753, conclusion: "success", head_branch: "task/30072-yrd" }),
+      makeRun({ name: "ci", run_number: 754, conclusion: "failure", head_branch: "cli-process-v0.1.0" }),
     )
-    expect(openIncidents()).toEqual([{ subject: "beorn/yrd/ci", recipient: GITHUB_WORKFLOW_INCIDENT_OWNER }])
+    expect(openIncidents()).toEqual([
+      { subject: "beorn/yrd/ci@cli-process-v0.1.0", recipient: OWNER },
+      { subject: "beorn/yrd/ci@main", recipient: OWNER },
+    ])
 
-    // A success on the same repo + workflow + branch (main) clears it.
-    router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 754, conclusion: "success", head_branch: "main" }))
+    // 4. Reload router (zero process-local state; listOpenIncidents is the only state).
+    const reloaded = createWorkflowIncidentRouter(api, { incidentOwner: OWNER })
+
+    // 5. Tag success clears ONLY the tag incident and leaves main open.
+    reloaded.handleRun(
+      "beorn/yrd",
+      makeRun({ name: "ci", run_number: 755, conclusion: "success", head_branch: "cli-process-v0.1.0" }),
+    )
+    expect(openIncidents()).toEqual([{ subject: "beorn/yrd/ci@main", recipient: OWNER }])
+    expect(ballsFor(OWNER).map((b) => b.request_id)).toEqual(["github:beorn/yrd/ci@main:failing"])
+
+    // 6. An ordinary green run on a branch/tag with no open incident sends nothing.
+    const countBeforeGreen = (db.query("SELECT COUNT(*) AS n FROM messages").get() as { n: number }).n
+    reloaded.handleRun(
+      "beorn/yrd",
+      makeRun({ name: "ci", run_number: 756, conclusion: "success", head_branch: "v1.2.3" }),
+    )
+    const countAfterGreen = (db.query("SELECT COUNT(*) AS n FROM messages").get() as { n: number }).n
+    expect(countAfterGreen).toBe(countBeforeGreen)
+    expect(broadcasts).toEqual([])
+
+    // 7. main's next success clears main.
+    reloaded.handleRun(
+      "beorn/yrd",
+      makeRun({ name: "ci", run_number: 757, conclusion: "success", head_branch: "main" }),
+    )
     expect(openIncidents()).toEqual([])
-    expect(ballsFor(GITHUB_WORKFLOW_INCIDENT_OWNER)).toEqual([])
+    expect(ballsFor(OWNER)).toEqual([])
   })
 
-  test("task branch ignored: task-branch failures stay pull broadcasts to * and open no incident ball", () => {
+  test("rerun through the poller seam: same html_url failing on attempt 1 then passing on attempt 2 clears the incident", () => {
+    const { api } = daemonApi()
+    const router = createWorkflowIncidentRouter(api, { incidentOwner: OWNER, stateDir: dir })
+    const nowMs = Date.parse("2026-10-18T22:02:00Z")
+    const sharedUrl = "https://github.com/beorn/terminfo.dev/actions/runs/39173749850"
+
+    // Poll 1: attempt 1 fails -> opens incident.
+    router.handleRuns(
+      "beorn/terminfo.dev",
+      [
+        makeRun({
+          name: "Content Validation",
+          run_number: 400,
+          run_attempt: 1,
+          conclusion: "failure",
+          head_branch: "main",
+          html_url: sharedUrl,
+          updated_at: "2026-10-18T22:01:00Z",
+        }),
+      ],
+      nowMs,
+    )
+    expect(openIncidents()).toEqual([{ subject: "beorn/terminfo.dev/Content Validation@main", recipient: OWNER }])
+    const countAfterAttempt1 = (db.query("SELECT COUNT(*) AS n FROM messages").get() as { n: number }).n
+
+    // Same attempt 1 polled again is deduped.
+    router.handleRuns(
+      "beorn/terminfo.dev",
+      [
+        makeRun({
+          name: "Content Validation",
+          run_number: 400,
+          run_attempt: 1,
+          conclusion: "failure",
+          head_branch: "main",
+          html_url: sharedUrl,
+          updated_at: "2026-10-18T22:01:00Z",
+        }),
+      ],
+      nowMs,
+    )
+    expect((db.query("SELECT COUNT(*) AS n FROM messages").get() as { n: number }).n).toBe(countAfterAttempt1)
+
+    // Poll 2: rerun of the SAME html_url with run_attempt: 2 succeeds -> reaches router and clears incident.
+    router.handleRuns(
+      "beorn/terminfo.dev",
+      [
+        makeRun({
+          name: "Content Validation",
+          run_number: 400,
+          run_attempt: 2,
+          conclusion: "success",
+          head_branch: "main",
+          html_url: sharedUrl,
+          updated_at: "2026-10-18T22:01:30Z",
+        }),
+      ],
+      nowMs,
+    )
+    expect(openIncidents()).toEqual([])
+    expect(ballsFor(OWNER)).toEqual([])
+  })
+
+  test("named failing set: failure, timed_out, and startup_failure raise; cancelled, skipped, neutral, action_required, and stale change no incident", () => {
+    const { api } = daemonApi()
+    const router = createWorkflowIncidentRouter(api, { incidentOwner: OWNER })
+
+    // timed_out on main raises an incident.
+    router.handleRun(
+      "beorn/yrd",
+      makeRun({ name: "ci", run_number: 800, conclusion: "timed_out", head_branch: "main" }),
+    )
+    expect(openIncidents()).toEqual([{ subject: "beorn/yrd/ci@main", recipient: OWNER }])
+
+    // Non-raising, non-clearing conclusions neither clear the open incident nor open a new one.
+    for (const [idx, conclusion] of ["cancelled", "skipped", "neutral", "action_required", "stale"].entries()) {
+      router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 801 + idx, conclusion, head_branch: "main" }))
+      router.handleRun("beorn/yrd", makeRun({ name: "lint", run_number: 810 + idx, conclusion, head_branch: "main" }))
+    }
+    expect(openIncidents()).toEqual([{ subject: "beorn/yrd/ci@main", recipient: OWNER }])
+
+    // startup_failure on a release tag also raises.
+    router.handleRun(
+      "beorn/yrd",
+      makeRun({ name: "release", run_number: 820, conclusion: "startup_failure", head_branch: "v1.0.0" }),
+    )
+    expect(openIncidents()).toEqual([
+      { subject: "beorn/yrd/ci@main", recipient: OWNER },
+      { subject: "beorn/yrd/release@v1.0.0", recipient: OWNER },
+    ])
+  })
+
+  test("unset-owner config: start log line says incident routing is off and router opens no incident when owner is unset", () => {
+    expect(resolveWorkflowIncidentOwner({})).toBeUndefined()
+    expect(resolveWorkflowIncidentOwner({ GITHUB_WORKFLOW_INCIDENT_OWNER: "   " })).toBeUndefined()
+    expect(resolveWorkflowIncidentOwner({ GITHUB_WORKFLOW_INCIDENT_OWNER: "@dev/fixer" })).toBe("@dev/fixer")
+
+    expect(formatGitHubPluginStartLine(["push", "workflow_run"], "failure", undefined)).toBe(
+      "event types: push, workflow_run, workflow notify: failure, workflow incident routing: off (GITHUB_WORKFLOW_INCIDENT_OWNER unset)",
+    )
+    expect(formatGitHubPluginStartLine(["push", "workflow_run"], "failure", "@dev/fixer")).toBe(
+      "event types: push, workflow_run, workflow notify: failure, workflow incident owner: @dev/fixer",
+    )
+
     const { api, broadcasts } = daemonApi()
-    const router = createWorkflowIncidentRouter(api)
+    const router = createWorkflowIncidentRouter(api, { incidentOwner: undefined })
+    router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 900, conclusion: "failure", head_branch: "main" }))
+    expect(openIncidents()).toEqual([])
+    expect(broadcasts).toHaveLength(1)
+    expect(broadcasts[0]?.classification).toEqual({
+      delivery: "pull",
+      topic: "github:workflow:failure",
+    })
+  })
+
+  test("task-branch failures stay pull broadcasts to * and open no incident ball", () => {
+    const { api, broadcasts } = daemonApi()
+    const router = createWorkflowIncidentRouter(api, { incidentOwner: OWNER })
 
     router.handleRun(
       "beorn/terminfo.dev",
@@ -713,7 +796,7 @@ describe("createWorkflowIncidentRouter — main and release-tag failures route t
     )
 
     expect(openIncidents()).toEqual([])
-    expect(ballsFor(GITHUB_WORKFLOW_INCIDENT_OWNER)).toEqual([])
+    expect(ballsFor(OWNER)).toEqual([])
     expect(broadcasts).toEqual([
       {
         content:

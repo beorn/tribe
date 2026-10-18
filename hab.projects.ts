@@ -33,6 +33,7 @@ export default {
       // daemon's own `TRIBE_ACTIVITY_LOG=<path>|off` override is a test/dev escape and is not reflected here.
       log: "$HOME/.local/share/tribe/activity-*.jsonl",
       env: {
+        GITHUB_WORKFLOW_INCIDENT_OWNER: "@dev/fixer",
         TRIBE_DUPLICATE_INCIDENT_OWNER: "@chief",
         TRIBE_DUPLICATE_YIELD_MODE: "observe",
         TRIBE_DELIVERY_FALLBACKS:
