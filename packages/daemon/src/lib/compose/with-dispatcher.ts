@@ -2050,14 +2050,8 @@ export function withDispatcher<
             // cwd) form gets to override the name).
             const pForResolve = pidCwdAdopted ? { ...p, name: pidCwdAdopted.name } : p
             let resolvedName = resolveName({
-              db,
               p: pForResolve,
-              adopted,
               claudeSessionName,
-              claudeSessionId,
-              role,
-              isActive,
-              projectId,
               takenNames,
             })
             // 21454 — re-apply a persisted runtime rename. tribe.rename /
