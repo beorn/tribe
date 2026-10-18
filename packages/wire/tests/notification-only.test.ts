@@ -1,3 +1,11 @@
+/**
+ * @failure A settled ball's type loses the notification-only marker, so the pane presents an
+ *          already-closed request as owed work and the agent re-answers it.
+ * @level l1
+ * @consumer the stdio adapter's pane envelope path (packages/wire markedType) and the 29327 turn-opener label
+ * @testonly none
+ */
+
 import { describe, expect, it } from "vitest"
 import { markedType, NOTIFICATION_ONLY_MARKER } from "../src/lib/notification-only.ts"
 
