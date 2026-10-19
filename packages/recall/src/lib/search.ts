@@ -18,7 +18,7 @@ import {
 import { DEFAULT_SYNTHESIS_TIMEOUT_MS, type IndexProvenanceDetail, type RecallSkip } from "../history/recall-shared.ts"
 import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
-import { retrieveCandidates, searchLiveSession } from "../history/search"
+import { retrieveCandidates, searchLiveSession, resolveSearchWindow } from "../history/search"
 import { bindVaultDb, getVaultDbPath, type VaultMatch } from "../history/vault-fts.ts"
 import { findSessionFiles, extractTextContent, parseSessionPath } from "../history/indexer"
 import type { ContentType, ContentRecord, MessageRecord, JsonlRecord } from "../history/types"
@@ -31,8 +31,6 @@ import {
   GREEN,
   RED,
   MAGENTA,
-  THIRTY_DAYS_MS,
-  parseTime,
   parseInclude,
   formatTime,
   formatRelativeTime,
@@ -52,6 +50,7 @@ export interface SearchOptions {
   snippets?: boolean
   json?: boolean
   since?: string
+  until?: string
   limit?: string
   timeout?: string
   project?: string
@@ -214,6 +213,15 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   } = options
   const project = resolveProjectScope(options.project)
 
+  if (options.until !== undefined) {
+    resolveSearchWindow(since, options.until)
+    const indexedRaw = raw || !!options.snippets || !!question || !!response || !!tool || !!session || !!include
+    if (!indexedRaw || regexMode || options.agent || options.debugPlan) {
+      throw new Error("--until supports indexed raw search, not --grep, agent, debug-plan or synthesis")
+    }
+    if (getVaultDbPath() !== null) throw new Error("--until cannot search --vault-db rows without timestamps")
+  }
+
   // Snapshot searches must not add live transcripts, vault rows, or model context.
   if (getSnapshotPath() !== null) {
     const indexedRaw = raw || !!options.snippets || !!question || !!response || !!tool || !!session || !!include
@@ -282,6 +290,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     raw: false,
     json: json,
     since,
+    until: options.until,
     limit: limitStr ? parseInt(limitStr, 10) : 10,
     timeout: timeoutStr ? parseInt(timeoutStr, 10) : DEFAULT_SYNTHESIS_TIMEOUT_MS,
     projectFilter: project,
@@ -430,7 +439,7 @@ function probeLiteralRawMatches(query: string, base: RecallOptions): { token: st
   const db = getDb()
   const sessionTitles = retrieveCandidates({ db, query: "", titles: true }).titles
   const limit = base.limit ?? 10
-  const sinceTime = base.since ? (parseTime(base.since) ?? undefined) : Date.now() - THIRTY_DAYS_MS
+  const { sinceTime, untilTime } = resolveSearchWindow(base.since, base.until)
   const projectFilter = base.projectFilter
 
   for (const token of tokens) {
@@ -438,7 +447,7 @@ function probeLiteralRawMatches(query: string, base: RecallOptions): { token: st
     const { messages: messageResults, projectContent: contentResults } = retrieveCandidates({
       db,
       query: token,
-      messages: { limit, sinceTime, projectFilter, snippetTokens: 200 },
+      messages: { limit, sinceTime, untilTime, projectFilter, snippetTokens: 200 },
       projectContent: {
         limit,
         projectFilter,
@@ -831,17 +840,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   const { vaultDb } = options
 
   // Parse time filter
-  let sinceTime: number | undefined
-  if (since !== undefined) {
-    const parsed = parseTime(since)
-    if (parsed === undefined) {
-      console.error(`Invalid --since ${JSON.stringify(since)}; expected Nh, Nd, Nw, today, yesterday, or all`)
-      process.exit(1)
-    }
-    sinceTime = parsed ?? undefined
-  } else {
-    sinceTime = Date.now() - THIRTY_DAYS_MS
-  }
+  const { sinceTime, untilTime } = resolveSearchWindow(since, options.until)
 
   // Parse content types
   let types: ContentType[] | undefined
@@ -880,6 +879,18 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   else console.log(searchDescription)
 
   const startTime = Date.now()
+  if (
+    untilTime !== undefined &&
+    !json &&
+    query &&
+    session === undefined &&
+    provenance !== "snapshot" &&
+    (!types || types.includes("message"))
+  ) {
+    throw new Error(
+      "--until requires --json for indexed raw message search; human output can enrich from live transcripts",
+    )
+  }
   const db = getDb()
 
   // Determine which sources to search
@@ -898,6 +909,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   const messageOpts: MessageSearchOptions & { mode?: "exact" } = {
     limit,
     sinceTime,
+    untilTime,
     messageType,
     toolName: tool,
     session: session === undefined ? undefined : { id: session, scope: "exact" },
@@ -919,6 +931,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
                 projectFilter: project?.replace(/\*/g, ""),
                 types: contentTypes,
                 sinceTime: contentSinceTime,
+                untilTime,
               },
             }
           : {}),
@@ -963,6 +976,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         LIMIT 1
       ))
       ${sinceTime ? "AND m.timestamp >= ?" : ""}
+      ${untilTime === undefined ? "" : "AND m.timestamp <= ?"}
       ${messageType ? "AND m.type = ?" : ""}
       ${tool ? "AND m.tool_name = ?" : ""}
       ${session ? "AND m.session_id = ?" : ""}
@@ -972,6 +986,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     `
     const params: (string | number)[] = []
     if (sinceTime) params.push(sinceTime)
+    if (untilTime !== undefined) params.push(untilTime)
     if (messageType) params.push(messageType)
     if (tool) params.push(tool)
     if (session) params.push(session)

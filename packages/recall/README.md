@@ -38,6 +38,26 @@ human output does not enrich results from the current live transcript.
 and invalid window text remains an error. A stable snapshot does not establish
 an evaluation's qrels or as-of correctness.
 
+`--until <instant>` adds an inclusive upper bound inside indexed search, before
+counting, ranking and either mode's candidate limit. Both bounds use the same
+parser: `Nh`, `Nd`, `Nw`, `today`, `yesterday`, or an absolute
+`YYYY-MM-DDTHH:mm:ss[.SSS]Z` / `YYYY-MM-DDTHH:mm:ss[.SSS]+HH:mm` instant.
+Absolute instants require a zone and at most three fractional digits; missing
+zones, finer precision, invalid calendar dates and reversed bounds are errors
+naming the requested bound. `all` is only a lower bound. Library `untilTime`
+values must be integer milliseconds, including signed values before 1970.
+
+The CLI supports this bound for raw/implied-raw indexed JSON searches (and raw
+snapshot output). Regex, agent/debug-plan, synthesis, bound-vault searches and
+ordinary human message output with live-transcript enrichment refuse it by
+name. Direct `recall()` calls must request raw indexed phases, exclude the live
+session and leave the vault unbound. Numeric fanout bounds apply to message
+and content candidates; the planner does not generate an upper bound.
+The existing four-times raw window, copy collapse, rank and annotations are
+unchanged. UUID representatives remain global: their selection subquery does
+not apply the caller's time window. An upper bound does not guarantee a full
+distinct page under eligible-copy pressure.
+
 By default, `recall` returns a **synthesized narrative** — the LLM digests raw FTS5 hits into a coherent summary that points to the original sessions. This is the "pointer mode" surface area: users see _what_ was found and _where_ to read more, not raw conversation snippets that could carry decoded prompt-injection or stuck-loop noise.
 
 The legacy snippet mode (raw FTS5 hits with surrounding text) is opt-in via `--raw` (alias `--snippets`). Power-user flags (`--question`, `--response`, `--tool`, `--session`, `--include`, `--grep`) also imply raw mode.

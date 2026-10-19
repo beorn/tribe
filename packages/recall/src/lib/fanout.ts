@@ -21,6 +21,7 @@ import { boostedRank, retrieveCandidates } from "../history/search.ts"
 export interface FanoutOptions {
   limit: number
   sinceTime?: number
+  untilTime?: number
   projectFilter?: string
   snippetTokens?: number
   /** Per-variant fetch cap. Larger = more coverage signal, but slower. */
@@ -81,6 +82,7 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
   const {
     limit,
     sinceTime,
+    untilTime,
     projectFilter,
     snippetTokens = 200,
     perVariantLimit = Math.max(5, Math.ceil(limit / 2)),
@@ -101,6 +103,7 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
   const msgOpts: MessageSearchOptions = {
     limit: perVariantLimit,
     sinceTime,
+    untilTime,
     projectFilter,
     snippetTokens,
     mode: "hook",
@@ -108,6 +111,7 @@ export function fanoutSearch(db: Database, variants: string[], opts: FanoutOptio
   const projectContentOpts: ContentSearchOptions = {
     mode: "hook",
     limit: perVariantLimit,
+    untilTime,
     projectFilter,
     snippetTokens,
     types: PROJECT_CONTENT_TYPES,

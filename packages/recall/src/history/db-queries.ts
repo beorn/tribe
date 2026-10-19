@@ -332,6 +332,7 @@ export interface MessageSearchOptions {
   projectFilter?: string
   projectGlob?: string // Glob pattern for project matching
   sinceTime?: number // Filter messages after this timestamp
+  untilTime?: number // Inclusive upper bound, before ranking or candidate limits
   messageType?: "user" | "assistant" // Filter by message type
   toolName?: string // Filter by tool name
   /** A session identity always names whether its direct children belong in the search. */
@@ -373,7 +374,13 @@ export interface HookMessageSearch extends HookSearchSummary {
  * window, project, type, tool and session. Both modes use this one statement of them.
  */
 function messageFilterSql(options: MessageSearchOptions): { sql: string; params: (string | number)[] } {
-  const { projectFilter, sinceTime, messageType, toolName, session } = options
+  const { projectFilter, sinceTime, untilTime, messageType, toolName, session } = options
+  if (untilTime !== undefined && !Number.isSafeInteger(untilTime)) {
+    throw new Error(`Invalid --until timestamp ${String(untilTime)}; expected integer milliseconds`)
+  }
+  if (sinceTime !== undefined && untilTime !== undefined && sinceTime > untilTime) {
+    throw new Error("--since is after --until")
+  }
   const clauses = [
     "m.duplicate_of IS NULL",
     `(m.uuid IS NULL OR m.id = (
@@ -392,6 +399,10 @@ function messageFilterSql(options: MessageSearchOptions): { sql: string; params:
   if (sinceTime !== undefined) {
     clauses.push("m.timestamp >= ?")
     params.push(sinceTime)
+  }
+  if (untilTime !== undefined) {
+    clauses.push("m.timestamp <= ?")
+    params.push(untilTime)
   }
   if (messageType) {
     clauses.push("m.type = ?")
@@ -982,6 +993,7 @@ export interface ContentSearchOptions {
   types?: ContentType[]
   projectFilter?: string
   sinceTime?: number // Filter content after this timestamp
+  untilTime?: number // Inclusive upper bound before count and ranking
   snippetTokens?: number // Snippet window size (default 64)
   /** "hook" counts nothing (@ag/tribe/25071 row 2); "exact", the default, also counts the total. */
   mode?: SearchMode
@@ -1012,7 +1024,22 @@ export function searchAll(
   query: string,
   options: ContentSearchOptions = {},
 ): { results: ContentSearchHit[]; total: number | null } {
-  const { limit = 50, offset = 0, types, projectFilter, sinceTime, snippetTokens = 64, mode = "exact" } = options
+  const {
+    limit = 50,
+    offset = 0,
+    types,
+    projectFilter,
+    sinceTime,
+    untilTime,
+    snippetTokens = 64,
+    mode = "exact",
+  } = options
+  if (untilTime !== undefined && !Number.isSafeInteger(untilTime)) {
+    throw new Error(`Invalid --until timestamp ${String(untilTime)}; expected integer milliseconds`)
+  }
+  if (sinceTime !== undefined && untilTime !== undefined && sinceTime > untilTime) {
+    throw new Error("--since is after --until")
+  }
   const ftsQuery = toFts5Query(query)
 
   const params: (string | number)[] = [ftsQuery]
@@ -1040,6 +1067,10 @@ export function searchAll(
   if (sinceTime !== undefined) {
     timeClause = ` AND c.timestamp >= ?`
     params.push(sinceTime)
+  }
+  if (untilTime !== undefined) {
+    timeClause += ` AND c.timestamp <= ?`
+    params.push(untilTime)
   }
 
   // Keep COUNT's original shape: LIMIT 0 bypasses ranked MATCH, and SQLite's

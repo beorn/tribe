@@ -103,7 +103,11 @@ program
   .argument("<query>", "Search query")
   .option("--raw", "Skip LLM synthesis, show raw FTS5 snippets")
   .option("--json", "JSON output")
-  .option("-s, --since <time>", "Time filter: 1h, 1d, 1w, today, yesterday, all (default: 30d)")
+  .option("-s, --since <time>", "Lower bound: Nh, Nd, Nw, today, yesterday, all or explicit-zone ISO (default: 30d)")
+  .option(
+    "--until <instant>",
+    "Inclusive indexed upper bound: explicit-zone ISO (at most milliseconds), or relative time",
+  )
   .option("-n, --limit <num>", "Max results (default: 10)", int)
   .option("--timeout <ms>", `LLM timeout in ms (default: ${DEFAULT_SYNTHESIS_TIMEOUT_MS})`, uint)
   .option("-p, --project <glob>", "Project filter")

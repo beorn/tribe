@@ -101,6 +101,9 @@ const ROUND2_NEW_DOCS_THRESHOLD = 2
 // ============================================================================
 
 export async function recallAgent(query: string, options: AgentRecallOptions = {}): Promise<AgentRecallResult> {
+  if (options.until !== undefined) {
+    throw new Error("--until cannot apply to agent planner context; use indexed raw search")
+  }
   const startedAt = Date.now()
   const {
     limit = DEFAULT_LIMIT,

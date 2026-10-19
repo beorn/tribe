@@ -188,6 +188,7 @@ describe("content search eligibility and work", () => {
       { options: { types: ["claude_md"] }, ids: [], total: 0 },
       { options: { types: ["doc"], limit: 1, offset: 1 }, ids: [2], total: 3 },
       { options: { types: ["doc"], limit: 0 }, ids: [], total: 3 },
+      { options: { types: ["doc"], sinceTime: 0, untilTime: 0 }, ids: [2], total: 1 },
       { options: { types: ["doc"], sinceTime: 0, projectFilter: "/_lpha" }, ids: [2, 3], total: 2 },
       { options: { projectFilter: "%" }, ids: [1, 2, 3, 5], total: 4 },
       { options: { types: ["doc", "llm_research"], snippetTokens: 3, limit: 2, offset: 1 }, ids: [2, 3], total: 4 },
@@ -252,6 +253,21 @@ describe("fanoutSearch", () => {
 
   beforeEach(() => {
     db = makeDb()
+  })
+
+  // Direct selector tests cannot catch fanout dropping either indexed leg's bound.
+  test("until bounds both message and content fanout candidates", () => {
+    for (const [id, timestamp] of [
+      ["eligible", 1],
+      ["later", 2],
+    ] as const) {
+      insertSession(db, id, id, timestamp)
+      insertMessage(db, id, "untilfanoutneedle", timestamp)
+      insertContent(db, "project_memory", id + "-content", "untilfanoutneedle", "untilfanoutneedle", timestamp)
+    }
+    const result = fanoutSearch(db, ["untilfanoutneedle"], { limit: 10, sinceTime: 0, untilTime: 1 })
+    expect(result.results.map((row) => row.sessionId).sort()).toEqual(["eligible", "eligible-content"])
+    expect(result.results.every((row) => row.timestamp <= 1)).toBe(true)
   })
 
   test("coverage rerank elevates docs hit by multiple variants", () => {

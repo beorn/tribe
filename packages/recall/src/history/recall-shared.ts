@@ -57,6 +57,7 @@ export interface RecallOptions {
   limit?: number // Max results to include (default 10)
   raw?: boolean // Return raw results without LLM synthesis
   since?: string // Time filter (1h, 1d, 1w, etc.)
+  until?: string // Inclusive indexed upper bound, parsed by parseTimeToMs
   json?: boolean // Return structured JSON
   timeout?: number // Total timeout in ms (default DEFAULT_SYNTHESIS_TIMEOUT_MS)
   snippetTokens?: number // Snippet window size (default 200)

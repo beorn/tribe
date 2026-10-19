@@ -20,6 +20,21 @@ beforeAll(() => {
 // ============================================================================
 
 describe("parseTimeToMs", () => {
+  test.each([
+    ["2026-10-07T04:42:57.113Z", 1791348177113],
+    ["2026-10-07T06:42:57.113+02:00", 1791348177113],
+    ["2026-10-07T04:42:57Z", 1791348177000],
+    ["1969-12-31T23:59:59.999Z", -1],
+  ] as const)("parses explicit-zone millisecond instant %s", (instant, expected) => {
+    expect(parseTimeToMs(instant)).toBe(expected)
+  })
+  test.each(["2026-10-07T04:42:57.113", "2026-10-07T04:42:57.113395Z", "2026-02-30T04:42:57Z"])(
+    "refuses ambiguous or lossy absolute instant %s",
+    (instant) => {
+      expect(parseTimeToMs(instant)).toBeUndefined()
+    },
+  )
+
   test("parses hours", () => {
     const result = parseTimeToMs("1h")
     expect(result).toBeDefined()

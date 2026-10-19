@@ -47,6 +47,42 @@ function seedForkCopies(copyCount: number, extras: { content: string; line: numb
 }
 
 describe("null-uuid copy collapse (29964)", () => {
+  test.each([Number.NaN, Number.POSITIVE_INFINITY, 0.5])(
+    "invalid numeric until %s refuses instead of changing eligibility",
+    (untilTime) => {
+      const db = seedForkCopies(1)
+      expect(() => ftsSearchWithSnippet(db, TOKEN, { untilTime })).toThrow(/--until/)
+      db.close()
+    },
+  )
+
+  // 27899: post-retrieval cuts cannot prove eligibility before either selection limit.
+  // ISO instants include dates before 1970; a signed millisecond value must preserve the same boundary.
+  test.each([
+    ["exact", -1],
+    ["hook", -1],
+    ["exact", 1],
+    ["hook", 1],
+  ] as const)("%s applies inclusive until %s before copies consume the window", (mode, until) => {
+    const db = seedForkCopies(220, [
+      { content: OTHER, line: 100 },
+      { content: TOKEN, line: 101 },
+    ])
+    db.prepare("UPDATE messages SET timestamp = CASE WHEN line = 100 THEN ? ELSE ? END").run(until, until + 1)
+    const page = ftsSearchWithSnippet(db, TOKEN, {
+      mode,
+      limit: 50,
+      sinceTime: until - 1,
+      untilTime: until,
+      withTotal: true,
+    })
+    expect(page.total).toBe(1)
+    expect(page.results.map((row) => ({ line: row.line, timestamp: row.timestamp }))).toEqual([
+      { line: 100, timestamp: until },
+    ])
+    db.close()
+  })
+
   test("exact limit 10 keeps one fork copy and the next distinct row; total stays raw", () => {
     const db = seedForkCopies(10, [{ content: OTHER, line: 100 }])
     const page = ftsSearchWithSnippet(db, TOKEN, { limit: 10 })

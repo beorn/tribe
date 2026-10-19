@@ -299,7 +299,7 @@ describe("recall search output", () => {
           RECALL_DB_PATH: dbPath,
           RECALL_AGENT: "0",
         })
-      for (const since of ["2026-10-17T00:00:00Z", "2days", ""]) {
+      for (const since of ["2026-10-17T00:00:00", "2days", ""]) {
         for (const flags of [[], ["--raw"], ["--agent"]]) {
           const result = await run(since, flags)
           expect(result.code, JSON.stringify({ since, flags, ...result })).not.toBe(0)
@@ -315,6 +315,65 @@ describe("recall search output", () => {
       safeRemoveSync(dir, { within: tmpdir() })
     }
   }, 15_000)
+
+  // 27899: real argument parsing must preserve precise bounds and name unsupported sources.
+  test("until CLI applies an inclusive indexed window and names invalid or unsupported bounds", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "recall-until-"))
+    const dbPath = join(dir, "fixture.db")
+    const until = Date.parse("2026-10-07T04:42:57.113Z")
+    try {
+      seedMessage("untilneedle eligible")
+      seedRankedMessage("post-bound", "untilneedle excluded", null)
+      getDb()
+        .prepare("UPDATE messages SET timestamp = CASE WHEN session_id = 'sess-a' THEN ? ELSE ? END")
+        .run(until, until + 1)
+      setIndexMeta(getDb(), "last_rebuild", new Date().toISOString())
+      getDb().prepare("VACUUM INTO ?").run(dbPath)
+      const run = (args: string[]) => runRecallCli(args, { ...process.env, RECALL_DB_PATH: dbPath, RECALL_AGENT: "0" })
+      const flags = [
+        "--raw",
+        "--json",
+        "-i",
+        "m",
+        "--since",
+        "2026-10-07T04:42:57.112Z",
+        "--until",
+        "2026-10-07T04:42:57.113Z",
+      ]
+      const valid = await run(["untilneedle", ...flags])
+      expect(valid.code, valid.stderr).toBe(0)
+      expect(JSON.parse(valid.stdout)).toMatchObject({ total: 1, results: [{ sourceId: "sess-a", timestamp: until }] })
+      for (const instant of [
+        "2026-10-07T04:42:57.113",
+        "2026-10-07T04:42:57.113395Z",
+        "all",
+        "-1",
+        "2026-02-30T04:42:57Z",
+      ]) {
+        const rejected = await run(["untilneedle", "--raw", "--until", instant])
+        expect(rejected.code).not.toBe(0)
+        expect(rejected.stderr).toContain("--until")
+        expect(rejected.stderr).toContain(instant)
+      }
+      const reversed = await run([
+        "untilneedle",
+        "--raw",
+        "--since",
+        "2026-10-07T04:42:57.114Z",
+        "--until",
+        "2026-10-07T04:42:57.113Z",
+      ])
+      expect(reversed.code).not.toBe(0)
+      expect(reversed.stderr).toMatch(/--since.*(after|later).*--until/)
+      for (const mode of [[], ["--raw"], ["--grep"], ["--agent"], ["--debug-plan"]]) {
+        const rejected = await run(["untilneedle", ...mode, "--until", "2026-10-07T04:42:57.113Z"])
+        expect(rejected.code).not.toBe(0)
+        expect(rejected.stderr).toMatch(/--until.*(raw|indexed|grep|agent|synth)/i)
+      }
+    } finally {
+      safeRemoveSync(dir, { within: tmpdir() })
+    }
+  }, 30_000)
 
   // Snapshot custody is a real CLI/file contract. Existing live-memory and freshness
   // cases cannot detect WAL sidecars, migrations, live enrichment, or an ignored selector.

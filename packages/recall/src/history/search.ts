@@ -75,6 +75,20 @@ export function parseTimeToMs(timeStr: string): number | null | undefined {
   const str = timeStr.toLowerCase().trim()
   if (str === "all") return null
 
+  // Absolute bounds must name a zone and cannot lose submillisecond precision.
+  if (/^\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:z|[+-]\d{2}:\d{2})$/.test(str)) {
+    const year = Number(str.slice(0, 4))
+    const month = Number(str.slice(5, 7))
+    const day = Number(str.slice(8, 10))
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
+    const timestamp = Date.parse(timeStr.trim())
+    if (days === undefined || day < 1 || day > days || Number(str.slice(11, 13)) > 23 || !Number.isFinite(timestamp)) {
+      return undefined
+    }
+    return timestamp
+  }
+
   // Handle relative time formats: 1h, 2d, 3w
   const match = str.match(/^(\d+)([hdw])$/)
   if (match) {
@@ -107,6 +121,27 @@ export function parseTimeToMs(timeStr: string): number | null | undefined {
   }
 
   return undefined
+}
+
+/** Resolve the caller's indexed window using Recall's one time parser. */
+export function resolveSearchWindow(
+  since?: string,
+  until?: string,
+): { sinceTime: number | undefined; untilTime: number | undefined } {
+  const sinceTime = since === undefined ? Date.now() - THIRTY_DAYS_MS : parseTimeToMs(since)
+  if (sinceTime === undefined && since !== undefined) {
+    throw new Error(
+      `Invalid --since ${JSON.stringify(since)}; expected Nh, Nd, Nw, today, yesterday, or all; absolute inputs require an explicit zone and at most millisecond precision`,
+    )
+  }
+  const untilTime = until === undefined ? undefined : parseTimeToMs(until)
+  if (until !== undefined && (untilTime === undefined || untilTime === null)) {
+    throw new Error(
+      `Invalid --until ${JSON.stringify(until)}; expected Nh, Nd, Nw, today, yesterday, or an explicit-zone ISO instant with at most millisecond precision`,
+    )
+  }
+  if (sinceTime != null && untilTime != null && sinceTime > untilTime) throw new Error("--since is after --until")
+  return { sinceTime: sinceTime ?? undefined, untilTime: untilTime ?? undefined }
 }
 
 // ============================================================================
@@ -399,6 +434,14 @@ export type CandidateSet = ReturnType<typeof retrieveCandidates>
  * and optionally passes them through a cheap LLM for synthesis.
  */
 export async function recall(query: string, options: RecallOptions = {}): Promise<RecallResult> {
+  if (options.until !== undefined) {
+    if (!options.raw) throw new Error("--until supports indexed raw Recall, not synthesis")
+    if (options.vaultDb != null) throw new Error("--until cannot search vault rows without timestamps")
+    if (!options.excludeCurrentSession) {
+      throw new Error("--until cannot enrich from the live session; set excludeCurrentSession for indexed raw Recall")
+    }
+  }
+  const { sinceTime, untilTime } = resolveSearchWindow(options.since, options.until)
   const {
     limit = 10,
     raw = false,
@@ -451,22 +494,11 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
   const db = getDb()
 
   try {
-    // Parse time filter (default: 30 days)
-    let sinceTime: number | undefined
-    if (since !== undefined) {
-      const parsed = parseTimeToMs(since)
-      if (parsed === undefined) {
-        throw new Error(`Invalid --since ${JSON.stringify(since)}; expected Nh, Nd, Nw, today, yesterday, or all`)
-      }
-      sinceTime = parsed ?? undefined
-    } else {
-      sinceTime = Date.now() - THIRTY_DAYS_MS
-    }
-
     // Search messages table with FTS5
     const messageOpts: MessageSearchOptions = {
       limit: limit * 2, // Fetch extra for dedup
       sinceTime,
+      untilTime,
       projectFilter,
       snippetTokens,
       mode,
@@ -476,6 +508,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // answers for beads and docs inside its wall.
     const projectContentOpts: ContentSearchOptions = {
       limit: limit * 2,
+      untilTime,
       projectFilter,
       snippetTokens,
       types: ["bead", "session_memory", "project_memory", "doc", "claude_md", "llm_research"] as ContentType[],
@@ -607,11 +640,15 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
            FROM messages_fts f
            JOIN messages m ON f.rowid = m.id
            WHERE messages_fts MATCH ?
+           ${untilTime === undefined ? "" : "AND m.timestamp <= ?"}
            GROUP BY m.session_id
            ORDER BY depth DESC
            LIMIT 100`,
           )
-          .all(ftsQuery) as { session_id: string; depth: number }[]
+          .all(...(untilTime === undefined ? [ftsQuery] : [ftsQuery, untilTime])) as {
+          session_id: string
+          depth: number
+        }[]
         for (const r of depthRows) {
           sessionDepths.set(r.session_id, r.depth)
         }
