@@ -394,7 +394,7 @@ export function withDispatcher<
         alarm: boolean
       }>
     } {
-      const { attentionRows, untakenPendingBalls, actionableCount, attention } = readAttentionProjection(
+      const { attentionRows, pendingBalls, untakenPendingBalls, actionableCount } = readAttentionProjection(
         daemonCtx,
         sessionName,
         Date.now(),
@@ -411,17 +411,16 @@ export function withDispatcher<
       const oldestTs = Math.min(oldest?.ts ?? Number.POSITIVE_INFINITY, oldestTrackedTs)
       const oldest_unread_ts = Number.isFinite(oldestTs) ? oldestTs : 0
       const oldest_unread_age_min = oldest_unread_ts > 0 ? Math.floor((Date.now() - oldest_unread_ts) / 60_000) : 0
-      const owed_balls = attention.pending_balls.map((ball) => ({
-        id: ball.request_id,
-        sender: ball.sender,
-        age_ms: ball.age_ms,
-        summary: ball.summary,
-        alarm: ball.request_kind === "incident",
-      }))
-      const oldest_owed = owed_balls.reduce<(typeof owed_balls)[number] | null>(
-        (oldestBall, ball) => (oldestBall === null || ball.age_ms > oldestBall.age_ms ? ball : oldestBall),
-        null,
-      )
+      const owed_balls = pendingBalls
+        .toSorted((left, right) => right.age_ms - left.age_ms || left.request_id.localeCompare(right.request_id))
+        .map((ball) => ({
+          id: ball.request_id,
+          sender: ball.sender,
+          age_ms: ball.age_ms,
+          summary: ball.summary,
+          alarm: ball.request_kind === "incident",
+        }))
+      const oldest_owed = owed_balls[0] ?? null
       return {
         session: sessionName,
         unread_count,
@@ -431,7 +430,7 @@ export function withDispatcher<
         latest_actionable_seq: latest?.rowid ?? null,
         latest_message_id: latest?.id ?? null,
         latest_type: latest?.type ?? null,
-        owed_count: attention.pending_balls_summary.total,
+        owed_count: owed_balls.length,
         oldest_owed,
         owed_balls,
       }

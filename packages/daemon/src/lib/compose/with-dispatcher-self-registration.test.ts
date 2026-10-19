@@ -1620,6 +1620,49 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(wait.attention.pending_balls).toHaveLength(4)
     expect(harness.sessionCount("@chief")).toBe(0)
     expect(harness.sessionAnnouncements("@chief")).toEqual([])
+
+    // @dev/11 REVISE (f3dc612e): when >= 10 non-incident balls exist alongside an older
+    // incident/alarm, `attention.pending_balls` (10-row preview, incidents sorted last)
+    // withholds the alarm, but `cli_inbox_status` must still compute `oldest_owed` and
+    // `owed_balls` over the complete owned set (`pendingBalls`), sorted oldest-first.
+    harness.db
+      .prepare("UPDATE pending_request SET request_kind = 'incident', opened_at = 1000 WHERE request_id = 'first-request'")
+      .run()
+    harness.db
+      .prepare("UPDATE pending_request SET request_kind = 'request', opened_at = 2000 WHERE request_id = ?")
+      .run(secondRequest.id)
+    harness.db
+      .prepare("UPDATE pending_request SET request_kind = 'request', opened_at = 3000 WHERE request_id = 'third-request'")
+      .run()
+    harness.db
+      .prepare("UPDATE pending_request SET request_kind = 'request', opened_at = 4000 WHERE request_id = 'fourth-request'")
+      .run()
+    for (let index = 5; index <= 12; index += 1) {
+      const reqId = `bulk-request-${index}`
+      harness.sendActionable("@chief", `bulk request ${index}`, reqId)
+      harness.sendTakingStatus("@chief", reqId)
+      harness.db
+        .prepare("UPDATE pending_request SET request_kind = 'request', opened_at = ? WHERE request_id = ?")
+        .run(index * 1000, reqId)
+    }
+    const statusWith12 = await readStatus("status-12-with-older-alarm")
+    expect(statusWith12.owed_count).toBe(12)
+    expect(statusWith12.owed_balls).toHaveLength(12)
+    expect(statusWith12.oldest_owed).toMatchObject({
+      id: "first-request",
+      sender: "daemon",
+      alarm: true,
+    })
+    expect(statusWith12.owed_balls[0]).toMatchObject({
+      id: "first-request",
+      sender: "daemon",
+      alarm: true,
+    })
+    expect(statusWith12.owed_balls.at(-1)).toMatchObject({
+      id: "bulk-request-12",
+      sender: "daemon",
+      alarm: false,
+    })
   })
 
   it("an operator inbox-drain acknowledges on the target's behalf by explicit intent, never stamps the target's read receipt, and --peek does neither (21757)", async () => {
