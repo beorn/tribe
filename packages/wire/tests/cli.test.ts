@@ -10,7 +10,17 @@
 
 import { describe, expect, it } from "vitest"
 import { execFileSync, spawn, spawnSync } from "node:child_process"
-import { closeSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { safeRemoveSync } from "removely"
 import { createConnection, createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
@@ -1001,6 +1011,70 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       )
       expect(result.stdout).toBe(`tribe inbox: 2 row(s), cursor 99, written to ${path}\n`)
       expect(readFileSync(path, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // 30270 — a consuming read must never advance the cursor before the file
+  // exists: a missing parent directory used to lose the rows permanently.
+  it("inbox --json-to-file refuses a missing directory before consuming, naming the path (30270)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-30270-"))
+    const path = join(dir, "missing", "inbox.json")
+    const payload = {
+      attention: {
+        actionable_unread: [{ id: "a1", from: "@chief", type: "request", content: "x" }],
+        pending_balls: [],
+        pending_balls_summary: { total: 0 },
+      },
+      events: [{ id: "e1", from: "@chief", type: "notify", content: "y" }],
+      cursor: 1477561,
+    }
+    const outcome = {
+      result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+    }
+    try {
+      const refused = await runManagedFetchCliAgainst(["inbox", "--json-to-file", path], () => outcome)
+
+      expect(refused.result.code).not.toBe(0)
+      // No daemon call at all: the mailbox was never consumed and the cursor never advanced.
+      expect(refused.calls).toEqual([])
+      expect(refused.result.stdout).toBe("")
+      expect(refused.result.stderr).toContain(path)
+      expect(refused.result.stderr).toContain(`mkdir -p ${dirname(path)}`)
+      expect(refused.result.stderr).toContain("tribe log --all --json")
+      expect(existsSync(path)).toBe(false)
+
+      // The rows are still readable afterwards: the same read at a writable path returns them.
+      const retryPath = join(dir, "inbox.json")
+      const retried = await runManagedFetchCliAgainst(["inbox", "--json-to-file", retryPath], () => outcome)
+      expect(retried.result.code).toBe(0)
+      expect(readFileSync(retryPath, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
+      expect(retried.calls).toEqual([
+        { method: "cli_self_inbox_v1", params: { idToken: MANAGED_PENDING_TOKEN, limit: 50 } },
+      ])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // 30270 — the refusal covers any destination the write would fail on, not
+  // only a missing parent: a directory at the target path refuses the same way.
+  it("inbox --json-to-file refuses a directory target before consuming, naming the path (30270)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-30270-isdir-"))
+    const path = join(dir, "inbox.json")
+    mkdirSync(path)
+    const payload = { attention: { actionable_unread: [], pending_balls: [] }, events: [], cursor: 7 }
+    try {
+      const refused = await runManagedFetchCliAgainst(["inbox", "--json-to-file", path], () => ({
+        result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+      }))
+
+      expect(refused.result.code).not.toBe(0)
+      expect(refused.calls).toEqual([])
+      expect(refused.result.stderr).toContain(path)
+      expect(refused.result.stderr).toContain("exists and is not a regular file")
+      expect(refused.result.stderr).toContain("tribe log --all --json")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

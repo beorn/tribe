@@ -1,4 +1,52 @@
-import { writeFile } from "node:fs/promises"
+import { access, stat, writeFile } from "node:fs/promises"
+import { constants } from "node:fs"
+import { dirname } from "node:path"
+
+/** The one supported way back to rows a consuming read already took (30270). */
+export const JSON_TO_FILE_RECOVERY = "tribe log --all --json"
+
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * 30270 — why a `--json-to-file` target cannot be written, or null when it can.
+ * A consuming read must ask this BEFORE the daemon takes the mailbox: the old
+ * order advanced the cursor first, so a missing parent directory destroyed the
+ * rows the file was meant to keep and the retry read an empty inbox.
+ */
+export async function jsonDestinationProblem(path: string): Promise<string | null> {
+  const dir = dirname(path)
+  let directory
+  try {
+    directory = await stat(dir)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return `the directory ${dir} does not exist (create it first: mkdir -p ${dir})`
+    }
+    return `the directory ${dir} cannot be inspected: ${errorDetail(error)}`
+  }
+  if (!directory.isDirectory()) return `${dir} is not a directory`
+  try {
+    await access(dir, constants.W_OK)
+  } catch {
+    return `the directory ${dir} is not writable`
+  }
+  try {
+    const target = await stat(path)
+    if (!target.isFile()) return `${path} exists and is not a regular file`
+    try {
+      await access(path, constants.W_OK)
+    } catch {
+      return `${path} is not writable`
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return `${path} cannot be inspected: ${errorDetail(error)}`
+    }
+  }
+  return null
+}
 
 /** Write one complete machine-readable JSON document or fail the CLI loudly. */
 export async function writeJsonStdout(value: unknown, space?: number): Promise<void> {
@@ -52,7 +100,7 @@ export function jsonToFileSummary(verb: string, rows: number, cursor: number | n
 export async function writeJsonToFile(
   value: unknown,
   path: string,
-  summary: { verb: string; rows: number; cursor: number | null },
+  summary: { verb: string; rows: number; cursor: number | null; recovery?: string },
 ): Promise<boolean> {
   try {
     const json = JSON.stringify(value, null, 2)
@@ -61,6 +109,7 @@ export async function writeJsonToFile(
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     console.error(`tribe ${summary.verb}: failed to write JSON to ${path}: ${detail}`)
+    if (summary.recovery !== undefined) console.error(`  ${summary.recovery}`)
     process.exitCode = 1
     return false
   }
