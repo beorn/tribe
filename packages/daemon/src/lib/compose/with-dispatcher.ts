@@ -378,7 +378,11 @@ export function withDispatcher<
       latest_actionable_seq: number | null
       latest_message_id: string | null
       latest_type: string | null
+      /** Total open balls owned by `session` from the complete owned set. */
       owed_count: number
+      /** Total alarm (incident) balls owned by `session` from the complete owned set. */
+      owed_alarm_count: number
+      /** Oldest open ball owned by `session` from the complete owned set. */
       oldest_owed: {
         id: string
         sender: string
@@ -386,6 +390,8 @@ export function withDispatcher<
         summary: string | null
         alarm: boolean
       } | null
+      /** Oldest-first preview (at most 10 rows) of open balls owned by `session`;
+       * the full owned set belongs in `tribe pending`. */
       owed_balls: Array<{
         id: string
         sender: string
@@ -411,7 +417,7 @@ export function withDispatcher<
       const oldestTs = Math.min(oldest?.ts ?? Number.POSITIVE_INFINITY, oldestTrackedTs)
       const oldest_unread_ts = Number.isFinite(oldestTs) ? oldestTs : 0
       const oldest_unread_age_min = oldest_unread_ts > 0 ? Math.floor((Date.now() - oldest_unread_ts) / 60_000) : 0
-      const owed_balls = pendingBalls
+      const all_owed_balls = pendingBalls
         .toSorted((left, right) => right.age_ms - left.age_ms || left.request_id.localeCompare(right.request_id))
         .map((ball) => ({
           id: ball.request_id,
@@ -420,7 +426,10 @@ export function withDispatcher<
           summary: ball.summary,
           alarm: ball.request_kind === "incident",
         }))
-      const oldest_owed = owed_balls[0] ?? null
+      const owed_count = all_owed_balls.length
+      const owed_alarm_count = all_owed_balls.filter((ball) => ball.alarm).length
+      const oldest_owed = all_owed_balls[0] ?? null
+      const owed_balls = all_owed_balls.slice(0, 10)
       return {
         session: sessionName,
         unread_count,
@@ -430,7 +439,8 @@ export function withDispatcher<
         latest_actionable_seq: latest?.rowid ?? null,
         latest_message_id: latest?.id ?? null,
         latest_type: latest?.type ?? null,
-        owed_count: owed_balls.length,
+        owed_count,
+        owed_alarm_count,
         oldest_owed,
         owed_balls,
       }

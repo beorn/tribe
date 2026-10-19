@@ -1996,9 +1996,12 @@ interface InboxStatusSummary {
   unread_ids?: string[]
   oldest_unread_age_min: number
   /** Every open ball owned by `session` (requests, queries, assigns, and
-   * alarms/incidents, due or not, receipted or not), from
-   * `readAttentionProjection` (@cto 50680467 item 1). */
+   * alarms/incidents, due or not, receipted or not), from the complete set in
+   * `readAttentionProjection` (@cto 50680467 item 1, a479fd77 item 1). */
   owed_count?: number
+  /** Total alarm (incident) balls owned by `session` from the complete owned set. */
+  owed_alarm_count?: number
+  /** Oldest open ball owned by `session` from the complete owned set. */
   oldest_owed?: {
     id: string
     sender: string
@@ -2006,6 +2009,8 @@ interface InboxStatusSummary {
     summary: string | null
     alarm: boolean
   } | null
+  /** Oldest-first preview (at most 10 rows) of open balls owned by `session`;
+   * the full owned set belongs in `tribe pending`. */
   owed_balls?: Array<{
     id: string
     sender: string

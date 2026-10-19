@@ -1490,6 +1490,7 @@ describe("dispatcher bounded mailbox drain", () => {
         oldest_unread_age_min: number
         oldest_unread_ts: number
         owed_count: number
+        owed_alarm_count: number
         oldest_owed: {
           id: string
           sender: string
@@ -1514,6 +1515,7 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(await readStatus("empty-status")).toMatchObject({
       unread_count: 0,
       owed_count: 0,
+      owed_alarm_count: 0,
       oldest_owed: null,
       owed_balls: [],
     })
@@ -1588,6 +1590,7 @@ describe("dispatcher bounded mailbox drain", () => {
       oldest_unread_age_min: 0,
       oldest_unread_ts: 0,
       owed_count: 4,
+      owed_alarm_count: 1,
       oldest_owed: {
         id: "first-request",
         sender: "daemon",
@@ -1621,21 +1624,27 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(harness.sessionCount("@chief")).toBe(0)
     expect(harness.sessionAnnouncements("@chief")).toEqual([])
 
-    // @dev/11 REVISE (f3dc612e): when >= 10 non-incident balls exist alongside an older
-    // incident/alarm, `attention.pending_balls` (10-row preview, incidents sorted last)
-    // withholds the alarm, but `cli_inbox_status` must still compute `oldest_owed` and
-    // `owed_balls` over the complete owned set (`pendingBalls`), sorted oldest-first.
+    // @dev/11 REVISE (f3dc612e) + @cto REVISE (a479fd77):
+    // `owed_count`, `owed_alarm_count`, and `oldest_owed` come from the complete owned set
+    // (`pendingBalls` sorted oldest-first), while `owed_balls` is bounded to an oldest-first
+    // preview of at most 10 rows.
     harness.db
-      .prepare("UPDATE pending_request SET request_kind = 'incident', opened_at = 1000 WHERE request_id = 'first-request'")
+      .prepare(
+        "UPDATE pending_request SET request_kind = 'incident', opened_at = 1000 WHERE request_id = 'first-request'",
+      )
       .run()
     harness.db
       .prepare("UPDATE pending_request SET request_kind = 'request', opened_at = 2000 WHERE request_id = ?")
       .run(secondRequest.id)
     harness.db
-      .prepare("UPDATE pending_request SET request_kind = 'request', opened_at = 3000 WHERE request_id = 'third-request'")
+      .prepare(
+        "UPDATE pending_request SET request_kind = 'request', opened_at = 3000 WHERE request_id = 'third-request'",
+      )
       .run()
     harness.db
-      .prepare("UPDATE pending_request SET request_kind = 'request', opened_at = 4000 WHERE request_id = 'fourth-request'")
+      .prepare(
+        "UPDATE pending_request SET request_kind = 'request', opened_at = 4000 WHERE request_id = 'fourth-request'",
+      )
       .run()
     for (let index = 5; index <= 12; index += 1) {
       const reqId = `bulk-request-${index}`
@@ -1647,7 +1656,8 @@ describe("dispatcher bounded mailbox drain", () => {
     }
     const statusWith12 = await readStatus("status-12-with-older-alarm")
     expect(statusWith12.owed_count).toBe(12)
-    expect(statusWith12.owed_balls).toHaveLength(12)
+    expect(statusWith12.owed_alarm_count).toBe(1)
+    expect(statusWith12.owed_balls).toHaveLength(10)
     expect(statusWith12.oldest_owed).toMatchObject({
       id: "first-request",
       sender: "daemon",
@@ -1659,7 +1669,31 @@ describe("dispatcher bounded mailbox drain", () => {
       alarm: true,
     })
     expect(statusWith12.owed_balls.at(-1)).toMatchObject({
-      id: "bulk-request-12",
+      id: "bulk-request-10",
+      sender: "daemon",
+      alarm: false,
+    })
+
+    // Youngest-alarm-beyond-preview case (@cto a479fd77 item 1):
+    // When the only alarm is the 12th (youngest) ball, it sits beyond the 10-row `owed_balls`
+    // preview, yet `owed_alarm_count` and `owed_count` still report 1 and 12 from the full set.
+    harness.db
+      .prepare(
+        "UPDATE pending_request SET request_kind = 'request', opened_at = 1000 WHERE request_id = 'first-request'",
+      )
+      .run()
+    harness.db
+      .prepare(
+        "UPDATE pending_request SET request_kind = 'incident', opened_at = 12000 WHERE request_id = 'bulk-request-12'",
+      )
+      .run()
+    const statusWithYoungestAlarm = await readStatus("status-12-with-youngest-alarm-beyond-preview")
+    expect(statusWithYoungestAlarm.owed_count).toBe(12)
+    expect(statusWithYoungestAlarm.owed_alarm_count).toBe(1)
+    expect(statusWithYoungestAlarm.owed_balls).toHaveLength(10)
+    expect(statusWithYoungestAlarm.owed_balls.every((ball) => !ball.alarm)).toBe(true)
+    expect(statusWithYoungestAlarm.oldest_owed).toMatchObject({
+      id: "first-request",
       sender: "daemon",
       alarm: false,
     })
