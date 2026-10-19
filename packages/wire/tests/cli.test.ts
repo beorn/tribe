@@ -10,7 +10,8 @@
 
 import { describe, expect, it } from "vitest"
 import { execFileSync, spawn, spawnSync } from "node:child_process"
-import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { closeSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { safeRemoveSync } from "removely"
 import { createConnection, createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { resolve, dirname, join } from "node:path"
@@ -1229,12 +1230,125 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
       expect(one).toMatchObject({ code: 0, stderr: "" })
       expect(one.stdout).toContain(
-        "req-@dev/3  from @chief  5m ago  fanout=first  (msg msg-@dev/3)  pull; last read 4m ago",
+        "req-@dev/3  from @chief  5m ago  opened 2026-09-16T19:55:00.000Z  due none  fanout=first  (msg msg-@dev/3)  pull; last read 4m ago",
       )
       expect(one.stdout).not.toContain("DEGRADED")
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // 29002: a late ball must not read as normal. Human rows carry the
+  // opened/due timestamps in strict ISO form and an OVERDUE mark when the
+  // daemon reports the ball expired or its due time has passed; --json
+  // passes the same fields through untouched.
+  it("pending prints opened and due per row and marks a past-due ball OVERDUE", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-pending-due-"))
+    const socketPath = join(dir, "tribe.sock")
+    const base = {
+      recipient: "@dev/3",
+      sender: "@chief",
+      opened_at: "2026-09-16T19:55:00.000Z",
+      age_ms: 300_000,
+      fanout: "first",
+      owner_transport_registered: true,
+      owner_transport_state: "connected",
+      owner_state: "live",
+      owner_answer_capability: "observed",
+      owner_transport_reason: "registered-transport",
+      owner_last_mailbox_read_age_ms: 60_000,
+      owner_transport_observed_at: "2026-09-16T20:00:00.000Z",
+      owner_transport_offline_since: null,
+    }
+    const rows = [
+      {
+        ...base,
+        request_id: "req-late",
+        summary: "late work",
+        message_id: "msg-late",
+        status: "expired",
+        expires_at: "2026-09-16T19:56:00.000Z",
+      },
+      {
+        ...base,
+        request_id: "req-ontime",
+        summary: "on-time work",
+        message_id: "msg-ontime",
+        status: "active",
+        expires_at: "2999-01-01T00:00:00.000Z",
+      },
+      {
+        ...base,
+        request_id: "req-incident",
+        summary: "watcher holding",
+        message_id: "msg-incident",
+        status: "active",
+        expires_at: null,
+      },
+    ]
+    const oneSnapshot = { owner: "@dev/3", expired: false, pending: rows, count: rows.length }
+    const allSnapshot = {
+      all: true,
+      expired: false,
+      count: rows.length,
+      owner_count: 1,
+      oldest_age_ms: 300_000,
+      pending: rows,
+      owners: [{ owner: "@dev/3", count: rows.length, oldest_age_ms: 300_000, pending: rows }],
+    }
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; params?: Record<string, unknown> }
+          const response = request.params?.owner === "@dev/3" ? oneSnapshot : allSnapshot
+          socket.write(
+            `${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { structuredContent: response } })}\n`,
+          )
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const env = { ...process.env, TRIBE_SOCKET: socketPath, TRIBE_NO_AUTOSTART: "1" }
+      const one = await runCliAsync(["pending", "--owner", "@dev/3"], env)
+      const all = await runCliAsync(["pending", "--all"], env)
+      const json = await runCliAsync(["pending", "--owner", "@dev/3", "--json"], env)
+
+      expect(one).toMatchObject({ code: 0, stderr: "" })
+      expect(one.stdout).toContain(
+        "req-late  from @chief  5m ago  OVERDUE  opened 2026-09-16T19:55:00.000Z  due 2026-09-16T19:56:00.000Z  fanout=first  (msg msg-late)",
+      )
+      expect(one.stdout).toContain(
+        "req-ontime  from @chief  5m ago  opened 2026-09-16T19:55:00.000Z  due 2999-01-01T00:00:00.000Z  fanout=first  (msg msg-ontime)",
+      )
+      expect(one.stdout).toContain("req-incident  from @chief  5m ago  opened 2026-09-16T19:55:00.000Z  due none")
+      expect(one.stdout.match(/OVERDUE/g)).toHaveLength(1)
+
+      expect(all).toMatchObject({ code: 0, stderr: "" })
+      expect(all.stdout).toContain(
+        "req-late  from @chief  to @dev/3  late work  OVERDUE  opened 2026-09-16T19:55:00.000Z  due 2026-09-16T19:56:00.000Z  (msg msg-late)",
+      )
+      expect(all.stdout.match(/OVERDUE/g)).toHaveLength(1)
+
+      expect(JSON.parse(json.stdout)).toEqual(oneSnapshot)
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      safeRemoveSync(dir, { within: realpathSync(tmpdir()), allowMissing: true })
     }
   })
 

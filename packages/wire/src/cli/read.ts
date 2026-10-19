@@ -778,6 +778,7 @@ type PendingCliRow = {
   recipient: string
   sender: string
   opened_at: string
+  expires_at?: string | null
   age_ms: number
   message_id: string
   fanout: string
@@ -825,6 +826,19 @@ function pendingOwnerTransportWarning(row: PendingCliRow): string {
         `as of ${observedAt}${unresolved}`
       )
   }
+}
+
+/**
+ * `  [OVERDUE  ]opened <iso>  due <iso|none>` for one pending row (29002).
+ * A late ball must not read as normal: the mark fires when the daemon
+ * reports the ball expired, or when its due time has already passed at
+ * render time. Timestamps print verbatim in the daemon's strict ISO form;
+ * a watcher incident carries no deadline and reads `due none`.
+ */
+function pendingDeadlineSegment(row: PendingCliRow): string {
+  const dueMs = row.expires_at ? Date.parse(row.expires_at) : Number.NaN
+  const overdue = row.status === "expired" || (Number.isFinite(dueMs) && dueMs <= Date.now())
+  return `${overdue ? "  OVERDUE" : ""}  opened ${row.opened_at}  due ${row.expires_at ?? "none"}`
 }
 
 function mailboxReadAge(ageMs: number | null | undefined): string {
@@ -1001,7 +1015,7 @@ async function cmdPending(
         const summary = p.summary?.trim() || "(no summary)"
         const outcome = expired ? `  settlement=${p.settlement ?? "unsettled"}` : ""
         console.log(
-          `    ${p.request_id}  from ${p.sender}  to ${p.recipient}  ${summary}${outcome}  (msg ${p.message_id})` +
+          `    ${p.request_id}  from ${p.sender}  to ${p.recipient}  ${summary}${outcome}${pendingDeadlineSegment(p)}  (msg ${p.message_id})` +
             pendingSettlementConflictLine(p),
         )
       }
@@ -1020,7 +1034,7 @@ async function cmdPending(
     const age = ageSec >= 60 ? `${Math.floor(ageSec / 60)}m` : `${ageSec}s`
     const outcome = expired ? `  settlement=${p.settlement ?? "unsettled"}` : ""
     console.log(
-      `  ${p.request_id}  from ${p.sender}  ${age} ago  fanout=${p.fanout}${outcome}  ` +
+      `  ${p.request_id}  from ${p.sender}  ${age} ago${pendingDeadlineSegment(p)}  fanout=${p.fanout}${outcome}  ` +
         `(msg ${p.message_id})${pendingOwnerTransportWarning(p)}${pendingSettlementConflictLine(p)}`,
     )
   }
