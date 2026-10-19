@@ -967,6 +967,13 @@ describe("registerSendCommands", () => {
                 closed,
               },
             }
+          } else if (request.method === "cli_inbox_status_by_launch_v1") {
+            // 30160: a managed launch resolves its identity before a ref-only send.
+            result = {
+              session: "@chief",
+              launch_id: request.params?.launch_id,
+              launch_parent_pid: 4242,
+            }
           } else if (request.method === "register") {
             // Mirror the real daemon's grant: the one-shot --reply register gets
             // the requested name back (no live holder in this fixture).
@@ -975,15 +982,48 @@ describe("registerSendCommands", () => {
             const progress = ["status", "notify", "request", "query"].includes(String(request.params?.type))
             if (!progress) pendingOpen = false
             const message = request.params?.message
+            // @ag/tribe/30160: the daemon's one fact set. Openness comes from the same
+            // pending list the pre-send note reads, never from the CLI.
+            const named = (request.params?.reply ?? request.params?.ref) as string | undefined
+            const namedId = named === undefined ? undefined : named === "msg-123" ? "req-123" : named
+            const closedNow =
+              namedId === "req-withdrawn"
+                ? 0
+                : message === "done" || message === "by-message"
+                  ? 1
+                  : message === "malformed"
+                    ? 1.5
+                    : 0
+            const ballOpen =
+              namedId !== undefined &&
+              (progress
+                ? pendingListed.some((row) => row.request_id === namedId || row.message_id === namedId)
+                : closedNow > 0)
+            const ball =
+              namedId === undefined
+                ? {}
+                : {
+                    ball: {
+                      request_id: namedId,
+                      open: ballOpen,
+                      ...(ballOpen ? { due_at: Date.now() + 900_000 } : {}),
+                      ...(ballOpen
+                        ? {}
+                        : {
+                            cause:
+                              namedId === "req-withdrawn"
+                                ? "sender-withdrawn: the ball's sender withdrew it before this reply arrived"
+                                : `no open ball of @chief's currently matches ${namedId}`,
+                          }),
+                    },
+                  }
             result =
               message === "missing" || progress
-                ? { sent: true }
+                ? { sent: true, ...ball }
                 : {
                     sent: true,
-                    tracker: {
-                      request_id: "req-123",
-                      closed: message === "done" || message === "by-message" ? 1 : message === "malformed" ? 1.5 : 0,
-                    },
+                    ...ball,
+                    tracker: { request_id: "req-123", closed: closedNow },
                   }
           } else {
             result = { error: `unexpected call ${request.method}` }
@@ -1027,10 +1067,12 @@ describe("registerSendCommands", () => {
       // name nonsettlement and succeed, rather than treating missing tracker as failure.
       for (const type of ["status", "notify", "request", "query"]) {
         const progress = await runCli(["send", "@agent/3", "taking", "--type", type, "--reply", "req-123"])
-        expect(progress).toMatchObject({ code: 0, stderr: "" })
-        expect(progress.stdout).toContain(
-          `${type} does not settle ball req-123; it stays open (settle it with --type response or verdict)`,
+        expect(progress).toMatchObject({ code: 0 })
+        // 30160: the notice is one stderr line rendered from the daemon's ball fact.
+        expect(progress.stderr).toContain(
+          `${type} does not settle ball req-123; it stays open (due `,
         )
+        expect(progress.stderr).toContain("settle it with --type response or verdict --reply req-123")
         expect(progress.stdout).not.toContain("Closed ")
       }
 
@@ -1040,30 +1082,47 @@ describe("registerSendCommands", () => {
       pendingListed = []
       const noLongerOpen = await runCli(["send", "@agent/3", "taking", "--type", "status", "--reply", "req-123"])
       expect(noLongerOpen).toMatchObject({ code: 0 })
-      expect(noLongerOpen.stdout).toContain("no open ball of @chief's currently matches req-123")
-      expect(noLongerOpen.stdout).not.toContain("it stays open")
-      expect(noLongerOpen.stdout).not.toContain("never opened")
+      expect(noLongerOpen.stderr).toContain("status did not settle ball req-123")
+      expect(noLongerOpen.stderr).toContain("no open ball of @chief's currently matches req-123")
+      expect(noLongerOpen.stderr).not.toContain("it stays open")
+      expect(noLongerOpen.stderr).not.toContain("never opened")
       expect(noLongerOpen.stderr).toContain("no pending request req-123 is currently owned by @chief")
 
       // And the SAME sentence for an id this fixture never listed: current absence is all
       // the read proves, so a settled id and a never-opened id are indistinguishable HERE.
       const neverListed = await runCli(["send", "@agent/3", "taking", "--type", "status", "--reply", "req-never"])
       expect(neverListed).toMatchObject({ code: 0 })
-      expect(neverListed.stdout).toContain("no open ball of @chief's currently matches req-never")
-      expect(neverListed.stdout).not.toContain("never opened")
+      expect(neverListed.stderr).toContain("no open ball of @chief's currently matches req-never")
+      expect(neverListed.stderr).not.toContain("never opened")
 
       // A read that FAILS is neither absence nor openness: the note says the settlement
       // is unknown, and the message is still delivered.
       pendingReadError = true
       const readFailed = await runCli(["send", "@agent/3", "taking", "--type", "status", "--reply", "req-123"])
       expect(readFailed).toMatchObject({ code: 0 })
-      expect(readFailed.stdout).toContain("whether ball req-123 is open for @chief could not be read")
-      expect(readFailed.stdout).toContain("its settlement is unknown")
-      expect(readFailed.stdout).not.toContain("it stays open")
+      // 30160: one line, from the daemon's facts; the failed pre-send read is named
+      // by its own warning, not by a second sentence about unknownness.
+      expect(readFailed.stderr).toContain("status did not settle ball req-123")
+      expect(readFailed.stderr).not.toContain("it stays open")
       expect(readFailed.stdout).toContain("Sent message to @agent/3")
       expect(readFailed.stderr).toContain("cannot verify pending request req-123 for @chief")
       pendingReadError = false
       pendingListed = [{ request_id: "req-123", message_id: "msg-123" }]
+
+      // 30160 (a): a TAKING receipt (status + --ref) names the ball too. The due
+      // comes from the daemon's fact, and nothing is settled.
+      const receipt = await runCli(["send", "@agent/3", "taking", "--type", "status", "--ref", "req-123"], launchToken("sid-chief", "@chief"))
+      expect(receipt).toMatchObject({ code: 0 })
+      expect(receipt.stderr).toContain("status does not settle ball req-123; it stays open (due ")
+      expect(receipt.stderr).toContain("settle it with --type response or verdict --reply req-123")
+      expect(receipt.stdout).not.toContain("Closed ")
+
+      // 30160 (c): a verdict to a ball its sender withdrew closes 0 rows; the same
+      // single line carries the daemon's own cause, and exit 3 is unchanged.
+      const withdrawn = await runCli(["send", "@agent/3", "done", "--type", "verdict", "--reply", "req-withdrawn"])
+      expect(withdrawn.code).toBe(3)
+      expect(withdrawn.stderr).toContain("verdict DELIVERED, but did not settle ball req-withdrawn")
+      expect(withdrawn.stderr).toContain("sender-withdrawn")
 
       pendingOpen = true
       const byMessage = await runReply("by-message", "msg-123")
@@ -1103,9 +1162,11 @@ describe("registerSendCommands", () => {
       const unproven = await runReply("unproven")
       expect(unproven.code).toBe(3)
       expect(unproven.stdout).toBe("")
-      expect(unproven.stderr).toContain("response DELIVERED")
-      expect(unproven.stderr).toContain("committed tracker result closed 0 rows for req-123")
-      expect(unproven.stderr).toContain("Verify current state with: tribe pending --owner @chief")
+      // 30160: one line, the daemon's cause, and the settle command — still
+      // DELIVERED, still exit 3 (22844 unchanged).
+      expect(unproven.stderr).toContain("response DELIVERED, but did not settle ball req-123")
+      expect(unproven.stderr).toContain("settle it with --type response or verdict --reply req-123")
+      expect(unproven.stderr).toContain("verify: tribe pending --owner @chief")
 
       pendingOpen = true
       const missing = await runReply("missing")
@@ -1137,7 +1198,9 @@ describe("registerSendCommands", () => {
           params: { owner: "@chief", close: "req-123", idToken: chiefToken },
         },
       ])
-      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(12)
+      // 12 through the reply scenarios plus the two 30160 sends above (the
+      // status --ref receipt and the verdict to a withdrawn ball).
+      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(14)
     } finally {
       server.close()
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })

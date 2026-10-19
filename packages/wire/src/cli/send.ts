@@ -489,19 +489,59 @@ async function warnPendingReplyOwner(owner: string, reply: string): Promise<bool
  *   can name the journal cause; this pre-delivery read cannot.
  * - `undefined` — the read itself failed: say so rather than assert either way.
  */
-function replyNotSettledNote(type: string, reply: string, owner: string, ballOpen: boolean | undefined): string {
-  if (ballOpen === true) {
-    return `${type} does not settle ball ${reply}; it stays open (settle it with --type response or verdict)`
+type SendBallFact = { request_id: string; open: boolean; due_at?: number; cause?: string }
+
+/**
+ * One sentence per send that NAMED a tracked ball, rendered from the daemon's
+ * `ball` fact (@ag/tribe/30160, @cto GO). The CLI classifies nothing: it does
+ * not decide ownership or type, it does not read pending a second time, and it
+ * never infers that anything was answered. stderr only; stdout and exit codes
+ * are unchanged (a response/verdict that closed 0 rows still exits 3).
+ */
+function reportBallReference(
+  owner: string,
+  input: { type?: string; reply?: string; json?: boolean },
+  result: {
+    tracker?: { request_id?: string; closed?: number; cause?: string }
+    ball?: SendBallFact
+  },
+): void {
+  const type = input.type ?? "notify"
+  const settles = (type === "response" || type === "verdict") && input.reply !== undefined
+  if (settles) {
+    const closed = result.tracker?.closed
+    if (typeof closed === "number" && closed >= 1) {
+      reportCommittedReplyTracker(owner, input.reply as string, result.tracker, input.json)
+      return
+    }
+    if (closed === 0) {
+      const id = result.ball?.request_id ?? result.tracker?.request_id ?? (input.reply as string)
+      const cause = result.ball?.cause ?? result.tracker?.cause
+      console.error(
+        cause !== undefined && cause.length > 0
+          ? `${type} DELIVERED, but did not settle ball ${id}: ${cause}; ` +
+              `settle it with --type response or verdict --reply ${id} (verify: tribe pending --owner ${owner})`
+          : `${type} DELIVERED, but settled no ball: no open ball currently matches ${id}; ` +
+              `settle it with --type response or verdict --reply ${id} (verify: tribe pending --owner ${owner})`,
+      )
+      process.exit(3)
+    }
+    reportCommittedReplyTracker(owner, input.reply as string, result.tracker, input.json)
+    return
   }
-  if (ballOpen === false) {
-    return (
-      `${type} settles nothing: no open ball of ${owner}'s currently matches ${reply} — an id already settled, ` +
-      `or one opened for another owner, reads the same here (check the id against tribe pending --owner ${owner})`
-    )
+  const ball = result.ball
+  if (ball === undefined) return
+  const settle = `settle it with --type response or verdict --reply ${ball.request_id}`
+  if (ball.open) {
+    const due = typeof ball.due_at === "number" ? ` (due ${new Date(ball.due_at).toISOString()})` : ""
+    console.error(`${type} does not settle ball ${ball.request_id}; it stays open${due}; ${settle}`)
+    return
   }
-  return (
-    `${type} settles nothing: whether ball ${reply} is open for ${owner} could not be read — ` +
-    `the pending lookup failed before this send, so its settlement is unknown`
+  const cause = ball.cause
+  console.error(
+    cause !== undefined && cause.length > 0
+      ? `${type} did not settle ball ${ball.request_id}: ${cause}; ${settle}`
+      : `${type} settles nothing: no open ball currently matches ${ball.request_id}; ${settle}`,
   )
 }
 
@@ -653,10 +693,9 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     process.exit(2)
   }
   const caller = await resolveSendCaller(input.reply, input.anonymous)
-  // @ag/tribe/29512: whether this reply id names an open ball of the caller's, read from
-  // the tracker the pre-send note already consults (`undefined` when that read failed).
-  let replyBallOpen: boolean | undefined
-  if (input.reply && caller) replyBallOpen = await warnPendingReplyOwner(caller.name, input.reply)
+  // The pre-send read warns when the id is not the caller's to close; the
+  // post-send sentence is rendered from the daemon's `ball` fact (30160).
+  if (input.reply && caller) await warnPendingReplyOwner(caller.name, input.reply)
   else if (!input.reply && caller && !input.anonymous) {
     await warnUnreleasedBallToRecipient(caller.name, input.to, type === "status" ? input.ref : undefined)
   }
@@ -673,6 +712,9 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     truncated?: boolean
     original_length?: number
     tracker?: { request_id?: string; closed?: number; cause?: string }
+    // @ag/tribe/30160 (@cto GO): the daemon's single fact set for a send that
+    // named a tracked ball. The CLI renders it and classifies nothing itself.
+    ball?: { request_id: string; open: boolean; due_at?: number; cause?: string }
     applied_due?: { request_id?: string; previous_expires_at?: number | null; expires_at?: number }
     delivery?: {
       state?: string
@@ -689,18 +731,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     if (input.json) await writeJsonStdout({ error: result.error })
     process.exit(1)
   }
-  if (input.reply && caller) {
-    const type = input.type ?? "notify"
-    if (type === "response" || type === "verdict") {
-      reportCommittedReplyTracker(caller.name, input.reply, result.tracker, input.json)
-    } else {
-      const tail = input.ref === undefined ? "" : `; reply ${input.reply} was not recorded; ref ${input.ref} kept`
-      // @ag/tribe/29512: three outcomes, three sentences — see `replyNotSettledNote`.
-      // 29718: in --json mode this prose goes to stderr; stdout stays JSON alone.
-      if (input.json) console.error(replyNotSettledNote(type, input.reply, caller.name, replyBallOpen) + tail)
-      else console.log(replyNotSettledNote(type, input.reply, caller.name, replyBallOpen) + tail)
-    }
-  }
+  if (caller) reportBallReference(caller.name, input, result)
   if (result.delivery?.state === "bounced") {
     const { original_target: originalTarget, recipient, reason } = result.delivery
     if (

@@ -1136,6 +1136,15 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     })
   }
   const replyReport = committedReplyReport(ctx, sender, [recipients], result.tracker)
+  // @ag/tribe/30160: one fact set for the CLI's single-line notice; the CLI no
+  // longer re-derives ball openness from a second pending read (@cto GO).
+  const ballFact = namedBallReference(ctx, {
+    owner: sender,
+    reply: replyId,
+    ref: a.ref as string | undefined,
+    tracker: replyReport.tracker,
+    dueAt: redue?.expiresAt,
+  })
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(summaryDerived),
     maybeTruncationWarning(truncation),
@@ -1147,6 +1156,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     sent: true,
     id: result.id,
     ...(effectiveRequestId ? { request_id: effectiveRequestId } : {}),
+    ...(ballFact ? { ball: ballFact } : {}),
     ...(result.incident ? { incident: result.incident } : {}),
     delivery: deliveryReport([{ recipient: recipients, resolution }], transport)[0],
     ...(replyReport.tracker ? { tracker: replyReport.tracker } : {}),
@@ -1166,6 +1176,33 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     ...truncationReport(truncation),
     ...(warning ? { warning } : {}),
   })
+}
+
+/**
+ * @ag/tribe/30160 (@cto GO): the one fact set the CLI needs to say, in a single
+ * line, whether a send that NAMED a tracked ball settled it. The CLI must not
+ * classify ownership or type itself; it renders these fields. `open` is a
+ * claim about the tracker, so it is made only from a row this send's own
+ * recipient lookup returned.
+ */
+function namedBallReference(
+  ctx: TribeContext,
+  input: { owner: string; reply: string | null; ref?: string; tracker?: Tracker; dueAt?: number },
+): { request_id: string; open: boolean; due_at?: number; cause?: string } | undefined {
+  const named = input.reply ?? input.ref
+  if (named === undefined || named.length === 0) return undefined
+  const row = ctx.stmts.selectPendingForReplyRecipient.get({
+    $reply_id: named,
+    $recipient: input.owner,
+  }) as { request_id: string; expires_at: number | null } | null
+  const requestId = input.tracker?.request_id ?? row?.request_id ?? named
+  if (row !== null) {
+    const dueAt = input.dueAt ?? row.expires_at
+    return { request_id: requestId, open: true, ...(dueAt === null || dueAt === undefined ? {} : { due_at: dueAt }) }
+  }
+  const cause =
+    input.tracker?.cause ?? formatPendingCloseCause(pendingCloseCause(ctx, requestId, input.owner), requestId, input.owner)
+  return { request_id: requestId, open: false, ...(cause.length === 0 ? {} : { cause }) }
 }
 
 /**
