@@ -412,7 +412,7 @@ describe("recall integration", () => {
   test("rejects an invalid since window instead of reporting zero matches", async () => {
     const recall = await getRecall()
     await expect(recall("test", { raw: true, since: "invalid" })).rejects.toThrow(
-      'Invalid --since "invalid"; expected Nh, Nd, Nw, today, or yesterday',
+      'Invalid --since "invalid"; expected Nh, Nd, Nw, today, yesterday, or all',
     )
   }, 15_000)
 
