@@ -492,11 +492,15 @@ async function warnPendingReplyOwner(owner: string, reply: string): Promise<bool
 type SendBallFact = { request_id: string; open: boolean; due_at?: number; cause?: string }
 
 /**
- * One sentence per send that NAMED a tracked ball, rendered from the daemon's
- * `ball` fact (@ag/tribe/30160, @cto GO). The CLI classifies nothing: it does
- * not decide ownership or type, it does not read pending a second time, and it
- * never infers that anything was answered. stderr only; stdout and exit codes
- * are unchanged (a response/verdict that closed 0 rows still exits 3).
+ * One sentence per send that NAMED a tracked ball with `--reply`, rendered from
+ * the daemon's `ball` fact (@ag/tribe/30160, @cto GO; revised: `--ref` alone
+ * never produces a fact, so 22990's silent TAKING receipt stands). The CLI
+ * classifies nothing: it does not decide ownership or type, it does not read
+ * pending a second time, and it never infers that anything was answered. It
+ * advises a settling send ONLY for a ball the daemon reports open; a ball that
+ * is gone names the daemon's cause and points at `tribe pending` instead.
+ * stderr only; stdout and exit codes are unchanged (a response/verdict that
+ * closed 0 rows still exits 3).
  */
 function reportBallReference(
   owner: string,
@@ -517,12 +521,15 @@ function reportBallReference(
     if (closed === 0) {
       const id = result.ball?.request_id ?? result.tracker?.request_id ?? (input.reply as string)
       const cause = result.ball?.cause ?? result.tracker?.cause
-      console.error(
+      const detail =
         cause !== undefined && cause.length > 0
-          ? `${type} DELIVERED, but did not settle ball ${id}: ${cause}; ` +
+          ? `did not settle ball ${id}: ${cause}`
+          : `settled no ball: no open ball currently matches ${id}`
+      console.error(
+        result.ball?.open === true
+          ? `${type} DELIVERED, but ${detail}; ` +
               `settle it with --type response or verdict --reply ${id} (verify: tribe pending --owner ${owner})`
-          : `${type} DELIVERED, but settled no ball: no open ball currently matches ${id}; ` +
-              `settle it with --type response or verdict --reply ${id} (verify: tribe pending --owner ${owner})`,
+          : `${type} DELIVERED, but ${detail}; verify: tribe pending --owner ${owner}`,
       )
       process.exit(3)
     }
@@ -540,8 +547,8 @@ function reportBallReference(
   const cause = ball.cause
   console.error(
     cause !== undefined && cause.length > 0
-      ? `${type} did not settle ball ${ball.request_id}: ${cause}; ${settle}`
-      : `${type} settles nothing: no open ball currently matches ${ball.request_id}; ${settle}`,
+      ? `${type} did not settle ball ${ball.request_id}: ${cause}; verify: tribe pending --owner ${owner}`
+      : `${type} settles nothing: no open ball currently matches ${ball.request_id}; verify: tribe pending --owner ${owner}`,
   )
 }
 

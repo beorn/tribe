@@ -1141,7 +1141,6 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const ballFact = namedBallReference(ctx, {
     owner: sender,
     reply: replyId,
-    ref: a.ref as string | undefined,
     tracker: replyReport.tracker,
     dueAt: redue?.expiresAt,
   })
@@ -1183,14 +1182,16 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
  * line, whether a send that NAMED a tracked ball settled it. The CLI must not
  * classify ownership or type itself; it renders these fields. `open` is a
  * claim about the tracker, so it is made only from a row this send's own
- * recipient lookup returned.
+ * recipient lookup returned. Only `reply` names a ball here (@cto 30160
+ * revision): a bare `ref` is a correlation, and 22990 keeps a TAKING receipt
+ * (status + ref on your own open ball) silent — the daemon adds no fact for it.
  */
 function namedBallReference(
   ctx: TribeContext,
-  input: { owner: string; reply: string | null; ref?: string; tracker?: Tracker; dueAt?: number },
+  input: { owner: string; reply: string | null; tracker?: Tracker; dueAt?: number },
 ): { request_id: string; open: boolean; due_at?: number; cause?: string } | undefined {
-  const named = input.reply ?? input.ref
-  if (named === undefined || named.length === 0) return undefined
+  const named = input.reply
+  if (named === null || named.length === 0) return undefined
   const row = ctx.stmts.selectPendingForReplyRecipient.get({
     $reply_id: named,
     $recipient: input.owner,

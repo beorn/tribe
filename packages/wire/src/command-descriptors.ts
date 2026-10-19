@@ -310,6 +310,18 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             required: ["request_id", "previous_expires_at", "expires_at"],
             description: "Present when a status + ref receipt carried expires_in_ms.",
           },
+          ball: {
+            type: "object",
+            properties: {
+              request_id: { type: "string", description: "The ball this send named with --reply." },
+              open: { type: "boolean", description: "Whether that ball is still open for this sender." },
+              due_at: { type: "number", description: "Its due, unix ms; only when open." },
+              cause: { type: "string", description: "Journal-backed reason it is not open; only when not open." },
+            },
+            required: ["request_id", "open"],
+            description:
+              "Additive (30160): present only when the send carried --reply. A bare --ref adds no ball, so a TAKING receipt stays silent (22990).",
+          },
           reply_close_failed: {
             type: "boolean",
             description:

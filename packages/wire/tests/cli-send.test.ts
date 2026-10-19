@@ -984,7 +984,9 @@ describe("registerSendCommands", () => {
             const message = request.params?.message
             // @ag/tribe/30160: the daemon's one fact set. Openness comes from the same
             // pending list the pre-send note reads, never from the CLI.
-            const named = (request.params?.reply ?? request.params?.ref) as string | undefined
+            // @cto 30160 revision: only --reply names a ball; a bare ref adds no fact
+            // (22990 keeps a TAKING receipt silent).
+            const named = request.params?.reply as string | undefined
             const namedId = named === undefined ? undefined : named === "msg-123" ? "req-123" : named
             const closedNow =
               namedId === "req-withdrawn"
@@ -1109,20 +1111,31 @@ describe("registerSendCommands", () => {
       pendingReadError = false
       pendingListed = [{ request_id: "req-123", message_id: "msg-123" }]
 
-      // 30160 (a): a TAKING receipt (status + --ref) names the ball too. The due
-      // comes from the daemon's fact, and nothing is settled.
+      // 30160 (a), revised: a TAKING receipt (status + --ref) prints NOTHING and
+      // settles nothing — 22990 keeps it silent, and the daemon adds no ball fact
+      // for a bare ref.
       const receipt = await runCli(["send", "@agent/3", "taking", "--type", "status", "--ref", "req-123"], launchToken("sid-chief", "@chief"))
       expect(receipt).toMatchObject({ code: 0 })
-      expect(receipt.stderr).toContain("status does not settle ball req-123; it stays open (due ")
-      expect(receipt.stderr).toContain("settle it with --type response or verdict --reply req-123")
+      expect(receipt.stderr).toBe("")
+      expect(receipt.stdout).toContain("Sent message to @agent/3")
       expect(receipt.stdout).not.toContain("Closed ")
 
+      // 30160 (a2): the same hold for a requester's notify that merely correlates
+      // with its own open ball — a ref is not a settlement and prints no advice.
+      const correlated = await runCli(["send", "@agent/3", "progress", "--type", "notify", "--ref", "req-123"], launchToken("sid-chief", "@chief"))
+      expect(correlated).toMatchObject({ code: 0 })
+      expect(correlated.stderr).not.toContain("did not settle ball")
+      expect(correlated.stderr).not.toContain("settle it with --type response or verdict")
+
       // 30160 (c): a verdict to a ball its sender withdrew closes 0 rows; the same
-      // single line carries the daemon's own cause, and exit 3 is unchanged.
+      // single line carries the daemon's own cause, advises nothing (the ball is
+      // gone), and exit 3 is unchanged.
       const withdrawn = await runCli(["send", "@agent/3", "done", "--type", "verdict", "--reply", "req-withdrawn"])
       expect(withdrawn.code).toBe(3)
       expect(withdrawn.stderr).toContain("verdict DELIVERED, but did not settle ball req-withdrawn")
       expect(withdrawn.stderr).toContain("sender-withdrawn")
+      expect(withdrawn.stderr).not.toContain("settle it with --type response or verdict")
+      expect(withdrawn.stderr).toContain("verify: tribe pending --owner @chief")
 
       pendingOpen = true
       const byMessage = await runReply("by-message", "msg-123")
@@ -1162,10 +1175,11 @@ describe("registerSendCommands", () => {
       const unproven = await runReply("unproven")
       expect(unproven.code).toBe(3)
       expect(unproven.stdout).toBe("")
-      // 30160: one line, the daemon's cause, and the settle command — still
-      // DELIVERED, still exit 3 (22844 unchanged).
+      // 30160 revised: the daemon says the ball is not open, so the line names
+      // its cause and points at pending — it does NOT advise a second settle
+      // of a ball that is gone. Still DELIVERED, still exit 3 (22844 unchanged).
       expect(unproven.stderr).toContain("response DELIVERED, but did not settle ball req-123")
-      expect(unproven.stderr).toContain("settle it with --type response or verdict --reply req-123")
+      expect(unproven.stderr).not.toContain("settle it with --type response or verdict")
       expect(unproven.stderr).toContain("verify: tribe pending --owner @chief")
 
       pendingOpen = true
@@ -1198,9 +1212,10 @@ describe("registerSendCommands", () => {
           params: { owner: "@chief", close: "req-123", idToken: chiefToken },
         },
       ])
-      // 12 through the reply scenarios plus the two 30160 sends above (the
-      // status --ref receipt and the verdict to a withdrawn ball).
-      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(14)
+      // 12 through the reply scenarios plus the three 30160 sends above (the
+      // status --ref receipt, the correlated notify --ref, and the verdict to a
+      // withdrawn ball).
+      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(15)
     } finally {
       server.close()
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
