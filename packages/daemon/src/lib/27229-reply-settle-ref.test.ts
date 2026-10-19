@@ -127,6 +127,11 @@ describe("#27229 a reply to a referenced request settles its listed ball", () =>
       ),
     )
     expect(reply.tracker).toMatchObject({ closed: 1 })
+    // @cto 30160 follow-up: the ball fact must not contradict tracker.closed.
+    // The pending row is already deleted here; without the guard this cause
+    // reads "closed 0 rows for <id>" beside closed: 1.
+    expect(reply.ball).toEqual({ request_id: REQUEST_ID, open: false })
+    expect(JSON.stringify(reply.ball)).not.toContain("closed 0 rows")
   })
 
   it("B: implicit request (request:true) + ref; reply with the message id settles", () => {

@@ -1192,6 +1192,13 @@ function namedBallReference(
 ): { request_id: string; open: boolean; due_at?: number; cause?: string } | undefined {
   const named = input.reply
   if (named === null || named.length === 0) return undefined
+  // @cto 30160 follow-up: a tracker row this send closed is not a failed close.
+  // The pending row is already gone here, so falling through to
+  // formatPendingCloseCause would stamp its "closed 0 rows" lead beside a
+  // successful tracker.closed >= 1 — a fact that contradicts itself.
+  if (typeof input.tracker?.closed === "number" && input.tracker.closed > 0) {
+    return { request_id: input.tracker.request_id ?? named, open: false }
+  }
   const row = ctx.stmts.selectPendingForReplyRecipient.get({
     $reply_id: named,
     $recipient: input.owner,
