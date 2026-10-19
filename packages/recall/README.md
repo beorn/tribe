@@ -112,17 +112,17 @@ incident.
 3. LLM synthesis (optional) summarizes results into a coherent narrative
 4. File recovery extracts written file contents from past sessions
 
-### Freshness — `RECALL_STALE_THRESHOLD`
+### Live index freshness — `RECALL_STALE_THRESHOLD`
 
 The session hooks never write the index: run `recall index --incremental` outside them, for example on a schedule, so the index has one writer. An index older than the threshold reads as stale. Search itself is read-only: `bun recall <query>` checks the index age, reports degraded provenance when it is stale or unavailable, and never starts index work.
 
 - Default threshold: **cadence plus run time** (75m at the hourly `recall-index` timer: 1h + 10m timeout + 5m slack). Hab's timer cadence is locked to `RECALL_INDEX_CADENCE` by `tools/hab-live-config.test.ts` (fragments cannot import this module). Slower or delayed rebuilds still report stale provenance.
 - Override: `RECALL_STALE_THRESHOLD=10m` (or `1h`, `30s`, `500ms`, bare number = minutes).
-- Legacy compatibility: `bun recall "query" --no-refresh` skips freshness classification, reports `unknown` provenance, and exits 3.
+- Legacy compatibility: `bun recall "query" --no-refresh` skips live-index freshness classification, reports `unknown` provenance, and exits 3. With `--snapshot`, provenance remains `snapshot` even with `--no-refresh`.
 
-Every search result envelope includes top-level `provenance`: `complete`, `stale`, `missing`, or `unknown`. Positive stale hits remain available but the command exits 3. A degraded empty JSON response uses `results: null` and `total: null`; human output labels the count `UNPROVEN`. Only a `complete` empty response uses `results: []`, `total: 0`, and exit 0.
+Every search result envelope includes top-level `provenance`: live-index searches report `complete`, `stale`, `missing`, or `unknown`; immutable snapshot searches report `snapshot`. Positive stale hits remain available but the command exits 3. A degraded empty JSON response uses `results: null` and `total: null`; human output labels the count `UNPROVEN`. A `complete` or `snapshot` empty response uses `results: []`, `total: 0`, and exit 0. Snapshot absence is scoped only to the selected file.
 
-The same threshold is the ONE freshness verdict: `recall status`'s `isStale` and `recall search`'s `provenance` are
+For the live index, the same threshold is the ONE freshness verdict: `recall status`'s `isStale` and `recall search`'s `provenance` are
 both derived from it, by one judge over `index_meta.last_rebuild` (@ag/recall/27930) — they cannot disagree about one
 index. A stale answer names the root and the window it judged: `provenanceDetail` on a search result, and
 `indexHealth.freshness` on `recall status --json`
