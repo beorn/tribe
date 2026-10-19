@@ -32,7 +32,7 @@ import { describeDaemonStderrLog } from "../lib/daemon-stderr-log.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
 import { readLaunchIdFromToken } from "../lib/identity-token.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
-import { writeJsonStdout, writeJsonToFile } from "./json-output.ts"
+import { JSON_TO_FILE_RECOVERY, jsonDestinationProblem, writeJsonStdout, writeJsonToFile } from "./json-output.ts"
 import {
   TRIBE_FETCH_DEFAULT_LIMIT,
   TRIBE_FETCH_MAX_LIMIT,
@@ -2148,6 +2148,20 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean; 
         "with --session <name> (tribe inbox-status --session <name>) or send with --anonymous",
     )
   }
+  // 30270 — the daemon consumes the mailbox before this process can write a
+  // byte, so a missing directory used to destroy the very rows the file was
+  // meant to keep. Refuse first: nothing is consumed and the cursor never moves.
+  if (opts.jsonToFile !== undefined && !opts.peek) {
+    const problem = await jsonDestinationProblem(opts.jsonToFile)
+    if (problem !== null) {
+      throw new Error(
+        `tribe inbox: refusing to consume the mailbox: cannot write JSON to ${opts.jsonToFile}: ${problem}.\n` +
+          "  Nothing was consumed and the cursor is unchanged.\n" +
+          "  Re-run with a writable path, or read without consuming with: tribe inbox --peek\n" +
+          `  Rows already consumed by an earlier read can be recovered from the journal with: ${JSON_TO_FILE_RECOVERY}`,
+      )
+    }
+  }
   const raw = await callDaemon("cli_self_inbox_v1", { idToken, limit: opts.limit ?? 50, peek: opts.peek })
   const result = mcpJsonContent(raw) as SelfInboxResult
   if (opts.jsonToFile !== undefined) {
@@ -2158,6 +2172,9 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean; 
       verb: "inbox",
       rows,
       cursor: result.cursor ?? null,
+      ...(opts.peek
+        ? {}
+        : { recovery: `the mailbox read was consumed; recover those rows with: ${JSON_TO_FILE_RECOVERY}` }),
     })
     // NO SILENT ERRORS: the file mode consumes the mailbox exactly as --json
     // does, so it carries the same destructive warning (on stderr; stdout stays
