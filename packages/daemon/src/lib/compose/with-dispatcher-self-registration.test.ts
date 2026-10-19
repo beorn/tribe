@@ -1489,12 +1489,36 @@ describe("dispatcher bounded mailbox drain", () => {
         unread_ids: string[]
         oldest_unread_age_min: number
         oldest_unread_ts: number
+        owed_count: number
+        owed_alarm_count: number
+        oldest_owed: {
+          id: string
+          sender: string
+          age_ms: number
+          summary: string | null
+          alarm: boolean
+        } | null
+        owed_balls: Array<{
+          id: string
+          sender: string
+          age_ms: number
+          summary: string | null
+          alarm: boolean
+        }>
       }>(
         await harness.dispatcher.handleRequest(
           { jsonrpc: "2.0", id, method: "cli_inbox_status", params: { session: "@chief" } },
           "conn-drain",
         ),
       )
+
+    expect(await readStatus("empty-status")).toMatchObject({
+      unread_count: 0,
+      owed_count: 0,
+      owed_alarm_count: 0,
+      oldest_owed: null,
+      owed_balls: [],
+    })
 
     const firstRequest = harness.sendActionable("@chief", "first historical request", "first-request")
     const secondRequest = harness.sendActionable("@chief", "second historical request")
@@ -1559,11 +1583,28 @@ describe("dispatcher bounded mailbox drain", () => {
     harness.setMessageTimestamp(clockRollbackReceipt.id, 1)
     harness.sendTakingStatus("@chief", "third-request")
     harness.sendTakingStatus("@chief", fourthRequest.id)
-    expect(await readStatus("status-after-drain")).toMatchObject({
+    harness.db.prepare("UPDATE pending_request SET request_kind = 'incident' WHERE request_id = 'fourth-request'").run()
+    const statusAfterDrain = await readStatus("status-after-drain")
+    expect(statusAfterDrain).toMatchObject({
       unread_count: 0,
       oldest_unread_age_min: 0,
       oldest_unread_ts: 0,
+      owed_count: 4,
+      owed_alarm_count: 1,
+      oldest_owed: {
+        id: "first-request",
+        sender: "daemon",
+        age_ms: expect.any(Number),
+        summary: null,
+        alarm: false,
+      },
     })
+    expect(statusAfterDrain.owed_balls).toEqual([
+      expect.objectContaining({ id: "first-request", sender: "daemon", alarm: false }),
+      expect.objectContaining({ id: secondRequest.id, sender: "daemon", alarm: false }),
+      expect.objectContaining({ id: "third-request", sender: "daemon", alarm: false }),
+      expect.objectContaining({ id: "fourth-request", sender: "daemon", alarm: true }),
+    ])
 
     const wait = parseResult<InboxWaitResult>(
       await harness.dispatcher.handleRequest(
@@ -1582,6 +1623,80 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(wait.attention.pending_balls).toHaveLength(4)
     expect(harness.sessionCount("@chief")).toBe(0)
     expect(harness.sessionAnnouncements("@chief")).toEqual([])
+
+    // @dev/11 REVISE (f3dc612e) + @cto REVISE (a479fd77):
+    // `owed_count`, `owed_alarm_count`, and `oldest_owed` come from the complete owned set
+    // (`pendingBalls` sorted oldest-first), while `owed_balls` is bounded to an oldest-first
+    // preview of at most 10 rows.
+    harness.db
+      .prepare(
+        "UPDATE pending_request SET request_kind = 'incident', opened_at = 1000 WHERE request_id = 'first-request'",
+      )
+      .run()
+    harness.db
+      .prepare("UPDATE pending_request SET request_kind = 'request', opened_at = 2000 WHERE request_id = ?")
+      .run(secondRequest.id)
+    harness.db
+      .prepare(
+        "UPDATE pending_request SET request_kind = 'request', opened_at = 3000 WHERE request_id = 'third-request'",
+      )
+      .run()
+    harness.db
+      .prepare(
+        "UPDATE pending_request SET request_kind = 'request', opened_at = 4000 WHERE request_id = 'fourth-request'",
+      )
+      .run()
+    for (let index = 5; index <= 12; index += 1) {
+      const reqId = `bulk-request-${index}`
+      harness.sendActionable("@chief", `bulk request ${index}`, reqId)
+      harness.sendTakingStatus("@chief", reqId)
+      harness.db
+        .prepare("UPDATE pending_request SET request_kind = 'request', opened_at = ? WHERE request_id = ?")
+        .run(index * 1000, reqId)
+    }
+    const statusWith12 = await readStatus("status-12-with-older-alarm")
+    expect(statusWith12.owed_count).toBe(12)
+    expect(statusWith12.owed_alarm_count).toBe(1)
+    expect(statusWith12.owed_balls).toHaveLength(10)
+    expect(statusWith12.oldest_owed).toMatchObject({
+      id: "first-request",
+      sender: "daemon",
+      alarm: true,
+    })
+    expect(statusWith12.owed_balls[0]).toMatchObject({
+      id: "first-request",
+      sender: "daemon",
+      alarm: true,
+    })
+    expect(statusWith12.owed_balls.at(-1)).toMatchObject({
+      id: "bulk-request-10",
+      sender: "daemon",
+      alarm: false,
+    })
+
+    // Youngest-alarm-beyond-preview case (@cto a479fd77 item 1):
+    // When the only alarm is the 12th (youngest) ball, it sits beyond the 10-row `owed_balls`
+    // preview, yet `owed_alarm_count` and `owed_count` still report 1 and 12 from the full set.
+    harness.db
+      .prepare(
+        "UPDATE pending_request SET request_kind = 'request', opened_at = 1000 WHERE request_id = 'first-request'",
+      )
+      .run()
+    harness.db
+      .prepare(
+        "UPDATE pending_request SET request_kind = 'incident', opened_at = 12000 WHERE request_id = 'bulk-request-12'",
+      )
+      .run()
+    const statusWithYoungestAlarm = await readStatus("status-12-with-youngest-alarm-beyond-preview")
+    expect(statusWithYoungestAlarm.owed_count).toBe(12)
+    expect(statusWithYoungestAlarm.owed_alarm_count).toBe(1)
+    expect(statusWithYoungestAlarm.owed_balls).toHaveLength(10)
+    expect(statusWithYoungestAlarm.owed_balls.every((ball) => !ball.alarm)).toBe(true)
+    expect(statusWithYoungestAlarm.oldest_owed).toMatchObject({
+      id: "first-request",
+      sender: "daemon",
+      alarm: false,
+    })
   })
 
   it("an operator inbox-drain acknowledges on the target's behalf by explicit intent, never stamps the target's read receipt, and --peek does neither (21757)", async () => {

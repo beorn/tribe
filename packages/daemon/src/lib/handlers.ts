@@ -5097,6 +5097,7 @@ export function readAttentionProjection(
   transportOpts?: Pick<HandlerOpts, "getActiveSessionInfo" | "inboxWait">,
 ): {
   attentionRows: FetchRow[]
+  pendingBalls: PendingBall[]
   untakenPendingBalls: PendingBall[]
   actionableCount: number
   attention: AttentionProjection
@@ -5188,6 +5189,7 @@ export function readAttentionProjection(
         }
   return {
     attentionRows,
+    pendingBalls,
     untakenPendingBalls,
     actionableCount,
     attention: {
