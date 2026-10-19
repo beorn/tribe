@@ -69,6 +69,26 @@ function fakeDaemon(registered: Record<string, unknown>, rowLaunchId: string, me
 }
 
 describe("connectTribeLaunch certifies the launch identity the daemon keyed (25074)", () => {
+  // 30299: a current register ACK already certifies name, keyed launch and
+  // this transport's delivery. A members reread introduces schema/promotion
+  // skew and is not another source of launch identity.
+  it("certifies a current launch from its ACK without reading members", async () => {
+    const { deps, calls } = fakeDaemon({ launchId: DERIVED, launchParentPid: PID }, "stale-members-launch", {
+      name: "@another-seat",
+      alive: false,
+      launch_parent_pid: PID + 1,
+    })
+    const joined = await connectTribeLaunch(REQUEST, deps)
+    expect(joined.launchId).toBe(DERIVED)
+    expect(calls.map(({ method }) => method)).toEqual(["register"])
+    joined.close()
+  })
+
+  it("rejects a wrong registered name before trusting any matching members row", async () => {
+    const { deps } = fakeDaemon({ name: "@another-seat", launchId: DERIVED, launchParentPid: PID }, DERIVED)
+    await expect(connectTribeLaunch(REQUEST, deps)).rejects.toThrow(/registered.*another-seat.*instead of/)
+  })
+
   // @failure A native Ag watch consumes takeover or registers another session, so the existing pull owner is lost.
   // @level l2 @consumer The old Ag receives successor notices on a same-launch push sibling.
   it("attaches a reconnecting push watch to the certified pull session with takeover false", async () => {
@@ -177,7 +197,9 @@ describe("connectTribeLaunch certifies the launch identity the daemon keyed (250
     const joined = await connectTribeLaunch(REQUEST, legacy.deps)
     joined.close()
     const sibling = fakeDaemon(ack, DERIVED, { delivery: "push" })
-    await expect(connectTribeLaunch(REQUEST, sibling.deps)).rejects.toThrow("member row did not certify")
+    await expect(connectTribeLaunch(REQUEST, sibling.deps)).rejects.toThrow(
+      "protocol 10 stored-pull acknowledgement did not certify",
+    )
   })
 
   it("a token register sends its launch id too, certifies the returned <sid>@<gen>, and its child env projects no launch id (3d-2b)", async () => {
