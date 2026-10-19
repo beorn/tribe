@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest"
 import { execFileSync, spawn, spawnSync } from "node:child_process"
 import {
+  chmodSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -1041,7 +1042,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       expect(refused.calls).toEqual([])
       expect(refused.result.stdout).toBe("")
       expect(refused.result.stderr).toContain(path)
-      expect(refused.result.stderr).toContain(`mkdir -p ${dirname(path)}`)
+      expect(refused.result.stderr).toContain(`mkdir -p "${dirname(path)}"`)
       expect(refused.result.stderr).toContain("tribe log --all --json")
       expect(existsSync(path)).toBe(false)
 
@@ -1076,6 +1077,31 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       expect(refused.result.stderr).toContain("exists and is not a regular file")
       expect(refused.result.stderr).toContain("tribe log --all --json")
     } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // review2 repro on 30270 — an existing writable file inside a searchable but
+  // read-only parent CAN be overwritten, so the parent's W_OK must not gate it.
+  it("inbox --json-to-file writes an existing writable file in a read-only parent (30270)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-30270-roparent-"))
+    const readOnlyDir = join(dir, "readonly")
+    mkdirSync(readOnlyDir)
+    const target = join(readOnlyDir, "inbox.json")
+    writeFileSync(target, "before\n", { mode: 0o600 })
+    chmodSync(readOnlyDir, 0o500)
+    const payload = { attention: { actionable_unread: [], pending_balls: [] }, events: [], cursor: 11 }
+    try {
+      const { result, calls } = await runManagedFetchCliAgainst(["inbox", "--json-to-file", target], () => ({
+        result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+      }))
+
+      expect(result.code).toBe(0)
+      expect(calls).toHaveLength(1)
+      expect(result.stdout).toBe(`tribe inbox: 0 row(s), cursor 11, written to ${target}\n`)
+      expect(readFileSync(target, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
+    } finally {
+      chmodSync(readOnlyDir, 0o700)
       rmSync(dir, { recursive: true, force: true })
     }
   })

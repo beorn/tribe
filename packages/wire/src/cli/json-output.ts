@@ -16,22 +16,10 @@ function errorDetail(error: unknown): string {
  * rows the file was meant to keep and the retry read an empty inbox.
  */
 export async function jsonDestinationProblem(path: string): Promise<string | null> {
-  const dir = dirname(path)
-  let directory
-  try {
-    directory = await stat(dir)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return `the directory ${dir} does not exist (create it first: mkdir -p ${dir})`
-    }
-    return `the directory ${dir} cannot be inspected: ${errorDetail(error)}`
-  }
-  if (!directory.isDirectory()) return `${dir} is not a directory`
-  try {
-    await access(dir, constants.W_OK)
-  } catch {
-    return `the directory ${dir} is not writable`
-  }
+  // An EXISTING target is judged on its own permission: a writable file inside a
+  // searchable but read-only directory can be overwritten, so gating it on the
+  // parent's W_OK would refuse a destination the write accepts. Only a NEW
+  // target needs its parent to admit the entry.
   try {
     const target = await stat(path)
     if (!target.isFile()) return `${path} exists and is not a regular file`
@@ -40,10 +28,27 @@ export async function jsonDestinationProblem(path: string): Promise<string | nul
     } catch {
       return `${path} is not writable`
     }
+    return null
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       return `${path} cannot be inspected: ${errorDetail(error)}`
     }
+  }
+  const dir = dirname(path)
+  let directory
+  try {
+    directory = await stat(dir)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return `the directory ${dir} does not exist (create it first: mkdir -p "${dir}")`
+    }
+    return `the directory ${dir} cannot be inspected: ${errorDetail(error)}`
+  }
+  if (!directory.isDirectory()) return `${dir} is not a directory`
+  try {
+    await access(dir, constants.W_OK)
+  } catch {
+    return `the directory ${dir} is not writable`
   }
   return null
 }
