@@ -112,6 +112,11 @@ describe("tribe.fetch --before reaches the older end of a history (29947)", () =
     expect(rowidsOf(fetch({ to: SEAT, limit: 2 }))).toEqual([d, e])
     expect(rowidsOf(fetch({ before: d, limit: 2 }))).toEqual([b, c])
     expect(rowidsOf(fetch({ before: c, limit: 10 }))).toEqual([a, b])
+
+    // A fractional bound is legal at the daemon boundary, exactly as `since`
+    // is: it is a numeric row-id comparison, so "rowid < c + 0.5" means "up to
+    // and including c". The CLI is the surface that requires an integer.
+    expect(rowidsOf(fetch({ before: c + 0.5, limit: 10 }))).toEqual([a, b, c])
   })
 
   it("bounds a range when since and before are both given", () => {
