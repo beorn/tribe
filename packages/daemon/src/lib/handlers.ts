@@ -5367,10 +5367,17 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
   if (before !== null && before <= 1) {
     return jsonResult({ error: `before ${before} selects no row: row ids start at 1; pass a bound above 1.` })
   }
-  if (since !== null && before !== null && before - since < 2) {
-    return jsonResult({
-      error: `since ${since} and before ${before} select no row: the range must contain at least one row id.`,
-    })
+  if (since !== null && before !== null) {
+    // A row id is an INTEGER, so a fractional range can still hold one:
+    // since 1.5 .. before 3 contains row 2, and since 0.5 .. before 1.5
+    // contains row 1. Refuse only when no integer k with k >= 1 and
+    // since < k < before can exist (review 4dd81b0b).
+    const firstRow = Math.max(1, Math.floor(since) + 1)
+    if (firstRow >= before) {
+      return jsonResult({
+        error: `since ${since} and before ${before} select no row id: no integer row lies strictly between them.`,
+      })
+    }
   }
   const withPeer = typeof a.with === "string" && a.with.length > 0 ? a.with : null
   const from = typeof a.from === "string" && a.from.length > 0 ? a.from : null

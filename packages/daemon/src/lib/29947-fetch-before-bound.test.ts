@@ -107,7 +107,11 @@ describe("tribe.fetch --before reaches the older end of a history (29947)", () =
     // is not assumed, because session registration may consume one.
     const all = rowidsOf(fetch({ to: SEAT, limit: 10 }))
     expect(all).toHaveLength(5)
-    const [a, b, c, d, e] = all
+    const a = all[0]!
+    const b = all[1]!
+    const c = all[2]!
+    const d = all[3]!
+    const e = all[4]!
 
     expect(rowidsOf(fetch({ to: SEAT, limit: 2 }))).toEqual([d, e])
     expect(rowidsOf(fetch({ before: d, limit: 2 }))).toEqual([b, c])
@@ -122,22 +126,32 @@ describe("tribe.fetch --before reaches the older end of a history (29947)", () =
   it("bounds a range when since and before are both given", () => {
     for (let n = 1; n <= 5; n += 1) message(n)
 
-    const [, b, c, d, e] = rowidsOf(fetch({ to: SEAT, limit: 10 }))
+    const rangeRows = rowidsOf(fetch({ to: SEAT, limit: 10 }))
+    const b = rangeRows[1]!
+    const c = rangeRows[2]!
+    const d = rangeRows[3]!
+    const e = rangeRows[4]!
     expect(rowidsOf(fetch({ since: b, before: e, limit: 10 }))).toEqual([c, d])
   })
 
   it("refuses a range that can hold no row id, by name", () => {
     for (let n = 1; n <= 4; n += 1) message(n)
 
-    const [, , c, d] = rowidsOf(fetch({ to: SEAT, limit: 10 }))
+    const rangeRows = rowidsOf(fetch({ to: SEAT, limit: 10 }))
+    const a = rangeRows[0]!
+    const c = rangeRows[2]!
+    const d = rangeRows[3]!
     expect(String(fetch({ since: c, before: c, limit: 10 }).error)).toContain(
-      `since ${c} and before ${c} select no row`,
+      `since ${c} and before ${c} select no row id`,
     )
-    // A one-row gap is empty too: the open range (since, before) holds a row
-    // only when before - since >= 2.
-    expect(String(fetch({ since: c, before: c + 1, limit: 10 }).error)).toContain("select no row")
-    // The smallest range that does hold one row is accepted.
+    // Adjacent integer bounds hold no integer strictly between them.
+    expect(String(fetch({ since: c, before: c + 1, limit: 10 }).error)).toContain("select no row id")
+    // The smallest integer range that does hold one row is accepted.
     expect(rowidsOf(fetch({ since: c, before: c + 2, limit: 10 }))).toEqual([d])
+    // Fractional bounds are legal and can still hold an integer row: the
+    // refusal must be "no integer row exists", not "the numeric gap is small".
+    expect(rowidsOf(fetch({ since: c + 0.5, before: c + 2, limit: 10 }))).toEqual([d])
+    expect(rowidsOf(fetch({ since: a - 0.5, before: a + 0.5, limit: 10 }))).toEqual([a])
   })
 
   it("refuses a before bound that can select no row (@cto API condition 2)", () => {
