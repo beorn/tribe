@@ -1,9 +1,9 @@
 /**
  * Tribe plugin boundary — the clean interface that separates optional observer
- * plugins (git, GitHub, health, account quotas) from the coordination daemon
+ * plugins (GitHub, health, account quotas) from the coordination daemon
  * core (tribe-daemon.ts).
  *
- * Plugins observe external signals (git commits, GitHub API, system health,
+ * Plugins observe external signals (GitHub API, system health,
  * account quotas) and push messages onto the tribe wire. They
  * are NOT part of the daemon's core coordination responsibilities — a daemon
  * with zero plugins is a complete coordination server.
@@ -12,7 +12,7 @@
  *   - A plugin identifies itself with a stable `name` (also used as the sender
  *     when it broadcasts).
  *   - A plugin reports `available()` so the daemon can skip it when its
- *     dependencies (git repo, gh auth, account configuration, …) are
+ *     dependencies (gh auth, account configuration, …) are
  *     absent.
  *   - `start(api)` wires the plugin to the tribe wire via `TribeClientApi`
  *     and returns a cleanup closure.
