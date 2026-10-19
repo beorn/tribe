@@ -164,7 +164,6 @@ describe("membership projection: a finished launch is history, not a degraded me
           member_id: "finished-1",
           name: "@agent/9",
           launch_id: "launch-9",
-          launch_parent_pid: 9009,
           state: "finished",
           left_at: new Date(leftAt).toISOString(),
         },
@@ -200,7 +199,6 @@ describe("membership projection: a finished launch is history, not a degraded me
           member_id: "vanished-1",
           name: "@agent/10",
           launch_id: "launch-10",
-          launch_parent_pid: 10010,
           last_refusal: null,
           state: "missing-transport",
         },
@@ -212,7 +210,11 @@ describe("membership projection: a finished launch is history, not a degraded me
     const health = parseToolJson(handleToolCall(opCtx, "tribe.health", {}, opts)) as {
       membership_discrepancy?: Record<string, unknown>
     }
-    expect(health.membership_discrepancy).toEqual(members.membership_discrepancy)
+    if (members.membership_discrepancy === undefined) throw new Error("fixture must retain the missing registration")
+    expect(health.membership_discrepancy).toMatchObject(members.membership_discrepancy)
+    expect(health.membership_discrepancy).toMatchObject({
+      missing: [expect.objectContaining({ launch_parent_pid: 10010 })],
+    })
   })
 
   it("the trap: never promotes a stale departure fact across a later re-registration of the same row", () => {
@@ -256,7 +258,6 @@ describe("membership projection: a finished launch is history, not a degraded me
           member_id: "trap-1",
           name: "@agent/11",
           launch_id: "launch-11",
-          launch_parent_pid: 11011,
           last_refusal: null,
           state: "missing-transport",
         },
@@ -327,7 +328,6 @@ describe("membership projection: a finished launch is history, not a degraded me
           member_id: "restart-old",
           name: "@agent/12",
           launch_id: "launch-12-old",
-          launch_parent_pid: 12012,
           state: "finished",
           left_at: new Date(oldLeftAt).toISOString(),
         },
@@ -347,7 +347,6 @@ describe("membership projection: a finished launch is history, not a degraded me
           member_id: "restart-new",
           name: "@agent/12-restarted",
           launch_id: "launch-12-new",
-          launch_parent_pid: 12013,
           last_refusal: null,
           state: "missing-transport",
         },
@@ -425,7 +424,6 @@ describe("membership projection: a finished launch is history, not a degraded me
         member_id: "archived-1",
         name: "@agent/13",
         launch_id: "launch-13",
-        launch_parent_pid: 13013,
         state: "finished",
         left_at: new Date(leftAt).toISOString(),
       },
