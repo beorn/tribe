@@ -1656,41 +1656,44 @@ function maybeUntrackedDeliveryNote(
 ): string | undefined {
   if (willTrack || (msgType !== "notify" && msgType !== "status")) return undefined
   const names = typeof recipients === "string" ? [recipients] : recipients
-  const absent: string[] = []
-  const unobserved: string[] = []
+  const facts: string[] = []
   for (const name of names) {
     if (name === "*") continue
     const observation = transport.observe(name)
-    switch (observation.owner_transport_reason) {
-      case "connected-pid-live-transport":
-      case "connected-no-consumer":
-        break
-      case "no-session-record":
-      case "owner-unknown-no-transport":
-      case "registered-transport-pids-dead":
-      case "registered-owner-pid-dead":
-        absent.push(name)
-        break
-      default:
-        unobserved.push(`${name}: ${observation.owner_transport_reason}`)
-    }
-  }
-  if (absent.length === 0 && unobserved.length === 0) return undefined
-  const parts: string[] = []
-  if (absent.length > 0) {
-    parts.push(
-      `${absent.join(", ")} ${absent.length === 1 ? "is" : "are"} not answer-capable at send time (no live transport); ` +
-        `this ${msgType} opens no obligation and pages nobody. ` +
-        "Send type=request if you need a reply; it opens a tracked ball that outlives a recipient's absence, " +
-        "or refuses with a reason if the mailbox is unknown. Sending anyway.",
+    if (
+      observation.owner_transport_reason === "connected-pid-live-transport" ||
+      observation.owner_transport_reason === "connected-no-consumer"
+    )
+      continue
+    const authority = transport.mailboxDeafNames.has(name)
+      ? "unavailable (" + transport.mailboxDeafReasons.get(name) + ")"
+      : observation.owner_transport_reason === "no-session-record" ||
+          observation.owner_transport_reason === "no-transport-source"
+        ? "unobserved"
+        : "available"
+    const age = observation.owner_last_mailbox_read_age_ms
+    const read = age === null ? "unobserved" : "observed age " + age + "ms"
+    facts.push(
+      name +
+        ": transport=" +
+        observation.owner_transport_state +
+        "; mailbox authority=" +
+        authority +
+        "; canonical mailbox READ=" +
+        read +
+        " (mailbox-name, observed_at=" +
+        observation.owner_transport_observed_at +
+        "); agent process=unobserved",
     )
   }
-  if (unobserved.length > 0) {
-    parts.push(
-      `answer capability unobserved: ${unobserved.join(", ")}; check delivery before relying on a reply. Sending anyway.`,
-    )
-  }
-  return `delivery note — ${parts.join(" ")}`
+  if (facts.length === 0) return undefined
+  return (
+    "delivery note — " +
+    facts.join("; ") +
+    "; this " +
+    msgType +
+    " opens no obligation and pages nobody. Send type=request if you need a reply; it opens a tracked ball for a known readable mailbox. Sending anyway."
+  )
 }
 
 function maybeProgressReplyNote(

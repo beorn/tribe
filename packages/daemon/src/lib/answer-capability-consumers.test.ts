@@ -340,11 +340,15 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     expect(send("@pull/idle").warning).toBeUndefined()
     expect(send("@pull/waiting").warning).toBeUndefined()
 
+    stmts.touchMailboxAttentionRead.run({ $recipient: "@pull/gone", $now: NOW - 42_000 })
     const gone = send("@pull/gone")
     expect(gone.sent).toBe(true)
     expect(String(gone.warning)).toContain("@pull/gone")
     expect(String(gone.warning)).toContain("opens no obligation")
     expect(String(gone.warning)).toContain("type=request")
+    expect(String(gone.warning)).toContain("transport=disconnected")
+    expect(String(gone.warning)).toContain("canonical mailbox READ=observed age 42000ms")
+    expect(String(gone.warning)).not.toContain("not answer-capable")
     expect(db.prepare("SELECT COUNT(*) AS count FROM pending_request WHERE recipient = '@pull/gone'").get()).toEqual({
       count: 0,
     })
@@ -352,8 +356,8 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
 
     const unknown = send("@pull/deaf", "status")
     expect(unknown.sent).toBe(true)
-    expect(String(unknown.warning)).toContain("answer capability unobserved:")
-    expect(String(unknown.warning)).toContain("@pull/deaf: mailbox-read-unavailable")
+    expect(String(unknown.warning)).toContain("mailbox authority=unavailable")
+    expect(String(unknown.warning)).toContain("@pull/deaf")
     expect(String(unknown.warning)).not.toContain("not answer-capable")
 
     expect(send("*", "notify").warning).toBeUndefined()
