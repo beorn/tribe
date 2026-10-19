@@ -1663,8 +1663,9 @@ function maybeUntrackedDeliveryNote(
     if (
       observation.owner_transport_reason === "connected-pid-live-transport" ||
       observation.owner_transport_reason === "connected-no-consumer"
-    )
+    ) {
       continue
+    }
     const authority = transport.mailboxDeafNames.has(name)
       ? "unavailable (" + transport.mailboxDeafReasons.get(name) + ")"
       : observation.owner_transport_reason === "no-session-record" ||

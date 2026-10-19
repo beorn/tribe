@@ -1573,13 +1573,14 @@ export function evaluateDoctorMembership(
   })
   const known = new Set(sessions.map((session) => session.name))
   const missing = (discrepancy?.missing ?? []).filter((row) => !known.has(row.name))
-  for (const row of missing)
+  for (const row of missing) {
     rows.push(
       row.name +
         " transport=" +
         row.state +
         " registration=unobserved mailbox authority=unobserved canonical mailbox READ=unobserved (tribe.members membership_discrepancy) agent process=unobserved",
     )
+  }
   const diagnosis =
     "tribe.members: " +
     (rows.join("; ") || "seats=none in default registration view (finished history excluded); agent process=unobserved")
