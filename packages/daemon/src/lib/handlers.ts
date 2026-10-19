@@ -4658,6 +4658,7 @@ type SnapshotFilters = {
   limit: number
   topics: string[]
   since: number | null
+  before: number | null
   withPeer: string | null
   from: string | null
   to: string | null
@@ -5187,7 +5188,15 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
   if (filters.since !== null) {
     conditions.push("rowid > $since")
     params.$since = filters.since
-  } else if (filters.topics.length > 0) {
+  }
+  // 29947 — an older bound. A `--before` read starts BELOW the newest visible
+  // row, so a caller's floor is reachable without a second paging
+  // implementation; the rows still come back chronologically (DESC then
+  // reversed), matching every other snapshot read.
+  if (filters.before !== null) {
+    conditions.push("rowid < $before")
+    params.$before = filters.before
+  } else if (filters.since === null && filters.topics.length > 0) {
     conditions.push("rowid < $before")
     params.$before = Number.MAX_SAFE_INTEGER
   }
@@ -5243,6 +5252,7 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
 
 function rowMatchesSnapshotFilters(row: FetchRow, filters: Omit<SnapshotFilters, "limit">): boolean {
   if (filters.since !== null && row.rowid <= filters.since) return false
+  if (filters.before !== null && row.rowid >= filters.before) return false
   if (
     filters.withPeer !== null &&
     !(
@@ -5335,10 +5345,22 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
   let cursorBase = cursor?.last_inbox_pull_seq ?? 0
   const since = typeof a.since === "number" ? a.since : null
   if (since !== null) cursorBase = since
+  // 29947 — the older bound. Refused by name rather than read as an empty
+  // window: a caller that passed a bad value and got `events: []` would read
+  // "nothing older exists", which is the NO SILENT ERRORS class.
+  if (a.before !== undefined && (typeof a.before !== "number" || !Number.isSafeInteger(a.before) || a.before < 0)) {
+    return jsonResult({ error: "before must be a non-negative integer row id." })
+  }
+  const before = typeof a.before === "number" ? a.before : null
+  if (since !== null && before !== null && since >= before) {
+    return jsonResult({
+      error: `since ${since} is not below before ${before}: that range selects no rows; omit one of the two bounds.`,
+    })
+  }
   const withPeer = typeof a.with === "string" && a.with.length > 0 ? a.with : null
   const from = typeof a.from === "string" && a.from.length > 0 ? a.from : null
   const to = typeof a.to === "string" && a.to.length > 0 ? a.to : null
-  const snapshotFilters = { currentName, since, withPeer, from, to, topics: topics ?? [] }
+  const snapshotFilters = { currentName, since, before, withPeer, from, to, topics: topics ?? [] }
 
   // 29327 — an ids read is a SNAPSHOT the caller may ask about specific
   // messages with, so it is also where the ag host reads the state of the balls
@@ -5413,7 +5435,14 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
     // Resolved ids, so an id that names no persisted message is REPORTED
     // (`settlement_unresolved`) instead of being answered as untracked.
     idsSettlement = settlementReadForMessageIds(ctx, currentName, lookupIds)
-  } else if (withPeer !== null || from !== null || to !== null || since !== null || topicsAreSnapshot) {
+  } else if (
+    withPeer !== null ||
+    from !== null ||
+    to !== null ||
+    since !== null ||
+    before !== null ||
+    topicsAreSnapshot
+  ) {
     rows = querySnapshotRows(ctx, { ...snapshotFilters, limit })
     shouldAdvance = !topicsAreSnapshot && since !== null && a.advance === true
   } else {

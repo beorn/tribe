@@ -487,7 +487,13 @@ function pendingRowCount(payload: { count?: number; pending?: unknown[]; owners?
  * line only when it reached its bound; below the bound it is exhaustive, and
  * returns null (silent).
  */
-export function tribeFetchScope(returned: number, limit: number, opts: { topicsWindow?: boolean } = {}): string | null {
+export type FetchScopeBound = { rowid: number; ts: string | null }
+
+export function tribeFetchScope(
+  returned: number,
+  limit: number,
+  opts: { topicsWindow?: boolean; direction?: "older" | "newer"; boundary?: FetchScopeBound | null } = {},
+): string | null {
   if (opts.topicsWindow === true) {
     return (
       `tribe fetch: ${returned} row(s) — a --topics read filters a ${TRIBE_FETCH_TOPICS_WINDOW}-row window, ` +
@@ -495,10 +501,25 @@ export function tribeFetchScope(returned: number, limit: number, opts: { topicsW
     )
   }
   if (returned < limit) return null
-  return (
-    `tribe fetch: ${returned} row(s) — at the --limit ${limit} bound; more rows may exist ` +
-    `(raise --limit, max ${TRIBE_FETCH_MAX_LIMIT}).`
-  )
+  // 29947 — at the maximum, "raise --limit" was advice that could not work, and
+  // a caller had no way to name the rows it could not see. The line now names
+  // the verb that does work and the exact boundary row, so the next read is a
+  // command rather than a guess; `max` is still stated where a raise is still
+  // possible.
+  const direction = opts.direction ?? "older"
+  const boundary = opts.boundary ?? null
+  const end = direction === "older" ? "oldest" : "newest"
+  const stamp = boundary !== null && boundary.ts !== null ? `; ${end} returned ${boundary.ts}` : ""
+  const advice =
+    direction === "older"
+      ? boundary === null
+        ? "older rows: --before <rowid>"
+        : `older rows: --before ${boundary.rowid}`
+      : boundary === null
+        ? "newer rows: --since <rowid>"
+        : `newer rows: --since ${boundary.rowid}`
+  const room = limit < TRIBE_FETCH_MAX_LIMIT ? ` (or raise --limit, max ${TRIBE_FETCH_MAX_LIMIT})` : ""
+  return `tribe fetch: ${returned} row(s) — at the --limit ${limit} bound${stamp}; ${advice}${room}.`
 }
 
 /**
@@ -522,6 +543,7 @@ async function cmdFetch(opts: {
   ids?: string
   topics?: string
   since?: string
+  before?: string
   with?: string
   from?: string
   to?: string
@@ -542,6 +564,17 @@ async function cmdFetch(opts: {
     }
     params.since = since
   }
+  // 29947 — the older bound. Without it a bounded read only ever reaches the
+  // NEWEST N rows, so an older floor was unreachable except by bisecting a
+  // bespoke script for a rowid.
+  if (opts.before !== undefined) {
+    const before = Number(opts.before)
+    if (!Number.isSafeInteger(before) || before <= 0) {
+      console.error(`tribe fetch: bad --before '${opts.before}' (expected a positive integer row id)`)
+      process.exit(2)
+    }
+    params.before = before
+  }
   if (opts.with !== undefined) params.with = opts.with
   if (opts.from !== undefined) params.from = opts.from
   if (opts.to !== undefined) params.to = opts.to
@@ -557,6 +590,7 @@ async function cmdFetch(opts: {
     (ids?.length ?? 0) > 0 ||
     (topics?.length ?? 0) > 0 ||
     opts.since !== undefined ||
+    opts.before !== undefined ||
     (opts.with?.length ?? 0) > 0 ||
     (opts.from?.length ?? 0) > 0 ||
     (opts.to?.length ?? 0) > 0
@@ -610,6 +644,16 @@ async function cmdFetch(opts: {
   // rows past it exist (stdout stays the single summary line).
   const rows = fetchRowCount(payload)
   const topicsWindow = (parseCommaList(opts.topics)?.length ?? 0) > 0
+  // 29947 — the boundary row the scope line names. A --since read walks
+  // FORWARD, so the rows it cannot see are ABOVE its newest row; every other
+  // snapshot read returns the newest N, so its blind rows are BELOW the oldest.
+  const events = (payload as { events?: Array<{ rowid?: unknown; ts?: unknown }> }).events
+  const boundaryOf = (row: { rowid?: unknown; ts?: unknown } | undefined): FetchScopeBound | null =>
+    row !== undefined && typeof row.rowid === "number"
+      ? { rowid: row.rowid, ts: typeof row.ts === "string" ? row.ts : null }
+      : null
+  const forward = opts.since !== undefined
+  const boundary = forward ? boundaryOf(events?.at(-1)) : boundaryOf(events?.[0])
   if (opts.jsonToFile !== undefined) {
     const cursor = (payload as { cursor?: unknown }).cursor
     const written = await writeJsonToFile(payload, opts.jsonToFile, {
@@ -621,7 +665,11 @@ async function cmdFetch(opts: {
   } else {
     await writeJsonStdout(payload)
   }
-  const scope = tribeFetchScope(rows, opts.limit ?? TRIBE_FETCH_DEFAULT_LIMIT, { topicsWindow })
+  const scope = tribeFetchScope(rows, opts.limit ?? TRIBE_FETCH_DEFAULT_LIMIT, {
+    topicsWindow,
+    direction: forward ? "newer" : "older",
+    boundary,
+  })
   if (scope !== null) console.error(scope)
 }
 
@@ -2628,6 +2676,7 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
   const fetchIds = cliOption(FETCH_CLI, "ids")
   const fetchTopics = cliOption(FETCH_CLI, "topics")
   const fetchSince = cliOption(FETCH_CLI, "since")
+  const fetchBefore = cliOption(FETCH_CLI, "before")
   const fetchWith = cliOption(FETCH_CLI, "with")
   const fetchFrom = cliOption(FETCH_CLI, "from")
   const fetchTo = cliOption(FETCH_CLI, "to")
@@ -2639,6 +2688,7 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     .option(fetchIds.flags, fetchIds.description)
     .option(fetchTopics.flags, fetchTopics.description)
     .option(fetchSince.flags, fetchSince.description)
+    .option(fetchBefore.flags, fetchBefore.description)
     .option(fetchWith.flags, fetchWith.description)
     .option(fetchFrom.flags, fetchFrom.description)
     .option(fetchTo.flags, fetchTo.description)
@@ -2650,6 +2700,7 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
         ids?: string
         topics?: string
         since?: string
+        before?: string
         with?: string
         from?: string
         to?: string

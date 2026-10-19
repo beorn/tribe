@@ -746,6 +746,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             description: "Optional topic globs, e.g. ['github:*', 'git:commit'].",
           },
           since: { type: "number", description: "Scan rows with rowid > since. Default mode uses the session cursor." },
+          before: {
+            type: "number",
+            description:
+              "Read rows with rowid < before, the older end of a history; with since it bounds a range. Snapshot.",
+          },
           with: { type: "string", description: "Bilateral history with this seat." },
           from: { type: "string", description: "One-sided history from this sender." },
           to: { type: "string", description: "One-sided history to this recipient." },
@@ -800,6 +805,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           name: "since",
           flags: "--since <rowid>",
           description: "Scan rows with rowid greater than this; read-only, never advances the cursor",
+        },
+        {
+          name: "before",
+          flags: "--before <rowid>",
+          description: "Read rows with rowid less than this (older history); read-only, never advances the cursor",
         },
         { name: "with", flags: "--with <session>", description: "Bilateral history with this session name" },
         { name: "from", flags: "--from <sender>", description: "One-sided history from this sender" },

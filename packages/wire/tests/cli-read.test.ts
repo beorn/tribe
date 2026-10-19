@@ -351,6 +351,29 @@ describe("registerReadCommands", () => {
     )
   })
 
+  // 29947 — the bound line must name the verb that actually works and the row
+  // that bounds the blind side, and at the maximum it must never advise a raise.
+  test("tribeFetchScope names the boundary row and a working verb (29947)", () => {
+    const older = tribeFetchScope(50, 50, {
+      direction: "older",
+      boundary: { rowid: 12345, ts: "2026-10-17T04:12:33.000Z" },
+    })
+    expect(older).toContain("oldest returned 2026-10-17T04:12:33.000Z")
+    expect(older).toContain("older rows: --before 12345")
+
+    const newer = tribeFetchScope(50, 50, {
+      direction: "newer",
+      boundary: { rowid: 999, ts: "2026-10-18T01:00:00.000Z" },
+    })
+    expect(newer).toContain("newest returned 2026-10-18T01:00:00.000Z")
+    expect(newer).toContain("newer rows: --since 999")
+
+    // At the maximum, "raise --limit" cannot work, so it is not offered.
+    const atMax = tribeFetchScope(500, 500, { direction: "older", boundary: { rowid: 7, ts: "2026-10-17T04:12:33Z" } })
+    expect(atMax).not.toContain("raise --limit")
+    expect(atMax).toContain("older rows: --before 7")
+  })
+
   test("wait verb is registered as idle wait alias with 5m default timeout and correlated reply wake", () => {
     const cmd = findCmd(buildProgram(), "wait")
     expect(cmd).toBeDefined()

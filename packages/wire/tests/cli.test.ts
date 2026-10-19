@@ -871,6 +871,31 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(calls).toEqual([])
   })
 
+  // 29947 — a bounded read must be able to reach the OLDER end of a history.
+  it("fetch --before sends the older bound and counts as a selector (29947)", async () => {
+    const payload = { events: [{ id: "m1", rowid: 40, ts: "2026-10-17T04:12:33Z" }], cursor: 40 }
+    const { result, calls } = await runManagedFetchCliAgainst(["fetch", "--json", "--before", "41"], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+    }))
+
+    expect(result.code).toBe(0)
+    expect(result.stderr).toBe("")
+    expect(calls).toEqual([
+      { method: "cli_session_fetch_read_v1", params: { idToken: MANAGED_PENDING_TOKEN, before: 41 } },
+    ])
+  })
+
+  it("fetch refuses a bad --before before connecting, naming the value (29947)", async () => {
+    const { result, calls } = await runManagedFetchCliAgainst(["fetch", "--json", "--before", "0"], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify({ events: [], cursor: 0 }) }] },
+    }))
+
+    expect(result.code).toBe(2)
+    expect(result.stdout).toBe("")
+    expect(result.stderr).toMatch(/bad --before '0'.*positive integer row id/)
+    expect(calls).toEqual([])
+  })
+
   it("fetch --json-to-file writes the full JSON and prints one summary line (28909)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-json-to-file-"))
     const path = join(dir, "fetch.json")

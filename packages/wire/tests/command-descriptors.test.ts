@@ -237,6 +237,7 @@ describe("Tribe command descriptors", () => {
       "ids",
       "topics",
       "since",
+      "before",
       "with",
       "from",
       "to",
