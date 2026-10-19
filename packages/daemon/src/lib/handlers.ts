@@ -4207,11 +4207,22 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
   // The tracker holds the expected set; the projection is what health can
   // report. A disagreement is a fact about this page, not a reason to throw
   // away everything else health already computed.
-  const storedRequestCount = (ctx.stmts.countPendingRequests.get() as { n: number } | undefined)?.n ?? 0
-  const projectionIncomplete =
-    projectedRequestCount !== storedRequestCount || requestOwners.some((owner) => owner.count !== owner.pending.length)
-      ? [`projection_incomplete: expected ${storedRequestCount} pending requests, projected ${projectedRequestCount}`]
-      : []
+  const storedRequestCount = (ctx.stmts.countPendingRequests.get() as { n: unknown } | undefined)?.n
+  const projectionIncomplete: string[] = []
+  if (typeof storedRequestCount !== "number" || !Number.isFinite(storedRequestCount)) {
+    // A COUNT that produced no usable row is not a measured zero: say the
+    // evidence is missing rather than reporting an empty fleet.
+    projectionIncomplete.push(
+      `projection_incomplete: stored pending request count unavailable, projected ${projectedRequestCount}`,
+    )
+  } else if (
+    projectedRequestCount !== storedRequestCount ||
+    requestOwners.some((owner) => owner.count !== owner.pending.length)
+  ) {
+    projectionIncomplete.push(
+      `projection_incomplete: expected ${storedRequestCount} pending requests, projected ${projectedRequestCount}`,
+    )
+  }
   const stalePending = pending.filter((ball) => ball.age_ms >= 2 * 60 * 60 * 1000)
   const staleOwnerCount = new Set(stalePending.map((ball) => ball.recipient)).size
   const oldestStaleAgeMs = stalePending.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0)

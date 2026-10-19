@@ -1462,6 +1462,52 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
+  it("tribe.health keeps a measured zero and names an unavailable stored count", () => {
+    const { db, stmts } = setup()
+    try {
+      // A real COUNT of 0 is a measured empty queue, not missing evidence.
+      const emptyCtx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-empty",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+      const empty = parseToolJson(handleToolCall(emptyCtx, "tribe.health", {}, makeOpts())) as { issues?: string[] }
+      expect(empty.issues ?? []).not.toContainEqual(expect.stringContaining("projection_incomplete"))
+
+      openBall(stmts, { id: "kept", recipient: "@agent/8", openedAt: Date.now() - 60_000 })
+      const blindStmts = {
+        ...stmts,
+        countPendingRequests: { get: () => undefined },
+      } as typeof stmts
+      const blindCtx = createTribeContext({
+        db,
+        stmts: blindStmts,
+        sessionId: "sess-blind",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+      const blind = parseToolJson(handleToolCall(blindCtx, "tribe.health", {}, makeOpts())) as {
+        issues?: string[]
+        pending_balls?: { count: number }
+      }
+      // @failure A missing count reads as a measured empty queue.
+      expect(blind.pending_balls?.count).toBe(1)
+      expect(blind.issues).toContainEqual(
+        expect.stringMatching(/projection_incomplete.*count unavailable.*projected 1/),
+      )
+    } finally {
+      db.close()
+    }
+  })
+
   /**
    * @failure The owner summary's deadline/receipt evidence is read off a
    * different ball than the one its age reports, a receipt is not seen, or
