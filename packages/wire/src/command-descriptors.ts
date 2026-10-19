@@ -95,7 +95,8 @@ const ATTENTION_SCHEMA = {
   properties: {
     sent_offline_balls: {
       type: "array",
-      description: "Up to 10 open requests this seat sent to recipients without live transport; never counted as owed.",
+      description:
+        "Up to 10 open requests this seat sent to recipients without live transport, or whose liveness could not be measured (owner_transport_live null, state unknown); never counted as owed.",
       items: { type: "object", additionalProperties: true },
     },
     sent_offline_balls_summary: {

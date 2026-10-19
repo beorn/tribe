@@ -2371,6 +2371,13 @@ export function createStatements(db: Database) {
 		ORDER BY p.recipient ASC, p.opened_at ASC
 	`),
 
+    /** The tracker's own count of open ordinary requests, read independently
+     *  of the projection above so health can name a projection that lost rows
+     *  instead of reporting a smaller fleet. */
+    countPendingRequests: db.prepare(`
+		SELECT COUNT(*) AS n FROM pending_request WHERE request_kind = 'request'
+	`),
+
     /** Full fleet-wide active pending surface. Health/attention consumers keep
      *  using selectAllPendingRequests above; only the explicit pending read
      *  pays to return bodies, and it does so in one bounded statement. */

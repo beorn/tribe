@@ -435,22 +435,37 @@ describe("one ball per incident (habwire stage 2(d))", () => {
       expect(read().pending[0]).toMatchObject({ incident_data: null, opened_at: opened })
     })
 
-    it("refuses non-JSON metadata before mutation and corrupt stored metadata instead of empty success", () => {
+    it("refuses non-JSON metadata before mutation and marks one corrupt stored row instead of losing the snapshot", () => {
       const watcher = makeContext(db, stmts, WATCHER)
       const bad = call(watcher, { to: "@chief", message: "bad", incident: INCIDENT, incident_data: { revision: NaN } })
       expect(String(bad.error)).toMatch(/incident_data.*JSON/)
       expect(openKeys("@chief")).toEqual([])
       observe(watcher, INCIDENT)
-      db.run("UPDATE messages SET incident_data='not-json' WHERE is_incident=1")
+      observe(watcher, { subject: "@dev/7", condition: "transport-wedged" })
+      const corrupt = db
+        .prepare("SELECT message_id FROM pending_request WHERE request_id = ?")
+        .get(incidentKey(INCIDENT)) as { message_id: string }
+      db.prepare("UPDATE messages SET incident_data='not-json' WHERE id = ?").run(corrupt.message_id)
       const result = handleToolCall(
         watcher,
         "tribe.pending",
         { emitter: WATCHER },
         { ...makeOpts(), incidentAuthorization: { emitter: WATCHER, operation: "read" } },
       ) as { content: Array<{ text: string }> }
-      const body = JSON.parse(result.content[0]!.text) as { error?: string }
-      expect(body.error).toMatch(/health-monitor.*tribe.db.*incident_data/)
-      expect(body).not.toHaveProperty("pending")
+      const body = JSON.parse(result.content[0]!.text) as {
+        error?: string
+        count?: number
+        pending?: Array<{ message_id: string; incident_data: unknown; incident_data_invalid?: unknown }>
+      }
+      // @failure One corrupt observation costs the caller every other row.
+      expect(body.error).toBeUndefined()
+      expect(body.count).toBe(2)
+      expect(body.pending).toHaveLength(2)
+      const marked = body.pending!.find((row) => row.message_id === corrupt.message_id)!
+      expect(marked).toMatchObject({ incident_data: null, incident_data_invalid: true })
+      expect(body.pending!.find((row) => row.message_id !== corrupt.message_id)).not.toHaveProperty(
+        "incident_data_invalid",
+      )
     })
 
     /** @failure An authorized emitter sees a recipient mailbox or incomplete custody instead of its full snapshot.

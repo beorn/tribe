@@ -43,7 +43,14 @@ type FetchJson = ToolJson & {
   attention?: {
     actionable_unread?: FetchEvent[]
     pending_balls?: AttentionBall[]
-    sent_offline_balls?: Array<AttentionBall & { recipient: string; owner_transport_offline_since: string | null }>
+    sent_offline_balls?: Array<
+      AttentionBall & {
+        recipient: string
+        owner_transport_offline_since: string | null
+        owner_transport_live?: boolean | null
+        owner_transport_state?: string
+      }
+    >
     sent_offline_balls_summary?: { total: number; oldest_age_ms: number; truncated: boolean }
     pending_balls_summary?: {
       total: number
@@ -318,9 +325,17 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       $name: NAME,
       $at: departureAt,
     })
-    expect(() => readAttentionProjection(chief, "@chief")).toThrow(
-      /sent requests require the connected transport source/,
-    )
+    const unmeasured = readAttentionProjection(chief, "@chief")
+    // @failure With no transport source wired, a seat cannot see what it sent.
+    expect(unmeasured.attention.sent_offline_balls).toEqual([
+      expect.objectContaining({
+        request_id: sent.id,
+        recipient: NAME,
+        owner_transport_live: null,
+        owner_transport_state: "unknown",
+        owner_transport_offline_since: null,
+      }),
+    ])
     const senderInbox = fetchJson(chief, opts).json
     expect(senderInbox.attention?.sent_offline_balls).toEqual([
       expect.objectContaining({

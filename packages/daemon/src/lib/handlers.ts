@@ -392,18 +392,35 @@ export type HandlerOpts = {
   resolveDelivery?: DirectDeliveryResolver
 }
 
-type OwnerTransportReason = SessionTransportEvidence["answer_reason"] | "no-session-record"
+type OwnerTransportReason = SessionTransportEvidence["answer_reason"] | "no-session-record" | "no-transport-source"
 
 type OwnerTransportObservation = {
-  owner_transport_registered: boolean
-  owner_transport_state: "connected" | "disconnected"
+  owner_transport_registered: boolean | null
+  owner_transport_state: "connected" | "disconnected" | "unknown"
   owner_state: OwnerState
   owner_answer_capability: "observed" | "not-observed"
   owner_transport_reason: OwnerTransportReason
   owner_last_mailbox_read_age_ms: number | null
   owner_transport_observed_at: string
-  owner_transport_live: boolean
+  owner_transport_live: boolean | null
   owner_transport_offline_since: string | null
+}
+
+/** What an owner-transport projection can say when the caller supplied no
+ *  transport source at all: nothing was measured, and the row must say so
+ *  rather than borrowing a liveness claim from a projection that never ran. */
+function unmeasuredTransportObservation(observedAt: number): OwnerTransportObservation {
+  return {
+    owner_transport_registered: null,
+    owner_transport_state: "unknown",
+    owner_state: "unknown",
+    owner_answer_capability: "not-observed",
+    owner_transport_reason: "no-transport-source",
+    owner_last_mailbox_read_age_ms: null,
+    owner_transport_observed_at: new Date(observedAt).toISOString(),
+    owner_transport_live: null,
+    owner_transport_offline_since: null,
+  }
 }
 
 /** The mailbox's last canonical read, joined by NAME exactly as the cursor is keyed. */
@@ -1901,7 +1918,10 @@ export type AttentionProjection = {
   actionable_unread: FetchEvent[]
   pending_balls: PendingBall[]
   pending_balls_summary: PendingBallSummary
-  /** Requests this persona sent whose original recipient has no live transport; never owed by this persona. */
+  /** Requests this persona sent whose original recipient has no live transport,
+   *  or whose liveness was not measured (`owner_transport_live: null`,
+   *  `owner_transport_state: "unknown"`) because no transport source was wired;
+   *  never owed by this persona. */
   sent_offline_balls?: PendingBallWithOwnerTransport[]
   sent_offline_balls_summary?: PendingBallSummary
 }
@@ -2622,14 +2642,16 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
             )
           }
           let incidentData: unknown = null
+          let incidentDataInvalid = false
           if (row.incident_data !== null) {
             try {
               incidentData = JSON.parse(row.incident_data)
               serializeIncidentData(incidentData)
-            } catch (error) {
-              throw new Error(`observation ${JSON.stringify(row.message_id)} has invalid incident_data JSON`, {
-                cause: error,
-              })
+            } catch {
+              // One corrupt stored observation must not cost the caller every
+              // other row in the snapshot. The row stays, with the gap named.
+              incidentData = null
+              incidentDataInvalid = true
             }
           }
           return [
@@ -2642,6 +2664,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
               message_id: row.message_id,
               summary: row.summary,
               incident_data: incidentData,
+              ...(incidentDataInvalid ? { incident_data_invalid: true as const } : {}),
             },
           ]
         })
@@ -4191,12 +4214,23 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
     takingReceipts,
   )
   const projectedRequestCount = requestOwners.reduce((count, owner) => count + owner.pending.length, 0)
-  if (
-    projectedRequestCount !== requests.length ||
+  // The tracker holds the expected set; the projection is what health can
+  // report. A disagreement is a fact about this page, not a reason to throw
+  // away everything else health already computed.
+  const storedRequestCount = (ctx.stmts.countPendingRequests.get() as { n: unknown } | undefined)?.n
+  const projectionIncomplete: string[] = []
+  if (typeof storedRequestCount !== "number" || !Number.isFinite(storedRequestCount)) {
+    // A COUNT that produced no usable row is not a measured zero: say the
+    // evidence is missing rather than reporting an empty fleet.
+    projectionIncomplete.push(
+      `projection_incomplete: stored pending request count unavailable, projected ${projectedRequestCount}`,
+    )
+  } else if (
+    projectedRequestCount !== storedRequestCount ||
     requestOwners.some((owner) => owner.count !== owner.pending.length)
   ) {
-    throw new Error(
-      `tribe.health: incomplete pending request projection; expected ${requests.length}, projected ${projectedRequestCount}`,
+    projectionIncomplete.push(
+      `projection_incomplete: expected ${storedRequestCount} pending requests, projected ${projectedRequestCount}`,
     )
   }
   const stalePending = pending.filter((ball) => ball.age_ms >= 2 * 60 * 60 * 1000)
@@ -4288,6 +4322,7 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
       ...mailboxReadIssues,
       ...(identityVerifierFault === undefined || identityVerifierFault === null ? [] : [identityVerifierFault]),
       ...retiredMemberIssues,
+      ...projectionIncomplete,
       ...pendingIssues,
       ...cadence.warnings,
     ],
@@ -5093,21 +5128,18 @@ export function readAttentionProjection(
   const shownThrough = Math.max(lastActionableSeq, alreadyDeliveredSeq)
   const pendingBalls = pendingBallsForOwner(ctx, owner, now)
   const sentRows = ctx.stmts.selectPendingForSender.all({ $sender: owner }) as PendingBallRow[]
-  if (sentRows.length > 0 && transportOpts === undefined) {
-    throw new Error(
-      `Tribe attention for ${owner}: ${sentRows.length} sent requests require the connected transport source`,
-    )
-  }
   const transport =
     sentRows.length === 0 || transportOpts === undefined
       ? null
       : ownerTransportObservationProjector(ctx, transportOpts, now)
-  const sentOfflineBalls =
-    transport === null
-      ? []
-      : sortPendingBalls(sentRows.map((row) => pendingBall(row, now)))
-          .map((ball) => ({ ...ball, ...transport.observe(ball.recipient) }))
-          .filter((ball) => !ball.owner_transport_live)
+  // With no transport source wired, liveness was not measured. Serve the sent
+  // rows with an explicit `unknown` state instead of refusing the read: the
+  // alternative is that a seat sees none of what it sent.
+  const sentBalls = sortPendingBalls(sentRows.map((row) => pendingBall(row, now))).map((ball) => ({
+    ...ball,
+    ...(transport === null ? unmeasuredTransportObservation(now) : transport.observe(ball.recipient)),
+  }))
+  const sentOfflineBalls = transport === null ? sentBalls : sentBalls.filter((ball) => !ball.owner_transport_live)
   const sentPreview = sentOfflineBalls.slice(0, ATTENTION_PENDING_BALL_LIMIT)
   const untakenRequestIds = untakenPendingRequestIds(ctx, owner)
   const untakenPendingBalls = pendingBalls.filter((ball) => untakenRequestIds.has(ball.request_id))
