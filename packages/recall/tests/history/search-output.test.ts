@@ -375,6 +375,27 @@ describe("recall search output", () => {
     }
   }, 30_000)
 
+  // Accepted absolute bounds include epoch zero. FTS/parser coverage cannot catch the separate no-query SQL path.
+  test("raw recent search applies an epoch-zero lower bound and its upper bound", async () => {
+    seedMessage("epoch eligible")
+    seedRankedMessage("before-epoch", "before excluded", null)
+    seedRankedMessage("after-bound", "after excluded", null)
+    getDb()
+      .prepare(
+        "UPDATE messages SET timestamp = CASE session_id WHEN 'sess-a' THEN 0 WHEN 'sess-before-epoch' THEN -1 ELSE 1001 END",
+      )
+      .run()
+    setIndexMeta(getDb(), "last_rebuild", new Date().toISOString())
+    await cmdSearch(undefined, {
+      raw: true,
+      json: true,
+      include: "m",
+      since: "1970-01-01T00:00:00Z",
+      until: "1970-01-01T00:00:01Z",
+    })
+    expect(jsonStdout(logSpy)).toMatchObject({ total: 1, results: [{ sourceId: "sess-a", timestamp: 0 }] })
+  })
+
   // Snapshot custody is a real CLI/file contract. Existing live-memory and freshness
   // cases cannot detect WAL sidecars, migrations, live enrichment, or an ignored selector.
   test("snapshot CLI searches only the immutable file, with explicit all window and provenance", async () => {

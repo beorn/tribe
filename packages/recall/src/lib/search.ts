@@ -975,7 +975,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         ORDER BY CASE WHEN s2.parent_session_id IS NULL THEN 0 ELSE 1 END, m2.id ASC
         LIMIT 1
       ))
-      ${sinceTime ? "AND m.timestamp >= ?" : ""}
+      ${sinceTime !== undefined ? "AND m.timestamp >= ?" : ""}
       ${untilTime === undefined ? "" : "AND m.timestamp <= ?"}
       ${messageType ? "AND m.type = ?" : ""}
       ${tool ? "AND m.tool_name = ?" : ""}
@@ -985,7 +985,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
       LIMIT ?
     `
     const params: (string | number)[] = []
-    if (sinceTime) params.push(sinceTime)
+    if (sinceTime !== undefined) params.push(sinceTime)
     if (untilTime !== undefined) params.push(untilTime)
     if (messageType) params.push(messageType)
     if (tool) params.push(tool)
