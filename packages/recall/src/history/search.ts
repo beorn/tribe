@@ -38,6 +38,7 @@ import type {
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import type { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 import { searchVault, type VaultQuery } from "./vault-fts.ts"
 
 // Re-export shared items so existing internal imports continue to work
@@ -636,14 +637,14 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       try {
         const depthRows = db
           .prepare(
-            `SELECT m.session_id, COUNT(*) as depth
+            assertSingleStatement(`SELECT m.session_id, COUNT(*) as depth
            FROM messages_fts f
            JOIN messages m ON f.rowid = m.id
            WHERE messages_fts MATCH ?
            ${untilTime === undefined ? "" : "AND m.timestamp <= ?"}
            GROUP BY m.session_id
            ORDER BY depth DESC
-           LIMIT 100`,
+           LIMIT 100`),
           )
           .all(...(untilTime === undefined ? [ftsQuery] : [ftsQuery, untilTime])) as {
           session_id: string
