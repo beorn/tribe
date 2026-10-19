@@ -1,3 +1,4 @@
+/** @reach fs-walk <fixture-only: snapshot sidecar checks list only this test's mkdtempSync directory> */
 import { assertSingleStatement } from "@bearly/sqlite"
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
