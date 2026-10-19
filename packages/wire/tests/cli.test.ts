@@ -892,8 +892,15 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
     expect(result.code).toBe(2)
     expect(result.stdout).toBe("")
-    expect(result.stderr).toMatch(/bad --before '0'.*positive integer row id/)
+    expect(result.stderr).toMatch(/bad --before '0'.*integer row id above 1/)
     expect(calls).toEqual([])
+
+    const one = await runManagedFetchCliAgainst(["fetch", "--json", "--before", "1"], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify({ events: [], cursor: 0 }) }] },
+    }))
+    expect(one.result.code).toBe(2)
+    expect(one.result.stderr).toMatch(/bad --before '1'/)
+    expect(one.calls).toEqual([])
   })
 
   it("fetch --json-to-file writes the full JSON and prints one summary line (28909)", async () => {

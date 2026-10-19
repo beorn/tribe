@@ -569,8 +569,8 @@ async function cmdFetch(opts: {
   // bespoke script for a rowid.
   if (opts.before !== undefined) {
     const before = Number(opts.before)
-    if (!Number.isSafeInteger(before) || before <= 0) {
-      console.error(`tribe fetch: bad --before '${opts.before}' (expected a positive integer row id)`)
+    if (!Number.isSafeInteger(before) || before <= 1) {
+      console.error(`tribe fetch: bad --before '${opts.before}' (expected an integer row id above 1)`)
       process.exit(2)
     }
     params.before = before

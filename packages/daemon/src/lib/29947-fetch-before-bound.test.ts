@@ -121,12 +121,32 @@ describe("tribe.fetch --before reaches the older end of a history (29947)", () =
     expect(rowidsOf(fetch({ since: b, before: e, limit: 10 }))).toEqual([c, d])
   })
 
-  it("refuses an empty range by name instead of answering an empty list", () => {
-    for (let n = 1; n <= 3; n += 1) message(n)
+  it("refuses a range that can hold no row id, by name", () => {
+    for (let n = 1; n <= 4; n += 1) message(n)
 
-    const [, , c] = rowidsOf(fetch({ to: SEAT, limit: 10 }))
-    const refused = fetch({ since: c, before: c, limit: 10 })
-    expect(String(refused.error)).toContain(`since ${c} is not below before ${c}`)
+    const [, , c, d] = rowidsOf(fetch({ to: SEAT, limit: 10 }))
+    expect(String(fetch({ since: c, before: c, limit: 10 }).error)).toContain(
+      `since ${c} and before ${c} select no row`,
+    )
+    // A one-row gap is empty too: the open range (since, before) holds a row
+    // only when before - since >= 2.
+    expect(String(fetch({ since: c, before: c + 1, limit: 10 }).error)).toContain("select no row")
+    // The smallest range that does hold one row is accepted.
+    expect(rowidsOf(fetch({ since: c, before: c + 2, limit: 10 }))).toEqual([d])
+  })
+
+  it("refuses a before bound that can select no row (@cto API condition 2)", () => {
+    for (let n = 1; n <= 2; n += 1) message(n)
+
+    expect(String(fetch({ before: 1 }).error)).toContain("before 1 selects no row: row ids start at 1")
+    expect(String(fetch({ before: 0 }).error)).toContain("before 0 selects no row")
+  })
+
+  it("refuses advance with a before bound (@cto API condition 1)", () => {
+    for (let n = 1; n <= 2; n += 1) message(n)
+
+    const refused = fetch({ before: 3, advance: true })
+    expect(String(refused.error)).toContain("before reads are snapshots and never advance the cursor")
   })
 
   it("refuses a non-numeric before by name", () => {

@@ -5352,9 +5352,24 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
     return jsonResult({ error: "before must be a finite non-negative row id." })
   }
   const before = typeof a.before === "number" ? a.before : null
-  if (since !== null && before !== null && since >= before) {
+  // @cto API GO on 29947, condition 1: a before read never advances, refused
+  // by name the way topics + advance is (19785), rather than silently ignoring
+  // the request while since + before + advance would have advanced.
+  if (before !== null && a.advance === true) {
     return jsonResult({
-      error: `since ${since} is not below before ${before}: that range selects no rows; omit one of the two bounds.`,
+      error: "before reads are snapshots and never advance the cursor — omit advance with a before bound (29947).",
+    })
+  }
+  // Condition 2: a bound that can select NO row is refused by name, never
+  // answered as an empty list. Row ids start at 1, so before <= 1 selects
+  // nothing, and the open range (since, before) holds a row id only when
+  // before - since >= 2.
+  if (before !== null && before <= 1) {
+    return jsonResult({ error: `before ${before} selects no row: row ids start at 1; pass a bound above 1.` })
+  }
+  if (since !== null && before !== null && before - since < 2) {
+    return jsonResult({
+      error: `since ${since} and before ${before} select no row: the range must contain at least one row id.`,
     })
   }
   const withPeer = typeof a.with === "string" && a.with.length > 0 ? a.with : null
