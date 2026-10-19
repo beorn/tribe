@@ -838,17 +838,17 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     mcpList: "listed",
     mcp: {
       name: "members",
-      description: "List sessions with transport, owner and mailbox-read verdicts (all: include disconnected rows).",
+      description: "List known registrations with separate transport and mailbox-read observations (all: add history).",
       inputSchema: {
         type: "object",
-        properties: { all: { type: "boolean", description: "Include disconnected session rows (default: false)" } },
+        properties: { all: { type: "boolean", description: "Add historical registration rows (default: false)" } },
       },
       outputSchema: OBJ(
         {
           sessions: {
             type: "array",
             description:
-              "One row per session: delivery, transport_state, owner_state, mailbox_read_capability, answer_capability with answer_reason, last_mailbox_read_age_ms, pids, uptime. Vocabulary: /tribe.",
+              "tribe-members/2 rows: registration, transport_state, connector owner_state, transport_pids, mailbox_read_capability and canonical READ-only mailbox_progress. No agent-life verdict. Vocabulary: /tribe.",
             items: { type: "object", additionalProperties: true },
           },
           membership_discrepancy: {
