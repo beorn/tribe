@@ -834,8 +834,8 @@ type PendingCliRow = {
   status?: "active" | "expired" | "unanswered"
   settlement?: BallSettlementReason | null
   settled_at?: string | null
-  owner_transport_registered?: boolean
-  owner_transport_state?: "connected" | "disconnected"
+  owner_transport_registered?: boolean | null
+  owner_transport_state?: "connected" | "disconnected" | "unknown"
   owner_state?: "live" | "dead" | "unknown"
   owner_answer_capability?: "observed" | "not-observed"
   owner_transport_reason?: string
@@ -2114,6 +2114,7 @@ interface SelfInboxResult {
       recipient: string
       expires_at: string | null
       owner_transport_offline_since: string | null
+      owner_transport_live?: boolean | null
     }>
     sent_offline_balls_summary?: { total: number; truncated: boolean }
   }
@@ -2201,8 +2202,12 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean; 
   }
   const pendingTotal = result.attention?.pending_balls_summary?.total ?? pending.length
   for (const ball of result.attention?.sent_offline_balls ?? []) {
+    const custody =
+      ball.owner_transport_live === null
+        ? "liveness not measured (no transport source wired)"
+        : `offline since ${ball.owner_transport_offline_since ?? "unknown (no current departure fact)"}`
     console.log(
-      `sent request ${ball.request_id} to ${ball.recipient}: offline since ${ball.owner_transport_offline_since ?? "unknown (no current departure fact)"}; deadline ${ball.expires_at ?? "none"}; original obligation remains open.`,
+      `sent request ${ball.request_id} to ${ball.recipient}: ${custody}; deadline ${ball.expires_at ?? "none"}; original obligation remains open.`,
     )
   }
   const sentSummary = result.attention?.sent_offline_balls_summary
