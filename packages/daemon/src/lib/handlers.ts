@@ -1202,7 +1202,8 @@ function namedBallReference(
     return { request_id: requestId, open: true, ...(dueAt === null || dueAt === undefined ? {} : { due_at: dueAt }) }
   }
   const cause =
-    input.tracker?.cause ?? formatPendingCloseCause(pendingCloseCause(ctx, requestId, input.owner), requestId, input.owner)
+    input.tracker?.cause ??
+    formatPendingCloseCause(pendingCloseCause(ctx, requestId, input.owner), requestId, input.owner)
   return { request_id: requestId, open: false, ...(cause.length === 0 ? {} : { cause }) }
 }
 

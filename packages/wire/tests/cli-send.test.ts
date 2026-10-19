@@ -1071,9 +1071,7 @@ describe("registerSendCommands", () => {
         const progress = await runCli(["send", "@agent/3", "taking", "--type", type, "--reply", "req-123"])
         expect(progress).toMatchObject({ code: 0 })
         // 30160: the notice is one stderr line rendered from the daemon's ball fact.
-        expect(progress.stderr).toContain(
-          `${type} does not settle ball req-123; it stays open (due `,
-        )
+        expect(progress.stderr).toContain(`${type} does not settle ball req-123; it stays open (due `)
         expect(progress.stderr).toContain("settle it with --type response or verdict --reply req-123")
         expect(progress.stdout).not.toContain("Closed ")
       }
@@ -1114,7 +1112,10 @@ describe("registerSendCommands", () => {
       // 30160 (a), revised: a TAKING receipt (status + --ref) prints NOTHING and
       // settles nothing — 22990 keeps it silent, and the daemon adds no ball fact
       // for a bare ref.
-      const receipt = await runCli(["send", "@agent/3", "taking", "--type", "status", "--ref", "req-123"], launchToken("sid-chief", "@chief"))
+      const receipt = await runCli(
+        ["send", "@agent/3", "taking", "--type", "status", "--ref", "req-123"],
+        launchToken("sid-chief", "@chief"),
+      )
       expect(receipt).toMatchObject({ code: 0 })
       expect(receipt.stderr).toBe("")
       expect(receipt.stdout).toContain("Sent message to @agent/3")
@@ -1122,7 +1123,10 @@ describe("registerSendCommands", () => {
 
       // 30160 (a2): the same hold for a requester's notify that merely correlates
       // with its own open ball — a ref is not a settlement and prints no advice.
-      const correlated = await runCli(["send", "@agent/3", "progress", "--type", "notify", "--ref", "req-123"], launchToken("sid-chief", "@chief"))
+      const correlated = await runCli(
+        ["send", "@agent/3", "progress", "--type", "notify", "--ref", "req-123"],
+        launchToken("sid-chief", "@chief"),
+      )
       expect(correlated).toMatchObject({ code: 0 })
       expect(correlated.stderr).not.toContain("did not settle ball")
       expect(correlated.stderr).not.toContain("settle it with --type response or verdict")
