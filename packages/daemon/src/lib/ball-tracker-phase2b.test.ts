@@ -1030,6 +1030,19 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       expect(messageCount()).toBe(count)
     })
 
+    it("a TAKING receipt that would also track is refused instead of silently leaving the named due untouched", () => {
+      // 30145: the same send shape with a tracked argument used to open a second ball and report success, so the
+      // caller read the ball's old due as the value it passed.
+      openBall("redue-tracked", 300_000)
+      const original = dueOf("redue-tracked")
+      const count = messageCount()
+
+      const res = receipt(agent1, "redue-tracked", { request: true, expires_in_ms: 600_000 })
+      expect(res.error).toMatch(/TAKING receipt.*cannot also open tracking/u)
+      expect(dueOf("redue-tracked")).toBe(original)
+      expect(messageCount()).toBe(count)
+    })
+
     it("a re-due that also carries reply is refused, because the reply settles the ball it would re-due", () => {
       openBall("redue-reply")
       const original = dueOf("redue-reply")

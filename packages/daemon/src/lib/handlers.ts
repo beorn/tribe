@@ -951,6 +951,16 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // 27735 B (@cto bd599f15): an owner may re-set its own open ball's due through a TAKING receipt (status + ref,
   // addressed to the ball's requester). Every other untracked send still refuses expires_in_ms.
   let redue: BallTracker["redue"]
+  // 30145: the receipt shape has one meaning — it re-sets the due of the ball it names. A tracked shape would open
+  // a NEW ball instead and leave that due untouched while the send still reports success, so the conflict refuses.
+  if (expiresInMs !== undefined && willTrack && msgType === "status" && typeof a.ref === "string" && a.ref !== "") {
+    return jsonResult({
+      error:
+        "tribe.send: invalid options - expires_in_ms with status + ref is a TAKING receipt, which re-sets the due " +
+        `of ${a.ref} and cannot also open tracking; drop the request/incident arguments to re-due it, ` +
+        "or omit expires_in_ms to send a tracked message",
+    })
+  }
   if (expiresInMs !== undefined && !willTrack) {
     // The ref is matched exactly as it is stored, because only an exact ref makes this message a TAKING receipt.
     const ref = typeof a.ref === "string" ? a.ref : ""
