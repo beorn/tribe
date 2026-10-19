@@ -103,8 +103,9 @@ export function getDb(options?: GetDbOptions): Database {
 export class IndexWriterBusyError extends Error {}
 
 export function acquireIndexWriter(db: Database) {
-  if (snapshotPath !== null)
+  if (snapshotPath !== null) {
     throw new Error(`Recall snapshot ${snapshotPath} is immutable; index writes are unavailable`)
+  }
   // SQLite's actual file identity includes RECALL_DB_PATH and symlink aliases.
   // In-memory databases cannot be shared by competing CLI processes.
   if (db.filename === ":memory:") return undefined

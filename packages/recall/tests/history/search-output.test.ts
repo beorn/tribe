@@ -165,7 +165,10 @@ function seedVaultDb(dbPath: string, content: string, secondContent?: string): v
   db.close()
 }
 
-function zeroAgentResult(query: string, options?: { provenance?: "complete" | "stale" | "missing" | "unknown" }) {
+function zeroAgentResult(
+  query: string,
+  options?: Pick<import("../../src/history/recall-shared").RecallOptions, "provenance">,
+) {
   return {
     query,
     provenance: options?.provenance ?? "unknown",

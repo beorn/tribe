@@ -325,7 +325,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     argv = ["search", ...argv]
   }
 
-  if (getSnapshotPath() !== null && !["search", "help", "--help", "-h", "--version", "-V"].includes(argv[0]!)) {
+  const command = argv[0]
+  if (
+    getSnapshotPath() !== null &&
+    command !== undefined &&
+    !["search", "help", "--help", "-h", "--version", "-V"].includes(command)
+  ) {
     console.error(
       `[recall] snapshot ${getSnapshotPath()} supports raw indexed search only; command ${argv[0]} is unavailable`,
     )
@@ -363,7 +368,8 @@ function takeLeadingBindings(argv: string[]): {
   }
   const result: { vaultDb?: string | boolean; snapshot?: string | boolean; rest: string[] } = { rest: argv }
   while (result.rest.length > 0) {
-    const first = result.rest[0]!
+    const first = result.rest[0]
+    if (first === undefined) break
     const flag = flags.find((name) => first === name || first.startsWith(`${name}=`))
     if (flag === undefined) break
     let raw: string | boolean
