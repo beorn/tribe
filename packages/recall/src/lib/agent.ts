@@ -139,7 +139,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
       log(`agent: invalid time filter "${since}" — falling through`)
       return fallthrough(query, options, startedAt, rounds, decision)
     }
-    sinceTime = parsed
+    sinceTime = parsed ?? undefined
   } else {
     sinceTime = Date.now() - THIRTY_DAYS_MS
   }
@@ -176,7 +176,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   // Apply planner-provided time hint only if caller didn't pass --since
   if (!since && planR1.plan.time_hint) {
     const hinted = parseTimeToMs(planR1.plan.time_hint)
-    if (hinted !== undefined) {
+    if (hinted !== undefined && hinted !== null) {
       log(`agent: applying planner time_hint "${planR1.plan.time_hint}"`)
       sinceTime = hinted
     }

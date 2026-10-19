@@ -200,6 +200,6 @@ describe("search and status cannot disagree about one stamp", () => {
     const freshness = readIndexFreshness({})
     expect(freshness.provenance).toBe("stale")
     expect(freshness.root).toBe(INDEX_FRESHNESS_ROOT)
-    expect(freshness.windowMs).toBe(75 * 60 * 1000)
+    expect(freshness).toMatchObject({ windowMs: 75 * 60 * 1000 })
   })
 })

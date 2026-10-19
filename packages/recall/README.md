@@ -20,6 +20,24 @@ repository.
 
 ## Modes
 
+### Read an immutable index
+
+`recall --snapshot /path/to/index.db search --raw --json -i m --since all -- "query"`
+uses the existing indexed search against exactly that file. The leading selector
+opens SQLite with `mode=ro&immutable=1`: it never initializes, migrates, refreshes,
+or writes the index. Prepare a checkpointed copy first; an existing `-wal` or `-journal` sibling
+or a schema version different from this Recall build is an error naming the file.
+Provenance is `snapshot`, with the canonical path and stored `last_rebuild` (null
+when missing), without a freshness judgment against the clock. Valid empty searches
+return `results: []`, `total: 0`, exit 0; query rejection still reports degradation.
+
+This selector supports raw or implied-raw indexed search only. Other commands,
+regex, agent/synthesis mode and a simultaneous `--vault-db` are unavailable;
+human output does not enrich results from the current live transcript.
+`--since all` removes the lower time bound; omission retains the 30-day default,
+and invalid window text remains an error. A stable snapshot does not establish
+an evaluation's qrels or as-of correctness.
+
 By default, `recall` returns a **synthesized narrative** — the LLM digests raw FTS5 hits into a coherent summary that points to the original sessions. This is the "pointer mode" surface area: users see _what_ was found and _where_ to read more, not raw conversation snippets that could carry decoded prompt-injection or stuck-loop noise.
 
 The legacy snippet mode (raw FTS5 hits with surrounding text) is opt-in via `--raw` (alias `--snippets`). Power-user flags (`--question`, `--response`, `--tool`, `--session`, `--include`, `--grep`) also imply raw mode.
@@ -94,17 +112,17 @@ incident.
 3. LLM synthesis (optional) summarizes results into a coherent narrative
 4. File recovery extracts written file contents from past sessions
 
-### Freshness — `RECALL_STALE_THRESHOLD`
+### Live index freshness — `RECALL_STALE_THRESHOLD`
 
 The session hooks never write the index: run `recall index --incremental` outside them, for example on a schedule, so the index has one writer. An index older than the threshold reads as stale. Search itself is read-only: `bun recall <query>` checks the index age, reports degraded provenance when it is stale or unavailable, and never starts index work.
 
 - Default threshold: **cadence plus run time** (75m at the hourly `recall-index` timer: 1h + 10m timeout + 5m slack). Hab's timer cadence is locked to `RECALL_INDEX_CADENCE` by `tools/hab-live-config.test.ts` (fragments cannot import this module). Slower or delayed rebuilds still report stale provenance.
 - Override: `RECALL_STALE_THRESHOLD=10m` (or `1h`, `30s`, `500ms`, bare number = minutes).
-- Legacy compatibility: `bun recall "query" --no-refresh` skips freshness classification, reports `unknown` provenance, and exits 3.
+- Legacy compatibility: `bun recall "query" --no-refresh` skips live-index freshness classification, reports `unknown` provenance, and exits 3. With `--snapshot`, provenance remains `snapshot` even with `--no-refresh`.
 
-Every search result envelope includes top-level `provenance`: `complete`, `stale`, `missing`, or `unknown`. Positive stale hits remain available but the command exits 3. A degraded empty JSON response uses `results: null` and `total: null`; human output labels the count `UNPROVEN`. Only a `complete` empty response uses `results: []`, `total: 0`, and exit 0.
+Every search result envelope includes top-level `provenance`: live-index searches report `complete`, `stale`, `missing`, or `unknown`; immutable snapshot searches report `snapshot`. Positive stale hits remain available but the command exits 3. A degraded empty JSON response uses `results: null` and `total: null`; human output labels the count `UNPROVEN`. A `complete` or `snapshot` empty response uses `results: []`, `total: 0`, and exit 0. Snapshot absence is scoped only to the selected file.
 
-The same threshold is the ONE freshness verdict: `recall status`'s `isStale` and `recall search`'s `provenance` are
+For the live index, the same threshold is the ONE freshness verdict: `recall status`'s `isStale` and `recall search`'s `provenance` are
 both derived from it, by one judge over `index_meta.last_rebuild` (@ag/recall/27930) — they cannot disagree about one
 index. A stale answer names the root and the window it judged: `provenanceDetail` on a search result, and
 `indexHealth.freshness` on `recall status --json`

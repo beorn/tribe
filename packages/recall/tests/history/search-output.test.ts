@@ -1,5 +1,8 @@
+/**
+ * @reach fs-walk <fixture-only: snapshot sidecar checks list only this test's mkdtempSync directory>
+ */
 import { assertSingleStatement } from "@bearly/sqlite"
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -8,6 +11,20 @@ import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 
 process.env.RECALL_DB_PATH = ":memory:"
+
+async function runRecallCli(argv: string[], env: NodeJS.ProcessEnv) {
+  const child = Bun.spawn([process.execPath, fileURLToPath(new URL("../../src/cli.ts", import.meta.url)), ...argv], {
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  return { stdout, stderr, code }
+}
 
 const mockAgent: {
   result: Awaited<typeof import("../../src/lib/agent")>["recallAgent"] | null
@@ -151,7 +168,10 @@ function seedVaultDb(dbPath: string, content: string, secondContent?: string): v
   db.close()
 }
 
-function zeroAgentResult(query: string, options?: { provenance?: "complete" | "stale" | "missing" | "unknown" }) {
+function zeroAgentResult(
+  query: string,
+  options?: Pick<import("../../src/history/recall-shared").RecallOptions, "provenance">,
+) {
   return {
     query,
     provenance: options?.provenance ?? "unknown",
@@ -187,7 +207,7 @@ function zeroAgentResult(query: string, options?: { provenance?: "complete" | "s
 // @i/20-search-and-memory/agent-mode-skips-exit-3
 function synthesisFailureAgentResult(
   query: string,
-  options?: { provenance?: "complete" | "stale" | "missing" | "unknown" },
+  options?: Pick<import("../../src/history/recall-shared.ts").RecallOptions, "provenance">,
 ) {
   return {
     query,
@@ -273,26 +293,12 @@ describe("recall search output", () => {
       seedMessage("sincewindowneedle")
       setIndexMeta(getDb(), "last_rebuild", new Date().toISOString())
       getDb().prepare("VACUUM INTO ?").run(dbPath)
-      const run = async (since: string, flags: string[]) => {
-        const child = Bun.spawn(
-          [
-            process.execPath,
-            fileURLToPath(new URL("../../src/cli.ts", import.meta.url)),
-            "sincewindowneedle",
-            "--since",
-            since,
-            "--json",
-            ...flags,
-          ],
-          { env: { ...process.env, RECALL_DB_PATH: dbPath, RECALL_AGENT: "0" }, stdout: "pipe", stderr: "pipe" },
-        )
-        const [stdout, stderr, code] = await Promise.all([
-          new Response(child.stdout).text(),
-          new Response(child.stderr).text(),
-          child.exited,
-        ])
-        return { stdout, stderr, code }
-      }
+      const run = (since: string, flags: string[]) =>
+        runRecallCli(["sincewindowneedle", "--since", since, "--json", ...flags], {
+          ...process.env,
+          RECALL_DB_PATH: dbPath,
+          RECALL_AGENT: "0",
+        })
       for (const since of ["2026-10-17T00:00:00Z", "2days", ""]) {
         for (const flags of [[], ["--raw"], ["--agent"]]) {
           const result = await run(since, flags)
@@ -309,6 +315,164 @@ describe("recall search output", () => {
       safeRemoveSync(dir, { within: tmpdir() })
     }
   }, 15_000)
+
+  // Snapshot custody is a real CLI/file contract. Existing live-memory and freshness
+  // cases cannot detect WAL sidecars, migrations, live enrichment, or an ignored selector.
+  test("snapshot CLI searches only the immutable file, with explicit all window and provenance", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "recall-snapshot-"))
+    const indexDir = join(dir, "snapshot")
+    mkdirSync(indexDir)
+    const snapshot = join(indexDir, "index # one.db")
+    try {
+      seedMessage("snapshotneedle recent -literalneedle --snapshot", "recent")
+      seedMessage("snapshotneedle old", "old")
+      getDb()
+        .prepare("UPDATE messages SET timestamp = ? WHERE uuid = ?")
+        .run(Date.now() - 90 * 86400_000, "msg-old")
+      setIndexMeta(getDb(), "last_rebuild", "2020-01-01T00:00:00.000Z")
+      getDb().prepare("VACUUM INTO ?").run(snapshot)
+      const writer = new Database(snapshot)
+      writer.run("PRAGMA journal_mode = WAL")
+      writer.close()
+      const before = readFileSync(snapshot)
+      const entries = readdirSync(indexDir)
+      expect(entries).toEqual(["index # one.db"])
+      const env = { ...process.env, RECALL_DB_PATH: join(dir, "unused", "live.db"), RECALL_AGENT: "1" }
+      const run = (args: string[], file = snapshot) => runRecallCli(["--snapshot", file, ...args], env)
+      const args = ["search", "snapshotneedle", "--raw", "--json", "-i", "m", "--since", "all"]
+      const first = await run(args)
+      const second = await run(args)
+      expect(first.code, first.stderr).toBe(0)
+      expect(second.code, second.stderr).toBe(0)
+      const result = JSON.parse(first.stdout) as {
+        provenanceDetail: Record<string, unknown>
+        results: Array<{ sourceId: string }>
+      }
+      expect(result).toMatchObject({
+        provenance: "snapshot",
+        total: 2,
+        provenanceDetail: {
+          provenance: "snapshot",
+          path: snapshot,
+          root: "index_meta.last_rebuild",
+          lastRebuild: "2020-01-01T00:00:00.000Z",
+        },
+      })
+      expect(result.provenanceDetail).not.toHaveProperty("windowMs")
+      expect(result.results.map((hit: { sourceId: string }) => hit.sourceId).sort()).toEqual([
+        "sess-old",
+        "sess-recent",
+      ])
+      expect(JSON.parse(second.stdout)).toMatchObject({ results: result.results })
+      const defaultWindow = await run(["snapshotneedle", "--raw", "--json", "-i", "m"])
+      expect(defaultWindow.code, defaultWindow.stderr).toBe(0)
+      expect(JSON.parse(defaultWindow.stdout)).toMatchObject({ total: 1, results: [{ sourceId: "sess-recent" }] })
+      const empty = await run(["absentneedle", "--json", "-i", "m", "--since", "all", "--no-refresh"])
+      expect(empty.code, empty.stderr).toBe(0)
+      expect(JSON.parse(empty.stdout)).toMatchObject({ provenance: "snapshot", total: 0, results: [] })
+
+      // Prove the live source exists and would contribute to ordinary human raw output.
+      const liveHome = join(dir, "live-home")
+      const liveDir = join(liveHome, ".claude", "projects", process.cwd().replaceAll("/", "-"))
+      mkdirSync(liveDir, { recursive: true })
+      writeFileSync(
+        join(liveDir, "live-fixture.jsonl"),
+        JSON.stringify({
+          type: "human",
+          timestamp: new Date().toISOString(),
+          message: { content: "liveonlyneedle should stay outside snapshot" },
+        }) + "\n",
+      )
+      const liveControl = join(dir, "live-control.db")
+      writeFileSync(liveControl, before)
+      const liveEnv = { ...env, HOME: liveHome, CLAUDE_SESSION_ID: "live-fixture", RECALL_DB_PATH: liveControl }
+      const control = await runRecallCli(["liveonlyneedle", "--raw", "-i", "m"], liveEnv)
+      expect(control.stdout).toContain("should stay outside snapshot")
+      const human = await runRecallCli(["--snapshot", snapshot, "liveonlyneedle", "--raw", "-i", "m"], liveEnv)
+      expect(human.code, human.stderr).toBe(0)
+      expect(human.stdout).toContain(`snapshot ${snapshot}`)
+      expect(human.stdout).not.toContain("should stay outside snapshot")
+      expect(human.stdout).not.toContain("UNPROVEN")
+
+      for (const command of [
+        "index",
+        "migrate",
+        "remember",
+        "summarize",
+        "weekly",
+        "export",
+        "sessions",
+        "files",
+        "status",
+        "show",
+        "current-brief",
+      ]) {
+        const refused = await run([command])
+        expect(refused.code, command).toBe(2)
+        expect(refused.stderr).toContain("raw indexed search only")
+        expect(refused.stdout).toBe("")
+      }
+      for (const mode of [[], ["--grep"], ["--agent"], ["--raw", "--debug-plan"]]) {
+        const refused = await run(["snapshotneedle", ...mode])
+        expect(refused.code, JSON.stringify(mode)).not.toBe(0)
+        expect(refused.stderr).toContain("raw indexed search only")
+      }
+      const mixed = await runRecallCli(["--snapshot", snapshot, "--vault-db", snapshot, ...args], env)
+      expect(mixed.code).toBe(2)
+      expect(mixed.stderr).toContain("cannot combine")
+      const absent = await run(args, join(dir, "absent", "index.db"))
+      expect(absent.code).not.toBe(0)
+      expect(absent.stderr).toContain("index.db")
+      expect(readdirSync(dir)).not.toContain("absent")
+      expect(readdirSync(dir)).not.toContain("unused")
+      expect(readFileSync(snapshot)).toEqual(before)
+      expect(readdirSync(indexDir)).toEqual(entries)
+
+      // Inspect the actual selected connection while open, including SQLite's own readonly enforcement.
+      closeDb()
+      const { bindSnapshot } = await import("../../src/history/db.ts")
+      bindSnapshot(snapshot)
+      const reader = getDb()
+      expect(() => reader.run("DELETE FROM messages")).toThrow(/readonly/i)
+      expect(readFileSync(snapshot)).toEqual(before)
+      expect(readdirSync(indexDir)).toEqual(entries)
+      closeDb()
+
+      // Immutable SQLite would ignore either unfinished transaction sidecar.
+      for (const suffix of ["-wal", "-journal"]) {
+        const unsafe = join(dir, `unsafe${suffix}.db`)
+        writeFileSync(unsafe, before)
+        const sidecar = `${unsafe}${suffix}`
+        writeFileSync(sidecar, "unfinished transaction sentinel")
+        const refused = await run(args, unsafe)
+        expect(refused.code).not.toBe(0)
+        expect(refused.stderr).toContain(sidecar)
+        expect(readFileSync(sidecar, "utf8")).toBe("unfinished transaction sentinel")
+        expect(readFileSync(unsafe)).toEqual(before)
+      }
+      const { CURRENT_SCHEMA_VERSION } = await import("../../src/history/db-schema.ts")
+      for (const version of [CURRENT_SCHEMA_VERSION - 1, CURRENT_SCHEMA_VERSION + 1]) {
+        const wrong = join(dir, `schema-${version}.db`)
+        writeFileSync(wrong, before)
+        const edit = new Database(wrong)
+        edit.run(assertSingleStatement(`PRAGMA user_version = ${version}`))
+        edit.close()
+        const wrongBefore = readFileSync(wrong)
+        const refused = await run(args, wrong)
+        expect(refused.code).not.toBe(0)
+        expect(refused.stderr).toContain(`schema version ${version}`)
+        expect(refused.stderr).toContain(`expected ${CURRENT_SCHEMA_VERSION}`)
+        expect(readFileSync(wrong)).toEqual(wrongBefore)
+      }
+      // Existing FTS grammar quotes a literal leading-dash term; -- ends CLI options only.
+      const literal = await run(["search", "--raw", "--json", "-i", "m", "--since", "all", "--", '"-literalneedle"'])
+      expect(literal.code, literal.stderr).toBe(0)
+      expect(JSON.parse(literal.stdout)).toMatchObject({ total: 1, results: [{ sourceId: "sess-recent" }] })
+    } finally {
+      closeDb()
+      safeRemoveSync(dir, { within: tmpdir() })
+    }
+  }, 30_000)
 
   // Receipt creation is covered by real SQLite fanout/agent tests. This is the
   // distinct CLI transport boundary, including its early synthesis-failure path.

@@ -328,6 +328,29 @@ describe("recallAgent — empty plan handling", () => {
 })
 
 describe("recallAgent — time-hint application", () => {
+  // Existing trace-only assertions cannot detect the planner silently widening the actual result set.
+  test.each([
+    { since: undefined, expected: ["recent-window"] },
+    { since: "all", expected: ["old-window", "recent-window"] },
+  ])("only the caller can remove the time window ($since)", async ({ since, expected }) => {
+    mockHolder.fn = buildMockQueryModel([
+      { match: /query planner/i, content: buildPlanJson({ keywords: ["windowneedle"], time_hint: "all" }) },
+      { content: "answer" },
+    ])
+    seedCorpus({
+      sessions: [
+        { id: "recent-window", title: "Recent", messages: ["windowneedle"] },
+        { id: "old-window", title: "Old", messages: ["windowneedle"] },
+      ],
+    })
+    getDb()
+      .prepare("UPDATE messages SET timestamp = ? WHERE session_id = ?")
+      .run(Date.now() - 90 * 86400_000, "old-window")
+    const result = await recallAgent("windowneedle", { limit: 3, since, round2: "off" })
+    expect(result.fellThrough).toBeFalsy()
+    expect(result.results.map((hit) => hit.sessionId).sort()).toEqual(expected)
+  })
+
   test("planner time_hint overrides default sinceTime when --since not set", async () => {
     const plan = buildPlanJson({ keywords: ["alpha"], time_hint: "1h" })
     mockHolder.fn = buildMockQueryModel([{ match: /query planner/i, content: plan }, { content: "answer" }])

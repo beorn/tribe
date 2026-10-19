@@ -70,6 +70,22 @@ afterEach(() => {
 const errText = () => errSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n")
 
 describe("recall --vault-db <path> <verb>: a leading global binding (25149 d)", () => {
+  // Snapshot binding must be removed before implicit-search routing, just like the vault binding.
+  test.each(["--snapshot", "--snapshot="])("%s binds the index before default search", async (flag) => {
+    await main([...(flag.endsWith("=") ? [`${flag}${vault}`] : [flag, vault]), "query", "--raw"])
+    const { getSnapshotPath } = await import("../src/history/db.ts")
+    expect(getSnapshotPath()).toBe(vault)
+    expect(calls).toEqual([expect.objectContaining({ verb: "search", arg: "query", vault: null })])
+  })
+
+  // Transport owns option termination, not the existing FTS grammar's interpretation of query text.
+  test.each(["-literalneedle", "--snapshot"])("-- preserves %s as literal search argv", async (query) => {
+    await main(["--snapshot", vault, "search", "--raw", "--", query])
+    const { getSnapshotPath } = await import("../src/history/db.ts")
+    expect(getSnapshotPath()).toBe(vault)
+    expect(calls).toEqual([expect.objectContaining({ verb: "search", arg: query, vault: null })])
+  })
+
   test("binds a subcommand: `recall --vault-db X summarize` runs summarize with X bound", async () => {
     await main(["--vault-db", vault, "summarize"])
     expect(calls).toEqual([expect.objectContaining({ verb: "summarize", vault })])

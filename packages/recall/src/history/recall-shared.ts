@@ -41,7 +41,17 @@ export const DEFAULT_PLAN_TIMEOUT_MS = 14_000
 // ============================================================================
 
 /** Whether the FTS index can support an authoritative absence claim. */
-export type IndexProvenance = "complete" | "stale" | "missing" | "unknown"
+export type IndexProvenance = "complete" | "stale" | "missing" | "unknown" | "snapshot"
+
+/** Snapshot provenance describes the selected file, without a live freshness judgment. */
+export type IndexProvenanceDetail =
+  | IndexFreshness
+  | {
+      provenance: "snapshot"
+      path: string
+      root: "index_meta.last_rebuild"
+      lastRebuild: string | null
+    }
 
 export interface RecallOptions {
   limit?: number // Max results to include (default 10)
@@ -59,7 +69,7 @@ export interface RecallOptions {
    * index (the CLI does) — echoed onto RecallResult so a stale answer names what
    * it judged (@ag/recall/27930).
    */
-  provenanceDetail?: IndexFreshness
+  provenanceDetail?: IndexProvenanceDetail
   /**
    * "exact" (the default, and the CLI's) ranks every match and counts totals. "hook" ranks the time window's matches,
    * at most HOOK_CANDIDATE_LIMIT of them with a loud cap line, inside the prompt hook's budget and counts nothing
@@ -125,7 +135,7 @@ export interface RecallResult {
    * The root, window and age behind `provenance` — attached on the CLI's own
    * results so a stale answer names what it judged (@ag/recall/27930).
    */
-  provenanceDetail?: IndexFreshness
+  provenanceDetail?: IndexProvenanceDetail
   synthesis: string | null // LLM synthesis (null if raw mode, no results, or synthesis failed)
   results: RecallSearchResult[]
   durationMs: number
