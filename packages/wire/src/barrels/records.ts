@@ -6,7 +6,7 @@
  * descriptors, runtime id and reaper-exempt markers. Parsers and tables, not
  * transport.
  *
- * Closure is at most 10 files and it deliberately does NOT reach launch-environment or
+ * Closure is at most 11 files and it deliberately does NOT reach launch-environment or
  * client. That is the point: a consumer of these facts should not become a
  * graph dependent of the daemon client (24965; measured in 24905, where every
  * tribe-wire file selected the same ~785 test files because the root barrel
@@ -117,3 +117,12 @@ export {
 // Pure message and MCP result shapes shared by producers and consumers.
 export { mcpJsonContent } from "../cli/mcp-json-content.ts"
 export { CLIENT_MESSAGE_MAX_LENGTH } from "../lib/send-validation.ts"
+
+// Transport registration and canonical mailbox-read facts, with no agent-life verdict.
+export {
+  parseMembersObservation,
+  type MailboxReadCapability,
+  type MailboxProgress,
+  type MemberObservation,
+  type MembersObservation,
+} from "../lib/member-observation.ts"

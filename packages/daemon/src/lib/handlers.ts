@@ -21,6 +21,7 @@ import {
   TRIBE_MESSAGE_TYPES,
 } from "tribe-wire"
 import type { TribeContext } from "./context.ts"
+import type { MailboxReadCapability, MemberObservation } from "tribe-wire/records"
 import type { TribeRole } from "tribe-wire/lib/config"
 import { TRIBE_PROTOCOL_VERSION } from "tribe-wire/lib/socket"
 import {
@@ -2915,12 +2916,6 @@ type DurableMembershipSessionRow = MembershipSessionRow & {
   launch_parent_pid: number
 }
 
-type MailboxReadCapability = {
-  state: "available" | "unavailable"
-  evidence_kind: "observed"
-  reason: "self-mailbox-authority-token" | "self-mailbox-authority-missing"
-}
-
 /**
  * Project whether a session can read its own inbox. Transport liveness cannot answer this question: a relay can send
  * and heartbeat while unable to read its own canonical inbox. A session reads by the identity token it registered with
@@ -3713,7 +3708,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       // 29686 — the daemon's last register refusal for this session: the only server-refusing
       // evidence on the wire now that the seat's own stderr record has no live writer.
       ...(lastRefusal ? { last_refusal: lastRefusal } : {}),
-    }
+    } satisfies MemberObservation
   })
   const disconnected = projectDisconnectedSessionRows(rows, activeIds)
   const diagnosticDisconnected = disconnected.diagnostic.filter((row) => !retiredNames.has(row.name))

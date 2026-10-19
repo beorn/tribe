@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { parseMembersObservation } from "tribe-wire/records"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
@@ -147,6 +148,7 @@ describe("tribe.members separates connector state from mailbox progress", () => 
       }),
     ])
     expect(members.schema).toBe("tribe-members/2")
+    expect(parseMembersObservation(members)).toEqual(members)
     // The ban covers nested history/discrepancy rows as well as sessions.
     expect(JSON.stringify(members)).not.toMatch(/"(?:alive|agent_alive|pid_alive|agent_pid|launch_parent_pid|pid)"\s*:/)
   })
