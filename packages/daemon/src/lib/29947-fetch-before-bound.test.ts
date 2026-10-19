@@ -129,8 +129,8 @@ describe("tribe.fetch --before reaches the older end of a history (29947)", () =
     expect(String(refused.error)).toContain(`since ${c} is not below before ${c}`)
   })
 
-  it("refuses a non-integer before by name", () => {
-    const refused = fetch({ before: 1.5 })
-    expect(String(refused.error)).toBe("before must be a non-negative integer row id.")
+  it("refuses a non-numeric before by name", () => {
+    const refused = fetch({ before: "old" })
+    expect(String(refused.error)).toBe("before must be a finite non-negative row id.")
   })
 })

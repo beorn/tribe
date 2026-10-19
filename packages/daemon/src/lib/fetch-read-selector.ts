@@ -19,7 +19,7 @@
  * field beside one is inert and is left alone. `since: 0` counts as effective:
  * it is a real row-id base, unlike an absent `since`.
  */
-export const FETCH_READ_SELECTOR_KEYS = ["ids", "topics", "since", "with", "from", "to"] as const
+export const FETCH_READ_SELECTOR_KEYS = ["ids", "topics", "since", "before", "with", "from", "to"] as const
 
 /** Whether a PRESENT selector value can select anything; `since: 0` is effective. */
 function isEffectiveSelectorValue(value: unknown): boolean {

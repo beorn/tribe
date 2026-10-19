@@ -780,7 +780,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(result).toMatchObject({
       code: 2,
       stderr:
-        "tribe fetch: snapshot lookups require at least one selector (--ids, --topics, --since, --with, --from, --to). " +
+        "tribe fetch: snapshot lookups require at least one selector (--ids, --topics, --since, --before, --with, --from, --to). " +
         "The live read is `tribe inbox`; `tribe log` is the daemon log.\n",
     })
     expect(calls).toEqual([])
@@ -815,7 +815,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       signal: null,
       stdout: "",
       stderr:
-        "tribe fetch: snapshot lookups require at least one selector (--ids, --topics, --since, --with, --from, --to). " +
+        "tribe fetch: snapshot lookups require at least one selector (--ids, --topics, --since, --before, --with, --from, --to). " +
         "The live read is `tribe inbox`; `tribe log` is the daemon log.\n",
     })
     expect(calls).toEqual([])

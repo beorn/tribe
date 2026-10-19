@@ -5348,8 +5348,8 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
   // 29947 — the older bound. Refused by name rather than read as an empty
   // window: a caller that passed a bad value and got `events: []` would read
   // "nothing older exists", which is the NO SILENT ERRORS class.
-  if (a.before !== undefined && (typeof a.before !== "number" || !Number.isSafeInteger(a.before) || a.before < 0)) {
-    return jsonResult({ error: "before must be a non-negative integer row id." })
+  if (a.before !== undefined && (typeof a.before !== "number" || !Number.isFinite(a.before) || a.before < 0)) {
+    return jsonResult({ error: "before must be a finite non-negative row id." })
   }
   const before = typeof a.before === "number" ? a.before : null
   if (since !== null && before !== null && since >= before) {

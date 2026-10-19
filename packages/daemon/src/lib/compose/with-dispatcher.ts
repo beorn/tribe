@@ -445,6 +445,7 @@ export function withDispatcher<
       ids?: string[]
       topics?: string[]
       since?: number
+      before?: number
       withPeer?: string
       from?: string
       to?: string
@@ -506,6 +507,12 @@ export function withDispatcher<
       ) {
         return "Authenticated fetch read filter 'since' must be a finite non-negative number"
       }
+      if (
+        params.before !== undefined &&
+        (typeof params.before !== "number" || !Number.isFinite(params.before) || params.before < 0)
+      ) {
+        return "Authenticated fetch read filter 'before' must be a finite non-negative number"
+      }
       for (const key of ["with", "from", "to"] as const) {
         if (params[key] !== undefined && typeof params[key] !== "string") {
           return `Authenticated fetch read filter '${key}' must be a string`
@@ -534,7 +541,7 @@ export function withDispatcher<
       const emptySelector = emptyFetchReadSelectorRefusal(params)
       if (emptySelector !== undefined) return emptySelector
       if (!hasEffectiveFetchReadSelector(params)) {
-        return "Authenticated fetch read requires a snapshot selector (ids, topics, since, with, from, to); the live read is tribe inbox"
+        return "Authenticated fetch read requires a snapshot selector (ids, topics, since, before, with, from, to); the live read is tribe inbox"
       }
       return undefined
     }
@@ -843,6 +850,7 @@ export function withDispatcher<
                 ...(capability.args.ids === undefined ? {} : { ids: capability.args.ids }),
                 ...(capability.args.topics === undefined ? {} : { topics: capability.args.topics }),
                 ...(capability.args.since === undefined ? {} : { since: capability.args.since }),
+                ...(capability.args.before === undefined ? {} : { before: capability.args.before }),
                 ...(capability.args.withPeer === undefined ? {} : { with: capability.args.withPeer }),
                 ...(capability.args.from === undefined ? {} : { from: capability.args.from }),
                 ...(capability.args.to === undefined ? {} : { to: capability.args.to }),
@@ -3496,6 +3504,7 @@ export function withDispatcher<
             if (Array.isArray(p.ids)) fetchArgs.ids = p.ids as string[]
             if (Array.isArray(p.topics)) fetchArgs.topics = p.topics as string[]
             if (typeof p.since === "number") fetchArgs.since = p.since
+            if (typeof p.before === "number") fetchArgs.before = p.before
             if (typeof p.with === "string") fetchArgs.withPeer = p.with
             if (typeof p.from === "string") fetchArgs.from = p.from
             if (typeof p.to === "string") fetchArgs.to = p.to

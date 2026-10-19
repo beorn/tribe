@@ -596,7 +596,7 @@ async function cmdFetch(opts: {
     (opts.to?.length ?? 0) > 0
   if (!hasSelector) {
     console.error(
-      "tribe fetch: snapshot lookups require at least one selector (--ids, --topics, --since, --with, --from, --to). " +
+      "tribe fetch: snapshot lookups require at least one selector (--ids, --topics, --since, --before, --with, --from, --to). " +
         "The live read is `tribe inbox`; `tribe log` is the daemon log.",
     )
     process.exit(2)

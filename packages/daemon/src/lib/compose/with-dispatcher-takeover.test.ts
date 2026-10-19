@@ -3782,6 +3782,71 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
     ).toMatchObject({ code: -32602, message: expect.stringContaining("identity and owner overrides are forbidden") })
   })
 
+  // 29947 — the older bound must survive the AUTHENTICATED path. The handler
+  // fixture and the canned CLI fixture both bypass this adapter, so the
+  // regression lives here: before-only is a selector on its own, and beside a
+  // sibling selector it must still bound the read rather than silently drop.
+  it("a before-bounded snapshot read reaches older rows through the authenticated RPC (29947)", async () => {
+    const seeded: number[] = []
+    const harness = createDispatcherHarness({ identityVerifier }, (ctx) => {
+      for (let n = 1; n <= 5; n += 1) {
+        const sent = sendMessage(
+          ctx,
+          "@dev/7",
+          `OLDER-${n}`,
+          "notify",
+          undefined,
+          undefined,
+          "direct",
+          {},
+          {},
+          { sender: "@chief" },
+        )
+        seeded.push(sent.rowid)
+      }
+    })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-fetch-before")
+    parseResult<RegisterResult>(
+      await harness.register("conn-fetch-before", {
+        name: "@dev/7",
+        pid: 4801,
+        project: "/tmp/p",
+        launchParentPid: 4800,
+        idToken: "token-dev7",
+      }),
+    )
+    const cursor = (): number =>
+      (
+        harness.db.prepare("SELECT last_inbox_pull_seq FROM sessions WHERE name = '@dev/7'").get() as {
+          last_inbox_pull_seq: number
+        } | null
+      )?.last_inbox_pull_seq ?? 0
+    const cursorBefore = cursor()
+    const rowids = async (params: Record<string, unknown>): Promise<number[]> => {
+      const reply = parseResult<{ content: Array<{ text: string }> }>(
+        await harness.request("cli_session_fetch_read_v1", { authority: null, idToken: "token-dev7", ...params }),
+      )
+      const payload = JSON.parse(reply.content[0]!.text) as { events?: Array<{ rowid: number }> }
+      return (payload.events ?? []).map((event) => event.rowid)
+    }
+
+    expect(seeded).toHaveLength(5)
+    const [a, b, c, d, e] = seeded
+
+    // before-only is a selector: it must not be refused as selectorless.
+    expect(await rowids({ before: c, limit: 10 })).toEqual([a, b])
+
+    // Beside a sibling selector the bound must still apply. Without forwarding,
+    // this call answered the newest page and silently ignored `before`.
+    expect(await rowids({ from: "@chief", limit: 10, before: c })).toEqual([a, b])
+    expect(await rowids({ from: "@chief", limit: 2 })).toEqual([d, e])
+    expect(await rowids({ from: "@chief", limit: 2, before: d })).toEqual([b, c])
+
+    // Still snapshot-only: no cursor moved.
+    expect(cursor()).toBe(cursorBefore)
+  })
+
   // 28402 — a PRESENT but EMPTY selector is not an absent one. `topics: []`,
   // `ids: []`, `from: ""`, `to: ""` and `with: ""` used to fall through to the
   // DEFAULT drain branch, which ACKNOWLEDGES: it advanced the mailbox cursor and
