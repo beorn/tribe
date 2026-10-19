@@ -378,8 +378,23 @@ export function withDispatcher<
       latest_actionable_seq: number | null
       latest_message_id: string | null
       latest_type: string | null
+      owed_count: number
+      oldest_owed: {
+        id: string
+        sender: string
+        age_ms: number
+        summary: string | null
+        alarm: boolean
+      } | null
+      owed_balls: Array<{
+        id: string
+        sender: string
+        age_ms: number
+        summary: string | null
+        alarm: boolean
+      }>
     } {
-      const { attentionRows, untakenPendingBalls, actionableCount } = readAttentionProjection(
+      const { attentionRows, untakenPendingBalls, actionableCount, attention } = readAttentionProjection(
         daemonCtx,
         sessionName,
         Date.now(),
@@ -396,6 +411,17 @@ export function withDispatcher<
       const oldestTs = Math.min(oldest?.ts ?? Number.POSITIVE_INFINITY, oldestTrackedTs)
       const oldest_unread_ts = Number.isFinite(oldestTs) ? oldestTs : 0
       const oldest_unread_age_min = oldest_unread_ts > 0 ? Math.floor((Date.now() - oldest_unread_ts) / 60_000) : 0
+      const owed_balls = attention.pending_balls.map((ball) => ({
+        id: ball.request_id,
+        sender: ball.sender,
+        age_ms: ball.age_ms,
+        summary: ball.summary,
+        alarm: ball.request_kind === "incident",
+      }))
+      const oldest_owed = owed_balls.reduce<(typeof owed_balls)[number] | null>(
+        (oldestBall, ball) => (oldestBall === null || ball.age_ms > oldestBall.age_ms ? ball : oldestBall),
+        null,
+      )
       return {
         session: sessionName,
         unread_count,
@@ -405,6 +431,9 @@ export function withDispatcher<
         latest_actionable_seq: latest?.rowid ?? null,
         latest_message_id: latest?.id ?? null,
         latest_type: latest?.type ?? null,
+        owed_count: attention.pending_balls_summary.total,
+        oldest_owed,
+        owed_balls,
       }
     }
 

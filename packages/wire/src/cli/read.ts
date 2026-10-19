@@ -1995,6 +1995,24 @@ interface InboxStatusSummary {
    * empty set — collapsing the two would stop a seat with an unread inbox. */
   unread_ids?: string[]
   oldest_unread_age_min: number
+  /** Every open ball owned by `session` (requests, queries, assigns, and
+   * alarms/incidents, due or not, receipted or not), from
+   * `readAttentionProjection` (@cto 50680467 item 1). */
+  owed_count?: number
+  oldest_owed?: {
+    id: string
+    sender: string
+    age_ms: number
+    summary: string | null
+    alarm: boolean
+  } | null
+  owed_balls?: Array<{
+    id: string
+    sender: string
+    age_ms: number
+    summary: string | null
+    alarm: boolean
+  }>
   /** Retained owner-to-requester status messages for open requests on either side.
    * Null is unavailable; optional for older daemons. Never an unread count. */
   open_request_status_count?: number | null

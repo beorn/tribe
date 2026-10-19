@@ -1489,12 +1489,34 @@ describe("dispatcher bounded mailbox drain", () => {
         unread_ids: string[]
         oldest_unread_age_min: number
         oldest_unread_ts: number
+        owed_count: number
+        oldest_owed: {
+          id: string
+          sender: string
+          age_ms: number
+          summary: string | null
+          alarm: boolean
+        } | null
+        owed_balls: Array<{
+          id: string
+          sender: string
+          age_ms: number
+          summary: string | null
+          alarm: boolean
+        }>
       }>(
         await harness.dispatcher.handleRequest(
           { jsonrpc: "2.0", id, method: "cli_inbox_status", params: { session: "@chief" } },
           "conn-drain",
         ),
       )
+
+    expect(await readStatus("empty-status")).toMatchObject({
+      unread_count: 0,
+      owed_count: 0,
+      oldest_owed: null,
+      owed_balls: [],
+    })
 
     const firstRequest = harness.sendActionable("@chief", "first historical request", "first-request")
     const secondRequest = harness.sendActionable("@chief", "second historical request")
@@ -1559,11 +1581,27 @@ describe("dispatcher bounded mailbox drain", () => {
     harness.setMessageTimestamp(clockRollbackReceipt.id, 1)
     harness.sendTakingStatus("@chief", "third-request")
     harness.sendTakingStatus("@chief", fourthRequest.id)
-    expect(await readStatus("status-after-drain")).toMatchObject({
+    harness.db.prepare("UPDATE pending_request SET request_kind = 'incident' WHERE request_id = 'fourth-request'").run()
+    const statusAfterDrain = await readStatus("status-after-drain")
+    expect(statusAfterDrain).toMatchObject({
       unread_count: 0,
       oldest_unread_age_min: 0,
       oldest_unread_ts: 0,
+      owed_count: 4,
+      oldest_owed: {
+        id: "first-request",
+        sender: "daemon",
+        age_ms: expect.any(Number),
+        summary: null,
+        alarm: false,
+      },
     })
+    expect(statusAfterDrain.owed_balls).toEqual([
+      expect.objectContaining({ id: "first-request", sender: "daemon", alarm: false }),
+      expect.objectContaining({ id: secondRequest.id, sender: "daemon", alarm: false }),
+      expect.objectContaining({ id: "third-request", sender: "daemon", alarm: false }),
+      expect.objectContaining({ id: "fourth-request", sender: "daemon", alarm: true }),
+    ])
 
     const wait = parseResult<InboxWaitResult>(
       await harness.dispatcher.handleRequest(
