@@ -33,6 +33,7 @@ import { DEFAULT_PLAN_TIMEOUT_MS, DEFAULT_SYNTHESIS_TIMEOUT_MS } from "./history
 import { cmdSearch, type SearchOptions } from "./lib/search"
 import { resolveVaultDbFlag } from "./lib/vault-db"
 import { bindVaultDb } from "./history/vault-fts"
+import { bindSnapshot, getSnapshotPath } from "./history/db.ts"
 import { cmdStatus } from "./lib/status"
 import { cmdSessions, cmdIndex, RECALL_INDEX_BUSY_EXIT, RECALL_INDEX_PRUNE_REFUSED_EXIT } from "./lib/sessions"
 import { cmdFiles } from "./lib/files"
@@ -70,7 +71,7 @@ program
   .name("recall")
   .description("Search and manage Claude Code session history")
   .version("1.0.0")
-  .usage("[--vault-db <path>] [command|query] [options]")
+  .usage("[--vault-db <path> | --snapshot <path>] [command|query] [options]")
   .exitOverride()
   .configureOutput({
     writeErr: (str) => console.error(str.trimEnd()),
@@ -80,9 +81,11 @@ program
     `\nThe km vault is bound only on the call line, before any command:\n` +
       `  --vault-db <path>  the vault database every command reads; no environment\n` +
       `                     variable binds it, and recall never discovers one from the cwd\n` +
+      `  --snapshot <path>  immutable Recall index; raw indexed search only, no live sources\n` +
+      `                     select before the command; cannot combine with --vault-db\n` +
       `\nExit codes:\n` +
       `  0  clean success — the index provenance is complete; an empty result\n` +
-      `     is authoritative\n` +
+      `     is authoritative; snapshot success is scoped only to the selected file\n` +
       `  1  hard failure — an unexpected crash, not the degraded path below\n` +
       `  2  CLI usage error (bad flags, removed subcommand)\n` +
       `  3  degraded — index provenance is stale, missing, or unknown, or LLM\n` +
@@ -100,7 +103,7 @@ program
   .argument("<query>", "Search query")
   .option("--raw", "Skip LLM synthesis, show raw FTS5 snippets")
   .option("--json", "JSON output")
-  .option("-s, --since <time>", "Time filter: 1h, 1d, 1w, today, yesterday (default: 30d)")
+  .option("-s, --since <time>", "Time filter: 1h, 1d, 1w, today, yesterday, all (default: 30d)")
   .option("-n, --limit <num>", "Max results (default: 10)", int)
   .option("--timeout <ms>", `LLM timeout in ms (default: ${DEFAULT_SYNTHESIS_TIMEOUT_MS})`, uint)
   .option("-p, --project <glob>", "Project filter")
@@ -270,23 +273,27 @@ program
 // ============================================================================
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
-  // A leading --vault-db binds the vault for the whole process (25149 d), so every verb routes as before and
-  // reads it; it is stripped before the search-prepend below, which would otherwise search for its path.
-  const leading = takeLeadingVaultDb(argv)
-  if (hasRepeatedVaultDb(leading.rest, leading.raw)) {
-    console.error("[recall] error: option '--vault-db' cannot be repeated")
-    process.exit(2)
-  }
+  // Resolve leading file selections before default-search routing or any command action.
   try {
-    const bound = resolveVaultDbFlag(leading.raw)
+    const leading = takeLeadingBindings(argv)
+    if (leading.snapshot !== undefined && leading.vaultDb !== undefined) {
+      throw new Error("--snapshot cannot combine with --vault-db: snapshot results use only the selected index")
+    }
+    if (leading.snapshot !== undefined) {
+      if (typeof leading.snapshot !== "string" || leading.snapshot.trim() === "") {
+        throw new Error("--snapshot requires a nonempty index file path")
+      }
+      bindSnapshot(leading.snapshot)
+    }
+    const bound = resolveVaultDbFlag(leading.vaultDb)
     if (bound !== null) bindVaultDb(bound)
+    argv = leading.rest
   } catch (error) {
     // A refused --vault-db is a usage error, exit 2 as the table above documents. The one rule returns the
     // refusal and each surface maps it to its own documented exit; the hook line keeps 1.
     console.error(`[recall] ${error instanceof Error ? error.message : String(error)}`)
     process.exit(2)
   }
-  argv = leading.rest
 
   // No args → show help (Step 0: fix exitOverride crash)
   if (argv.length === 0) {
@@ -318,6 +325,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     argv = ["search", ...argv]
   }
 
+  if (getSnapshotPath() !== null && !["search", "help", "--help", "-h", "--version", "-V"].includes(argv[0]!)) {
+    console.error(
+      `[recall] snapshot ${getSnapshotPath()} supports raw indexed search only; command ${argv[0]} is unavailable`,
+    )
+    process.exit(2)
+  }
+
   try {
     await program.parseAsync(["node", "recall", ...argv])
   } catch (e) {
@@ -333,27 +347,39 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   }
 }
 
-/** Split a leading `--vault-db <path>` / `--vault-db=<path>` off argv; a valueless flag carries `true`. */
-function takeLeadingVaultDb(argv: string[]): { raw: string | boolean | undefined; rest: string[] } {
-  const first = argv[0]
-  if (first === "--vault-db") {
-    const second = argv[1]
-    const hasValue = second !== undefined && !second.startsWith("-")
-    return { raw: hasValue ? second : true, rest: hasValue ? argv.slice(2) : argv.slice(1) }
+/** One leading-binding parser; valueless flags carry true for the named usage error. */
+function takeLeadingBindings(argv: string[]): {
+  vaultDb?: string | boolean
+  snapshot?: string | boolean
+  rest: string[]
+} {
+  const flags = ["--vault-db", "--snapshot"] as const
+  const dashDashIndex = argv.indexOf("--")
+  const optionTokens = dashDashIndex === -1 ? argv : argv.slice(0, dashDashIndex)
+  for (const flag of flags) {
+    if (optionTokens.filter((arg) => arg === flag || arg.startsWith(`${flag}=`)).length > 1) {
+      throw new Error(`error: option '${flag}' cannot be repeated`)
+    }
   }
-  if (first?.startsWith("--vault-db=")) return { raw: first.slice("--vault-db=".length), rest: argv.slice(1) }
-  return { raw: undefined, rest: argv }
-}
-
-/** Check whether `--vault-db` was provided more than once in option positions (before `--`). */
-function hasRepeatedVaultDb(rest: string[], leadingRaw: string | boolean | undefined): boolean {
-  const dashDashIndex = rest.indexOf("--")
-  const optionTokens = dashDashIndex === -1 ? rest : rest.slice(0, dashDashIndex)
-  const restCount = optionTokens.filter((arg) => arg === "--vault-db" || arg.startsWith("--vault-db=")).length
-  if (leadingRaw !== undefined) {
-    return restCount > 0
+  const result: { vaultDb?: string | boolean; snapshot?: string | boolean; rest: string[] } = { rest: argv }
+  while (result.rest.length > 0) {
+    const first = result.rest[0]!
+    const flag = flags.find((name) => first === name || first.startsWith(`${name}=`))
+    if (flag === undefined) break
+    let raw: string | boolean
+    if (first.startsWith(`${flag}=`)) {
+      raw = first.slice(flag.length + 1)
+      result.rest = result.rest.slice(1)
+    } else {
+      const value = result.rest[1]
+      const hasValue = value !== undefined && !value.startsWith("-")
+      raw = hasValue ? value : true
+      result.rest = result.rest.slice(hasValue ? 2 : 1)
+    }
+    if (flag === "--vault-db") result.vaultDb = raw
+    else result.snapshot = raw
   }
-  return restCount > 1
+  return result
 }
 
 if (import.meta.main) {

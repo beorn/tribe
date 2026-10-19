@@ -837,7 +837,7 @@ function runSearchBenchmark(
   try {
     const startTime = Date.now()
 
-    const sinceTime = since ? parseTimeToMs(since) : Date.now() - THIRTY_DAYS_MS
+    const sinceTime = since ? (parseTimeToMs(since) ?? undefined) : Date.now() - THIRTY_DAYS_MS
 
     if (types) {
       // Content-only search

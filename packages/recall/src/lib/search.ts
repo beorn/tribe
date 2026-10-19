@@ -5,7 +5,7 @@ import { assertSingleStatement } from "@bearly/sqlite"
 
 import * as path from "path"
 import * as fs from "fs"
-import { getDb, closeDb, getIndexMeta, PROJECTS_DIR, type MessageSearchOptions } from "../history/db"
+import { getDb, closeDb, getIndexMeta, getSnapshotPath, PROJECTS_DIR, type MessageSearchOptions } from "../history/db"
 import {
   recall,
   suggestRetryTimeoutMs,
@@ -15,7 +15,7 @@ import {
   type RecallSearchResult,
   type SynthesisDiagnostics,
 } from "../history/recall"
-import { DEFAULT_SYNTHESIS_TIMEOUT_MS, type RecallSkip } from "../history/recall-shared.ts"
+import { DEFAULT_SYNTHESIS_TIMEOUT_MS, type IndexProvenanceDetail, type RecallSkip } from "../history/recall-shared.ts"
 import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
 import { retrieveCandidates, searchLiveSession } from "../history/search"
@@ -107,7 +107,7 @@ export {
   type IndexFreshness,
   type RefreshResult,
 } from "./staleness"
-import { describeFreshness, judgeIndexFreshness, type IndexFreshness, type RefreshResult } from "./staleness"
+import { describeFreshness, judgeIndexFreshness, type RefreshResult } from "./staleness"
 
 /** Read `last_rebuild` index meta — returns null if missing, throws on DB access errors. */
 function readLastRebuild(): string | null {
@@ -144,7 +144,11 @@ export async function refreshIndexIfStale(
  * judged over; a caller attaches it as `provenanceDetail` so a stale answer
  * says what it judged.
  */
-export function readIndexFreshness(options: { refresh?: boolean }): IndexFreshness {
+export function readIndexFreshness(options: { refresh?: boolean }): IndexProvenanceDetail {
+  const snapshot = getSnapshotPath()
+  if (snapshot !== null) {
+    return { provenance: "snapshot", path: snapshot, root: "index_meta.last_rebuild", lastRebuild: readLastRebuild() }
+  }
   if (options.refresh === false) {
     // --no-refresh: this run deliberately did not classify the index, so there is
     // no window verdict to name. provenance stays "unknown" (unchanged contract).
@@ -161,8 +165,11 @@ export function readIndexProvenance(options: { refresh?: boolean }): IndexProven
   return readIndexFreshness(options).provenance
 }
 
-function unprovenSuffix(provenance: IndexProvenance, freshness?: IndexFreshness): string {
+function unprovenSuffix(provenance: IndexProvenance, freshness?: IndexProvenanceDetail): string {
   if (provenance === "complete") return ""
+  if (freshness?.provenance === "snapshot") {
+    return ` — snapshot ${freshness.path} (${freshness.root}: ${freshness.lastRebuild ?? "missing"})`
+  }
   // Only a stale verdict carries the window clause: "missing"/"unknown" did not
   // judge a stamp against a window, so naming one there would invent a comparison.
   const judged = provenance === "stale" && freshness !== undefined ? `: ${describeFreshness(freshness)}` : ""
@@ -172,7 +179,7 @@ function unprovenSuffix(provenance: IndexProvenance, freshness?: IndexFreshness)
 function recallJsonEnvelope(result: RecallResult): Omit<RecallResult, "results"> & {
   results: RecallSearchResult[] | null
 } {
-  if (result.provenance !== "complete" && result.results.length === 0) {
+  if (result.provenance !== "complete" && result.provenance !== "snapshot" && result.results.length === 0) {
     return { ...result, results: null }
   }
   return result
@@ -207,6 +214,16 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   } = options
   const project = resolveProjectScope(options.project)
 
+  // Snapshot searches must not add live transcripts, vault rows, or model context.
+  if (getSnapshotPath() !== null) {
+    const indexedRaw = raw || !!options.snippets || !!question || !!response || !!tool || !!session || !!include
+    if (!indexedRaw || regexMode || options.agent || options.debugPlan || getVaultDbPath() !== null) {
+      throw new Error(
+        `Recall snapshot ${getSnapshotPath()} supports raw indexed search only; use --raw without --grep, --agent, --debug-plan or --vault-db`,
+      )
+    }
+  }
+
   // The vault is bound only explicitly (25149): the CLI's leading --vault-db, resolved here once at the command
   // boundary into what every search below is handed (@cto 456e6e77). Nothing bound is said out loud, so an absent
   // vault never reads as "no vault hits".
@@ -217,7 +234,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   // Lifecycle hints and the host scheduler own incremental indexing cadence.
   const freshness = readIndexFreshness(options)
   const provenance = freshness.provenance
-  if (!regexMode && provenance !== "complete") process.exitCode = 3
+  if (!regexMode && provenance !== "complete" && provenance !== "snapshot") process.exitCode = 3
 
   // Power-user flags imply raw mode. --snippets is an explicit alias for
   // --raw — surfaces the vocabulary used by the accountly side ("snippet vs
@@ -413,7 +430,7 @@ function probeLiteralRawMatches(query: string, base: RecallOptions): { token: st
   const db = getDb()
   const sessionTitles = retrieveCandidates({ db, query: "", titles: true }).titles
   const limit = base.limit ?? 10
-  const sinceTime = base.since ? parseTime(base.since) : Date.now() - THIRTY_DAYS_MS
+  const sinceTime = base.since ? (parseTime(base.since) ?? undefined) : Date.now() - THIRTY_DAYS_MS
   const projectFilter = base.projectFilter
 
   for (const token of tokens) {
@@ -803,7 +820,7 @@ function formatType(type: string): string {
 interface RawSearchOptions extends Omit<SearchOptions, "limit"> {
   limit: number
   provenance: IndexProvenance
-  provenanceDetail?: IndexFreshness
+  provenanceDetail?: IndexProvenanceDetail
   /** The vault the command boundary resolved, or null when none is bound. */
   vaultDb: string | null
 }
@@ -816,11 +833,12 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   // Parse time filter
   let sinceTime: number | undefined
   if (since !== undefined) {
-    sinceTime = parseTime(since)
-    if (sinceTime === undefined) {
-      console.error(`Invalid --since ${JSON.stringify(since)}; expected Nh, Nd, Nw, today, or yesterday`)
+    const parsed = parseTime(since)
+    if (parsed === undefined) {
+      console.error(`Invalid --since ${JSON.stringify(since)}; expected Nh, Nd, Nw, today, yesterday, or all`)
       process.exit(1)
     }
+    sinceTime = parsed ?? undefined
   } else {
     sinceTime = Date.now() - THIRTY_DAYS_MS
   }
@@ -1056,7 +1074,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         rank: v.rank,
       })),
     ]
-    const unprovenEmpty = provenance !== "complete" && total === 0
+    const unprovenEmpty = provenance !== "complete" && provenance !== "snapshot" && total === 0
     console.log(
       JSON.stringify(
         {
@@ -1088,7 +1106,9 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
 
   // Search live session (current, not yet indexed)
   const liveResults =
-    query && searchMessages && session === undefined ? searchLiveSession(query, Math.min(5, limit)) : []
+    provenance !== "snapshot" && query && searchMessages && session === undefined
+      ? searchLiveSession(query, Math.min(5, limit))
+      : []
   const totalWithLive = total + liveResults.length
 
   if (totalWithLive === 0) {

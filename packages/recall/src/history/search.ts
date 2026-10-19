@@ -68,11 +68,12 @@ import { CLAUDE_SESSION_ID_ENV } from "tribe-wire/lib/session-identity-env"
  *   today        - Since midnight today
  *   yesterday    - Since midnight yesterday
  *
- * Returns undefined if parsing fails.
+ * Returns null for all (no lower bound), undefined if parsing fails.
  */
-export function parseTimeToMs(timeStr: string): number | undefined {
+export function parseTimeToMs(timeStr: string): number | null | undefined {
   const now = Date.now()
   const str = timeStr.toLowerCase().trim()
+  if (str === "all") return null
 
   // Handle relative time formats: 1h, 2d, 3w
   const match = str.match(/^(\d+)([hdw])$/)
@@ -453,10 +454,11 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // Parse time filter (default: 30 days)
     let sinceTime: number | undefined
     if (since !== undefined) {
-      sinceTime = parseTimeToMs(since)
-      if (sinceTime === undefined) {
-        throw new Error(`Invalid --since ${JSON.stringify(since)}; expected Nh, Nd, Nw, today, or yesterday`)
+      const parsed = parseTimeToMs(since)
+      if (parsed === undefined) {
+        throw new Error(`Invalid --since ${JSON.stringify(since)}; expected Nh, Nd, Nw, today, yesterday, or all`)
       }
+      sinceTime = parsed ?? undefined
     } else {
       sinceTime = Date.now() - THIRTY_DAYS_MS
     }

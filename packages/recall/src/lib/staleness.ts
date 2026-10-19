@@ -77,7 +77,7 @@ export interface IndexFreshness {
   ageMs: number | null
   windowMs: number
   windowSource: string
-  provenance: IndexProvenance
+  provenance: Exclude<IndexProvenance, "snapshot">
 }
 
 /**

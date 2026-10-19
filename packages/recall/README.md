@@ -20,6 +20,24 @@ repository.
 
 ## Modes
 
+### Read an immutable index
+
+`recall --snapshot /path/to/index.db search --raw --json -i m --since all -- "query"`
+uses the existing indexed search against exactly that file. The leading selector
+opens SQLite with `mode=ro&immutable=1`: it never initializes, migrates, refreshes,
+or writes the index. Prepare a checkpointed copy first; an existing `-wal` or `-journal` sibling
+or a schema version different from this Recall build is an error naming the file.
+Provenance is `snapshot`, with the canonical path and stored `last_rebuild` (null
+when missing), without a freshness judgment against the clock. Valid empty searches
+return `results: []`, `total: 0`, exit 0; query rejection still reports degradation.
+
+This selector supports raw or implied-raw indexed search only. Other commands,
+regex, agent/synthesis mode and a simultaneous `--vault-db` are unavailable;
+human output does not enrich results from the current live transcript.
+`--since all` removes the lower time bound; omission retains the 30-day default,
+and invalid window text remains an error. A stable snapshot does not establish
+an evaluation's qrels or as-of correctness.
+
 By default, `recall` returns a **synthesized narrative** — the LLM digests raw FTS5 hits into a coherent summary that points to the original sessions. This is the "pointer mode" surface area: users see _what_ was found and _where_ to read more, not raw conversation snippets that could carry decoded prompt-injection or stuck-loop noise.
 
 The legacy snippet mode (raw FTS5 hits with surrounding text) is opt-in via `--raw` (alias `--snippets`). Power-user flags (`--question`, `--response`, `--tool`, `--session`, `--include`, `--grep`) also imply raw mode.

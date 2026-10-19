@@ -6,17 +6,30 @@
  * Barrel module: re-exports schema and queries. Owns DB lifecycle (open/close).
  */
 
-import { Database } from "bun:sqlite"
+import { Database, constants } from "bun:sqlite"
 import { assertSingleStatement } from "@bearly/sqlite"
 import { tryAcquireFlock } from "@bearly/flock"
 import * as path from "path"
 import * as fs from "fs"
-import { DB_PATH, initSchema } from "./db-schema.ts"
+import { pathToFileURL } from "node:url"
+import { CURRENT_SCHEMA_VERSION, DB_PATH, initSchema } from "./db-schema.ts"
 
 // Re-export constants from schema
 export { CLAUDE_DIR, DB_PATH, PROJECTS_DIR, MAX_CONTENT_SIZE } from "./db-schema.ts"
 
 let dbInstance: Database | null = null
+let snapshotPath: string | null = null
+
+/** Select the immutable index before CLI dispatch; closing a connection retains this selection. */
+export function bindSnapshot(file: string): void {
+  const selected = fs.realpathSync(file)
+  closeDb()
+  snapshotPath = selected
+}
+
+export function getSnapshotPath(): string | null {
+  return snapshotPath
+}
 
 /** How long a statement waits for another connection's SQLite write lock before failing "database is locked". */
 export const DB_BUSY_TIMEOUT_MS = 5000
@@ -31,6 +44,34 @@ export interface GetDbOptions {
 
 export function getDb(options?: GetDbOptions): Database {
   if (dbInstance) return dbInstance
+
+  if (snapshotPath !== null) {
+    for (const suffix of ["-wal", "-journal"]) {
+      const sidecar = `${snapshotPath}${suffix}`
+      if (fs.existsSync(sidecar)) {
+        throw new Error(
+          `Recall snapshot ${snapshotPath} has an unfinished transaction sibling: ${sidecar}; checkpoint a separate copy before selecting it`,
+        )
+      }
+    }
+    const uri = pathToFileURL(snapshotPath)
+    uri.searchParams.set("mode", "ro")
+    uri.searchParams.set("immutable", "1")
+    const db = new Database(uri.href, constants.SQLITE_OPEN_READONLY | constants.SQLITE_OPEN_URI)
+    try {
+      const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version
+      if (version !== CURRENT_SCHEMA_VERSION) {
+        throw new Error(
+          `Recall snapshot ${snapshotPath} schema version ${version}; expected ${CURRENT_SCHEMA_VERSION}. Snapshot mode never migrates the file`,
+        )
+      }
+    } catch (error) {
+      db.close()
+      throw error
+    }
+    dbInstance = db
+    return db
+  }
 
   const dbPath = currentDbPath()
 
@@ -62,6 +103,8 @@ export function getDb(options?: GetDbOptions): Database {
 export class IndexWriterBusyError extends Error {}
 
 export function acquireIndexWriter(db: Database) {
+  if (snapshotPath !== null)
+    throw new Error(`Recall snapshot ${snapshotPath} is immutable; index writes are unavailable`)
   // SQLite's actual file identity includes RECALL_DB_PATH and symlink aliases.
   // In-memory databases cannot be shared by competing CLI processes.
   if (db.filename === ":memory:") return undefined
