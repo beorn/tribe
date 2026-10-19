@@ -6,6 +6,7 @@
 
 import { Database } from "bun:sqlite"
 import { assertSingleStatement } from "@bearly/sqlite"
+import { createHash } from "node:crypto"
 import { spawn, spawnSync } from "node:child_process"
 import { StringDecoder } from "node:string_decoder"
 import { fileURLToPath } from "node:url"
@@ -16,6 +17,76 @@ import type { SessionRecord } from "./types.ts"
 
 export const INDEX_WINDOW_DAYS = 180
 export const INDEX_WINDOW_MS = INDEX_WINDOW_DAYS * 24 * 60 * 60 * 1000
+const HEAD_SCAN_MAX_BYTES = 256 * 1024
+
+export function computeTranscriptHeadFingerprint(filePath: string): string | null {
+  if (!filePath) return null
+  let fd: number
+  try {
+    fd = fs.openSync(filePath, "r")
+  } catch {
+    // silent-fallback-allow: missing or unreadable transcript has no head fingerprint
+    return null
+  }
+  try {
+    const st = fs.fstatSync(fd)
+    const readLen = Math.min(st.size, HEAD_SCAN_MAX_BYTES)
+    if (readLen <= 0) return null
+    const buf = Buffer.allocUnsafe(readLen)
+    const bytesRead = fs.readSync(fd, buf, 0, readLen, 0)
+    if (bytesRead <= 0) return null
+    const text = buf.subarray(0, bytesRead).toString("utf8")
+    const lines = text.split("\n").filter((l) => l.trim().length > 0)
+    if (lines.length === 0) return null
+    const isGrok = (lines[0] ?? "").includes('"role":"system"')
+    const targetLines = isGrok ? 4 : 2
+    const headSlice = lines.slice(0, Math.min(lines.length, targetLines)).join("\n")
+    return createHash("sha256").update(headSlice, "utf8").digest("hex").slice(0, 32)
+  } catch {
+    // silent-fallback-allow: unreadable file descriptor has no head fingerprint
+    return null
+  } finally {
+    try {
+      fs.closeSync(fd)
+    } catch {
+      // silent-fallback-allow: best-effort descriptor close
+    }
+  }
+}
+
+function hasCompactionHeadMarker(filePath: string): boolean {
+  if (!filePath) return false
+  let fd: number
+  try {
+    fd = fs.openSync(filePath, "r")
+  } catch {
+    // silent-fallback-allow: missing or unreadable transcript has no compaction marker
+    return false
+  }
+  try {
+    const st = fs.fstatSync(fd)
+    const readLen = Math.min(st.size, HEAD_SCAN_MAX_BYTES)
+    if (readLen <= 0) return false
+    const buf = Buffer.allocUnsafe(readLen)
+    const bytesRead = fs.readSync(fd, buf, 0, readLen, 0)
+    if (bytesRead <= 0) return false
+    const headLines = buf.subarray(0, bytesRead).toString("utf8").split("\n").slice(0, 10)
+    return headLines.some(
+      (line) =>
+        line.includes('"type":"compacted"') ||
+        line.includes("This session is being continued from a previous conversation"),
+    )
+  } catch {
+    // silent-fallback-allow: unreadable file descriptor has no compaction marker
+    return false
+  } finally {
+    try {
+      fs.closeSync(fd)
+    } catch {
+      // silent-fallback-allow: best-effort descriptor close
+    }
+  }
+}
 
 export function safeRollback(db: Database): void {
   try {
@@ -552,7 +623,9 @@ export async function indexCodexTranscripts(
           stored.status === "unreadable" ||
           stored.status === "stale-bad-header" ||
           stored.status === "stale-unreadable" ||
-          stored.status === "shrunk"
+          (stored.status === "shrunk" &&
+            stored.head_fingerprint != null &&
+            stored.head_fingerprint === computeTranscriptHeadFingerprint(path))
         if (!skippable) return false
         if (stored.jsonl_path !== path) return false
         if (stored.size_bytes !== c.sizeBytes) return false
@@ -638,6 +711,12 @@ export async function indexCodexTranscripts(
     const batchRetainedSessionIds: string[] = []
     let currentSession: TranscriptExportSessionRecord | null = null
     const currentExistingCounts = new Map<string, number>()
+    const currentBaselineCounts = new Map<string, number>()
+    const currentHeadChanged = new Map<string, boolean>()
+    const currentHeadFingerprints = new Map<string, string | null>()
+    const currentKeepExisting = new Map<string, boolean>()
+    const existingSigCounts = new Map<string, Map<string, number>>()
+    const seenSigCounts = new Map<string, Map<string, number>>()
     const currentRowCounts = new Map<string, number>()
     let totalRowsThisSession = 0
     let totalToolsThisSession = 0
@@ -715,10 +794,43 @@ export async function indexCodexTranscripts(
               : [`${currentSession.provider ?? "codex"}:${nativeId}`]
 
         currentExistingCounts.clear()
+        currentBaselineCounts.clear()
+        currentHeadChanged.clear()
+        currentHeadFingerprints.clear()
+        currentKeepExisting.clear()
+        existingSigCounts.clear()
+        seenSigCounts.clear()
+
         for (const key of keys) {
+          const matchedCopy =
+            keys.length > 1
+              ? currentSession.copies?.find((c) => c.key === key)
+              : currentSession.copies?.find((c) => c.path === currentSession?.path)
+          const copyPath = matchedCopy?.path ?? currentSession.path ?? ""
+          const headFp = computeTranscriptHeadFingerprint(copyPath)
+          currentHeadFingerprints.set(key, headFp)
+
           const existing = getSession(db, key)
           if (existing) {
             currentExistingCounts.set(key, existing.message_count)
+            const priorCompacted =
+              typeof existing.tail_fingerprint === "string" && existing.tail_fingerprint.startsWith("compacted:")
+                ? Number.parseInt(existing.tail_fingerprint.slice("compacted:".length), 10)
+                : Number.NaN
+            const hasPriorCompacted = Number.isFinite(priorCompacted)
+            const baselineCount = hasPriorCompacted ? priorCompacted : existing.message_count
+            currentBaselineCounts.set(key, baselineCount)
+            const headChanged =
+              existing.head_fingerprint != null
+                ? headFp !== null && headFp !== existing.head_fingerprint
+                : hasCompactionHeadMarker(copyPath)
+            currentHeadChanged.set(key, headChanged)
+            const keepExisting = !options.force && existing.message_count > 0 && (headChanged || hasPriorCompacted)
+            currentKeepExisting.set(key, keepExisting)
+          } else {
+            currentBaselineCounts.set(key, 0)
+            currentHeadChanged.set(key, false)
+            currentKeepExisting.set(key, false)
           }
         }
 
@@ -732,8 +844,28 @@ export async function indexCodexTranscripts(
         }
 
         try {
-          // Delete old rows for this native id inside the transaction by explicit keys list (A1: fully indexed)
-          deleteCodexSessionKeys(db, [`${currentSession.provider ?? "codex"}:${nativeId}`, ...keys])
+          const defaultKey = `${currentSession.provider ?? "codex"}:${nativeId}`
+          const keysToDelete = keys.filter((k) => !currentKeepExisting.get(k))
+          if (keysToDelete.length > 0) {
+            const deleteList = currentKeepExisting.get(defaultKey) ? keysToDelete : [defaultKey, ...keysToDelete]
+            // Delete old rows for this native id inside the transaction by explicit keys list (A1: fully indexed)
+            deleteCodexSessionKeys(db, deleteList)
+          }
+          for (const key of keys) {
+            if (!currentKeepExisting.get(key)) continue
+            const sigMap = new Map<string, number>()
+            const rows = db
+              .prepare(
+                "SELECT type, COALESCE(tool_name, '') AS tool_name, COALESCE(content, '') AS content, timestamp FROM messages WHERE session_id = ?",
+              )
+              .all(key) as Array<{ type: string; tool_name: string; content: string; timestamp: number }>
+            for (const r of rows) {
+              const sig = `${r.type}\0${r.tool_name}\0${r.timestamp}\0${r.content}`
+              sigMap.set(sig, (sigMap.get(sig) ?? 0) + 1)
+            }
+            existingSigCounts.set(key, sigMap)
+            seenSigCounts.set(key, new Map())
+          }
         } catch (err) {
           safeRollback(db)
           inTx = false
@@ -758,25 +890,43 @@ export async function indexCodexTranscripts(
         const createdAtMs = currentSession.createdAt ? new Date(currentSession.createdAt).getTime() : Date.now()
         const rowTimestamp = row.timestamp ? new Date(row.timestamp).getTime() : createdAtMs
 
-        try {
-          insertMessage(
-            db,
-            null,
-            key,
-            row.role,
-            row.text,
-            null,
-            null,
-            rowTimestamp,
-            row.duplicateOf ?? null,
-            row.line ?? null,
-          )
-        } catch (err) {
-          safeRollback(db)
-          inTx = false
-          reject(err)
-          child.kill()
-          return false
+        let shouldInsert = true
+        if (currentKeepExisting.get(key)) {
+          const sig = `${row.role}\0\0${rowTimestamp}\0${row.text ?? ""}`
+          let seenMap = seenSigCounts.get(key)
+          if (!seenMap) {
+            seenMap = new Map()
+            seenSigCounts.set(key, seenMap)
+          }
+          const seen = (seenMap.get(sig) ?? 0) + 1
+          seenMap.set(sig, seen)
+          const existingCount = existingSigCounts.get(key)?.get(sig) ?? 0
+          if (seen <= existingCount) {
+            shouldInsert = false
+          }
+        }
+
+        if (shouldInsert) {
+          try {
+            insertMessage(
+              db,
+              null,
+              key,
+              row.role,
+              row.text,
+              null,
+              null,
+              rowTimestamp,
+              row.duplicateOf ?? null,
+              row.line ?? null,
+            )
+          } catch (err) {
+            safeRollback(db)
+            inTx = false
+            reject(err)
+            child.kill()
+            return false
+          }
         }
 
         currentRowCounts.set(key, (currentRowCounts.get(key) ?? 0) + 1)
@@ -796,25 +946,43 @@ export async function indexCodexTranscripts(
         const toolType = tool.phase === "call" ? "tool_use" : "tool_result"
         const filePaths = tool.phase === "call" ? extractToolFilePathsFromArguments(tool.text) : null
 
-        try {
-          insertMessage(
-            db,
-            null,
-            key,
-            toolType,
-            tool.text,
-            tool.toolName ?? null,
-            filePaths,
-            toolTimestamp,
-            tool.duplicateOf ?? null,
-            tool.line ?? null,
-          )
-        } catch (err) {
-          safeRollback(db)
-          inTx = false
-          reject(err)
-          child.kill()
-          return false
+        let shouldInsert = true
+        if (currentKeepExisting.get(key)) {
+          const sig = `${toolType}\0${tool.toolName ?? ""}\0${toolTimestamp}\0${tool.text ?? ""}`
+          let seenMap = seenSigCounts.get(key)
+          if (!seenMap) {
+            seenMap = new Map()
+            seenSigCounts.set(key, seenMap)
+          }
+          const seen = (seenMap.get(sig) ?? 0) + 1
+          seenMap.set(sig, seen)
+          const existingCount = existingSigCounts.get(key)?.get(sig) ?? 0
+          if (seen <= existingCount) {
+            shouldInsert = false
+          }
+        }
+
+        if (shouldInsert) {
+          try {
+            insertMessage(
+              db,
+              null,
+              key,
+              toolType,
+              tool.text,
+              tool.toolName ?? null,
+              filePaths,
+              toolTimestamp,
+              tool.duplicateOf ?? null,
+              tool.line ?? null,
+            )
+          } catch (err) {
+            safeRollback(db)
+            inTx = false
+            reject(err)
+            child.kill()
+            return false
+          }
         }
 
         // A stored tool event is a message; message_count is the count of stored
@@ -945,16 +1113,19 @@ export async function indexCodexTranscripts(
           }
           batchRetainedSessionIds.push(...keys)
         } else if (status === "complete" || status === "incomplete-tail") {
-          // Check shrink condition (D1)
+          // Check shrink condition (D1): a lower re-read row count on an unchanged head is a projector regression
+          // (or file truncation without compaction) and is refused as shrunk; when the head fingerprint changed
+          // on compaction, existing rows were preserved above and the union is committed.
           let isShrunk = false
           let shrinkOldCount = 0
           let shrinkNewCount = 0
           for (const key of keys) {
-            const oldCount = currentExistingCounts.get(key) ?? 0
+            const baselineCount = currentBaselineCounts.get(key) ?? currentExistingCounts.get(key) ?? 0
             const newCount = currentRowCounts.get(key) ?? 0
-            if (oldCount > newCount && !options.force) {
+            const headChanged = currentHeadChanged.get(key) ?? false
+            if (baselineCount > newCount && !options.force && !headChanged) {
               isShrunk = true
-              shrinkOldCount = oldCount
+              shrinkOldCount = currentExistingCounts.get(key) ?? baselineCount
               shrinkNewCount = newCount
             }
           }
@@ -996,6 +1167,7 @@ export async function indexCodexTranscripts(
                 }
               }
 
+              const headFp = currentHeadFingerprints.get(key) ?? computeTranscriptHeadFingerprint(copyPath)
               updateSessionStatus(db, key, "shrunk", {
                 failureReason: shrinkReason,
                 failureTime: now,
@@ -1005,6 +1177,7 @@ export async function indexCodexTranscripts(
                 mtimeMs: copyMtime,
                 lastEventAtMs: copyLastEvent,
                 jsonlPath: copyPath,
+                headFingerprint: headFp,
               })
             }
             batchRetainedSessionIds.push(...keys)
@@ -1012,7 +1185,15 @@ export async function indexCodexTranscripts(
             try {
               const session = currentSession
               for (const key of keys) {
-                const count = currentRowCounts.get(key) ?? 0
+                const rereadCount = currentRowCounts.get(key) ?? 0
+                const kept = currentKeepExisting.get(key) ?? false
+                const count = kept
+                  ? ((
+                      db.prepare("SELECT COUNT(*) AS c FROM messages WHERE session_id = ?").get(key) as {
+                        c: number
+                      } | null
+                    )?.c ?? rereadCount)
+                  : rereadCount
                 // Stated rule: for ambiguous copies (multiple keys), the copy matching key; for single key, the copy matching session.path
                 const matchedCopy =
                   keys.length > 1
@@ -1022,6 +1203,8 @@ export async function indexCodexTranscripts(
                 const copySize = matchedCopy?.sizeBytes ?? session.sizeBytes
                 const copyMtime = matchedCopy?.mtimeMs ?? session.mtimeMs ?? Date.now()
                 const copyLastEvent = matchedCopy?.lastEventAtMs ?? session.lastEventAtMs ?? null
+                const headFp = currentHeadFingerprints.get(key) ?? computeTranscriptHeadFingerprint(copyPath)
+                const tailFp = kept ? `compacted:${rereadCount}` : null
 
                 upsertSession(db, key, session.cwd || "", copyPath, createdAtMs, copyMtime, count, null, {
                   status: status,
@@ -1029,6 +1212,8 @@ export async function indexCodexTranscripts(
                   mtimeMs: copyMtime,
                   lastEventAtMs: copyLastEvent,
                   cwd: session.cwd || null,
+                  headFingerprint: headFp,
+                  tailFingerprint: tailFp,
                 })
               }
 

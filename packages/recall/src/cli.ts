@@ -100,7 +100,7 @@ program
 program
   .command("search", { hidden: true })
   .description("Search and synthesize session history")
-  .argument("<query>", "Search query")
+  .argument("[query]", "Search query")
   .option("--raw", "Skip LLM synthesis, show raw FTS5 snippets")
   .option("--json", "JSON output")
   .option("-s, --since <time>", "Lower bound: Nh, Nd, Nw, today, yesterday, all or explicit-zone ISO (default: 30d)")
@@ -128,7 +128,7 @@ program
     "Compatibility flag: skip freshness classification; index provenance is unknown and search exits 3",
   )
   .actionMerged(async (opts) => {
-    const searchOpts = opts as unknown as SearchOptions & { query: string }
+    const searchOpts = opts as unknown as SearchOptions & { query?: string }
     await cmdSearch(searchOpts.query, searchOpts)
   })
 

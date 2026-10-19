@@ -262,7 +262,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   }
 
   // No query and no filters → show help
-  if (!query && !question && !response && !tool && !since) {
+  if (!query && !question && !response && !tool && !since && !session) {
     console.error("Usage: recall <query> [options]")
     console.error("Run `recall --help` for all options.")
     process.exit(1)
@@ -893,17 +893,62 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   }
   const db = getDb()
 
+  let resolvedSession = session
+  if (session !== undefined) {
+    const exactRow = db.prepare(assertSingleStatement("SELECT id FROM sessions WHERE id = ? LIMIT 1")).get(session) as
+      | { id: string }
+      | undefined
+    if (!exactRow && !session.includes(":")) {
+      const candidateRows = db
+        .prepare(
+          assertSingleStatement(
+            "SELECT id FROM sessions WHERE id IN (?, ?, ?) OR id LIKE ? OR id LIKE ? OR id LIKE ? OR id LIKE ? ORDER BY updated_at DESC",
+          ),
+        )
+        .all(
+          `codex:${session}`,
+          `grok:${session}`,
+          `agy:${session}`,
+          `codex:${session}%`,
+          `grok:${session}%`,
+          `agy:${session}%`,
+          `${session}%`,
+        ) as Array<{ id: string }>
+      const uniqueIds = Array.from(new Set(candidateRows.map((r) => r.id)))
+      if (uniqueIds.length === 1) {
+        resolvedSession = uniqueIds[0]
+      } else if (uniqueIds.length > 1) {
+        console.error(
+          `recall: ambiguous --session ${session} in ${db.filename} (matching ${searchDesc.join(" ")}); ` +
+            `pass the required <provider>:<uuid> form: ${uniqueIds.join(", ")}`,
+        )
+        process.exitCode = 1
+        closeDb()
+        return
+      } else {
+        console.error(
+          `recall: session ${session} not found in ${db.filename} (searched ${searchDesc.join(" ")}); ` +
+            `provider sessions require the <provider>:<uuid> form (e.g. codex:${session})`,
+        )
+        process.exitCode = 1
+        closeDb()
+        return
+      }
+    }
+  }
+
   // Determine which sources to search
   const searchMessages = !types || types.includes("message")
   const contentTypes = types?.filter((t) => t !== "message") as ContentType[] | undefined
   // Content rows have no message role, including when both roles are selected.
   const searchContent =
-    session === undefined && !question && !response && (!types || (contentTypes && contentTypes.length > 0))
+    resolvedSession === undefined && !question && !response && (!types || (contentTypes && contentTypes.length > 0))
   // Project source types are persistent knowledge and ignore the raw time filter.
   const projectSourceTypes = new Set(["bead", "session_memory", "project_memory", "doc", "claude_md"])
   const contentSinceTime = contentTypes?.every((t) => projectSourceTypes.has(t)) ? undefined : sinceTime
   // A vault row cannot honor message role/tool/session or Recall content-type filters.
-  const vaultFilterActive = question || response || tool !== undefined || session !== undefined || include !== undefined
+  const vaultFilterActive =
+    question || response || tool !== undefined || resolvedSession !== undefined || include !== undefined
 
   // Build search options
   const messageOpts: MessageSearchOptions & { mode?: "exact" } = {
@@ -912,7 +957,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     untilTime,
     messageType,
     toolName: tool,
-    session: session === undefined ? undefined : { id: session, scope: "exact" },
+    session: resolvedSession === undefined ? undefined : { id: resolvedSession, scope: "exact" },
   }
 
   if (project) {
@@ -961,35 +1006,38 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     }
   } else if (searchMessages && !query) {
     const recentQuery = `
-      SELECT m.*, s.project_path, s.cwd,
-             (SELECT d.line FROM messages d WHERE d.session_id = m.session_id AND d.duplicate_of = m.line LIMIT 1) as duplicate_line,
+      SELECT top.*,
+             (SELECT d.line FROM messages d WHERE d.session_id = top.session_id AND d.duplicate_of = top.line LIMIT 1) as duplicate_line,
              '' as snippet, 0 as rank
-      FROM messages m
-      JOIN sessions s ON m.session_id = s.id
-      WHERE 1=1
-      AND (m.duplicate_of IS NULL)
-      AND (m.uuid IS NULL OR m.id = (
-        SELECT m2.id FROM messages m2
-        JOIN sessions s2 ON m2.session_id = s2.id
-        WHERE m2.uuid = m.uuid
-        ORDER BY CASE WHEN s2.parent_session_id IS NULL THEN 0 ELSE 1 END, m2.id ASC
-        LIMIT 1
-      ))
-      ${sinceTime !== undefined ? "AND m.timestamp >= ?" : ""}
-      ${untilTime === undefined ? "" : "AND m.timestamp <= ?"}
-      ${messageType ? "AND m.type = ?" : ""}
-      ${tool ? "AND m.tool_name = ?" : ""}
-      ${session ? "AND m.session_id = ?" : ""}
-      ${project ? "AND s.cwd LIKE ?" : ""}
-      ORDER BY m.timestamp DESC
-      LIMIT ?
+      FROM (
+        SELECT m.*, s.project_path, s.cwd
+        FROM messages m
+        JOIN sessions s ON m.session_id = s.id
+        WHERE 1=1
+        AND (m.duplicate_of IS NULL)
+        AND (m.uuid IS NULL OR m.id = (
+          SELECT m2.id FROM messages m2
+          JOIN sessions s2 ON m2.session_id = s2.id
+          WHERE m2.uuid = m.uuid
+          ORDER BY CASE WHEN s2.parent_session_id IS NULL THEN 0 ELSE 1 END, m2.id ASC
+          LIMIT 1
+        ))
+        ${sinceTime !== undefined ? "AND m.timestamp >= ?" : ""}
+        ${untilTime === undefined ? "" : "AND m.timestamp <= ?"}
+        ${messageType ? "AND m.type = ?" : ""}
+        ${tool ? "AND m.tool_name = ?" : ""}
+        ${resolvedSession ? "AND m.session_id = ?" : ""}
+        ${project ? "AND s.cwd LIKE ?" : ""}
+        ORDER BY m.timestamp DESC
+        LIMIT ?
+      ) top
     `
     const params: (string | number)[] = []
     if (sinceTime !== undefined) params.push(sinceTime)
     if (untilTime !== undefined) params.push(untilTime)
     if (messageType) params.push(messageType)
     if (tool) params.push(tool)
-    if (session) params.push(session)
+    if (resolvedSession) params.push(resolvedSession)
     if (project) params.push(`%${project.replace(/\*/g, "")}%`)
     params.push(limit)
 
@@ -1002,9 +1050,9 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     messageResults = { results, total: results.length }
   }
 
-  if (session !== undefined && messageResults.total === 0) {
+  if (resolvedSession !== undefined && messageResults.total === 0) {
     console.error(
-      `recall: session ${session} has no indexed messages matching ${searchDesc.join(" ")} in ${db.filename}; ` +
+      `recall: session ${resolvedSession} has no indexed messages matching ${searchDesc.join(" ")} in ${db.filename}; ` +
         `non-session content and vault rows were excluded; this process's live, not-yet-indexed session was not searched`,
     )
     process.exitCode = 1

@@ -3385,4 +3385,422 @@ if (args.includes("list")) {
       }
     })
   })
+
+  describe("Bead 30356: Compacted codex sessions, projector regression guard, and codex session resolution", () => {
+    test("Acceptance 1: compacted session whose head fingerprint changed and row count fell keeps existing rows, indexes new tail, and records union message_count", async () => {
+      const codexHome = join(tempDir, "codex-compact-union-home")
+      const sessionDir = join(codexHome, ".codex/sessions/2026/10/19")
+      mkdirSync(sessionDir, { recursive: true })
+      const rolloutPath = join(sessionDir, "rollout-2026-10-19T12-00-00-01a10a6e-41fe-7112-a4dc-1c92c38f1841.jsonl")
+
+      // Pre-compaction: 4 rows
+      const v1Lines = [
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "01a10a6e-41fe-7112-a4dc-1c92c38f1841",
+            cwd: "/hh/dev-wt12",
+            timestamp: "2026-10-16T22:00:00.000Z",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-10-16T22:01:00.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "Pre-compaction message 1" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-10-16T22:02:00.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "Pre-compaction message 2" }],
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-10-16T22:03:00.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "Pre-compaction message 3" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-10-16T22:04:00.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "Shared message 4 before and after compaction" }],
+          },
+        }),
+      ]
+      writeFileSync(rolloutPath, v1Lines.join("\n") + "\n", "utf8")
+
+      const fixtureAg = makeFixtureProducer(codexHome)
+      await rebuildIndex(db, { full: true, agBin: fixtureAg })
+
+      const initialSess = getSession(db, "codex:01a10a6e-41fe-7112-a4dc-1c92c38f1841")
+      expect(initialSess?.status).toBe("complete")
+      expect(initialSess?.message_count).toBe(4)
+      expect(initialSess?.head_fingerprint).toBeTruthy()
+
+      // Post-compaction: line 1 is identical session_meta, line 2 is {"type":"compacted",...},
+      // followed by 1 overlapping row (message 4) and 1 new tail row (message 5) -> 2 exported rows (< 4).
+      const v2Lines = [
+        v1Lines[0] ?? "",
+        JSON.stringify({
+          timestamp: "2026-10-17T23:59:00.000Z",
+          type: "compacted",
+          payload: { message: "", replacement_history: [] },
+        }),
+        v1Lines[4] ?? "",
+        JSON.stringify({
+          timestamp: "2026-10-19T21:15:00.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "Post-compaction tail message 5" },
+        }),
+      ]
+      writeFileSync(rolloutPath, v2Lines.join("\n") + "\n", "utf8")
+      const later = new Date(Date.now() + 5000)
+      utimesSync(rolloutPath, later, later)
+
+      await rebuildIndex(db, { incremental: true, agBin: fixtureAg })
+
+      const compactedSess = getSession(db, "codex:01a10a6e-41fe-7112-a4dc-1c92c38f1841")
+      expect(compactedSess?.status).toBe("complete")
+      expect(compactedSess?.message_count).toBe(5)
+
+      const storedMessages = db
+        .prepare("SELECT content FROM messages WHERE session_id = ? ORDER BY timestamp ASC, id ASC")
+        .all("codex:01a10a6e-41fe-7112-a4dc-1c92c38f1841") as Array<{ content: string }>
+      expect(storedMessages.map((m) => m.content)).toEqual([
+        "Pre-compaction message 1",
+        "Pre-compaction message 2",
+        "Pre-compaction message 3",
+        "Shared message 4 before and after compaction",
+        "Post-compaction tail message 5",
+      ])
+    })
+
+    test("Acceptance 1b: legacy shrunk session with null head_fingerprint and compacted file recovers on incremental run", async () => {
+      const codexHome = join(tempDir, "codex-legacy-shrunk-home")
+      const sessionDir = join(codexHome, ".codex/sessions/2026/10/19")
+      mkdirSync(sessionDir, { recursive: true })
+      const rolloutPath = join(sessionDir, "rollout-2026-10-19T12-00-00-01a10a6e-legacy.jsonl")
+
+      const compactedLines = [
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "01a10a6e-legacy", cwd: "/hh", timestamp: "2026-10-16T22:00:00.000Z" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-10-17T23:59:00.000Z",
+          type: "compacted",
+          payload: { message: "", replacement_history: [] },
+        }),
+        JSON.stringify({
+          timestamp: "2026-10-19T21:20:00.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "Fresh tail row after compaction" },
+        }),
+      ]
+      writeFileSync(rolloutPath, compactedLines.join("\n") + "\n", "utf8")
+      const st = statSync(rolloutPath)
+
+      // Seed legacy shrunk state with head_fingerprint = null and matching size_bytes/mtime_ms
+      upsertSession(
+        db,
+        "codex:01a10a6e-legacy",
+        "/hh",
+        rolloutPath,
+        Date.parse("2026-10-16T22:00:00.000Z"),
+        Math.floor(st.mtimeMs),
+        2,
+        null,
+        {
+          status: "shrunk",
+          sizeBytes: st.size,
+          mtimeMs: Math.floor(st.mtimeMs),
+          lastEventAtMs: Date.parse("2026-10-19T21:20:00.000Z"),
+          failureReason: "shrunk: prior count 2 > new count 1",
+          shrinkOldCount: 2,
+          shrinkNewCount: 1,
+          headFingerprint: null,
+        },
+      )
+      insertMessage(db, null, "codex:01a10a6e-legacy", "user", "Old row A", null, null, 1000)
+      insertMessage(db, null, "codex:01a10a6e-legacy", "assistant", "Old row B", null, null, 2000)
+
+      const fixtureAg = makeFixtureProducer(codexHome)
+      await rebuildIndex(db, { incremental: true, agBin: fixtureAg })
+
+      const recovered = getSession(db, "codex:01a10a6e-legacy")
+      expect(recovered?.status).toBe("complete")
+      expect(recovered?.message_count).toBe(3)
+      expect(recovered?.head_fingerprint).toBeTruthy()
+    })
+
+    test("Acceptance 2: projector regression on an unchanged file is still refused as shrunk", async () => {
+      const codexHome = join(tempDir, "codex-projector-regression-home")
+      const sessionDir = join(codexHome, ".codex/sessions/2026/10/19")
+      mkdirSync(sessionDir, { recursive: true })
+      const rolloutPath = join(sessionDir, "rollout-2026-10-19T12-00-00-01a10a6e-proj-reg.jsonl")
+
+      const lines = [
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "01a10a6e-proj-reg", cwd: "/hh", timestamp: "2026-10-19T12:00:00.000Z" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-10-19T12:01:00.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "Row 1" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-10-19T12:02:00.000Z",
+          type: "response_item",
+          payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Row 2" }] },
+        }),
+        JSON.stringify({
+          timestamp: "2026-10-19T12:03:00.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "Row 3" },
+        }),
+      ]
+      writeFileSync(rolloutPath, lines.join("\n") + "\n", "utf8")
+
+      const goodProjector = makeFixtureProducer(codexHome)
+      await rebuildIndex(db, { full: true, agBin: goodProjector })
+
+      const initial = getSession(db, "codex:01a10a6e-proj-reg")
+      expect(initial?.status).toBe("complete")
+      expect(initial?.message_count).toBe(3)
+
+      // File bytes on disk are UNCHANGED; a regressed projector drops rows 2 and 3.
+      const st = statSync(rolloutPath)
+      const regressedProjector = makeMockAg(`
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "01a10a6e-proj-reg",
+    sessionKey: "codex:01a10a6e-proj-reg",
+    canonicalPath: ${JSON.stringify(rolloutPath)},
+    sizeBytes: ${st.size},
+    mtimeMs: ${Math.floor(st.mtimeMs) + 1000},
+    status: "canonical",
+    copies: [{ path: ${JSON.stringify(rolloutPath)}, sizeBytes: ${st.size}, mtimeMs: ${Math.floor(st.mtimeMs) + 1000}, decision: "canonical", key: "codex:01a10a6e-proj-reg" }]
+  }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0 }))
+} else if (process.argv.includes("export")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "01a10a6e-proj-reg",
+    sessionKey: "codex:01a10a6e-proj-reg",
+    path: ${JSON.stringify(rolloutPath)},
+    cwd: "/hh",
+    createdAt: "2026-10-19T12:00:00.000Z",
+    sizeBytes: ${st.size},
+    mtimeMs: ${Math.floor(st.mtimeMs) + 1000},
+    status: "canonical"
+  }))
+  console.log(JSON.stringify({
+    kind: "row",
+    sessionKey: "codex:01a10a6e-proj-reg",
+    role: "user",
+    text: "Row 1",
+    timestamp: "2026-10-19T12:01:00.000Z",
+    line: 2
+  }))
+  console.log(JSON.stringify({ kind: "end", sessionKey: "codex:01a10a6e-proj-reg", nativeId: "01a10a6e-proj-reg", status: "complete" }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0, unreadable: 0, errors: 0 }))
+}
+`)
+
+      await rebuildIndex(db, { full: true, agBin: regressedProjector })
+
+      const afterReg = getSession(db, "codex:01a10a6e-proj-reg")
+      expect(afterReg?.status).toBe("shrunk")
+      expect(afterReg?.message_count).toBe(3)
+      expect(afterReg?.shrink_old_count).toBe(3)
+      expect(afterReg?.shrink_new_count).toBe(1)
+    })
+
+    test("Acceptance 3: recall sessions <codex-uuid> resolves through codex/adapter roots", async () => {
+      const { cmdSessions } = await import("../../src/lib/sessions.ts")
+      const fakeHome = join(tempDir, "fake-sessions-home")
+      const adapterSessionDir = join(
+        fakeHome,
+        ".config",
+        "ag",
+        "profiles",
+        "codex",
+        "acct1",
+        "sessions",
+        "2026",
+        "10",
+        "19",
+      )
+      mkdirSync(adapterSessionDir, { recursive: true })
+      const rolloutPath = join(
+        adapterSessionDir,
+        "rollout-2026-10-19T12-00-00-01a10a6e-41fe-7112-a4dc-1c92c38f1841.jsonl",
+      )
+      writeFileSync(
+        rolloutPath,
+        [
+          JSON.stringify({
+            type: "session_meta",
+            timestamp: "2026-10-19T12:00:00.000Z",
+            payload: {
+              id: "01a10a6e-41fe-7112-a4dc-1c92c38f1841",
+              cwd: "/hh/dev-wt12",
+              timestamp: "2026-10-19T12:00:00.000Z",
+            },
+          }),
+          JSON.stringify({
+            timestamp: "2026-10-19T12:01:00.000Z",
+            type: "event_msg",
+            payload: { type: "user_message", message: "Hello codex session" },
+          }),
+          JSON.stringify({
+            timestamp: "2026-10-19T12:02:00.000Z",
+            type: "response_item",
+            payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Ack from codex" }] },
+          }),
+        ].join("\n") + "\n",
+        "utf8",
+      )
+
+      const prevHome = process.env.HOME
+      const prevDbPath = process.env.RECALL_DB_PATH
+      const logLines: string[] = []
+      const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+        logLines.push(args.join(" "))
+      })
+      try {
+        process.env.HOME = fakeHome
+        const isolatedDbPath = join(tempDir, "sessions-cmd.db")
+        const isolatedDb = new Database(isolatedDbPath)
+        initSchema(isolatedDb)
+        isolatedDb.close()
+        process.env.RECALL_DB_PATH = isolatedDbPath
+        closeDb()
+
+        await cmdSessions("01a10a6e-41fe-7112-a4dc-1c92c38f1841")
+        const out = logLines.join("\n")
+        expect(out).toContain("01a10a6e-41fe-7112-a4dc-1c92c38f1841")
+        expect(out).toContain("/hh/dev-wt12")
+        expect(out).toContain("Messages:      2")
+      } finally {
+        logSpy.mockRestore()
+        closeDb()
+        if (prevHome === undefined) delete process.env.HOME
+        else process.env.HOME = prevHome
+        if (prevDbPath === undefined) delete process.env.RECALL_DB_PATH
+        else process.env.RECALL_DB_PATH = prevDbPath
+      }
+    })
+
+    test("Acceptance 4: recall --session <bare-uuid> resolves unique codex:<uuid> or refuses naming the required form", async () => {
+      const { cmdSearch } = await import("../../src/lib/search.ts")
+      const { setIndexMeta } = await import("../../src/history/db.ts")
+      const prevDbPath = process.env.RECALL_DB_PATH
+      const prevExitCode = process.exitCode
+      const isolatedDbPath = join(tempDir, "search-bare-session.db")
+
+      const logLines: string[] = []
+      const errLines: string[] = []
+      const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => logLines.push(args.join(" ")))
+      const errSpy = vi.spyOn(console, "error").mockImplementation((...args) => errLines.push(args.join(" ")))
+
+      try {
+        closeDb()
+        process.env.RECALL_DB_PATH = isolatedDbPath
+        const sdb = new Database(isolatedDbPath)
+        initSchema(sdb)
+        setIndexMeta(sdb, "last_rebuild", new Date().toISOString())
+        const now = Date.now()
+        upsertSession(
+          sdb,
+          "codex:01a10a6e-41fe-7112-a4dc-1c92c38f1841",
+          "/hh",
+          "/tmp/rollout-01a10a6e.jsonl",
+          now - 10_000,
+          now,
+          1,
+          "Chief codex session",
+          { status: "complete", cwd: "/hh" },
+        )
+        insertMessage(
+          sdb,
+          null,
+          "codex:01a10a6e-41fe-7112-a4dc-1c92c38f1841",
+          "assistant",
+          "uniquecompactedtailtoken from codex session",
+          null,
+          null,
+          now,
+        )
+        sdb.close()
+
+        // 1. Unique bare UUID resolves to codex:<uuid> and returns the row
+        process.exitCode = 0
+        await cmdSearch("uniquecompactedtailtoken", {
+          raw: true,
+          json: true,
+          session: "01a10a6e-41fe-7112-a4dc-1c92c38f1841",
+        })
+        expect(process.exitCode).toBe(0)
+        const payload = JSON.parse(logLines.join("\n")) as { total: number; results: Array<{ sourceId: string }> }
+        expect(payload.total).toBe(1)
+        expect(payload.results[0]?.sourceId).toBe("codex:01a10a6e-41fe-7112-a4dc-1c92c38f1841")
+
+        // 2. Colliding provider sessions with same bare UUID refuse naming the required <provider>:<uuid> form
+        const sdb2 = new Database(isolatedDbPath)
+        upsertSession(
+          sdb2,
+          "grok:01a10a6e-41fe-7112-a4dc-1c92c38f1841",
+          "/hh",
+          "/tmp/grok-01a10a6e.jsonl",
+          now - 10_000,
+          now,
+          1,
+          "Colliding grok session",
+          { status: "complete", cwd: "/hh" },
+        )
+        insertMessage(
+          sdb2,
+          null,
+          "grok:01a10a6e-41fe-7112-a4dc-1c92c38f1841",
+          "assistant",
+          "uniquecompactedtailtoken from grok session",
+          null,
+          null,
+          now,
+        )
+        sdb2.close()
+
+        logLines.length = 0
+        errLines.length = 0
+        process.exitCode = 0
+        await cmdSearch("uniquecompactedtailtoken", {
+          raw: true,
+          json: true,
+          session: "01a10a6e-41fe-7112-a4dc-1c92c38f1841",
+        })
+        expect(process.exitCode).toBe(1)
+        expect(errLines.join("\n")).toContain("codex:01a10a6e-41fe-7112-a4dc-1c92c38f1841")
+        expect(errLines.join("\n")).not.toContain("has no indexed messages")
+      } finally {
+        logSpy.mockRestore()
+        errSpy.mockRestore()
+        closeDb()
+        process.exitCode = prevExitCode
+        if (prevDbPath === undefined) delete process.env.RECALL_DB_PATH
+        else process.env.RECALL_DB_PATH = prevDbPath
+      }
+    })
+  })
 })

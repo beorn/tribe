@@ -275,8 +275,9 @@ export function discoverActiveSession(opts: DiscoverOptions): SessionDiscoveryRe
       candidateCount += inspected
       matched.push(...m)
       if (cwdMismatch > 0) exclusions.push(`${root.kind}: ${cwdMismatch} session(s) excluded — cwd mismatch`)
-      if (stale > 0)
+      if (stale > 0) {
         exclusions.push(`${root.kind}: ${stale} session(s) skipped — not modified in ${fmtDur(scanWindowMs)}`)
+      }
     }
   }
 
@@ -323,6 +324,108 @@ export function discoverActiveSession(opts: DiscoverOptions): SessionDiscoveryRe
   }
 
   return { candidate: chosen, diagnostics }
+}
+
+/**
+ * Resolve a session transcript file by session ID, prefix, or `<provider>:<id>`
+ * across all enumerated Claude and Codex/adapter transcript roots, returning
+ * the freshest matching copy when multiple copies exist.
+ */
+export function findSessionTranscriptById(
+  sessionIdOrFile: string,
+  homeDir = process.env.HOME || os.homedir(),
+): { path: string; sessionId: string; format: SessionFormat; cwd: string | null } | null {
+  const bareTarget = sessionIdOrFile.replace(/^(codex|grok|agy|claude):/, "")
+  if (!bareTarget) return null
+  const { roots } = enumerateRoots(homeDir)
+  const matches: Array<{
+    path: string
+    sessionId: string
+    format: SessionFormat
+    cwd: string | null
+    mtimeMs: number
+  }> = []
+  const seenReal = new Set<string>()
+
+  for (const root of roots) {
+    if (!fs.existsSync(root.dir)) continue
+    const real = realpathOrNull(root.dir)
+    if (real !== null) {
+      if (seenReal.has(real)) continue
+      seenReal.add(real)
+    }
+
+    if (root.format === "claude") {
+      for (const slug of listSubdirs(root.dir)) {
+        const projectDir = path.join(root.dir, slug)
+        let entries: fs.Dirent[]
+        try {
+          entries = fs.readdirSync(projectDir, { withFileTypes: true })
+        } catch {
+          // silent-fallback-allow: unreadable project subdir contributes no matches.
+          continue
+        }
+        for (const e of entries) {
+          if (!e.isFile() || !e.name.endsWith(".jsonl")) continue
+          const base = path.basename(e.name, ".jsonl")
+          const full = path.join(projectDir, e.name)
+          if (base.startsWith(bareTarget) || full.includes(bareTarget)) {
+            try {
+              const st = fs.statSync(full)
+              matches.push({
+                path: full,
+                sessionId: base,
+                format: "claude",
+                cwd: null,
+                mtimeMs: st.mtimeMs,
+              })
+            } catch {
+              // silent-fallback-allow: vanished file skipped.
+            }
+          }
+        }
+      }
+    } else {
+      for (const y of listSubdirs(root.dir).sort().reverse()) {
+        const yDir = path.join(root.dir, y)
+        for (const m of listSubdirs(yDir).sort().reverse()) {
+          const mDir = path.join(yDir, m)
+          for (const d of listSubdirs(mDir).sort().reverse()) {
+            const dDir = path.join(mDir, d)
+            let entries: fs.Dirent[]
+            try {
+              entries = fs.readdirSync(dDir, { withFileTypes: true })
+            } catch {
+              // silent-fallback-allow: unreadable date subdir contributes no matches.
+              continue
+            }
+            for (const e of entries) {
+              if (!e.isFile() || !e.name.endsWith(".jsonl")) continue
+              const full = path.join(dDir, e.name)
+              if (!e.name.includes(bareTarget) && !full.includes(bareTarget)) continue
+              try {
+                const st = fs.statSync(full)
+                const meta = readCodexSessionMeta(full)
+                matches.push({
+                  path: full,
+                  sessionId: meta?.id ?? path.basename(e.name, ".jsonl"),
+                  format: "codex",
+                  cwd: meta?.cwd ?? null,
+                  mtimeMs: st.mtimeMs,
+                })
+              } catch {
+                // silent-fallback-allow: vanished file skipped.
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  matches.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  const best = matches[0]
+  return best ? { path: best.path, sessionId: best.sessionId, format: best.format, cwd: best.cwd } : null
 }
 
 /** Render discovery diagnostics as a compact, human-readable block. */

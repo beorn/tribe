@@ -2,13 +2,15 @@
  * Session list, show, and index commands.
  */
 
+import { assertSingleStatement } from "@bearly/sqlite"
 import * as path from "path"
 import * as fs from "fs"
 import * as readline from "readline"
-import { getDb, closeDb, PROJECTS_DIR, getAllSessionTitles, getSessionTitle } from "../history/db"
+import { getDb, closeDb, PROJECTS_DIR, getAllSessionTitles, getSessionTitle, getSession } from "../history/db"
 import { rebuildIndex, findSessionFiles } from "../history/indexer"
 import type { JsonlRecord } from "../history/types"
 import { THIRTY_DAYS_MS, formatBytes, displayProjectPath, matchProjectGlob } from "./format"
+import { findSessionTranscriptById } from "./session-discovery"
 import * as os from "os"
 import { acquireIndexWriter, IndexWriterBusyError } from "../history/db.ts"
 
@@ -236,27 +238,67 @@ export async function cmdSessions(id?: string, opts?: { project?: string }): Pro
 // ============================================================================
 
 async function showSession(sessionIdOrFile: string): Promise<void> {
+  const bareTarget = sessionIdOrFile.replace(/^(codex|grok|agy|claude):/, "")
   let sessionFile: string | undefined
+  let discoveredMeta: { sessionId: string; format: "claude" | "codex"; cwd: string | null } | undefined
 
   for await (const file of findSessionFiles()) {
     const basename = path.basename(file, ".jsonl")
-    if (basename.startsWith(sessionIdOrFile) || file.includes(sessionIdOrFile)) {
+    if (basename.startsWith(bareTarget) || file.includes(bareTarget)) {
       sessionFile = file
       break
     }
   }
 
   if (!sessionFile) {
+    const found = findSessionTranscriptById(sessionIdOrFile)
+    if (found) {
+      sessionFile = found.path
+      discoveredMeta = { sessionId: found.sessionId, format: found.format, cwd: found.cwd }
+    }
+  }
+
+  const db = getDb()
+  if (!sessionFile) {
+    const dbRow = db
+      .prepare(
+        assertSingleStatement(
+          "SELECT id, jsonl_path, cwd, project_path FROM sessions WHERE id = ? OR id = ? OR id LIKE ? OR id LIKE ? ORDER BY updated_at DESC LIMIT 1",
+        ),
+      )
+      .get(sessionIdOrFile, `codex:${bareTarget}`, `codex:${bareTarget}%`, `${bareTarget}%`) as
+      | { id: string; jsonl_path: string; cwd: string | null; project_path: string }
+      | undefined
+    if (dbRow?.jsonl_path && fs.existsSync(dbRow.jsonl_path)) {
+      sessionFile = dbRow.jsonl_path
+      discoveredMeta = {
+        sessionId: dbRow.id.replace(/^(codex|grok|agy|claude):/, ""),
+        format: dbRow.id.startsWith("codex:") ? "codex" : "claude",
+        cwd: dbRow.cwd || dbRow.project_path || null,
+      }
+    }
+  }
+
+  if (!sessionFile) {
+    closeDb()
     console.error(`Session not found: ${sessionIdOrFile}`)
     process.exit(1)
   }
 
-  console.log(`Session: ${path.relative(PROJECTS_DIR, sessionFile)}\n`)
+  const homeDir = process.env.HOME || os.homedir()
+  const displayFile = sessionFile.startsWith(PROJECTS_DIR + path.sep)
+    ? path.relative(PROJECTS_DIR, sessionFile)
+    : sessionFile.startsWith(homeDir)
+      ? "~" + sessionFile.slice(homeDir.length)
+      : sessionFile
+  console.log(`Session: ${displayFile}\n`)
 
   const stats = fs.statSync(sessionFile)
   const relativePath = path.relative(PROJECTS_DIR, sessionFile)
-  const project = relativePath.split(path.sep)[0] || "unknown"
-  const sessionId = path.basename(sessionFile, ".jsonl")
+  let project = sessionFile.startsWith(PROJECTS_DIR + path.sep)
+    ? relativePath.split(path.sep)[0] || "unknown"
+    : discoveredMeta?.cwd || "unknown"
+  let sessionId = discoveredMeta?.sessionId ?? path.basename(sessionFile, ".jsonl")
 
   let messageCount = 0
   let firstTimestamp: string | undefined
@@ -271,23 +313,46 @@ async function showSession(sessionIdOrFile: string): Promise<void> {
   for await (const line of rl) {
     if (!line.trim()) continue
     try {
-      const record = JSON.parse(line) as JsonlRecord
-      if (record.timestamp) {
-        if (!firstTimestamp) firstTimestamp = record.timestamp
-        lastTimestamp = record.timestamp
+      const record = JSON.parse(line) as JsonlRecord & {
+        payload?: { id?: string; cwd?: string; timestamp?: string; type?: string; role?: string }
       }
-      if (record.type === "assistant" || record.type === "user") messageCount++
+      const ts = record.timestamp ?? record.payload?.timestamp
+      if (ts) {
+        if (!firstTimestamp) firstTimestamp = ts
+        lastTimestamp = ts
+      }
+      if (record.type === "session_meta" && record.payload) {
+        if (typeof record.payload.id === "string") sessionId = record.payload.id
+        if (typeof record.payload.cwd === "string") project = record.payload.cwd
+      } else if (record.type === "assistant" || record.type === "user") {
+        messageCount++
+      } else if (
+        record.type === "response_item" &&
+        record.payload?.type === "message" &&
+        (record.payload?.role === "user" || record.payload?.role === "assistant")
+      ) {
+        messageCount++
+      } else if (
+        record.type === "event_msg" &&
+        (record.payload?.type === "user_message" || record.payload?.type === "agent_message")
+      ) {
+        messageCount++
+      }
     } catch {
       // Skip malformed lines
     }
   }
 
-  const db = getDb()
-  const title = getSessionTitle(db, sessionId)
+  const storedSession = getSession(db, sessionId) ?? getSession(db, `codex:${sessionId}`)
+  if (storedSession && storedSession.message_count > messageCount) {
+    messageCount = storedSession.message_count
+  }
+  const title = getSessionTitle(db, sessionId) ?? getSessionTitle(db, `codex:${sessionId}`)
+  const projectDisplay = project.startsWith("/") ? project : displayProjectPath(project)
 
   console.log(`Session ID:    ${sessionId}`)
   if (title) console.log(`Title:         ${title}`)
-  console.log(`Project:       ${displayProjectPath(project)}`)
+  console.log(`Project:       ${projectDisplay}`)
   console.log(`Size:          ${formatBytes(stats.size)}`)
   console.log(`Messages:      ${messageCount}`)
   if (firstTimestamp) {
