@@ -4,6 +4,13 @@
 
 ### Changed
 
+- **A deadline with actionable attention that arrived during the wait settles `woken`, not `timeout` (30414).**
+  `inbox.wait` reports `status: "woken"` with `woken_by` naming the newest retained `actionable_unread` row whose
+  sequence is past the wait baseline (a direct response wakes nothing live unless correlated, yet it is
+  attention). A fresh logical wait's baseline now also covers the attention present at its start, so attention
+  that predates the wait keeps `timeout` with the rows listed and never manufactures a wake. Recurrence of 22378;
+  callers that already act on `unread_count > 0` are unaffected.
+
 - Health RPC `growth_7d.estimated_bytes` is now `null` with an
   `estimated_bytes_not_collected` reason unless `TRIBE_HEALTH_DB_GROWTH_WARN_BYTES`
   is valid. Row counts remain measured; invalid settings also produce a warning.
