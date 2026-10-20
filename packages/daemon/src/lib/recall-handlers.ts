@@ -590,7 +590,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
           `summary attempt recorded pid=${row.claude_pid} model=${summary.model}${summary.error ? ` error=${summary.error}` : ""}`,
         )
       } catch (err) {
-        log.error(
+        log.error?.(
           `${opts.dbPath}: summary refresh or receipt storage failed for session ${row.session_id}, pid=${row.claude_pid}: ${err instanceof Error ? err.message : String(err)}`,
         )
       }
