@@ -145,6 +145,51 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     ).map((row) => JSON.parse(row.content) as Record<string, unknown>)
   }
 
+  // 30319: the full pending receipt fact preserves both tiers, both kinds and Hab's zero fallback.
+  // Health's request-only, missing-original behavior must remain independent.
+  it.each(
+    ["request", "incident"].flatMap((kind) =>
+      ["hot", "archived", "missing"].flatMap((original) =>
+        ["hot", "archived"].map((receipt) => ({ kind, original, receipt })),
+      ),
+    ),
+  )("full pending receipt: $kind original=$original receipt=$receipt", ({ kind, original, receipt }) => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      const ctx = makeContext(db, stmts, "@agent/9")
+      if (original !== "missing") insertBallMessage(stmts, { id: "subject", openedAt: now - 10_000 })
+      const archive = (id: string) => {
+        db.prepare(`INSERT INTO messages_archive (seq,id,type,sender,recipient,kind,content,ref,ts,archived_at)
+          SELECT rowid,id,type,sender,recipient,kind,content,ref,ts,? FROM messages WHERE id=?`).run(now, id)
+        db.prepare("DELETE FROM messages WHERE id=?").run(id)
+      }
+      if (original === "archived") archive("subject-msg")
+      openBall(stmts, { id: "subject", recipient: "@agent/9", openedAt: now - 10_000, expiresAt: now - 1_000 })
+      db.prepare("UPDATE pending_request SET request_kind=? WHERE request_id='subject'").run(kind)
+      insertTaking(stmts, { id: "before-due", ballId: "subject", owner: "@agent/9", requester: "@chief", ts: now - 2_000 })
+      if (receipt === "archived") archive("before-due")
+      const before = parseToolJson(handleToolCall(ctx, "tribe.pending", { all: true }, makeOpts()))
+      expect(before).toMatchObject({ count: 1, pending: [{ request_id: "subject", taking_receipt_at_ms: now - 2_000 }] })
+      insertTaking(stmts, { id: "after-due", ballId: "subject-msg", owner: "@agent/9", requester: "@chief", ts: now })
+      if (receipt === "archived") archive("after-due")
+      const all = parseToolJson(handleToolCall(ctx, "tribe.pending", { all: true }, makeOpts()))
+      const own = parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts()))
+      expect(all).toMatchObject({ count: 1, owner_count: 1, pending: [{ taking_receipt_at_ms: now }] })
+      expect(own).toMatchObject({ count: 1, pending: [{ taking_receipt_at_ms: now }] })
+      expect((all.owners as Array<{ pending: unknown }>)[0]?.pending).toEqual(all.pending)
+      const history = parseToolJson(handleToolCall(ctx, "tribe.pending", { expired: true }, makeOpts()))
+      expect((history.pending as Array<Record<string, unknown>>)[0]).not.toHaveProperty("taking_receipt_at_ms")
+      const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as {
+        pending_balls: { requests: { owners: Array<{ pending: Array<{ taking_receipt_at_ms: number | null }> }> } }
+      }
+      const detailed = health.pending_balls.requests.owners.flatMap((owner) => owner.pending)
+      expect(detailed).toEqual(kind === "incident" ? [] : [expect.objectContaining({ taking_receipt_at_ms: original === "missing" ? null : now })])
+    } finally {
+      db.close()
+    }
+  })
+
   it("cleanupOldData records gc-expired evidence before removing a stale ball", () => {
     const { db, stmts } = setup()
     try {
