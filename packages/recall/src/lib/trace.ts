@@ -11,6 +11,7 @@ import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
 import type { RecallSkip } from "../history/recall-shared.ts"
+import type { LlmCostCall, LlmCostFields } from "./llm-backend.ts"
 
 export interface TracePayload {
   query: string
@@ -37,10 +38,11 @@ export interface TracePayload {
     synthMs: number
     totalMs: number
   }
-  costs: {
-    plannerUsd: number
-    synthesisUsd: number
-    totalUsd: number
+  calls?: LlmCostCall[]
+  costs?: {
+    planner: LlmCostFields
+    synthesis: LlmCostFields
+    total: LlmCostFields
   }
 }
 
