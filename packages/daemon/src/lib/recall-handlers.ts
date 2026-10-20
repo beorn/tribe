@@ -582,16 +582,16 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
         if (!summary) continue
         repo.upsertSummary({
           claudePid: row.claude_pid,
-          focusSummary: summary.focus,
-          looseEnds: summary.looseEnds,
-          summaryModel: summary.model,
-          summaryCost: summary.cost,
+          sessionId: row.session_id,
+          summary,
           summaryUpdatedAt: Date.now(),
         })
-        log.debug?.(`summary refreshed pid=${row.claude_pid} model=${summary.model} cost=$${summary.cost.toFixed(5)}`)
-      } catch (err) {
         log.debug?.(
-          `summary refresh failed for pid=${row.claude_pid}: ${err instanceof Error ? err.message : String(err)}`,
+          `summary attempt recorded pid=${row.claude_pid} model=${summary.model}${summary.error ? ` error=${summary.error}` : ""}`,
+        )
+      } catch (err) {
+        log.error(
+          `${opts.dbPath}: summary refresh or receipt storage failed for session ${row.session_id}, pid=${row.claude_pid}: ${err instanceof Error ? err.message : String(err)}`,
         )
       }
     }
