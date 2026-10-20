@@ -1,6 +1,7 @@
 /** Read and inspect verbs for the canonical `tribe-wire` CLI. */
 
 import { readFileSync } from "node:fs"
+import { parseMembersObservation, type MemberObservation } from "../lib/member-observation.ts"
 import { inspect } from "node:util"
 import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
@@ -1539,32 +1540,67 @@ export function evaluateDoctorVersions(
   }
 }
 
-type DoctorMembershipRow = { name: string; transport_state?: string }
 type DoctorMembershipDiscrepancy = { status?: string; missing?: Array<{ name: string; state: string }> }
 
 export function evaluateDoctorMembership(
-  sessions: readonly DoctorMembershipRow[],
+  sessions: readonly MemberObservation[],
   discrepancy: DoctorMembershipDiscrepancy | undefined,
 ): DoctorDiagnosticCheck {
-  const states = new Map(sessions.map((session) => [session.name, session.transport_state ?? "unknown"]))
-  for (const missing of discrepancy?.missing ?? []) states.set(missing.name, missing.state)
-  const evidence = [...states].map(([name, state]) => `${name}=${state}`).join(" ") || "seats=none"
-  if ([...states.values()].some((state) => state === "unknown")) {
-    return { severity: "UNKNOWN", diagnosis: `membership rail state unresolved: ${evidence}` }
+  const rows = sessions.map((session) => {
+    const progress = session.mailbox_progress
+    const read =
+      progress.state === "observed"
+        ? progress.last_attention_read_at_ms +
+          " age=" +
+          progress.last_attention_read_age_ms +
+          "ms scope=mailbox-name observed_at=" +
+          progress.observed_at_ms
+        : "unobserved (tribe.members mailbox-name receipt absent; observed_at=" + progress.observed_at_ms + ")"
+    return (
+      session.name +
+      " transport=" +
+      session.transport_state +
+      " connector_owner=" +
+      session.owner_state +
+      " mailbox authority=" +
+      session.mailbox_read_capability.state +
+      " (" +
+      session.mailbox_read_capability.reason +
+      ") canonical mailbox READ=" +
+      read +
+      " agent process=unobserved"
+    )
+  })
+  const known = new Set(sessions.map((session) => session.name))
+  const missing = (discrepancy?.missing ?? []).filter((row) => !known.has(row.name))
+  for (const row of missing) {
+    rows.push(
+      row.name +
+        " transport=" +
+        row.state +
+        " registration=unobserved mailbox authority=unobserved canonical mailbox READ=unobserved (tribe.members membership_discrepancy) agent process=unobserved",
+    )
   }
-  if (discrepancy?.status === "degraded" || [...states.values()].some((state) => state !== "connected")) {
-    // 25662: a missing-transport seat's bridge is repaired from its own pane; no rejoin reaches it.
-    const lost = [...states].filter(([, state]) => state === "missing-transport").map(([name]) => name)
+  const diagnosis =
+    "tribe.members: " +
+    (rows.join("; ") || "seats=none in default registration view (finished history excluded); agent process=unobserved")
+  if (sessions.some((session) => session.mailbox_read_capability.state === "unavailable")) {
     return {
       severity: "WARNING",
-      diagnosis: `membership degraded: ${evidence}`,
+      diagnosis,
       remedy:
-        lost.length > 0
-          ? `in each missing-transport seat's pane run /mcp, select plugin:tribe:tribe, Reconnect (${lost.join(", ")}); rejoin any other disconnected seat; then re-run \`tribe doctor\``
-          : "rejoin each disconnected seat, then re-run `tribe doctor`",
+        "restore the affected launch's inherited mailbox authority, then read its own inbox and re-run tribe doctor",
     }
   }
-  return { severity: "OK", diagnosis: `connected=${states.size} missing=0 ${evidence}` }
+  if (missing.length > 0 || sessions.some((session) => session.mailbox_progress.state === "unobserved")) {
+    return {
+      severity: "UNKNOWN",
+      diagnosis,
+      remedy:
+        "verify each affected seat's own canonical mailbox read and registration acknowledgement; inspect provider MCP calls only when that rail actually fails",
+    }
+  }
+  return { severity: "OK", diagnosis }
 }
 
 /** The daemon's bridge-lost paging arming (25662), as cli_health reports it. */
@@ -1847,14 +1883,11 @@ async function cmdDoctor(
         }
       }
       try {
-        const members = mcpJsonContent(await client.call("tribe.members")) as {
-          sessions?: DoctorMembershipRow[]
-          membership_discrepancy?: DoctorMembershipDiscrepancy
-        }
-        if (members === null || typeof members !== "object" || !Array.isArray(members.sessions)) {
-          throw new Error(`daemon returned an unexpected members shape: ${JSON.stringify(members)}`)
-        }
-        membership = evaluateDoctorMembership(members.sessions, members.membership_discrepancy)
+        const members = parseMembersObservation(mcpJsonContent(await client.call("tribe.members")))
+        membership = evaluateDoctorMembership(
+          members.sessions,
+          members["membership_discrepancy"] as DoctorMembershipDiscrepancy | undefined,
+        )
       } catch (error) {
         membership = {
           severity: "UNKNOWN",

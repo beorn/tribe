@@ -113,7 +113,9 @@ describe("tribe-wire's consumer subpaths", () => {
     // carries. It is the sole additional file; the broad graph stays excluded.
     expect(client.files.has(realpathSync(resolve(PACKAGE, "src/lib/credential-file.ts")))).toBe(true)
     expect(client.files.size).toBeLessThanOrEqual(19)
-    expect(records.files.size).toBeLessThanOrEqual(10)
+    // 30299 adds one dependency-free members-fact leaf to the records owner.
+    expect(records.files.has(realpathSync(resolve(PACKAGE, "src/lib/member-observation.ts")))).toBe(true)
+    expect(records.files.size).toBeLessThanOrEqual(11)
     expect(sender.files.has(realpathSync(resolve(PACKAGE, "src/lib/delivery.ts")))).toBe(true)
     // stall-sample.ts rides the client graph into the sender subpath.
     expect(sender.files.has(realpathSync(resolve(PACKAGE, "src/stall-sample.ts")))).toBe(true)

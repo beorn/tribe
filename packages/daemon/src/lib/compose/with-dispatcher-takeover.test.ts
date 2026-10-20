@@ -3648,8 +3648,8 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
 })
 
 // 25074 3b — a one-shot caller's authority is its launch's identity token. The capability projection and the
-// resolution move together, so a verified seat both reads its inbox by token and re-certifies (launch-registration's
-// exactLaunchMember accepts the token reason).
+// resolution move together, so a verified seat reads its own canonical inbox by token.
+// Launch registration separately certifies the register exchange and its delivery acknowledgement.
 describe("one-shot session authority by identity token (25074 3b)", () => {
   const identityVerifier = {
     path: "/stub/identity-verifier.ts",

@@ -9,6 +9,7 @@
  */
 
 import { describe, expect, test } from "vitest"
+import type { MemberObservation } from "../src/barrels/records.ts"
 import {
   deriveDoctorOutcome,
   evaluateDoctorIdentity,
@@ -53,6 +54,30 @@ describe("deriveDoctorOutcome (worst-of verdict algebra)", () => {
     expect(deriveDoctorOutcome(checks)).toEqual(expected)
   })
 })
+
+function doctorMember(name: string, changes: Partial<MemberObservation> = {}): MemberObservation {
+  return {
+    name,
+    member_id: name,
+    launch_id: name,
+    registration: { source: "durable-launch", state: "registered", registered_at_ms: 1 },
+    transport_registered: false,
+    transport_state: "disconnected",
+    owner_state: "unknown",
+    transport_reason: "owner-unknown-no-transport",
+    transport_observed_at_ms: 10,
+    transport_pids: [],
+    mailbox_read_capability: { state: "available", evidence_kind: "observed", reason: "self-mailbox-authority-token" },
+    mailbox_progress: {
+      state: "observed",
+      scope: "mailbox-name",
+      observed_at_ms: 10,
+      last_attention_read_at_ms: 8,
+      last_attention_read_age_ms: 2,
+    },
+    ...changes,
+  }
+}
 
 describe("status-backed doctor checks", () => {
   const success = (value: string) => ({ ok: true as const, value })
@@ -250,34 +275,57 @@ describe("status-backed doctor checks", () => {
     expect(check.diagnosis).toContain("@dev/1=version-degraded(v9)")
   })
 
-  test("membership discrepancy is WARNING and names every per-seat rail state", () => {
+  test("membership observations name transport, authority, READ and unknown registration independently", () => {
     const check = evaluateDoctorMembership(
-      [
-        { name: "@dev/0", transport_state: "connected" },
-        { name: "@dev/1", transport_state: "disconnected" },
-      ],
-      {
-        status: "degraded",
-        missing: [{ name: "@dev/2", state: "missing-transport" }],
-      },
+      [doctorMember("@dev/0", { transport_state: "connected" }), doctorMember("@dev/1")],
+      { status: "degraded", missing: [{ name: "@dev/2", state: "missing-transport" }] },
     )
-    expect(check).toMatchObject({ severity: "WARNING" })
-    expect(check.diagnosis).toContain("@dev/0=connected")
-    expect(check.diagnosis).toContain("@dev/1=disconnected")
-    expect(check.diagnosis).toContain("@dev/2=missing-transport")
+    expect(check.severity).toBe("UNKNOWN")
+    expect(check.diagnosis).toContain("@dev/0 transport=connected")
+    expect(check.diagnosis).toContain("@dev/1 transport=disconnected")
+    expect(check.diagnosis).toContain("@dev/2 transport=missing-transport")
+    expect(check.diagnosis).toContain("agent process=unobserved")
   })
 
-  // 25662: a missing-transport seat's bridge is repaired from its own pane, which the remedy must name.
-  test("a missing-transport seat's remedy names the pane repair; a plain disconnect keeps the rejoin", () => {
-    const lost = evaluateDoctorMembership([{ name: "@dev/0", transport_state: "connected" }], {
+  test("a CLI reader with a real mailbox read needs no MCP reconnect from socket absence", () => {
+    const check = evaluateDoctorMembership([doctorMember("@dev/2")], {
       status: "degraded",
       missing: [{ name: "@dev/2", state: "missing-transport" }],
     })
-    expect(lost.remedy).toBe(
-      "in each missing-transport seat's pane run /mcp, select plugin:tribe:tribe, Reconnect (@dev/2); rejoin any other disconnected seat; then re-run `tribe doctor`",
+    expect(check.severity).toBe("OK")
+    expect(check.remedy).toBeUndefined()
+    expect(check.diagnosis).toContain("mailbox authority=available")
+    expect(check.diagnosis).toContain("canonical mailbox READ=8 age=2ms scope=mailbox-name observed_at=10")
+  })
+
+  test("missing authority and unobserved READ name their sources without prescribing reconnect", () => {
+    const unread = {
+      state: "unobserved",
+      scope: "mailbox-name",
+      observed_at_ms: 10,
+      last_attention_read_at_ms: null,
+      last_attention_read_age_ms: null,
+      reason: "no-canonical-read-receipt",
+    } as const
+    const unavailable = evaluateDoctorMembership(
+      [
+        doctorMember("@dev/2", {
+          mailbox_read_capability: {
+            state: "unavailable",
+            evidence_kind: "observed",
+            reason: "self-mailbox-authority-missing",
+          },
+          mailbox_progress: unread,
+        }),
+      ],
+      undefined,
     )
-    const disconnected = evaluateDoctorMembership([{ name: "@dev/1", transport_state: "disconnected" }], undefined)
-    expect(disconnected.remedy).toBe("rejoin each disconnected seat, then re-run `tribe doctor`")
+    expect(unavailable.severity).toBe("WARNING")
+    expect(unavailable.remedy).toContain("mailbox authority")
+    const unknown = evaluateDoctorMembership([doctorMember("@dev/2", { mailbox_progress: unread })], undefined)
+    expect(unknown.severity).toBe("UNKNOWN")
+    expect(unknown.diagnosis).toContain("canonical mailbox READ=unobserved")
+    expect(unknown.remedy).not.toContain("Reconnect")
   })
 })
 

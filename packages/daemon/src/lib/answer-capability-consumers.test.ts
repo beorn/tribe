@@ -191,7 +191,7 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it("members, pending and a tracked send agree on capability, reason and read age for each case", () => {
+  it("members reports read facts while pending and tracked send retain admission and delivery policy", () => {
     SEATS.forEach((seat, index) => addSeat(seat, index + 2))
 
     const deliveries = new Map<string, unknown>()
@@ -239,9 +239,25 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     for (const seat of SEATS) {
       const { capability, reason, state } = seat.expected
       expect(membersByName.get(seat.name), `members ${seat.name}`).toMatchObject({
-        answer_capability: capability,
-        answer_reason: reason,
-        last_mailbox_read_age_ms: seat.lastReadAgeMs,
+        transport_state: seat.connected ? "connected" : "disconnected",
+        mailbox_read_capability: expect.objectContaining({ state: seat.readableMailbox ? "available" : "unavailable" }),
+        mailbox_progress:
+          seat.lastReadAgeMs === null
+            ? {
+                state: "unobserved",
+                scope: "mailbox-name",
+                observed_at_ms: NOW,
+                last_attention_read_at_ms: null,
+                last_attention_read_age_ms: null,
+                reason: "no-canonical-read-receipt",
+              }
+            : {
+                state: "observed",
+                scope: "mailbox-name",
+                observed_at_ms: NOW,
+                last_attention_read_at_ms: NOW - seat.lastReadAgeMs,
+                last_attention_read_age_ms: seat.lastReadAgeMs,
+              },
       })
       expect(pendingByOwner.get(seat.name), `pending ${seat.name}`).toMatchObject({
         owner_answer_capability: capability,
@@ -324,11 +340,15 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     expect(send("@pull/idle").warning).toBeUndefined()
     expect(send("@pull/waiting").warning).toBeUndefined()
 
+    stmts.touchMailboxAttentionRead.run({ $recipient: "@pull/gone", $now: NOW - 42_000 })
     const gone = send("@pull/gone")
     expect(gone.sent).toBe(true)
     expect(String(gone.warning)).toContain("@pull/gone")
     expect(String(gone.warning)).toContain("opens no obligation")
     expect(String(gone.warning)).toContain("type=request")
+    expect(String(gone.warning)).toContain("transport=disconnected")
+    expect(String(gone.warning)).toContain("canonical mailbox READ=observed age 42000ms")
+    expect(String(gone.warning)).not.toContain("not answer-capable")
     expect(db.prepare("SELECT COUNT(*) AS count FROM pending_request WHERE recipient = '@pull/gone'").get()).toEqual({
       count: 0,
     })
@@ -336,8 +356,8 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
 
     const unknown = send("@pull/deaf", "status")
     expect(unknown.sent).toBe(true)
-    expect(String(unknown.warning)).toContain("answer capability unobserved:")
-    expect(String(unknown.warning)).toContain("@pull/deaf: mailbox-read-unavailable")
+    expect(String(unknown.warning)).toContain("mailbox authority=unavailable")
+    expect(String(unknown.warning)).toContain("@pull/deaf")
     expect(String(unknown.warning)).not.toContain("not answer-capable")
 
     expect(send("*", "notify").warning).toBeUndefined()

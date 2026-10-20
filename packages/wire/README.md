@@ -38,7 +38,7 @@ to participate in a tribe without bundling the daemon itself.
 ```bash
 tribe-wire --help                                 # full Commander help + addHelpText MCP-adapter hint
 tribe-wire status                                 # active sessions with uptime + last-seen
-tribe-wire members --all                          # JSON transport + owner verdicts, including disconnected rows
+tribe-wire members --all                          # JSON registration history, connector transport and mailbox READ progress
 tribe-wire repair --reap-stale-transports --json # bounded stale connection-row repair with reason counts
 tribe-wire send '@alice' 'task X done' --type=notify --anonymous
 tribe-wire send '@ci' 'R656 failed; see journal evidence' --type=notify --delivery=pull --anonymous
@@ -166,15 +166,23 @@ banner confirms delivery. Bootstrap certifies its own pull ACK even beside a
 push sibling; protocol 10's no-ACK compatibility path still requires stored pull
 and is removed when version 10 leaves the supported window.
 
-`members --all` is the daemon-side rejoin verdict. `transport_state` is derived
-from the authenticated socket registry; `owner_state` is separate process
-evidence. `last_seen_sec` reports activity age only. A host MCP dialog may say
-connected while the daemon reports the member disconnected, so host UI state is
-not a substitute for this projection. After disconnect, a stored numeric PID
-without launch-bound process evidence reports owner `unknown` even if that PID
-currently exists: the OS may have recycled it. Health keeps addressable
-complete-launch rows with no transport loud, while connection-scoped no-launch
-rows are reaped only after reconnect grace.
+`members` returns `tribe-members/2`: registration, connector transport, mailbox
+authority and canonical mailbox READ progress are separate observations. Default
+contains connected rows plus each otherwise absent name's latest nonfinished
+durable registration; `--all` adds retained history. A row is not an agent-life
+verdict, and this envelope publishes no Hab supervisor PID or agent `alive` flag.
+`owner_state` describes the connector owner only; without a current connector
+it is unknown. `last_seen_sec` remains activity age, not a READ receipt.
+
+`mailbox_progress` carries the actual canonical READ timestamp, age and
+mailbox-name scope, or explicit unobserved fields. A read is not attributed to
+a particular launch merely because it appears on a historical sibling. A
+successful `join` acknowledges registration; bootstrap's useful-turn evidence
+is separate. A working CLI inbox reader needs no persistent socket, and
+missing transport alone is not a reason to declare the agent dead or reconnect.
+Confirm provider MCP failures through an actual failed call and use independent
+runtime evidence when process life matters. The separate `health.members`
+contract is unchanged; its legacy fields are not part of `members`.
 
 A supervised plugin adapter's exits outlive the host's MCP log. The plugin
 supervisor appends one JSON line per adapter exit (`at`, `adapter_pid`, `code`,

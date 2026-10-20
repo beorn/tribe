@@ -1,17 +1,8 @@
 /**
- * `tribe.members` (`handleSessions`) asserted `alive` from daemon in-memory
- * transport-registry presence alone (`activeIds.has(sessionId)`) and never
- * probed the owning pid — unlike `tribe.health` (`handleHealth`), which
- * already derives liveness via `pidStillAlive` + `projectSessionLiveness`.
- * A registry entry can outlive the process it names (a dead transport
- * adapter, a session mid-restart whose old socket hasn't been pruned yet),
- * so stored transport-registry belief is not the same fact as "the process
- * is alive" — two live incidents surfaced `tribe.members` reporting
- * `alive: true` for pids that no longer existed.
- *
- * `alive` must be derived by probing the pid at projection-read time, the
- * same way `handleHealth` already does, so the two endpoints cannot
- * disagree about the same session's liveness.
+ * Members reports independently observed connector and name-scoped mailbox
+ * facts. A registered connector whose PID is gone is disconnected; a durable
+ * registration whose socket is absent remains addressable without an agent
+ * life verdict. Health keeps its separate internal projection.
  */
 import { spawnSync } from "node:child_process"
 import { Database } from "bun:sqlite"
@@ -19,6 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { parseMembersObservation } from "tribe-wire/records"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
@@ -92,7 +84,7 @@ function activeInfoFor(id: string, name: string, pid: number): ActiveSessionInfo
   }
 }
 
-describe("tribe.members derives alive from the pid, not stored transport-registry presence", () => {
+describe("tribe.members separates connector state from mailbox progress", () => {
   let tmpDir: string
   let db: Database
   let stmts: TribeStatements
@@ -108,7 +100,60 @@ describe("tribe.members derives alive from the pid, not stored transport-registr
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it("reports alive=false when the registry still claims a transport for a pid that no longer exists", () => {
+  // 30299: the real disconnected-reader specimens need two independent axes.
+  // Earlier tests only covered connected transports, so default members could
+  // omit a registered CLI reader and all:true could call that reader dead.
+  it.each([false, true])("keeps a durable disconnected reader and its canonical read (all=%s)", (all) => {
+    addSession(db, stmts, "cli-reader", "@dev/reader", process.pid, "reader-sid")
+    db.prepare("UPDATE sessions SET launch_id = ?, launch_parent_pid = ? WHERE id = ?").run(
+      "reader-sid@1",
+      process.pid,
+      "cli-reader",
+    )
+    const readAt = Date.now() - 1_000
+    stmts.touchMailboxAttentionRead.run({ $recipient: "@dev/reader", $now: readAt })
+    const ctx = makeContext(db, stmts, "operator", "@operator")
+    const opts = {
+      cleanup: () => {},
+      userRenamed: false,
+      setUserRenamed: () => {},
+      getActiveSessionIds: () => new Set<string>(),
+      hasActiveTransport: () => false,
+      getActiveSessionInfo: () => [],
+    } as HandlerOpts
+
+    const members = parseToolJson(handleToolCall(ctx, "tribe.members", { all }, opts))
+    expect(members.sessions).toEqual([
+      expect.objectContaining({
+        member_id: "cli-reader",
+        name: "@dev/reader",
+        launch_id: "reader-sid@1",
+        registration: expect.objectContaining({ source: "durable-launch", state: "registered" }),
+        transport_registered: false,
+        transport_state: "disconnected",
+        owner_state: "unknown",
+        transport_pids: [],
+        mailbox_read_capability: {
+          state: "available",
+          evidence_kind: "observed",
+          reason: "self-mailbox-authority-token",
+        },
+        mailbox_progress: {
+          state: "observed",
+          scope: "mailbox-name",
+          observed_at_ms: expect.any(Number),
+          last_attention_read_at_ms: readAt,
+          last_attention_read_age_ms: expect.any(Number),
+        },
+      }),
+    ])
+    expect(members.schema).toBe("tribe-members/2")
+    expect(parseMembersObservation(members)).toEqual(members)
+    // The ban covers nested history/discrepancy rows as well as sessions.
+    expect(JSON.stringify(members)).not.toMatch(/"(?:alive|agent_alive|pid_alive|agent_pid|launch_parent_pid|pid)"\s*:/)
+  })
+
+  it("reports a dead connector when its registered transport PID no longer exists", () => {
     const deadPid = mintDeadPid()
     addSession(db, stmts, "zombie-transport", "zombie-agent", deadPid)
     const ctx = makeContext(db, stmts, "operator", "@operator")
@@ -139,16 +184,13 @@ describe("tribe.members derives alive from the pid, not stored transport-registr
         // fleet-wide recovery after the wrong sessions.
         transport_registered: true,
         transport_state: "disconnected",
-        transport_alive: false,
         transport_reason: "registered-transport-pids-dead",
-        // The pid is provably dead, so alive is false too.
-        pid_alive: false,
-        alive: false,
+        owner_state: "dead",
       }),
     ])
   })
 
-  it("keeps alive=true for a genuinely live, currently-connected pid", () => {
+  it("reports a live connector for a genuinely connected PID", () => {
     addSession(db, stmts, "live-transport", "live-agent", process.pid)
     const ctx = makeContext(db, stmts, "operator", "@operator")
     const opts = {
@@ -167,9 +209,7 @@ describe("tribe.members derives alive from the pid, not stored transport-registr
       expect.objectContaining({
         name: "live-agent",
         transport_state: "connected",
-        transport_alive: true,
-        pid_alive: true,
-        alive: true,
+        owner_state: "live",
       }),
     ])
   })
@@ -251,7 +291,7 @@ describe("tribe.members derives alive from the pid, not stored transport-registr
     // A disconnected session's last-known pid is reusable and proves nothing
     // (session.ts `isPidAlive` docstring); it must not be pid-probed into a
     // false "alive". Register with the CURRENT test process's pid (always
-    // alive) and confirm a disconnected row still reads alive=false.
+    // alive) and confirm a disconnected row still has an unknown connector.
     addSession(db, stmts, "long-gone", "long-gone-agent", process.pid)
     const ctx = makeContext(db, stmts, "operator", "@operator")
     const opts = {
@@ -270,8 +310,7 @@ describe("tribe.members derives alive from the pid, not stored transport-registr
       expect.objectContaining({
         name: "long-gone-agent",
         transport_state: "disconnected",
-        transport_alive: false,
-        alive: false,
+        owner_state: "unknown",
       }),
     ])
   })

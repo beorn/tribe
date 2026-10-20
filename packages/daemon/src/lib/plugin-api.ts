@@ -124,8 +124,9 @@ export interface TribeClientApi {
   /**
    * Optional: lightweight roster snapshot for plugins that need to DM a
    * specific session (e.g. CI alerts → responsible repo owner, reaper →
-   * the session owning a runaway PID). Mirrors what `tribe.members` would
-   * return if the plugin were an out-of-process client.
+   * the session owning a runaway PID). This in-process connector roster keeps
+   * connector PIDs; it is separate from `tribe.members` transport/mailbox facts
+   * and does not observe agent or supervisor process life.
    */
   getActiveSessions(): Array<{ name: string; pid: number; role: string }>
 

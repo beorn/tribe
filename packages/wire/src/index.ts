@@ -10,6 +10,14 @@
  * the narrow subpaths in package.json so a leaf change selects fewer tests (24965).
  */
 
+export {
+  parseMembersObservation,
+  type MailboxReadCapability,
+  type MailboxProgress,
+  type MemberObservation,
+  type MembersObservation,
+} from "./barrels/records.ts"
+
 // JSON-RPC wire protocol
 export type { JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from "./rpc.ts"
 export { isNotification, isRequest, isResponse, makeError, makeNotification, makeRequest, makeResponse } from "./rpc.ts"

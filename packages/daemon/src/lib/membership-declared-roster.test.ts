@@ -165,7 +165,6 @@ describe("membership projection: declared-roster membership is a function of a p
             member_id: "exp-1",
             name: "@agent/restart-always",
             launch_id: "launch-exp-1",
-            launch_parent_pid: 30001,
             last_refusal: null,
             state: "exited-not-remounted",
             left_at: new Date(leftAt).toISOString(),
@@ -178,7 +177,11 @@ describe("membership projection: declared-roster membership is a function of a p
       const health = parseToolJson(handleToolCall(opCtx, "tribe.health", {}, opts)) as {
         membership_discrepancy?: Record<string, unknown>
       }
-      expect(health.membership_discrepancy).toEqual(members.membership_discrepancy)
+      if (members.membership_discrepancy === undefined) throw new Error("fixture must retain the missing registration")
+      expect(health.membership_discrepancy).toMatchObject(members.membership_discrepancy)
+      expect(health.membership_discrepancy).toMatchObject({
+        missing: [expect.objectContaining({ launch_parent_pid: 30001 })],
+      })
       // 25662: the bridge-lost check reads this projection; a settled exit is not a lost bridge.
       const seats = readSeatTransportFacts(opCtx, opts)
       expect(seats.missing).toEqual([])
@@ -220,7 +223,6 @@ describe("membership projection: declared-roster membership is a function of a p
           member_id: "exp-2",
           name: "@agent/restart-onfailure",
           launch_id: "launch-exp-2",
-          launch_parent_pid: 30002,
           last_refusal: null,
           state: "missing-transport",
         },
@@ -392,7 +394,6 @@ describe("membership projection: declared-roster membership is a function of a p
           member_id: "dem-1",
           name: "@adhoc/never-1",
           launch_id: "launch-dem-1",
-          launch_parent_pid: 30004,
           state: "finished",
           left_at: new Date(leftAt).toISOString(),
         },
@@ -488,7 +489,6 @@ describe("membership projection: declared-roster membership is a function of a p
           member_id: "und-1",
           name: "@proof/wait-rc4",
           launch_id: "launch-und-1",
-          launch_parent_pid: 30007,
           state: "departed",
           last_seen: new Date(registeredAt).toISOString(),
           left_at: new Date(leftAt).toISOString(),
@@ -619,7 +619,6 @@ describe("membership projection: declared-roster membership is a function of a p
           member_id: "dorm-quiet",
           name: "@adhoc/7",
           launch_id: "launch-dorm-quiet",
-          launch_parent_pid: 30071,
           state: "dormant",
           last_seen: new Date(quietSeen).toISOString(),
         },
@@ -627,7 +626,6 @@ describe("membership projection: declared-roster membership is a function of a p
           member_id: "dorm-closed",
           name: "@adhoc/8",
           launch_id: "launch-dorm-closed",
-          launch_parent_pid: 30081,
           state: "dormant",
           last_seen: new Date(closedSeen).toISOString(),
           left_at: new Date(closedLeft).toISOString(),
@@ -702,7 +700,6 @@ describe("membership projection: declared-roster membership is a function of a p
           member_id: "nodecl-finished",
           name: "@agent/nodecl-9",
           launch_id: "launch-nodecl-9",
-          launch_parent_pid: 40009,
           state: "finished",
           left_at: new Date(leftAt).toISOString(),
         },
@@ -717,7 +714,6 @@ describe("membership projection: declared-roster membership is a function of a p
             member_id: "nodecl-vanished",
             name: "@agent/nodecl-10",
             launch_id: "launch-nodecl-10",
-            launch_parent_pid: 40010,
             last_refusal: null,
             state: "missing-transport",
           },

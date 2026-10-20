@@ -21,6 +21,7 @@ import {
   TRIBE_MESSAGE_TYPES,
 } from "tribe-wire"
 import type { TribeContext } from "./context.ts"
+import type { MailboxReadCapability, MemberObservation } from "tribe-wire/records"
 import type { TribeRole } from "tribe-wire/lib/config"
 import { TRIBE_PROTOCOL_VERSION } from "tribe-wire/lib/socket"
 import {
@@ -1655,41 +1656,45 @@ function maybeUntrackedDeliveryNote(
 ): string | undefined {
   if (willTrack || (msgType !== "notify" && msgType !== "status")) return undefined
   const names = typeof recipients === "string" ? [recipients] : recipients
-  const absent: string[] = []
-  const unobserved: string[] = []
+  const facts: string[] = []
   for (const name of names) {
     if (name === "*") continue
     const observation = transport.observe(name)
-    switch (observation.owner_transport_reason) {
-      case "connected-pid-live-transport":
-      case "connected-no-consumer":
-        break
-      case "no-session-record":
-      case "owner-unknown-no-transport":
-      case "registered-transport-pids-dead":
-      case "registered-owner-pid-dead":
-        absent.push(name)
-        break
-      default:
-        unobserved.push(`${name}: ${observation.owner_transport_reason}`)
+    if (
+      observation.owner_transport_reason === "connected-pid-live-transport" ||
+      observation.owner_transport_reason === "connected-no-consumer"
+    ) {
+      continue
     }
-  }
-  if (absent.length === 0 && unobserved.length === 0) return undefined
-  const parts: string[] = []
-  if (absent.length > 0) {
-    parts.push(
-      `${absent.join(", ")} ${absent.length === 1 ? "is" : "are"} not answer-capable at send time (no live transport); ` +
-        `this ${msgType} opens no obligation and pages nobody. ` +
-        "Send type=request if you need a reply; it opens a tracked ball that outlives a recipient's absence, " +
-        "or refuses with a reason if the mailbox is unknown. Sending anyway.",
+    const authority = transport.mailboxDeafNames.has(name)
+      ? "unavailable (" + transport.mailboxDeafReasons.get(name) + ")"
+      : observation.owner_transport_reason === "no-session-record" ||
+          observation.owner_transport_reason === "no-transport-source"
+        ? "unobserved"
+        : "available"
+    const age = observation.owner_last_mailbox_read_age_ms
+    const read = age === null ? "unobserved" : "observed age " + age + "ms"
+    facts.push(
+      name +
+        ": transport=" +
+        observation.owner_transport_state +
+        "; mailbox authority=" +
+        authority +
+        "; canonical mailbox READ=" +
+        read +
+        " (mailbox-name, observed_at=" +
+        observation.owner_transport_observed_at +
+        "); agent process=unobserved",
     )
   }
-  if (unobserved.length > 0) {
-    parts.push(
-      `answer capability unobserved: ${unobserved.join(", ")}; check delivery before relying on a reply. Sending anyway.`,
-    )
-  }
-  return `delivery note — ${parts.join(" ")}`
+  if (facts.length === 0) return undefined
+  return (
+    "delivery note — " +
+    facts.join("; ") +
+    "; this " +
+    msgType +
+    " opens no obligation and pages nobody. Send type=request if you need a reply; it opens a tracked ball for a known readable mailbox. Sending anyway."
+  )
 }
 
 function maybeProgressReplyNote(
@@ -2915,12 +2920,6 @@ type DurableMembershipSessionRow = MembershipSessionRow & {
   launch_parent_pid: number
 }
 
-type MailboxReadCapability = {
-  state: "available" | "unavailable"
-  evidence_kind: "observed"
-  reason: "self-mailbox-authority-token" | "self-mailbox-authority-missing"
-}
-
 /**
  * Project whether a session can read its own inbox. Transport liveness cannot answer this question: a relay can send
  * and heartbeat while unable to read its own canonical inbox. A session reads by the identity token it registered with
@@ -3573,7 +3572,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
         s.account, s.provider, s.identity_sid, s.launch_id, s.launch_parent_pid, s.delivery,
         s.adapter_exit_record
       FROM sessions s
-      ORDER BY s.started_at
+      ORDER BY s.started_at, s.id
     `)
     .all() as Array<{
     id: string
@@ -3595,9 +3594,32 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     adapter_exit_record: string | null
   }>
 
-  // By default return only currently-connected sessions. `a.all` exposes the
-  // full DB (useful for diagnostics and tribe retro).
-  const visibleRows = a.all ? rows : rows.filter((r) => activeIds.has(r.id))
+  const observedAt = Date.now()
+  const roster = opts.getExpectedMembers?.()
+  const registrationStates = new Map(
+    rows.map((row) => {
+      const classification = isDurableMembershipSessionRow(row)
+        ? classifyDisconnectedDurableRow(row, (r) => readSessionLeftFact(ctx, r), roster)
+        : undefined
+      return [row.id, classification] as const
+    }),
+  )
+  // Transport absence does not remove an addressable durable registration.
+  // Keep connected siblings; add only the latest nonfinished registration of
+  // each otherwise absent name. All adds history without asserting life.
+  const representedNames = new Set(rows.filter((row) => activeIds.has(row.id)).map((row) => row.name))
+  const retainedIds = new Set<string>()
+  for (const row of [...rows].reverse()) {
+    const state = registrationStates.get(row.id)?.state
+    if (representedNames.has(row.name) || retiredNames.has(row.name) || !isDurableMembershipSessionRow(row)) continue
+    if (state === "finished" || state === "exited-not-remounted" || state === "departed") continue
+    representedNames.add(row.name)
+    retainedIds.add(row.id)
+  }
+  const visibleRows = a.all ? rows : rows.filter((row) => activeIds.has(row.id) || retainedIds.has(row.id))
+  const mailboxReadAt = new Map(
+    [...new Set(visibleRows.map((row) => row.name))].map((name) => [name, readLastMailboxReadAt(ctx.stmts, name)]),
+  )
 
   // Build parent map: first session per claudeSessionId is the parent, rest are sub-agents
   const parentMap = new Map<string, string>()
@@ -3612,23 +3634,28 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     const parent = r.claude_session_id ? parentMap.get(r.claude_session_id) : undefined
     const foreignTransport = opts.getForeignIdentityTransport?.(r.id)
     const lastRefusal = opts.getLastRefusal?.(r.id)
-    const { active, transportPids, agentPid, evidence } = projectSessionRowTransport(
-      r,
-      activeIds,
-      activeInfo,
-      { stmts: ctx.stmts, hasLiveWaiter: opts.inboxWait?.hasLiveWaiter },
-      foreignTransport,
-    )
+    const active = activeInfo.find((session) => session.id === r.id)
+    const transportPids = active?.transportPids ?? []
+    const evidence = projectSessionTransportState({
+      transportConnected: activeIds.has(r.id),
+      transportPidsAlive: transportPids.length === 0 || transportPids.some((pid) => pidStillAlive(pid)),
+      foreignIdentityTransport: foreignTransport !== undefined,
+    })
     const protocolVersions = active?.protocolVersions ?? []
+    const readAt = mailboxReadAt.get(r.name) ?? null
+    const registrationState = registrationStates.get(r.id)?.state
     return {
       member_id: r.id,
       name: r.name,
       role: r.role,
       domains: parseDomains(r.domains),
-      pid: active?.pid ?? r.pid,
-      agent_pid: agentPid,
       launch_id: r.launch_id,
-      launch_parent_pid: r.launch_parent_pid,
+      registration: {
+        source: isDurableMembershipSessionRow(r) ? "durable-launch" : "connection",
+        state:
+          registrationState === "finished" || registrationState === "exited-not-remounted" ? "finished" : "registered",
+        registered_at_ms: r.started_at,
+      },
       delivery: r.delivery,
       transport_pids: transportPids,
       protocol_versions: protocolVersions,
@@ -3642,14 +3669,32 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       claude_session_id: r.claude_session_id,
       claude_session_name: r.claude_session_name,
       mailbox_read_capability: projectMailboxReadCapability(r),
+      mailbox_progress:
+        readAt === null
+          ? {
+              state: "unobserved",
+              scope: "mailbox-name",
+              observed_at_ms: observedAt,
+              last_attention_read_at_ms: null,
+              last_attention_read_age_ms: null,
+              reason: "no-canonical-read-receipt",
+            }
+          : {
+              state: "observed",
+              scope: "mailbox-name",
+              observed_at_ms: observedAt,
+              last_attention_read_at_ms: readAt,
+              last_attention_read_age_ms: Math.max(0, observedAt - readAt),
+            },
       // 25074 3b — how the daemon knows this session is who it says: verified (its identity token) or claimed (its name
       // alone). A facet, never an exit code.
       authority: sessionAuthority(r),
-      ...evidence,
-      // `alive` (plus transport_alive/agent_alive/pid_alive/is_silent) is
-      // derived above, never asserted from transport-registry presence — see
-      // the comment on `liveness`. Kept as `alive` for wire compatibility;
-      // the other fields are additive.
+      transport_registered: evidence.transport_registered,
+      transport_state: evidence.transport_state,
+      // The owner here is the connector process, never the agent.
+      owner_state: evidence.owner_state,
+      transport_reason: evidence.transport_reason,
+      transport_observed_at_ms: observedAt,
       uptime_min: Math.round((Date.now() - r.started_at) / 60_000),
       last_seen_sec: Math.round((Date.now() - r.updated_at) / 1000),
       parent: parent && parent !== r.name ? parent : undefined,
@@ -3667,9 +3712,8 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       // 29686 — the daemon's last register refusal for this session: the only server-refusing
       // evidence on the wire now that the seat's own stderr record has no live writer.
       ...(lastRefusal ? { last_refusal: lastRefusal } : {}),
-    }
+    } satisfies MemberObservation
   })
-  const roster = opts.getExpectedMembers?.()
   const disconnected = projectDisconnectedSessionRows(rows, activeIds)
   const diagnosticDisconnected = disconnected.diagnostic.filter((row) => !retiredNames.has(row.name))
   const membership = projectMembershipDiscrepancy(
@@ -3690,25 +3734,36 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     roster === undefined
       ? []
       : [...new Set(rows.filter((row) => activeIds.has(row.id) && !roster.byName.has(row.name)).map((row) => row.name))]
+  // Internal health projections keep their process identity; the public
+  // members envelope contains registration and connector facts only.
+  const registrationFact = (row: MissingLaunch | FinishedLaunch | DormantLaunch | DepartedLaunch) => {
+    if (!("launch_parent_pid" in row)) return row
+    const { launch_parent_pid: _supervisorPid, ...fact } = row
+    return fact
+  }
   return jsonResult({
+    schema: "tribe-members/2",
     sessions,
     ...(membership.discrepancy === undefined
       ? {}
       : {
-          // 29162 — name the missing seats up front; the sessions list above carries only connected rows.
+          // Name missing transports separately; sessions also retains otherwise absent names' latest nonfinished registrations.
           headline: membersDiscrepancyHeadline(membership.discrepancy),
-          membership_discrepancy: membership.discrepancy,
+          membership_discrepancy: {
+            ...membership.discrepancy,
+            missing: membership.discrepancy.missing.map(registrationFact),
+          },
         }),
     // History, not alarm: a finished launch never sets membership_discrepancy
     // on its own, but stays visible here so a seat's past is not erased along
     // with its old "degraded" noise (@ag/tribe/tribe-membership-projection-
     // counts-permanent-history-as-degraded). Omitted (not `[]`) when empty.
-    ...(membership.finished.length > 0 ? { finished_launches: membership.finished } : {}),
+    ...(membership.finished.length > 0 ? { finished_launches: membership.finished.map(registrationFact) } : {}),
     // Declared-roster-only, both omitted (not `[]`) when empty: a quiet
     // on-demand seat and an undeclared departed one are neither alarms, but
     // an operator reading tribe.members should still be able to find them.
-    ...(membership.dormant.length > 0 ? { dormant_launches: membership.dormant } : {}),
-    ...(membership.departed.length > 0 ? { departed_launches: membership.departed } : {}),
+    ...(membership.dormant.length > 0 ? { dormant_launches: membership.dormant.map(registrationFact) } : {}),
+    ...(membership.departed.length > 0 ? { departed_launches: membership.departed.map(registrationFact) } : {}),
     ...(unexpectedConnected.length > 0 ? { unexpected_connected: unexpectedConnected } : {}),
   })
 }

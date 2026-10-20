@@ -29,11 +29,6 @@ export interface TribeLaunchRequest {
   readonly takeover: boolean
   readonly provider?: string
   readonly account?: string
-  /**
-   * Agents require a certified self-mailbox read (the daemon's token-verified `mailbox_read_capability`); sender-only
-   * services omit it. 25074 3d-3 replaced the bearer hash that used to both carry and imply it.
-   */
-  readonly requireMailboxAuthority?: boolean
   /** The launch's identity token (25074 3b), verified by the daemon's composing-layer verifier when it has one. */
   readonly idToken?: string
 }
@@ -352,29 +347,20 @@ async function registerLaunch(
         (registration.protocolVersion === 10 || registration.protocolVersion === undefined) &&
         registration.transportDelivery === undefined &&
         registration.delivery === undefined
-      if (!legacyStoredPull) {
+      if (legacyStoredPull) {
+        // Protocol 10 lacks a transport ACK: retain its existing stored-pull
+        // boundary only while 10 remains supported. This is not launch-life
+        // or mailbox-authority certification.
+        if (!legacyStoredPullAcknowledged(await client.call("tribe.members", {}), request.name, launchId)) {
+          throw new Error(
+            `Tribe protocol 10 stored-pull acknowledgement did not certify ${request.name} launch ${launchId}`,
+          )
+        }
+      } else {
         const acknowledgement = validateDeliveryAcknowledgement(registration, "pull")
         if (!acknowledgement.acknowledged) {
           throw new Error(`Tribe delivery acknowledgement did not certify ${request.name}: ${acknowledgement.cause}`)
         }
-      }
-      const certification = exactLaunchMember(await client.call("tribe.members", {}), {
-        persona: request.name,
-        launchId,
-        launchParentPid: processId,
-        ...(request.provider === undefined ? {} : { provider: request.provider }),
-        account: request.account,
-        cwd: request.cwd,
-        requireMailboxAuthority: request.requireMailboxAuthority === true,
-        legacyStoredPull,
-      })
-      if (certification.member === null) {
-        throw new Error(
-          `Tribe member row did not certify ${request.name} launch ${launchId} under harness pid ${processId}` +
-            (certification.mailboxReadCapabilityDetail === null
-              ? ""
-              : `: ${certification.mailboxReadCapabilityDetail}`),
-        )
       }
       // The caller owns this lifetime. A live socket cannot keep a finished
       // service occurrence or provider host alive by itself.
@@ -470,70 +456,30 @@ function keyedLaunchId(
   )
 }
 
-function exactLaunchMember(
-  result: unknown,
-  expected: {
-    readonly persona: string
-    readonly launchId: string
-    readonly launchParentPid: number
-    readonly provider?: string
-    readonly account?: string
-    readonly cwd: string
-    readonly requireMailboxAuthority: boolean
-    readonly legacyStoredPull: boolean
-  },
-): { readonly member: object | null; readonly mailboxReadCapabilityDetail: string | null } {
+/** retire-when: protocol 10 leaves TRIBE_SUPPORTED_PROTOCOL_VERSIONS.
+ * Only the existing stored-pull delivery check; current protocols certify the
+ * keyed identity/name and this transport's delivery from register alone. */
+function legacyStoredPullAcknowledged(result: unknown, name: string, launchId: string): boolean {
   const text = (result as { readonly content?: readonly [{ readonly text?: unknown }] }).content?.[0]?.text
-  if (typeof text !== "string") return { member: null, mailboxReadCapabilityDetail: null }
+  if (typeof text !== "string") return false
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
-  } catch {
-    return { member: null, mailboxReadCapabilityDetail: null }
+  } catch (cause) {
+    throw new Error(`Tribe protocol 10 stored-pull observation is not JSON for ${name}`, { cause })
   }
-  const rawSessions = (parsed as { readonly sessions?: unknown }).sessions
-  if (!Array.isArray(rawSessions)) return { member: null, mailboxReadCapabilityDetail: null }
-  const sessions: readonly unknown[] = rawSessions
-  let mailboxReadCapabilityDetail: string | null = null
-  for (const candidate of sessions) {
-    if (typeof candidate !== "object" || candidate === null) continue
-    const member = candidate as Record<string, unknown>
-    if (
-      member["name"] !== expected.persona ||
-      member["launch_id"] !== expected.launchId ||
-      member["launch_parent_pid"] !== expected.launchParentPid ||
-      member["transport_state"] !== "connected" ||
-      (expected.legacyStoredPull && member["delivery"] !== "pull") ||
-      member["alive"] !== true ||
-      (expected.provider === undefined
-        ? member["provider"] !== undefined && member["provider"] !== null
-        : member["provider"] !== expected.provider) ||
-      (expected.account === undefined
-        ? member["account"] !== undefined && member["account"] !== null
-        : member["account"] !== expected.account) ||
-      member["cwd"] !== expected.cwd
-    ) {
-      continue
-    }
-    if (!expected.requireMailboxAuthority) return { member, mailboxReadCapabilityDetail: null }
-    const mailboxReadCapability = member["mailbox_read_capability"]
-    if (
-      typeof mailboxReadCapability === "object" &&
-      mailboxReadCapability !== null &&
-      (mailboxReadCapability as Record<string, unknown>)["state"] === "available" &&
-      (mailboxReadCapability as Record<string, unknown>)["evidence_kind"] === "observed" &&
-      // 25074 3d-3: a token-verified session is the only one that reads its own mailbox.
-      (mailboxReadCapability as Record<string, unknown>)["reason"] === "self-mailbox-authority-token"
-    ) {
-      return { member, mailboxReadCapabilityDetail: null }
-    }
-    const capability =
-      typeof mailboxReadCapability === "object" && mailboxReadCapability !== null
-        ? (mailboxReadCapability as Record<string, unknown>)
-        : null
-    mailboxReadCapabilityDetail ??=
-      `mailbox_read_capability state=${JSON.stringify(capability?.["state"])} ` +
-      `reason=${JSON.stringify(capability?.["reason"])}`
-  }
-  return { member: null, mailboxReadCapabilityDetail }
+  const rows = (parsed as { readonly sessions?: unknown } | null)?.sessions
+  return (
+    Array.isArray(rows) &&
+    rows.some((row: unknown) => {
+      if (row === null || typeof row !== "object") return false
+      const fact = row as Record<string, unknown>
+      return (
+        fact.name === name &&
+        fact.launch_id === launchId &&
+        fact.transport_state === "connected" &&
+        fact.delivery === "pull"
+      )
+    })
+  )
 }
