@@ -84,6 +84,21 @@ export type LlmQueryResult = {
   }
 }
 
+/** Monetary facts for one invoked call, without retaining its prompt or answer. */
+export type LlmCostCall = Omit<LlmQueryResult["response"], "content" | "model"> & { model: LlmModel }
+
+export function llmCostCall(model: LlmModel, response: LlmQueryResult["response"]): LlmCostCall {
+  const target = response.model ?? model
+  return {
+    model: { provider: target.provider, modelId: target.modelId },
+    usage: response.usage,
+    cost_usd: response.cost_usd,
+    servedBy: response.servedBy,
+    cacheHit: response.cacheHit,
+    error: response.error,
+  }
+}
+
 export type LlmQueryOpts = {
   question: string
   model: LlmModel
