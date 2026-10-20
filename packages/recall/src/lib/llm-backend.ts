@@ -45,8 +45,8 @@ export type LlmModelSelectionResult = {
 }
 
 export type LlmUsage = {
-  promptTokens: number
-  completionTokens: number
+  promptTokens?: number
+  completionTokens?: number
   classes?: Record<string, number>
   raw?: unknown
 }

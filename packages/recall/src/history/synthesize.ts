@@ -53,7 +53,7 @@ export interface LlmRaceModelResult extends LlmCostFields {
   ms: number
   status: "ok" | "timeout" | "error"
   error?: string
-  tokens?: { input: number; output: number }
+  tokens?: { input?: number; output?: number }
 }
 
 export interface LlmRaceResult extends LlmCostFields {
