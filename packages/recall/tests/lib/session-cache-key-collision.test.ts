@@ -17,6 +17,8 @@ import { join } from "node:path"
 import { afterAll, beforeEach, describe, expect, test, vi } from "vitest"
 
 // Two real Codex session ids from the specimen. Their first 8 characters are identical.
+import { unavailableCostMethods } from "../helpers/llm-mock.ts"
+
 const SESSION_A = "codex:01a0f1e9-3851-7692-986b-7527f44e6bd5"
 const SESSION_B = "codex:01a0f4b0-9cbc-7062-b89e-d175b2caa0bb"
 
@@ -44,7 +46,7 @@ vi.mock("../../src/lib/llm-backend.ts", async (importOriginal) => {
       getModel: () => undefined,
       getCheapModel: () => model,
       getCheapModels: () => [model],
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     }),
   }

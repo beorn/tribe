@@ -31,7 +31,7 @@ afterEach(() => {
 
 describe("the review's live recall test searches the vault its caller names", () => {
   test("bound, the recall carries that vault; unbound, it carries null", async () => {
-    recallMock.mockResolvedValue({ results: [], synthesis: null, llmCost: null })
+    recallMock.mockResolvedValue({ results: [], synthesis: null, calls: [] })
 
     await reviewMemorySystem(process.cwd(), { skipSearchBenchmarks: true, vaultDb: "/fixture/vault/.km/state.db" })
     await reviewMemorySystem(process.cwd(), { skipSearchBenchmarks: true, vaultDb: null })

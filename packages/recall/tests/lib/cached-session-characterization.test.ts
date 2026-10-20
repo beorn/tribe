@@ -17,6 +17,8 @@ import { join } from "node:path"
 import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import type { LlmBackend, LlmModel } from "../../src/lib/llm-backend.ts"
 
+import { unavailableCostMethods } from "../helpers/llm-mock.ts"
+
 const fake = vi.hoisted(() => ({ home: "" }))
 const backend = vi.hoisted(() => ({ loads: 0 }))
 
@@ -36,7 +38,7 @@ vi.mock("../../src/lib/llm-backend.ts", async (importOriginal) => {
         getModel: () => undefined,
         getCheapModel: () => model,
         getCheapModels: () => [model],
-        estimateCost: () => 0,
+        ...unavailableCostMethods,
         isProviderAvailable: () => true,
         explainUnavailable: () => "",
       }

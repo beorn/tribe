@@ -7,6 +7,7 @@
 
 import { Database } from "bun:sqlite"
 import { assertSingleStatement } from "@bearly/sqlite"
+import type { SessionSummary } from "./summarizer.ts"
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -67,7 +68,6 @@ export function openRecallDatabase(path: string): Database {
     `ALTER TABLE session_focus ADD COLUMN loose_ends TEXT NOT NULL DEFAULT '[]'`,
     `ALTER TABLE session_focus ADD COLUMN summary_updated_at INTEGER`,
     `ALTER TABLE session_focus ADD COLUMN summary_model TEXT`,
-    `ALTER TABLE session_focus ADD COLUMN summary_cost REAL`,
   ]) {
     try {
       db.run(assertSingleStatement(col))
@@ -121,15 +121,12 @@ export type FocusRow = {
   loose_ends: string[]
   summary_updated_at: number | null
   summary_model: string | null
-  summary_cost: number | null
 }
 
 export type SummaryUpsert = {
   claudePid: number
-  focusSummary: string
-  looseEnds: string[]
-  summaryModel: string
-  summaryCost: number
+  sessionId?: string
+  summary: SessionSummary
   summaryUpdatedAt: number
 }
 
@@ -225,8 +222,7 @@ export function createRecallRepo(db: Database): RecallRepo {
       focus_summary = $focus,
       loose_ends = $looseEnds,
       summary_updated_at = $updatedAt,
-      summary_model = $model,
-      summary_cost = $cost
+      summary_model = $model
     WHERE claude_pid = $pid
   `)
 
@@ -244,7 +240,6 @@ export function createRecallRepo(db: Database): RecallRepo {
     loose_ends: string | null
     summary_updated_at: number | null
     summary_model: string | null
-    summary_cost: number | null
   }
 
   function hydrateFocus(raw: RawFocus): FocusRow {
@@ -262,7 +257,6 @@ export function createRecallRepo(db: Database): RecallRepo {
       loose_ends: safeParseArray(raw.loose_ends ?? "[]"),
       summary_updated_at: raw.summary_updated_at,
       summary_model: raw.summary_model,
-      summary_cost: raw.summary_cost,
     }
   }
 
@@ -336,13 +330,22 @@ export function createRecallRepo(db: Database): RecallRepo {
       deleteFocusStmt.run({ $pid: claudePid })
     },
     upsertSummary(input) {
+      // Retain every paid attempt in the existing append-only history, including failed summaries.
+      // Historical summary_cost columns are deliberately left untouched and are never relabelled.
+      insertEventStmt.run({
+        $ts: input.summaryUpdatedAt,
+        $sessionId: input.sessionId ?? null,
+        $pid: input.claudePid,
+        $type: "summary.attempt",
+        $meta: JSON.stringify(input.summary),
+      })
+      if (input.summary.focus === null) return
       upsertSummaryStmt.run({
         $pid: input.claudePid,
-        $focus: input.focusSummary,
-        $looseEnds: JSON.stringify(input.looseEnds),
+        $focus: input.summary.focus,
+        $looseEnds: JSON.stringify(input.summary.looseEnds),
         $updatedAt: input.summaryUpdatedAt,
-        $model: input.summaryModel,
-        $cost: input.summaryCost,
+        $model: input.summary.model,
       })
     },
     close() {

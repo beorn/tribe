@@ -10,7 +10,15 @@
  *   - deeper: strong round-1 cluster → mine entities from top snippets
  */
 
-import { loadLlm, selectBudgetedModels, type LlmBackend, type LlmModel } from "./llm-backend.ts"
+import {
+  loadLlm,
+  llmCostCall,
+  selectBudgetedModels,
+  type LlmBackend,
+  type LlmModel,
+  type LlmCostCall,
+  type LlmCostFields,
+} from "./llm-backend.ts"
 import type { RecallSearchResult } from "../history/recall-shared.ts"
 import { DEFAULT_PLAN_TIMEOUT_MS, log } from "../history/recall-shared.ts"
 import type { QueryContext } from "./context.ts"
@@ -39,11 +47,11 @@ export interface QueryPlan {
   notes?: string
 }
 
-export interface PlanCall {
+export interface PlanCall extends Partial<LlmCostFields> {
   plan: QueryPlan | null
   model?: string
   elapsedMs: number
-  cost?: number
+  calls: LlmCostCall[]
   rawResponse?: string
   error?: string
 }
@@ -151,6 +159,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
   if (!llm) {
     return {
       plan: null,
+      calls: [],
       elapsedMs: Date.now() - startedAt,
       error: "no-llm-backend-available",
     }
@@ -159,6 +168,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
   if (models.length === 0) {
     return {
       plan: null,
+      calls: [],
       elapsedMs: Date.now() - startedAt,
       error: "no-planner-model-available",
     }
@@ -173,7 +183,9 @@ export async function planQuery(query: string, context: QueryContext, options: P
   // model starve every later one (@cto 19102a36, @ag/llm/29473).
   const deadline = startedAt + timeoutMs * PLANNER_ATTEMPT_CAP
   let rawResponse = ""
-  let cost: number | undefined
+  const calls: LlmCostCall[] = []
+  const costFields = (): LlmCostFields =>
+    llm.serializeCost(llm.aggregateCosts(calls.map((call) => llm.resolveResponseCost(call))))
   let lastModel: LlmModel | undefined
   const failures: Array<{ modelId: string; error: string }> = []
 
@@ -197,15 +209,13 @@ export async function planQuery(query: string, context: QueryContext, options: P
       const message = attemptFailure(llm, model, error, attempt.signal, budgetMs)
       log(`planner: ${model.modelId} failed (${message})`)
       failures.push({ modelId: model.modelId, error: message })
+      calls.push(llmCostCall(model, { error: error instanceof Error ? error.message : String(error) }))
       continue
     } finally {
       clearTimeout(timer)
     }
 
-    const usage = result.response.usage
-    if (usage) {
-      cost = (cost ?? 0) + llm.estimateCost(model, usage.promptTokens, usage.completionTokens)
-    }
+    calls.push(llmCostCall(model, result.response))
     if (result.response.error) {
       const message = attemptFailure(llm, model, result.response.error, attempt.signal, budgetMs)
       log(`planner: ${model.modelId} failed (${message})`)
@@ -221,7 +231,8 @@ export async function planQuery(query: string, context: QueryContext, options: P
         plan: parsed.plan,
         model: model.modelId,
         elapsedMs: Date.now() - startedAt,
-        cost,
+        calls,
+        ...costFields(),
         rawResponse,
       }
     }
@@ -234,7 +245,8 @@ export async function planQuery(query: string, context: QueryContext, options: P
     plan: null,
     model: lastModel?.modelId,
     elapsedMs: Date.now() - startedAt,
-    cost,
+    calls,
+    ...costFields(),
     rawResponse,
     error:
       failures.length === 1

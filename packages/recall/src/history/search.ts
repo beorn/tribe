@@ -16,6 +16,7 @@ import {
 } from "./db.ts"
 import type { ContentType } from "./types.ts"
 import { synthesizeResults } from "./synthesize.ts"
+import { loadLlm } from "../lib/llm-backend.ts"
 import {
   DEFAULT_SYNTHESIS_TIMEOUT_MS,
   log,
@@ -816,10 +817,12 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // "nothing found" defect. Catch, keep the lexical results, and attach a
     // full diagnostic report so the formatter can say so loudly.
     const llmStart = Date.now()
+    const llm = options.deps?.llm ?? (await loadLlm())
     let synthesis
     try {
-      synthesis = await synthesizeResults(query, deduped, timeout)
+      synthesis = await synthesizeResults(query, deduped, timeout, llm ?? undefined)
     } catch (err) {
+      const failure = synthesisDiagnosticsFromError(err, timeout)
       const llmMs = Date.now() - llmStart
       const totalMs = Date.now() - startTime
       log(
@@ -832,7 +835,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         results: deduped,
         durationMs: totalMs,
         timing: { searchMs, llmMs, phases },
-        synthesisFailure: synthesisDiagnosticsFromError(err, timeout),
+        synthesisFailure: failure,
+        calls: failure.calls ?? [],
+        ...(llm ? llm.serializeCost(llm.deserializeCost(failure)) : {}),
         ...said(),
       }
     }
@@ -840,7 +845,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
 
     const totalMs = Date.now() - startTime
     log(
-      `synthesis OK: ${synthesis.text.length} chars, cost=$${(synthesis.cost ?? 0).toFixed(4)} (${totalMs}ms total, search=${searchMs}ms llm=${llmMs}ms${synthesis.aborted ? " ABORTED" : ""})`,
+      `synthesis OK: ${synthesis.text.length} chars, costs=${JSON.stringify(llm?.serializeCost(llm.deserializeCost(synthesis)))} (${totalMs}ms total, search=${searchMs}ms llm=${llmMs}ms${synthesis.aborted ? " ABORTED" : ""})`,
     )
 
     return {
@@ -849,7 +854,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       synthesis: synthesis.text,
       results: deduped,
       durationMs: totalMs,
-      llmCost: synthesis.cost,
+      calls: synthesis.calls,
+      ...(llm ? llm.serializeCost(llm.deserializeCost(synthesis)) : {}),
       timing: { searchMs, llmMs, phases },
       ...said(),
     }

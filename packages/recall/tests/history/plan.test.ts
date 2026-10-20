@@ -9,6 +9,7 @@ import { setRecallLogging } from "../../src/history/recall-shared.ts"
 import { parsePlanResult, PLANNER_ATTEMPT_CAP, planQuery, planVariants, type QueryPlan } from "../../src/lib/plan"
 import type { QueryContext } from "../../src/lib/context.ts"
 import type { LlmBackend, LlmModel } from "../../src/lib/llm-backend.ts"
+import { unavailableCostMethods } from "../helpers/llm-mock.ts"
 
 const emptyContext: QueryContext = {
   today: "2026-09-03",
@@ -222,7 +223,7 @@ describe("planQuery provider fallback", () => {
         getModel: () => model,
         getCheapModel: () => model,
         getCheapModels: () => [model],
-        estimateCost: () => 0,
+        ...unavailableCostMethods,
         isProviderAvailable: () => true,
       } satisfies LlmBackend
       const options = mode === "round1" ? { round: 1 as const } : { round: 2 as const, mode }
@@ -268,7 +269,7 @@ describe("planQuery provider fallback", () => {
       budgetedModelIds: [denied.modelId, selected.modelId],
       getCheapModel: () => denied,
       getCheapModels: () => [denied, selected],
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
       providerFacts,
       selectModels: ({ candidates = [denied, selected] }) => ({
@@ -323,7 +324,7 @@ describe("planQuery provider fallback", () => {
       budgetedModelIds: [gemini.modelId, fallback.modelId],
       getCheapModel: () => anotherGemini,
       getCheapModels: () => [anotherGemini, fallback],
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -337,21 +338,21 @@ describe("planQuery provider fallback", () => {
     )
   })
 
-  test("reports every provider failure and accounts for billed failed responses", async () => {
+  test("reports every provider failure and retains billed failed response facts", async () => {
     const gemini: LlmModel = { provider: "google", modelId: "gemini-2.0-flash-lite" }
     const fallback: LlmModel = { provider: "openrouter", modelId: "deepseek/deepseek-chat" }
     const llm = {
       queryModel: async ({ model }) => ({
         response: {
           error: `${model.provider} failed`,
-          ...(model.provider === "google" ? { usage: { promptTokens: 1, completionTokens: 1 } } : {}),
+          ...(model.provider === "google" ? { cost_usd: 0.25, usage: { promptTokens: 1, completionTokens: 1 } } : {}),
         },
       }),
       getModel: (id) => [gemini, fallback].find((m) => m.modelId === id),
       budgetedModelIds: [gemini.modelId, fallback.modelId],
       getCheapModel: () => fallback,
       getCheapModels: () => [fallback],
-      estimateCost: () => 0.25,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -360,7 +361,11 @@ describe("planQuery provider fallback", () => {
     expect(result.plan).toBeNull()
     expect(result.error).toContain(`${gemini.modelId}: google failed`)
     expect(result.error).toContain(`${fallback.modelId}: openrouter failed`)
-    expect(result.cost).toBe(0.25)
+    expect(result.calls).toHaveLength(2)
+    expect(result.calls[0]).toMatchObject({ cost_usd: 0.25, usage: { promptTokens: 1, completionTokens: 1 } })
+    expect(result.calls[1]?.cost_usd).toBeUndefined()
+    expect(result.calls[1]?.error).toBe("openrouter failed")
+    expect(result).not.toHaveProperty("cost")
     expect(logEvents.filter((ev) => ev.message.includes("failed"))).toHaveLength(2)
   })
 
@@ -385,7 +390,7 @@ describe("planQuery provider fallback", () => {
       budgetedModelIds: [slow.modelId, fallback.modelId],
       getCheapModel: () => fallback,
       getCheapModels: () => [fallback],
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -428,7 +433,7 @@ describe("planQuery provider fallback", () => {
       budgetedModelIds: models.map((m) => m.modelId),
       getCheapModel: () => models[0],
       getCheapModels: () => models,
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -469,7 +474,7 @@ describe("planQuery provider fallback", () => {
       budgetedModelIds: models.map((m) => m.modelId),
       getCheapModel: () => models[0],
       getCheapModels: () => models,
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -510,7 +515,7 @@ describe("planQuery provider fallback", () => {
       budgetedModelIds: [deepseek.modelId],
       getCheapModel: () => deepseek,
       getCheapModels: () => [deepseek],
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -553,7 +558,7 @@ describe("planQuery provider fallback", () => {
       getModel: (id) => [gemini, deepseek].find((m) => m.modelId === id),
       getCheapModel: () => gemini,
       getCheapModels: () => [gemini, deepseek],
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -575,7 +580,7 @@ describe("planQuery provider fallback", () => {
       getModel: () => undefined,
       getCheapModel: () => fallback,
       getCheapModels: () => [fallback],
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 

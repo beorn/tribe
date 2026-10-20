@@ -7,11 +7,14 @@ import * as fs from "fs"
 import * as path from "path"
 import {
   loadLlm,
+  llmCostCall,
   requireLlm,
   selectAvailableCheapModels,
   selectBudgetedModels,
   type LlmBackend,
   type LlmModel,
+  type LlmCostCall,
+  type LlmCostFields,
 } from "../lib/llm-backend.ts"
 import { log, SynthesisFailure, suggestRetryTimeoutMs } from "./recall-shared.ts"
 import type {
@@ -45,23 +48,21 @@ Rules:
 // LLM Race Infrastructure
 // ============================================================================
 
-export interface LlmRaceModelResult {
+export interface LlmRaceModelResult extends LlmCostFields {
   model: string
   ms: number
   status: "ok" | "timeout" | "error"
   error?: string
-  tokens?: { input: number; output: number }
-  cost?: number // USD
+  tokens?: { input?: number; output?: number }
 }
 
-export interface LlmRaceResult {
+export interface LlmRaceResult extends LlmCostFields {
   winner: string | null
   text: string | null
-  cost?: number
   timedOut: boolean
   totalMs: number
   perModel: LlmRaceModelResult[]
-  totalCost: number // sum of ALL models called (winner + losers)
+  calls: LlmCostCall[]
 }
 
 /**
@@ -98,14 +99,34 @@ export async function raceLlmModels(
   // Pair each model with its own result slot up front — avoids indexing
   // back into a parallel array (models[i] / modelResults[i]) later, which
   // TS can't prove in-bounds without a non-null assertion.
-  const paired: { model: LlmModel; mr: LlmRaceModelResult }[] = models.map((model) => ({
-    model,
-    mr: { model: model.modelId, ms: 0, status: "timeout" },
-  }))
-  const modelResults: LlmRaceModelResult[] = paired.map(({ mr }) => mr)
+  const paired = models.map(
+    (model): { model: LlmModel; mr: Omit<LlmRaceModelResult, keyof LlmCostFields>; call: LlmCostCall } => {
+      const call = llmCostCall(model, { error: "invoked call has not returned billing facts" })
+      return {
+        model,
+        call,
+        mr: { model: model.modelId, ms: 0, status: "timeout" },
+      }
+    },
+  )
+  // Losers may return after the winner. Return a fixed receipt, never the
+  // live slots they update; an unfinished call makes each affected total unknown.
+  const snapshot = () => {
+    const receipts = paired.map(({ call, mr }) => {
+      const saved = globalThis.structuredClone(call)
+      const cost = llm.resolveResponseCost(saved)
+      return { call: saved, cost, mr: { ...globalThis.structuredClone(mr), ...llm.serializeCost(cost) } }
+    })
+    return {
+      calls: receipts.map(({ call }) => call),
+      perModel: receipts.map(({ mr }) => mr),
+      ...llm.serializeCost(llm.aggregateCosts(receipts.map(({ cost }) => cost))),
+    }
+  }
 
   // Race all models
-  const racePromises = paired.map(async ({ model, mr }) => {
+  const racePromises = paired.map(async (pair) => {
+    const { model, mr } = pair
     let result
     try {
       result = await llm.queryModel({
@@ -118,16 +139,17 @@ export async function raceLlmModels(
       mr.ms = Date.now() - raceStart
       mr.status = "error"
       mr.error = formatAttemptError(llm, model, error)
+      pair.call = llmCostCall(model, { error: error instanceof Error ? error.message : String(error) })
       return null
     }
 
     mr.ms = Date.now() - raceStart
+    pair.call = llmCostCall(model, result.response)
 
     // Track tokens + compute cost from actual usage
     const usage = result.response.usage
     if (usage) {
       mr.tokens = { input: usage.promptTokens, output: usage.completionTokens }
-      mr.cost = llm.estimateCost(model, usage.promptTokens, usage.completionTokens)
     }
 
     // queryModel catches errors internally — check for abort/error
@@ -152,7 +174,6 @@ export async function raceLlmModels(
     mr.status = "ok"
     return {
       text: content,
-      cost: mr.cost,
       model: model.modelId,
     }
   })
@@ -169,28 +190,23 @@ export async function raceLlmModels(
       ),
     )
 
-    const totalCost = modelResults.reduce((s, m) => s + (m.cost ?? 0), 0)
     return {
       winner: winner.model,
       text: winner.text,
-      cost: winner.cost,
       timedOut: false,
       totalMs: Date.now() - raceStart,
-      perModel: modelResults,
-      totalCost,
+      ...snapshot(),
     }
   } catch {
     clearTimeout(timer)
     controller.abort()
     const totalMs = Date.now() - raceStart
-    const totalCost = modelResults.reduce((s, m) => s + (m.cost ?? 0), 0)
     return {
       winner: null,
       text: null,
       timedOut: totalMs >= timeoutMs - 50,
       totalMs,
-      perModel: modelResults,
-      totalCost,
+      ...snapshot(),
     }
   }
 }
@@ -199,9 +215,9 @@ export async function raceLlmModels(
 // LLM synthesis (internal)
 // ============================================================================
 
-export interface SynthesisResult {
+export interface SynthesisResult extends LlmCostFields {
   text: string
-  cost?: number
+  calls: LlmCostCall[]
   aborted?: boolean
   /** The model whose answer won the race. */
   winner: string
@@ -223,6 +239,7 @@ export async function synthesizeResults(
     throw new SynthesisFailure(summary, {
       summary,
       totalBudgetMs: timeoutMs,
+      calls: [],
       attempts: [],
       batches: [],
       excludedProviders: [],
@@ -249,6 +266,7 @@ export async function synthesizeResults(
     throw new SynthesisFailure(summary, {
       summary,
       totalBudgetMs: timeoutMs,
+      calls: [],
       attempts: [],
       batches: [],
       excludedProviders,
@@ -261,7 +279,8 @@ export async function synthesizeResults(
   const attempts: SynthesisAttempt[] = []
   const batches: SynthesisBatchAccounting[] = []
   let deadlineExceeded = false
-  let totalCost = 0
+  const calls: LlmCostCall[] = []
+  const costFields = () => llm.serializeCost(llm.aggregateCosts(calls.map((call) => llm.resolveResponseCost(call))))
 
   for (let offset = 0; offset < models.length; offset += 2) {
     const remainingMs = deadline - Date.now()
@@ -289,7 +308,7 @@ export async function synthesizeResults(
         `(${remainingMs}ms budget / ${batchesRemaining} batch${batchesRemaining === 1 ? "" : "es"} left)`,
     )
     const race = await raceLlmModels(context, SYNTHESIS_PROMPT, batch, batchTimeoutMs, llm)
-    totalCost += race.totalCost
+    calls.push(...race.calls)
 
     batches.push({
       modelIds: batch.map((model) => model.modelId),
@@ -312,7 +331,7 @@ export async function synthesizeResults(
 
     if (race.winner && race.text) {
       log(`LLM winner: ${race.winner} in ${race.totalMs}ms`)
-      return { text: race.text, cost: totalCost, aborted: false, winner: race.winner, attempts, batches }
+      return { text: race.text, calls, ...costFields(), aborted: false, winner: race.winner, attempts, batches }
     }
 
     log(
@@ -333,6 +352,8 @@ export async function synthesizeResults(
   const summary = buildFailureSummary({ resultCount: results.length, attempts, timeoutMs, timedOut })
   throw new SynthesisFailure(summary, {
     summary,
+    calls,
+    ...costFields(),
     totalBudgetMs: timeoutMs,
     attempts,
     batches,
