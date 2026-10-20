@@ -349,7 +349,7 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
         .map((m) => {
           const ms = `${(m.ms / 1000).toFixed(1)}s`
           const costStr = ` ${llm.formatCostColumns(m)}`
-          const tokStr = m.tokens ? ` ${m.tokens.input}+${m.tokens.output}tok` : ""
+          const tokStr = ` ${m.tokens?.input ?? "unknown"}+${m.tokens?.output ?? "unknown"}tok`
           if (m.status === "ok") return `${GREEN}${m.model}=${ms}${tokStr}${costStr}${RESET}`
           if (m.status === "timeout") return `${DIM}${m.model}=${ms}(timeout)${costStr}${RESET}`
           return `${RED}${m.model}=${ms}(error)${costStr}${RESET}`
