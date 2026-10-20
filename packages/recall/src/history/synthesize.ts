@@ -113,9 +113,9 @@ export async function raceLlmModels(
   // live slots they update; an unfinished call makes each affected total unknown.
   const snapshot = () => {
     const receipts = paired.map(({ call, mr }) => {
-      const saved = structuredClone(call)
+      const saved = globalThis.structuredClone(call)
       const cost = llm.resolveResponseCost(saved)
-      return { call: saved, cost, mr: { ...structuredClone(mr), ...llm.serializeCost(cost) } }
+      return { call: saved, cost, mr: { ...globalThis.structuredClone(mr), ...llm.serializeCost(cost) } }
     })
     return {
       calls: receipts.map(({ call }) => call),
