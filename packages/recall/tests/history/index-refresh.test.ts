@@ -1,4 +1,5 @@
 /** @failure Failed or competing rebuilds publish fresh Recall evidence (23189). */
+import { Glob } from "bun"
 import { Database } from "bun:sqlite"
 import { tryAcquireFlock } from "@bearly/flock"
 import { spawn } from "node:child_process"
@@ -636,18 +637,16 @@ describe("Recall refresh completion", () => {
       }) + "\n",
     )
 
-    const fs = await import("node:fs")
-
-    // rebuildIndex must NOT throw when 01-vanishing.jsonl disappears mid-run;
-    // it must skip the vanished file and successfully index 00-first and 02-stable
-    const result = await rebuildIndex(db, {
-      incremental: true,
-      onProgress: (p) => {
-        if (p.currentFile.includes("02-stable.jsonl") && fs.existsSync(vanishingFile)) {
-          fs.unlinkSync(vanishingFile)
-        }
-      },
+    // Glob traversal order is unspecified. Remove the discovered file before
+    // its stat, after the first file was indexed, to exercise real ENOENT.
+    vi.spyOn(Glob.prototype, "scan").mockImplementation(async function* () {
+      yield firstFile
+      unlinkSync(vanishingFile)
+      yield vanishingFile
+      yield stableFile
     })
+
+    const result = await rebuildIndex(db, { incremental: true })
     expect(result.messages).toBe(2)
 
     const firstRow = db.query("SELECT * FROM sessions WHERE jsonl_path LIKE '%00-first.jsonl'").get() as any
