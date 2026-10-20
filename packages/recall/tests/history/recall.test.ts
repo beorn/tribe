@@ -9,6 +9,7 @@ import { synthesizeResults } from "../../src/history/synthesize"
 import { SynthesisFailure } from "../../src/history/recall-shared"
 import { BUDGETED_MODEL_IDS, type LlmBackend, type LlmModel } from "../../src/lib/llm-backend"
 import { toFts5Query, closeDb, getDb } from "../../src/history/db"
+import { unavailableCostMethods } from "../helpers/llm-mock.ts"
 
 // Suppress verbose [recall] logging during tests
 beforeAll(() => {
@@ -521,7 +522,7 @@ describe("synthesizeResults", () => {
       budgetedModelIds: models.map((model) => model.modelId),
       getCheapModel: () => models[0],
       getCheapModels: () => models,
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       // Compatibility meaning stays credential-presence only. The shared
       // selector is the authority for explicit policy exclusions.
       isProviderAvailable: () => true,
@@ -581,7 +582,7 @@ describe("synthesizeResults", () => {
         requestedMax = max
         return models.slice(0, max)
       },
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: (provider) => provider === "xai" || provider === "openrouter",
     }
 
@@ -626,7 +627,7 @@ describe("synthesizeResults", () => {
       getModel: (id) => [gemini, deepseek].find((model) => model.modelId === id),
       getCheapModel: () => gemini,
       getCheapModels: () => [gemini, deepseek],
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     }
 
@@ -664,7 +665,7 @@ describe("synthesizeResults", () => {
       getModel: (id) => [gemini, deepseek].find((model) => model.modelId === id),
       getCheapModel: () => deepseek,
       getCheapModels: () => [deepseek, gemini],
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     }
 
@@ -703,7 +704,7 @@ describe("synthesizeResults", () => {
       budgetedModelIds: models.map((model) => model.modelId),
       getCheapModel: () => models[0],
       getCheapModels: () => models,
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     }
 
@@ -758,7 +759,7 @@ describe("synthesizeResults", () => {
       budgetedModelIds: models.map((model) => model.modelId),
       getCheapModel: () => models[0],
       getCheapModels: () => models,
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     }
 
@@ -816,7 +817,7 @@ describe("synthesizeResults", () => {
       budgetedModelIds: models.map((model) => model.modelId),
       getCheapModel: () => models[0],
       getCheapModels: () => models,
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     }
 

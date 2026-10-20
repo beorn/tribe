@@ -17,13 +17,53 @@
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { describe, expect, test } from "vitest"
-import { toAskResult } from "../recall/lib/rpc.ts"
+import { toAskResult, toPlanOnlyResult } from "../recall/lib/rpc.ts"
+import type { PlanCall } from "../../../packages/recall/src/lib/plan.ts"
 import type { AgentRecallResult } from "../../../packages/recall/src/lib/agent.ts"
 
 const RECALL_SERVER = readFileSync(resolve(import.meta.dirname, "../recall/server.ts"), "utf8")
 const RECALL_SOCKET = readFileSync(resolve(import.meta.dirname, "../recall/lib/socket.ts"), "utf8")
 
 describe("Claude plugin boundary", () => {
+  test.each([true, false])("planner wire receipts survive success=%s", (success) => {
+    const call: PlanCall = {
+      plan: success
+        ? {
+            keywords: ["fixture"],
+            phrases: [],
+            concepts: [],
+            paths: [],
+            errors: [],
+            bead_ids: [],
+            time_hint: null,
+            notes: "",
+          }
+        : null,
+      elapsedMs: 1,
+      cost_usd: 0.125,
+      list_equivalent_reason: "missing usage for first attempt",
+      list_equivalent_basis: [],
+      calls: [
+        {
+          model: { provider: "fixture", modelId: "fixture" },
+          cost_usd: 0.125,
+          usage: { promptTokens: 1, completionTokens: 1, raw: { invoice: "first" } },
+        },
+      ],
+      ...(success ? {} : { error: "paid parse failure" }),
+    }
+    const wire = toPlanOnlyResult(call, success ? ["fixture"] : undefined)
+    expect(wire).toMatchObject({
+      ok: success,
+      cost_usd: 0.125,
+      calls: call.calls,
+      list_equivalent_reason: "missing usage for first attempt",
+    })
+    expect(wire).not.toHaveProperty("cost")
+    expect(wire.list_equivalent_usd).toBeUndefined()
+    if (!success) expect(wire.error).toBe("paid parse failure")
+  })
+
   test("keeps the provider-owned recall bridge connect-only", () => {
     expect(RECALL_SERVER).not.toContain("ensureTribeDaemonIfConfigured")
     expect(RECALL_SERVER).not.toContain("autostartChecked")
@@ -47,6 +87,16 @@ describe("Claude plugin boundary", () => {
       synthesis: null,
       results: [],
       durationMs: 42,
+      cost_usd: 0,
+      list_equivalent_usd: 0.25,
+      list_equivalent_basis: [{ rateSource: "sku", matchedModelId: "fixture-model" }],
+      calls: [
+        {
+          model: { provider: "fixture", modelId: "fixture-model" },
+          cost_usd: 0,
+          usage: { promptTokens: 10, completionTokens: 5, raw: { invoice: "original" } },
+        },
+      ],
       trace: {
         rounds: [],
         decision: { round2Mode: "off", reason: "fixture" },
@@ -56,10 +106,21 @@ describe("Claude plugin boundary", () => {
       },
     }
     const noMatches = toAskResult(base)
+    expect(noMatches).toMatchObject({
+      cost_usd: 0,
+      list_equivalent_usd: 0.25,
+      list_equivalent_basis: [{ matchedModelId: "fixture-model" }],
+      calls: base.calls,
+    })
+    expect(noMatches).not.toHaveProperty("cost")
 
     const degraded = toAskResult({
       ...base,
       provenance: "stale",
+      cost_usd: undefined,
+      cost_usd_reason: "charge unavailable for unfinished loser",
+      list_equivalent_usd: undefined,
+      list_equivalent_reason: "usage unavailable for unfinished loser",
       results: [
         {
           type: "message",
@@ -83,6 +144,9 @@ describe("Claude plugin boundary", () => {
     expect(noMatches).toMatchObject({ answer: null, provenance: "complete", results: [] })
     expect(noMatches).not.toHaveProperty("synthesisFailure")
     expect(degraded).toMatchObject({
+      cost_usd_reason: "charge unavailable for unfinished loser",
+      list_equivalent_reason: "usage unavailable for unfinished loser",
+      calls: base.calls,
       answer: null,
       provenance: "stale",
       results: [{ sessionId: "session-1", snippet: "The lexical hit remains useful." }],
@@ -91,5 +155,8 @@ describe("Claude plugin boundary", () => {
         excludedProviders: [{ provider: "openai", reason: "account unavailable" }],
       },
     })
+    expect(degraded.cost_usd).toBeUndefined()
+    expect(degraded.list_equivalent_usd).toBeUndefined()
+    expect(degraded).not.toHaveProperty("cost")
   })
 })

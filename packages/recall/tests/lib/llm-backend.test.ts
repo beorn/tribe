@@ -64,7 +64,12 @@ function selectionBackend(opts: {
     getModel: vi.fn(),
     getCheapModel: vi.fn(() => opts.preferred),
     getCheapModels: vi.fn((max = 2) => opts.candidates.slice(0, max)),
-    estimateCost: vi.fn(() => 0),
+    resolveResponseCost: vi.fn(),
+    aggregateCosts: vi.fn(),
+    averageCost: vi.fn(),
+    formatCostColumns: vi.fn(),
+    serializeCost: vi.fn(),
+    deserializeCost: vi.fn(),
     isProviderAvailable: vi.fn((provider) => available.has(provider)),
     explainUnavailable: opts.reasons ? (provider) => opts.reasons?.[provider] ?? "unknown" : undefined,
   }
@@ -284,6 +289,9 @@ describe("loadLlm shared provider-health surface", () => {
       expect(child.stderr).toContain("createProviderObservationStore")
       expect(child.stderr).toContain("selectModels")
       expect(child.stderr).toContain("describeDispatchFailure")
+      for (const name of ["resolveResponseCost", "aggregateCosts", "serializeCost", "deserializeCost"]) {
+        expect(child.stderr).toContain(name)
+      }
     } finally {
       rmSync(fixture, { recursive: true, force: true })
     }
@@ -298,11 +306,27 @@ describe("loadLlm shared provider-health surface", () => {
       join(fixture, "index.ts"),
       `
         const model = { provider: "openai", modelId: "gpt-test" }
-        export const queryModel = async () => ({ response: { content: "ok" } })
+        export const queryModel = async () => ({ response: {
+          model, content: "ok", cost_usd: 0.125,
+          usage: { promptTokens: 20, completionTokens: 5, classes: { input: 10, cache_read: 10, output: 5 }, raw: { invoice: "fixture" } },
+          servedBy: { model: "served-model" }, cacheHit: false,
+        } })
         export const getModel = (id) => id === model.modelId ? model : undefined
         export const getCheapModel = () => model
         export const getCheapModels = () => [model]
-        export const estimateCost = () => 0
+        const cost = { charged: { usd: 0.125 }, listEquivalent: { reason: "fixture rate unavailable" }, listEquivalentBasis: [] }
+        export const resolveResponseCost = (response) => {
+          if (response.cost_usd !== 0.125 || response.usage.raw.invoice !== "fixture") throw new Error("billing facts lost")
+          return cost
+        }
+        export const aggregateCosts = (costs) => {
+          if (costs.length !== 1 || costs[0].charged.usd !== 0.125) throw new Error("cost delegation lost")
+          return cost
+        }
+        export const serializeCost = () => ({ cost_usd: 0.125, list_equivalent_reason: "fixture rate unavailable", list_equivalent_basis: [] })
+        export const deserializeCost = () => cost
+        export const averageCost = (total) => total
+        export const formatCostColumns = () => "fixture cost columns"
         export const isProviderAvailable = () => true
         export const createProviderObservationStore = () => ({})
         export const readProviderAvailability = async (provider) => ({
@@ -342,11 +366,17 @@ describe("loadLlm shared provider-health surface", () => {
       const llm = await loadLlm()
       if (!llm) throw new Error("loadLlm returned null")
       const selection = selectAvailableCheapModels(llm, { limit: 6, order: "registry" })
+      const { response } = await llm.queryModel({ question: "fixture", model: llm.getCheapModel() })
+      const cost = llm.resolveResponseCost(response)
       console.log(JSON.stringify({
         hasFacts: Array.isArray(llm.providerFacts),
         hasSelector: typeof llm.selectModels === "function",
         legacyOpenAI: llm.isProviderAvailable("openai"),
         rejected: selection.rejected,
+        cost: llm.serializeCost(llm.aggregateCosts([cost])),
+        decoded: llm.deserializeCost(llm.serializeCost(cost)),
+        response,
+        hasLegacyEstimate: "estimateCost" in llm,
       }))
     `
 
@@ -371,6 +401,17 @@ describe("loadLlm shared provider-health surface", () => {
         rejected: Array<{ provider: string; status?: string; reason: string }>
       }
       expect(result).toMatchObject({ hasFacts: true, hasSelector: true, legacyOpenAI: true })
+      expect(result).toMatchObject({
+        cost: { cost_usd: 0.125, list_equivalent_reason: "fixture rate unavailable", list_equivalent_basis: [] },
+        decoded: { charged: { usd: 0.125 }, listEquivalent: { reason: "fixture rate unavailable" } },
+        response: {
+          cost_usd: 0.125,
+          usage: { classes: { input: 10, cache_read: 10, output: 5 }, raw: { invoice: "fixture" } },
+          servedBy: { model: "served-model" },
+          cacheHit: false,
+        },
+        hasLegacyEstimate: false,
+      })
       expect(result.rejected).toContainEqual(
         expect.objectContaining({ provider: "openai", status: "excluded", reason: "excluded by caller" }),
       )

@@ -14,7 +14,32 @@
  * @fakes tribe-recall
  */
 
-import type { LlmModel } from "../../src/lib/llm-backend.ts"
+import type { LlmBackend, LlmModel, LlmResolvedCost, LlmUsage } from "../../src/lib/llm-backend.ts"
+
+// Selection/planning fixtures do not supply rates or billing. Keep those
+// amounts explicitly unknown; the root coupled-contract test uses real Bearly
+// resolution and aggregation rather than reproducing its arithmetic here.
+const unavailableCost: LlmResolvedCost = {
+  charged: { reason: "fixture billing unavailable" },
+  listEquivalent: { reason: "fixture pricing unavailable" },
+  listEquivalentBasis: [],
+}
+export const unavailableCostMethods: Pick<
+  LlmBackend,
+  "resolveResponseCost" | "aggregateCosts" | "averageCost" | "formatCostColumns" | "serializeCost" | "deserializeCost"
+> = {
+  resolveResponseCost: () => unavailableCost,
+  aggregateCosts: () => unavailableCost,
+  averageCost: () => unavailableCost,
+  formatCostColumns: () =>
+    "charged unknown (fixture billing unavailable); list-equivalent unknown (fixture pricing unavailable)",
+  serializeCost: () => ({
+    cost_usd_reason: "fixture billing unavailable",
+    list_equivalent_reason: "fixture pricing unavailable",
+    list_equivalent_basis: [],
+  }),
+  deserializeCost: () => unavailableCost,
+}
 
 // ============================================================================
 // Scenario-based mock for queryModel
@@ -30,7 +55,7 @@ export interface MockScenario {
   /** Optional simulated error — when set, content is ignored. */
   error?: string
   /** Optional usage tokens for cost-estimation tests. */
-  usage?: { promptTokens: number; completionTokens: number; totalTokens?: number }
+  usage?: LlmUsage & { totalTokens?: number }
 }
 
 export interface MockCall {
@@ -46,7 +71,7 @@ type MockResponse = {
     content: string
     durationMs: number
     error?: string
-    usage?: { promptTokens: number; completionTokens: number; totalTokens: number }
+    usage?: MockScenario["usage"]
   }
 }
 
@@ -117,12 +142,7 @@ export function buildMockQueryModel(scenarios: MockScenario[]) {
       }
     }
 
-    const baseUsage = scenario.usage ?? { promptTokens: 100, completionTokens: 50 }
-    const usage = {
-      promptTokens: baseUsage.promptTokens,
-      completionTokens: baseUsage.completionTokens,
-      totalTokens: baseUsage.totalTokens ?? baseUsage.promptTokens + baseUsage.completionTokens,
-    }
+    const usage = scenario.usage ?? { promptTokens: 100, completionTokens: 50, totalTokens: 150 }
     return {
       response: {
         model: opts.model,

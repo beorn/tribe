@@ -6,6 +6,7 @@ import { createLogger } from "loggily"
 import type { ContentType } from "./types.ts"
 import type { IndexFreshness } from "../lib/staleness.ts"
 import type { VaultQuery } from "./vault-fts.ts"
+import type { LlmBackend, LlmCostCall, LlmCostFields } from "../lib/llm-backend.ts"
 
 // ============================================================================
 // Logging
@@ -54,6 +55,8 @@ export type IndexProvenanceDetail =
     }
 
 export interface RecallOptions {
+  /** Existing host backend, also forwarded by the agent's fallback path. */
+  deps?: { llm?: LlmBackend }
   limit?: number // Max results to include (default 10)
   raw?: boolean // Return raw results without LLM synthesis
   since?: string // Time filter (1h, 1d, 1w, etc.)
@@ -129,7 +132,7 @@ export interface HookSearchSummary {
   survivors: number
 }
 
-export interface RecallResult {
+export interface RecallResult extends Partial<LlmCostFields> {
   query: string
   provenance: IndexProvenance
   /**
@@ -140,7 +143,7 @@ export interface RecallResult {
   synthesis: string | null // LLM synthesis (null if raw mode, no results, or synthesis failed)
   results: RecallSearchResult[]
   durationMs: number
-  llmCost?: number
+  calls?: LlmCostCall[]
   timing?: {
     searchMs: number
     llmMs?: number
@@ -228,7 +231,9 @@ export interface ExcludedProvider {
  * needs to diagnose the failure without a second run. § Fail Loud: what I
  * queried, where I looked, what I excluded.
  */
-export interface SynthesisDiagnostics {
+export interface SynthesisDiagnostics extends Partial<LlmCostFields> {
+  /** Original monetary call facts, including failed attempts, when recorded. */
+  calls?: LlmCostCall[]
   /**
    * One-line human summary of what went wrong — the SAME text as the
    * thrown error's `.message`. Some failure modes (e.g. no LLM backend

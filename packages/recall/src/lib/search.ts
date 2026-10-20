@@ -310,7 +310,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   // stale answer says what it judged without the caller running a second tool.
   result.provenanceDetail = freshness
   reportSearchSkips(result, json)
-  formatRecallOutput(result, { json })
+  await formatRecallOutput(result, { json })
 }
 
 async function runAgentSearch(query: string, options: SearchOptions, base: RecallOptions): Promise<void> {
@@ -370,7 +370,7 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   }
 
   // Reuse the standard output formatter for the final answer.
-  formatRecallOutput(result, { json: false })
+  await formatRecallOutput(result, { json: false })
 
   // Surface the synth path explicitly after the answer — users should know
   // whether the answer was short-circuited after round 1 or cost 2 synth
@@ -593,13 +593,20 @@ export function emitRefreshNote(r: RefreshResult): void {
   }
 }
 
-function formatRecallOutput(result: RecallResult, options: { json?: boolean }): void {
+async function formatRecallOutput(result: RecallResult, options: { json?: boolean }): Promise<void> {
+  let costText: string | undefined
+  if (result.list_equivalent_basis !== undefined) {
+    const { requireLlm } = await import("./llm-backend.ts")
+    const llm = await requireLlm("Recall cost display")
+    costText = llm.formatCostColumns(llm.deserializeCost(result))
+  }
   // Check FIRST, before requireSynthesizedAnswer would throw a generic
   // "no synthesized answer" error that discards the rich diagnostic report
   // recall() already built. A synthesis failure with lexical results in
   // hand is a distinct, better-understood case than "nothing came back."
   if (result.synthesisFailure) {
     renderSynthesisFailure(result, result.synthesisFailure, options)
+    if (!options.json && costText) console.log(`${DIM}${costText}${RESET}`)
     return
   }
 
@@ -630,6 +637,7 @@ function formatRecallOutput(result: RecallResult, options: { json?: boolean }): 
       )
     }
     console.log(`${DIM}(searched in ${result.durationMs}ms)${RESET}`)
+    if (costText) console.log(`${DIM}${costText}${RESET}`)
     return
   }
 
@@ -644,9 +652,7 @@ function formatRecallOutput(result: RecallResult, options: { json?: boolean }): 
   console.log(
     `${DIM}${result.results.length} results${unprovenSuffix(result.provenance, result.provenanceDetail)} from ${uniqueSessions} sessions (${timingParts.join(", ")})${RESET}`,
   )
-  if (result.llmCost !== undefined && result.llmCost > 0) {
-    console.log(`${DIM}LLM cost: $${result.llmCost.toFixed(4)}${RESET}`)
-  }
+  if (costText) console.log(`${DIM}${costText}${RESET}`)
 }
 
 function requireSynthesizedAnswer(result: RecallResult): void {

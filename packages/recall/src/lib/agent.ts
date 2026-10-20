@@ -23,7 +23,7 @@ import { buildQueryContext, renderContextPrompt, type QueryContext } from "./con
 import { planQuery, planVariants, type PlanCall } from "./plan.ts"
 import { fanoutSearch, mergeFanouts, type FanoutResult } from "./fanout.ts"
 import { writeTrace, type RoundTrace, type TracePayload } from "./trace.ts"
-import type { LlmBackend } from "./llm-backend.ts"
+import { loadLlm, type LlmBackend, type LlmCostCall } from "./llm-backend.ts"
 
 // ============================================================================
 // Options
@@ -46,10 +46,6 @@ export interface AgentRecallOptions extends RecallOptions {
    * Set false to always synth on the final merged results (one at a time).
    */
   speculativeSynth?: boolean
-  /** Test/host seam; defaults to loading TRIBE_LLM_DIR. */
-  deps?: {
-    llm?: LlmBackend
-  }
 }
 
 export interface AgentRecallResult extends RecallResult {
@@ -118,14 +114,25 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
 
   const db = getDb()
   const rounds: RoundTrace[] = []
-  const planCosts: number[] = []
+  const plannerCalls: LlmCostCall[] = []
+  const synthesisCalls: LlmCostCall[] = []
   const planElapsed: number[] = []
   const fanoutElapsed: number[] = []
 
   // Speculative synth defaults on — env var or explicit option can disable.
   const speculativeSynth =
     options.speculativeSynth !== undefined ? options.speculativeSynth : process.env.RECALL_SPECULATIVE_SYNTH !== "0"
-  const llm = options.deps?.llm
+  const llm = options.deps?.llm ?? (await loadLlm()) ?? undefined
+  const runSynthesis = async (results: RecallSearchResult[]): Promise<SynthesisResult> => {
+    try {
+      const result = await synthesizeResults(query, results, timeout, llm)
+      synthesisCalls.push(...result.calls)
+      return result
+    } catch (error) {
+      synthesisCalls.push(...(synthesisDiagnosticsFromError(error, timeout).calls ?? []))
+      throw error
+    }
+  }
 
   let decision: { round2Mode: "wider" | "deeper" | "off"; reason: string } = {
     round2Mode: "off",
@@ -168,12 +175,12 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   // ──────────────────────────────────────────────────────────────────────
   const planR1 = await planQuery(query, context, { round: 1, timeoutMs: planTimeoutMs, llm })
   planElapsed.push(planR1.elapsedMs)
-  if (planR1.cost) planCosts.push(planR1.cost)
+  plannerCalls.push(...planR1.calls)
 
   if (!planR1.plan) {
     log(`agent: round 1 planner failed (${planR1.error ?? "unknown"}) — falling through`)
     rounds.push(buildRoundTrace(1, undefined, planR1, [], null))
-    return fallthrough(query, options, startedAt, rounds, decision, contextChars)
+    return fallthrough(query, options, startedAt, rounds, decision, contextChars, plannerCalls, llm)
   }
 
   // Apply planner-provided time hint only if caller didn't pass --since
@@ -191,7 +198,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   if (variantsR1.length === 0) {
     log(`agent: round 1 produced zero variants — falling through`)
     rounds.push(buildRoundTrace(1, undefined, planR1, [], null))
-    return fallthrough(query, options, startedAt, rounds, decision, contextChars)
+    return fallthrough(query, options, startedAt, rounds, decision, contextChars, plannerCalls, llm)
   }
 
   const fanoutR1 = fanoutSearch(db, variantsR1, {
@@ -219,7 +226,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   const speculativeSynthStart = Date.now()
   const speculativeSynthPromise: Promise<{ result: SynthesisResult } | { error: unknown }> | null =
     speculativeSynth && fanoutR1.results.length > 0
-      ? synthesizeResults(query, fanoutR1.results, timeout, llm).then(
+      ? runSynthesis(fanoutR1.results).then(
           (result) => ({ result }),
           (error: unknown) => ({ error }),
         )
@@ -248,7 +255,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
         llm,
       })
       planElapsed.push(planR2.elapsedMs)
-      if (planR2.cost) planCosts.push(planR2.cost)
+      plannerCalls.push(...planR2.calls)
 
       if (!planR2.plan) {
         const msg =
@@ -291,7 +298,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   // the speculative result reflects what matters, and we save ~3s.
   // ──────────────────────────────────────────────────────────────────────
   const synthStart = Date.now()
-  let synthesis: { text: string | null; cost?: number } = { text: null }
+  let synthesis: { text: string | null } = { text: null }
   let synthPath: NonNullable<AgentRecallResult["trace"]["synthPath"]> = "none"
   let synthCallsUsed = 0
   let round1ShortCircuited = false
@@ -313,7 +320,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
         const speculative = await speculativeSynthPromise
         if ("error" in speculative) throw speculative.error
         const specResult = speculative.result
-        synthesis = { text: specResult.text, cost: specResult.cost }
+        synthesis = { text: specResult.text }
         synthPath = round2Ran ? "speculative-round1" : "single-pass"
         round1ShortCircuited = true
         const saved = Date.now() - speculativeSynthStart
@@ -326,22 +333,21 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
         // call whose result we're abandoning, and our cost + synth-count
         // report should reflect that honestly.
         synthCallsUsed = speculativeSynthPromise ? 2 : 1
-        const [freshResult, abandonedSpeculative] = await Promise.all([
-          synthesizeResults(query, finalFanout.results, timeout, llm),
+        const [freshResult] = await Promise.all([
+          runSynthesis(finalFanout.results).then(
+            (result) => ({ result }),
+            (error: unknown) => ({ error }),
+          ),
           speculativeSynthPromise,
         ])
-        const abandonedSpec =
-          abandonedSpeculative && "result" in abandonedSpeculative ? abandonedSpeculative.result : null
+        if ("error" in freshResult) throw freshResult.error
         synthesis = {
-          text: freshResult.text,
-          cost: (freshResult.cost ?? 0) + (abandonedSpec?.cost ?? 0),
+          text: freshResult.result.text,
         }
         synthPath = round2Ran ? "fresh-merged" : "single-pass"
         round1ShortCircuited = false
         log(
-          `agent: using fresh synth on ${round2Ran ? `merged results (r2 added ${newDocsInTop} new top-K)` : "round 1 results (speculative disabled)"} — ${synthCallsUsed} synth call${synthCallsUsed === 1 ? "" : "s"}${
-            abandonedSpec?.cost ? ` (abandoned spec cost $${abandonedSpec.cost.toFixed(4)})` : ""
-          }`,
+          `agent: using fresh synth on ${round2Ran ? `merged results (r2 added ${newDocsInTop} new top-K)` : "round 1 results (speculative disabled)"} — ${synthCallsUsed} synth call${synthCallsUsed === 1 ? "" : "s"}`,
         )
       }
     }
@@ -349,14 +355,21 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
     synthesisFailure = synthesisDiagnosticsFromError(err, timeout)
     log(`agent: synthesis FAILED — keeping ${finalFanout.results.length} lexical results: ${synthesisFailure.summary}`)
   }
+  if (speculativeSynthPromise) await speculativeSynthPromise
   const synthMs = Date.now() - synthStart
 
   const totalMs = Date.now() - startedAt
-  const plannerUsd = planCosts.reduce((s, x) => s + x, 0)
-  const synthUsd = synthesis.cost ?? 0
+  const calls = [...plannerCalls, ...synthesisCalls]
+  const costs = llm
+    ? {
+        planner: llm.serializeCost(llm.aggregateCosts(plannerCalls.map((call) => llm.resolveResponseCost(call)))),
+        synthesis: llm.serializeCost(llm.aggregateCosts(synthesisCalls.map((call) => llm.resolveResponseCost(call)))),
+        total: llm.serializeCost(llm.aggregateCosts(calls.map((call) => llm.resolveResponseCost(call)))),
+      }
+    : undefined
 
   log(
-    `agent: done — ${finalFanout.results.length} results, synth=${synthesis.text ? "ok" : "none"} (total=${totalMs}ms, plan=${planElapsed.reduce((a, b) => a + b, 0)}ms, fanout=${fanoutElapsed.reduce((a, b) => a + b, 0)}ms, synth=${synthMs}ms, cost=$${(plannerUsd + synthUsd).toFixed(4)})`,
+    `agent: done — ${finalFanout.results.length} results, synth=${synthesis.text ? "ok" : "none"} (total=${totalMs}ms, plan=${planElapsed.reduce((a, b) => a + b, 0)}ms, fanout=${fanoutElapsed.reduce((a, b) => a + b, 0)}ms, synth=${synthMs}ms, costs=${JSON.stringify(costs?.total)})`,
   )
 
   const result: AgentRecallResult = {
@@ -366,7 +379,8 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
     results: finalFanout.results,
     ...(finalFanout.skipped?.length ? { skipped: finalFanout.skipped } : {}),
     durationMs: totalMs,
-    llmCost: plannerUsd + synthUsd,
+    calls,
+    ...costs?.total,
     timing: {
       searchMs: fanoutElapsed.reduce((a, b) => a + b, 0),
       llmMs: planElapsed.reduce((a, b) => a + b, 0) + synthMs,
@@ -375,7 +389,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
     trace: { rounds, decision, contextChars, synthPath, synthCallsUsed, round1ShortCircuited },
   }
 
-  const traceFile = writeTrace(buildTracePayload(result, options, context, synthMs, plannerUsd, synthUsd))
+  const traceFile = writeTrace(buildTracePayload(result, options, context, synthMs, costs))
   if (traceFile) result.traceFile = traceFile
 
   closeDb()
@@ -505,8 +519,7 @@ function buildTracePayload(
   options: AgentRecallOptions,
   context: QueryContext,
   synthMs: number,
-  plannerUsd: number,
-  synthUsd: number,
+  costs: TracePayload["costs"],
 ): TracePayload {
   return {
     query: result.query,
@@ -535,11 +548,8 @@ function buildTracePayload(
       synthMs,
       totalMs: result.durationMs,
     },
-    costs: {
-      plannerUsd,
-      synthesisUsd: synthUsd,
-      totalUsd: plannerUsd + synthUsd,
-    },
+    calls: result.calls,
+    costs,
   }
 }
 
@@ -554,10 +564,30 @@ async function fallthrough(
   rounds: RoundTrace[],
   decision: { round2Mode: "wider" | "deeper" | "off"; reason: string },
   contextChars = 0,
+  priorCalls: LlmCostCall[] = [],
+  llm?: LlmBackend,
 ): Promise<AgentRecallResult> {
-  const baseline = await recall(query, options)
+  const backend = llm ?? options.deps?.llm ?? (await loadLlm()) ?? undefined
+  const baseline = await recall(query, { ...options, deps: { ...options.deps, llm: backend } })
+  const calls = [...priorCalls, ...(baseline.calls ?? [])]
+  const baselineResult = { ...baseline }
+  // Replace the complete monetary envelope. A newly unknown total must not
+  // leave the baseline's known partial amount beside its reason.
+  for (const key of [
+    "cost_usd",
+    "cost_usd_reason",
+    "list_equivalent_usd",
+    "list_equivalent_reason",
+    "list_equivalent_basis",
+  ] as const) {
+    delete baselineResult[key]
+  }
   return {
-    ...baseline,
+    ...baselineResult,
+    calls,
+    ...(backend
+      ? backend.serializeCost(backend.aggregateCosts(calls.map((call) => backend.resolveResponseCost(call))))
+      : {}),
     durationMs: Date.now() - startedAt,
     trace: { rounds, decision, contextChars },
     fellThrough: true,

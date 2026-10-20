@@ -8,7 +8,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest"
-import { buildMockQueryModel, buildPlanJson, alwaysAvailable } from "../helpers/llm-mock.ts"
+import { buildMockQueryModel, buildPlanJson, alwaysAvailable, unavailableCostMethods } from "../helpers/llm-mock.ts"
 import type { LlmBackend } from "../../src/lib/llm-backend.ts"
 
 process.env.RECALL_DB_PATH = ":memory:"
@@ -26,7 +26,7 @@ const llm = {
   getModel: (id: string) => fakeModel(id),
   getCheapModel: () => fakeModel("mock-cheap"),
   getCheapModels: (max = 2) => [fakeModel("mock-cheap"), fakeModel("mock-cheap-2")].slice(0, Math.max(0, max)),
-  estimateCost: () => 0.0001,
+  ...unavailableCostMethods,
   isProviderAvailable: alwaysAvailable,
 } satisfies LlmBackend
 

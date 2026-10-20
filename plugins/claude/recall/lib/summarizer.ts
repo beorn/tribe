@@ -21,7 +21,11 @@ export type SummarizerMode = "off" | "haiku" | "local"
 
 import {
   loadLlm,
+  llmCostCall,
   selectAvailableCheapModels,
+  type LlmCostCall,
+  type LlmCostFields,
+  type LlmQueryResult,
   type LlmBackend,
   type LlmModel as Model,
 } from "../../../../packages/recall/src/lib/llm-backend.ts"
@@ -36,11 +40,12 @@ function warnUnavailableOnce(mode: SummarizerMode): void {
   )
 }
 
-export type SessionSummary = {
-  focus: string
+export type SessionSummary = LlmCostFields & {
+  focus: string | null
   looseEnds: string[]
   model: string
-  cost: number
+  calls: LlmCostCall[]
+  error?: string
 }
 
 export function resolveSummarizerMode(raw?: string): SummarizerMode {
@@ -106,7 +111,7 @@ Rules:
 
 /**
  * Summarize a flattened session tail. Returns null on model unavailable,
- * empty tail, or parse failure (non-throwing — caller just skips).
+ * or empty tail. An invoked failure returns its original receipt and error.
  */
 export async function summarizeTail(
   tail: string,
@@ -125,6 +130,7 @@ export async function summarizeTail(
   if (!model) return null
 
   const startedAt = Date.now()
+  let response: LlmQueryResult["response"]
   try {
     const result = await llm.queryModel({
       model,
@@ -133,24 +139,26 @@ export async function summarizeTail(
       stream: false,
       abortSignal: opts.timeoutMs ? AbortSignal.timeout(opts.timeoutMs) : undefined,
     })
-    const content = result.response?.content ?? ""
-    const parsed = parseSummary(content)
-    if (!parsed) return null
-    const cost = result.response?.usage?.estimatedCost ?? 0
-    return {
-      focus: parsed.focus,
-      looseEnds: parsed.loose_ends,
-      model: model.modelId,
-      cost: typeof cost === "number" ? cost : 0,
-    }
+    response = result.response
   } catch (err) {
     if (process.env.TRIBE_LOG === "1") {
       process.stderr.write(
         `[lore-summarizer] ${model.modelId} failed after ${Date.now() - startedAt}ms: ${err instanceof Error ? err.message : err}\n`,
       )
     }
-    // silent-fallback-allow: failed lore LLM summarization falls back to no summary for this model.
-    return null
+    response = { error: err instanceof Error ? err.message : String(err) }
+  }
+  const call = llmCostCall(model, response)
+  const cost = llm.serializeCost(llm.aggregateCosts([llm.resolveResponseCost(call)]))
+  const parsed = response.error ? null : parseSummary(response.content ?? "")
+  const error = response.error ?? (parsed ? undefined : `summary from ${model.modelId} could not be parsed`)
+  return {
+    ...cost,
+    focus: parsed?.focus ?? null,
+    looseEnds: parsed?.loose_ends ?? [],
+    model: model.modelId,
+    calls: [call],
+    ...(error ? { error } : {}),
   }
 }
 
