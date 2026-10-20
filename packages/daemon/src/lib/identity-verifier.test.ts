@@ -731,33 +731,58 @@ describe("boundedIdentityVerifier", () => {
   /** @failure The bound is revised from a ratio to a budget instead of the cold tail actually observed:
    * a probe that outlived the wait lands its verdict in the cache with no record of how long it took
    * (28947, @cto must). @level l1 @consumer The daemon composition's info log. */
-  it("a probe that outlived the wait reports its eventual duration and verdict kind when it lands (28947)", async () => {
-    const landed: Array<{ elapsedMs: number; result: IdentityVerdict["result"]; probeId?: string }> = []
-    const probe = deferred<IdentityVerdict>()
-    const wrapped = boundedIdentityVerifier(
-      stub(async () => probe.promise),
-      {
-        waitMs: 30,
-        onOutlivedProbe: (info) => landed.push(info),
-      },
-    )
-    const timedOut = await wrapped.verify("tok")
-    expect(timedOut).toMatchObject({
-      result: "undecided",
-      reason: "no verdict within 30ms",
-      diagnostic: { probeId: expect.any(String) },
-    })
-    expect(landed).toEqual([])
-    probe.resolve(verified)
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(landed).toHaveLength(1)
-    expect(landed[0]?.result).toBe("verified")
-    expect(landed[0]?.elapsedMs).toBeGreaterThanOrEqual(30)
-    expect(landed[0]?.probeId).toBe(timedOut.diagnostic?.probeId)
-    // The next call serves the landed verdict from cache; nothing outlived again.
-    await expect(wrapped.verify("tok")).resolves.toEqual(verified)
-    expect(landed).toHaveLength(1)
-  })
+  it.each(["verified", "contradicted", "absent"] as const)(
+    "reports a shared late probe with redacted observation fields: %s",
+    async (result) => {
+      const token = "private-identity-test-token"
+      const diagnostic = { [`input-${token}`]: `detail-${token}`, elapsedMs: 12 }
+      const verdict: IdentityVerdict =
+        result === "verified"
+          ? { result, actor: `actor-${token}`, sid: `sid-${token}`, gen: 3, diagnostic }
+          : result === "contradicted"
+            ? { result, reason: `contradiction-${token}`, diagnostic }
+            : { result }
+      const landed: Array<{ elapsedMs: number; result: IdentityVerdict["result"]; probeId?: string }> = []
+      const probe = deferred<IdentityVerdict>()
+      const wrapped = boundedIdentityVerifier(
+        stub(async () => probe.promise),
+        {
+          waitMs: 30,
+          onOutlivedProbe: (info) => landed.push(info),
+        },
+      )
+      const timedOut = await wrapped.verify(token)
+      expect(timedOut).toMatchObject({
+        result: "undecided",
+        reason: "no verdict within 30ms",
+        diagnostic: { probeId: expect.any(String) },
+      })
+      expect(landed).toEqual([])
+      probe.resolve(verdict)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(landed).toHaveLength(1)
+      expect(landed[0]).toMatchObject({
+        result,
+        reason: result === "contradicted" ? "contradiction-[redacted identity token]" : result,
+        diagnostic:
+          result === "absent"
+            ? { status: "unavailable", reason: "module supplied no diagnostic" }
+            : { "input-[redacted identity token]": "detail-[redacted identity token]", elapsedMs: 12 },
+      })
+      if (result === "verified") {
+        expect(landed[0]).toMatchObject({
+          actor: "actor-[redacted identity token]",
+          launchId: "sid-[redacted identity token]@3",
+        })
+      }
+      expect(JSON.stringify(landed)).not.toContain(token)
+      expect(landed[0]?.elapsedMs).toBeGreaterThanOrEqual(30)
+      expect(landed[0]?.probeId).toBe(timedOut.diagnostic?.probeId)
+      // The next call serves the landed verdict from cache; nothing outlived again.
+      await expect(wrapped.verify(token)).resolves.toEqual(verdict)
+      expect(landed).toHaveLength(1)
+    },
+  )
 })
 
 describe("session authority", () => {
