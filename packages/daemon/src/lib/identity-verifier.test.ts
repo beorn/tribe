@@ -109,13 +109,14 @@ describe("loadIdentityVerifier", () => {
     ).rejects.toThrow(`incident policy ${path}`)
 
     // The promotion repairs the module at the path the daemon already holds; the daemon does not restart.
+    // Optional diagnostics are observations, never identity facts supplied to a policy's authorization decision.
     writeFileSync(
       path,
       `export const IDENTITY_VERIFIER_INTERFACE = 1
        export async function verifyIdentity() { return { result: "absent" } }
        export const INCIDENT_POLICY = {
          emitters: ["workmon"],
-         authorize: (identity, emitter) => identity.actor === emitter,
+         authorize: (identity, emitter) => identity.actor === emitter && !("diagnostic" in identity),
        }`,
     )
     const repaired = verifier.readIncidentPolicy!()
@@ -123,7 +124,7 @@ describe("loadIdentityVerifier", () => {
     try {
       expect(
         await repaired.authorize(
-          { result: "verified", actor: "workmon", kind: "service", sid: "sid" },
+          { result: "verified", actor: "workmon", kind: "service", sid: "sid", diagnostic: { stage: "observed" } },
           "workmon",
           "read",
         ),
