@@ -3747,7 +3747,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     ...(membership.discrepancy === undefined
       ? {}
       : {
-          // 29162 — name the missing seats up front; the sessions list above carries only connected rows.
+          // Name missing transports separately; sessions also retains otherwise absent names' latest nonfinished registrations.
           headline: membersDiscrepancyHeadline(membership.discrepancy),
           membership_discrepancy: {
             ...membership.discrepancy,

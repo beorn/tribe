@@ -2,7 +2,7 @@
  * connectTribeLaunch certifies the launch identity the daemon keyed (25074, @cto b58e4715 and 95c2be2d). The client never
  * omits the launch id it was given: a register sends its token AND its derived launch id, and the daemon decides the
  * keying. A verified token keys `<sid>@<gen>`, which only the daemon knows, so `register` returns the identity it keyed
- * and the client certifies its members row against that. The returned id must be the derived one or that seat's
+ * and the client validates that registration ACK independently of members or useful-turn evidence. The returned id must be the derived one or that seat's
  * `<sid>@<gen>`, never another launch. An old daemon that returns none keeps the derived-id certification, so an old
  * daemon plus this client keeps joining (@cto 57e5f42a). sessionId alone never certifies.
  */
