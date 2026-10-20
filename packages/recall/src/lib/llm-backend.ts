@@ -81,6 +81,13 @@ export type LlmQueryResult = {
     cost_usd?: number
     servedBy?: { model: string; [key: string]: unknown }
     cacheHit?: boolean
+    calls?: Array<{
+      model: LlmModel
+      usage?: LlmUsage
+      cost_usd?: number
+      error?: string
+      responseBody?: string
+    }>
   }
 }
 
@@ -96,6 +103,7 @@ export function llmCostCall(model: LlmModel, response: LlmQueryResult["response"
     servedBy: response.servedBy,
     cacheHit: response.cacheHit,
     error: response.error,
+    calls: response.calls,
   }
 }
 
