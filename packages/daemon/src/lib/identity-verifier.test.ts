@@ -36,6 +36,57 @@ function moduleAt(name: string, source: string): string {
 }
 
 describe("loadIdentityVerifier", () => {
+  /** @failure Optional observation metadata must never turn a verified core identity into child failure.
+   * @level l2 — real loader, one-response verifier child and parent normalization.
+   * @consumer Wire timeout diagnostics: once-valid getter catches the child spread reread;
+   * always-throwing getter separately exercises the existing guarded read-failure fallback.
+   */
+  it.each(["once-valid", "always-throws", "malformed", "missing"] as const)(
+    "keeps optional diagnostics nonfatal through the child: %s",
+    async (mode) => {
+      const declaration =
+        mode === "missing"
+          ? ""
+          : mode === "malformed"
+            ? "const diagnostic = {stage: {nested: true}}"
+            : `let reads = 0; const diagnostic = Object.defineProperty({}, "stage", {
+            enumerable: true, get() {
+              if (++reads === ${mode === "once-valid" ? 1 : 0}) return "liveness"
+              throw new Error("diagnostic getter reread")
+            }
+          })`
+      const path = moduleAt(
+        `optional-diagnostic-${mode}.ts`,
+        `
+        export const IDENTITY_VERIFIER_INTERFACE = 1
+        export async function verifyIdentity() {
+          ${declaration}
+          return {result:"verified",actor:"@diagnostic-test",sid:"diagnostic-session"${mode === "missing" ? "" : ",diagnostic"}}
+        }`,
+      )
+      const loaded = await loadIdentityVerifier(path)
+      const result = await loaded.verify("diagnostic-test-token")
+      expect(result).toMatchObject({ result: "verified", actor: "@diagnostic-test", sid: "diagnostic-session" })
+      if (mode === "missing") {
+        expect(result).not.toHaveProperty("diagnostic")
+      } else {
+        const diagnostic =
+          mode === "once-valid"
+            ? { stage: "liveness" }
+            : {
+                status: "unavailable",
+                reason:
+                  mode === "malformed"
+                    ? "malformed optional verifier diagnostic"
+                    : "unreadable optional verifier diagnostic",
+              }
+        expect(result).toMatchObject({ diagnostic: { ...diagnostic, moduleLoadMs: expect.any(Number) } })
+        // Serialization must retain owned values; it must never re-enter the module's accessor.
+        expect(JSON.parse(JSON.stringify(result))).toMatchObject({ diagnostic })
+      }
+    },
+  )
+
   /** @failure A policy that faulted at boot is refused FOREVER, so a landing that repairs it never takes effect
    *          without a daemon restart.
    * @level   l2
@@ -648,7 +699,13 @@ describe("boundedIdentityVerifier", () => {
       { waitMs: 30 },
     )
     const started = Date.now()
-    await expect(wrapped.verify("tok")).resolves.toEqual({ result: "undecided", reason: "no verdict within 30ms" })
+    const [first, second] = await Promise.all([wrapped.verify("tok"), wrapped.verify("tok")])
+    expect(first).toMatchObject({
+      result: "undecided",
+      reason: "no verdict within 30ms",
+      diagnostic: { probeId: expect.any(String), stage: "unknown", reason: "untracked verifier" },
+    })
+    expect(second).toEqual(first)
     expect(Date.now() - started).toBeLessThan(1_000)
     expect(calls).toBe(1)
     probe.resolve(verified)
@@ -674,7 +731,7 @@ describe("boundedIdentityVerifier", () => {
    * a probe that outlived the wait lands its verdict in the cache with no record of how long it took
    * (28947, @cto must). @level l1 @consumer The daemon composition's info log. */
   it("a probe that outlived the wait reports its eventual duration and verdict kind when it lands (28947)", async () => {
-    const landed: Array<{ elapsedMs: number; result: IdentityVerdict["result"] }> = []
+    const landed: Array<{ elapsedMs: number; result: IdentityVerdict["result"]; probeId?: string }> = []
     const probe = deferred<IdentityVerdict>()
     const wrapped = boundedIdentityVerifier(
       stub(async () => probe.promise),
@@ -683,13 +740,19 @@ describe("boundedIdentityVerifier", () => {
         onOutlivedProbe: (info) => landed.push(info),
       },
     )
-    await expect(wrapped.verify("tok")).resolves.toEqual({ result: "undecided", reason: "no verdict within 30ms" })
+    const timedOut = await wrapped.verify("tok")
+    expect(timedOut).toMatchObject({
+      result: "undecided",
+      reason: "no verdict within 30ms",
+      diagnostic: { probeId: expect.any(String) },
+    })
     expect(landed).toEqual([])
     probe.resolve(verified)
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(landed).toHaveLength(1)
     expect(landed[0]?.result).toBe("verified")
     expect(landed[0]?.elapsedMs).toBeGreaterThanOrEqual(30)
+    expect(landed[0]?.probeId).toBe(timedOut.diagnostic?.probeId)
     // The next call serves the landed verdict from cache; nothing outlived again.
     await expect(wrapped.verify("tok")).resolves.toEqual(verified)
     expect(landed).toHaveLength(1)
