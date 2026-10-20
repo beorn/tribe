@@ -651,6 +651,7 @@ export function withDispatcher<
     async function verifyOneShotToken(
       value: unknown,
       idToken: unknown,
+      connId: string,
     ): Promise<VerifiedOneShotToken | Extract<SessionAuthorityResolution, { errorCode: number }>> {
       const token = requiredNonEmptyString(idToken)
       const verifier = hooks.identityVerifier
@@ -709,6 +710,12 @@ export function withDispatcher<
           // the probe is still running in the background and no fault is recorded for it.
           log.info?.(
             `identity verdict undecided on a one-shot caller's token (${verdict.reason}); answered retry at once`,
+            {
+              ...connectionLogIdentity(clients.get(connId), connId),
+              caller_identity:
+                !clients.has(connId) || clients.get(connId)?.role === "pending" ? "unobserved" : "registered",
+              probe_id: verdict.diagnostic?.probeId ?? "unobserved",
+            },
           )
           return refuse(
             rejected(
@@ -725,8 +732,12 @@ export function withDispatcher<
       }
     }
 
-    async function resolveSessionAuthority(value: unknown, idToken: unknown): Promise<SessionAuthorityResolution> {
-      const verified = await verifyOneShotToken(value, idToken)
+    async function resolveSessionAuthority(
+      value: unknown,
+      idToken: unknown,
+      connId: string,
+    ): Promise<SessionAuthorityResolution> {
+      const verified = await verifyOneShotToken(value, idToken, connId)
       return "verdict" in verified ? contextForVerifiedToken(verified.verdict) : verified
     }
 
@@ -804,7 +815,7 @@ export function withDispatcher<
       | { errorCode: number; errorMessage: string; errorData: Record<string, unknown> }
     > {
       const callerSocket = captureCallerTransport(connId)
-      const resolution = await resolveSessionAuthority(credentials.authority, credentials.idToken)
+      const resolution = await resolveSessionAuthority(credentials.authority, credentials.idToken, connId)
       if (!("context" in resolution)) {
         if (capability.kind === "pending-close" || capability.kind === "pending-prune") {
           const closeIds =
@@ -974,7 +985,7 @@ export function withDispatcher<
           errorData: { kind: "could-not-evaluate", reason: "session-authority-missing" },
         }
       }
-      const verified = await verifyOneShotToken(undefined, params.id_token)
+      const verified = await verifyOneShotToken(undefined, params.id_token, connId)
       if (!("verdict" in verified)) return verified
       const verifiedSid = verified.verdict.sid
 
@@ -2854,7 +2865,7 @@ export function withDispatcher<
             const target = await resolveInboxTarget(p, explicit ? { mode: "explicit" } : { mode: "launch" }, connId)
             if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage, target.errorData)
             if (explicit) {
-              const verified = await verifyOneShotToken(undefined, p.id_token)
+              const verified = await verifyOneShotToken(undefined, p.id_token, connId)
               if (!("verdict" in verified)) {
                 return makeError(id, verified.errorCode, verified.errorMessage, verified.errorData)
               }
@@ -2960,7 +2971,7 @@ export function withDispatcher<
                   reason: "sessionless-token-missing",
                 })
               }
-              const current = await verifyOneShotToken(undefined, sessionlessToken)
+              const current = await verifyOneShotToken(undefined, sessionlessToken, connId)
               if (!("verdict" in current)) {
                 return makeError(id, -32003, current.errorMessage, current.errorData)
               }
@@ -3045,7 +3056,7 @@ export function withDispatcher<
               const authority = db
                 .prepare("SELECT verified_id_token FROM sessions WHERE id = ?")
                 .get(ctx.sessionId) as { verified_id_token: string | null } | null
-              const current = await verifyOneShotToken(undefined, authority?.verified_id_token)
+              const current = await verifyOneShotToken(undefined, authority?.verified_id_token, connId)
               if (!("verdict" in current)) return refuseIncident(current.errorMessage)
               const operation = emitterRead ? "read" : incident?.active === false ? "clear" : "raise"
               try {

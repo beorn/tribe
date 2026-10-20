@@ -60,9 +60,11 @@ async function readRequest(): Promise<unknown> {
 
 export async function answer(request: unknown, modulePath: string): Promise<unknown> {
   const op = (request as { readonly op?: unknown } | null)?.op
+  const moduleStartedAt = performance.now()
   const loaded = await loadVerifierModule(modulePath).catch((error: unknown) => {
     fail(error instanceof Error ? error.message : String(error))
   })
+  const moduleLoadMs = performance.now() - moduleStartedAt
   switch (op) {
     case "hello": {
       // A broken incident policy must NOT take identity verification down with it (28044 AC1): hello answers either
@@ -84,7 +86,10 @@ export async function answer(request: unknown, modulePath: string): Promise<unkn
     case "verify": {
       const token = (request as { readonly token?: unknown }).token
       if (typeof token !== "string" || token === "") fail("a verify request needs a non-empty string token")
-      return loaded.verify(token)
+      const verdict = await loaded.verify(token)
+      return verdict.diagnostic === undefined
+        ? verdict
+        : { ...verdict, diagnostic: { ...verdict.diagnostic, moduleLoadMs } }
     }
     case "authorize": {
       const { identity, emitter, operation } = request as {

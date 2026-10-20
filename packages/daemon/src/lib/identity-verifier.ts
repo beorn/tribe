@@ -18,6 +18,7 @@
 import { isAbsolute, join } from "node:path"
 import { existsSync } from "node:fs"
 import { createLogger } from "loggily"
+import { randomUUID } from "node:crypto"
 import {
   runBoundedProcessCommand,
   type BoundedProcessCommandResult,
@@ -45,7 +46,9 @@ export const CHILD_STDERR_MARKER = "identity-verifier-child: "
  * register that sends no launch id is keyed `<sid>@<gen>`; without it such a register refuses by name. A module that
  * fills it says so by exporting `IDENTITY_VERIFIER_SUPPLIES_GEN = true`, which the daemon reports in health.
  */
-export type IdentityVerdict =
+export type IdentityDiagnostic = Readonly<Record<string, string | number | boolean | null>>
+
+export type IdentityVerdict = (
   | {
       readonly result: "verified"
       readonly actor: string
@@ -65,6 +68,7 @@ export type IdentityVerdict =
    * bound (28927). A module never returns it — checkedVerdict rejects it as outside the contract.
    */
   | { readonly result: "undecided"; readonly reason: string }
+) & { readonly diagnostic?: IdentityDiagnostic }
 
 export type IdentityVerifier = (token: string) => Promise<IdentityVerdict>
 
@@ -131,8 +135,13 @@ export interface BoundedIdentityVerifierOptions {
    * the next revision of the wait bound is set from. A thrown probe lands nothing and is not told.
    */
   readonly onOutlivedProbe?: (landed: {
+    readonly probeId: string
     readonly elapsedMs: number
     readonly result: IdentityVerdict["result"]
+    readonly reason: string
+    readonly actor?: string
+    readonly launchId?: string
+    readonly diagnostic: IdentityDiagnostic
   }) => void
 }
 
@@ -169,6 +178,7 @@ export function boundedIdentityVerifier(
   const probes = new Map<
     Promise<IdentityVerdict>,
     {
+      probeId: string
       startedAt: number
       outlived: boolean
       completionReported?: boolean
@@ -203,6 +213,7 @@ export function boundedIdentityVerifier(
     })()
     inFlight.set(token, started)
     probes.set(started, {
+      probeId: randomUUID(),
       startedAt,
       outlived: false,
       ...(tracked === undefined ? {} : { readCompletion: tracked.readCompletion }),
@@ -216,7 +227,31 @@ export function boundedIdentityVerifier(
         const seen = probes.get(started)
         probes.delete(started)
         if (seen?.outlived === true) {
-          options.onOutlivedProbe?.({ elapsedMs: now() - seen.startedAt, result: verdict.result })
+          const diagnostic = verdict.diagnostic ?? { status: "unavailable", reason: "module supplied no diagnostic" }
+          options.onOutlivedProbe?.({
+            probeId: seen.probeId,
+            elapsedMs: now() - seen.startedAt,
+            result: verdict.result,
+            reason: ("reason" in verdict ? verdict.reason : verdict.result).replaceAll(
+              token,
+              "[redacted identity token]",
+            ),
+            ...(verdict.result === "verified"
+              ? {
+                  actor: verdict.actor.replaceAll(token, "[redacted identity token]"),
+                  launchId: (verdict.gen === undefined ? verdict.sid : `${verdict.sid}@${verdict.gen}`).replaceAll(
+                    token,
+                    "[redacted identity token]",
+                  ),
+                }
+              : {}),
+            diagnostic: Object.fromEntries(
+              Object.entries(diagnostic).map(([key, value]) => [
+                key.replaceAll(token, "[redacted identity token]"),
+                typeof value === "string" ? value.replaceAll(token, "[redacted identity token]") : value,
+              ]),
+            ),
+          })
         }
       } catch {
         probes.delete(started)
@@ -235,6 +270,8 @@ export function boundedIdentityVerifier(
       const cached = fresh(token)
       if (cached !== undefined) return cached
       const pending = probe(token)
+      // Retain this call's existing probe metadata even if completion removes the map entry.
+      const probeContext = probes.get(pending)
       let timer: ReturnType<typeof setTimeout> | undefined
       const outcome = await Promise.race([
         pending.then(
@@ -253,7 +290,7 @@ export function boundedIdentityVerifier(
       // Only the probe's checked verdict is cached, never the synthesized undecided result.
       const landed = fresh(token)
       if (landed !== undefined) return landed
-      const seen = probes.get(pending)
+      const seen = probeContext
       const completion = seen?.readCompletion?.()
       // Proven exited BY CALLBACK TIME, not necessarily before the original wall-clock cutoff. Still await the
       // same bounded capture/drain and checked verdict: process exit alone never authenticates anybody.
@@ -261,6 +298,7 @@ export function boundedIdentityVerifier(
         if (seen !== undefined && seen.completionReported !== true) {
           seen.completionReported = true
           log.info?.("verifier exited by deadline callback", {
+            probe_id: seen.probeId,
             elapsedMs: now() - seen.startedAt,
             evidence: completion.evidence,
             path: loaded.path,
@@ -275,7 +313,15 @@ export function boundedIdentityVerifier(
           : completion?.state === "running"
             ? "; verifier child still running at callback time"
             : ""
-      return { result: "undecided", reason: `no verdict within ${String(waitMs)}ms${reason}` }
+      return {
+        result: "undecided",
+        reason: `no verdict within ${String(waitMs)}ms${reason}`,
+        diagnostic: {
+          probeId: seen?.probeId ?? "unobserved",
+          stage: completion?.state ?? "unknown",
+          reason: completion?.evidence ?? "untracked verifier",
+        },
+      }
     },
   }
 }
@@ -561,7 +607,14 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
         ): Promise<LoadedIncidentAuthorization> => {
           let answer: AuthorizeAnswer
           try {
-            answer = (await call({ op: "authorize", identity, emitter, operation })) as AuthorizeAnswer
+            // Observation metadata is not an authorization fact and never crosses that request.
+            const { diagnostic: _diagnostic, ...authorityIdentity } = identity
+            answer = (await call({
+              op: "authorize",
+              identity: authorityIdentity,
+              emitter,
+              operation,
+            })) as AuthorizeAnswer
           } catch (error) {
             // A policy that fails NOW becomes the CURRENT fault (28921 review, @cto SHOULD 1): this operation is
             // refused either way, so the health line must not go on reading healthy while grants refuse.
@@ -596,6 +649,35 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
 /** A verdict outside the contract is the verifier's fault, surfaced like a throw — never read as "unreadable". */
 function checkedVerdict(value: unknown, path: string): IdentityVerdict {
   const verdict = value as Record<string, unknown> | null
+  // Optional telemetry is nonfatal and never changes the authentication result.
+  let diagnostic: { readonly diagnostic?: IdentityDiagnostic } = {}
+  try {
+    const raw = verdict?.diagnostic
+    if (raw !== undefined) {
+      const entries =
+        raw !== null &&
+        typeof raw === "object" &&
+        !Array.isArray(raw) &&
+        (Object.getPrototypeOf(raw) === Object.prototype || Object.getPrototypeOf(raw) === null)
+          ? Object.entries(raw)
+          : null
+      diagnostic = {
+        diagnostic:
+          entries !== null &&
+          entries.every(
+            ([, v]) =>
+              v === null ||
+              typeof v === "string" ||
+              typeof v === "boolean" ||
+              (typeof v === "number" && Number.isFinite(v)),
+          )
+            ? (Object.fromEntries(entries) as IdentityDiagnostic)
+            : { status: "unavailable", reason: "malformed optional verifier diagnostic" },
+      }
+    }
+  } catch {
+    diagnostic = { diagnostic: { status: "unavailable", reason: "unreadable optional verifier diagnostic" } }
+  }
   const nonEmpty = (field: unknown): field is string => typeof field === "string" && field.length > 0
   switch (verdict?.result) {
     case "verified":
@@ -622,7 +704,15 @@ function checkedVerdict(value: unknown, path: string): IdentityVerdict {
             }
           : {}
         if (verdict.gen === undefined) {
-          return { result: "verified", actor: verdict.actor, sid: verdict.sid, ...kind, ...habitat, ...observed }
+          return {
+            result: "verified",
+            actor: verdict.actor,
+            sid: verdict.sid,
+            ...kind,
+            ...habitat,
+            ...observed,
+            ...diagnostic,
+          }
         }
         if (typeof verdict.gen === "number" && Number.isSafeInteger(verdict.gen) && verdict.gen >= 0) {
           return {
@@ -633,15 +723,16 @@ function checkedVerdict(value: unknown, path: string): IdentityVerdict {
             ...kind,
             ...habitat,
             ...observed,
+            ...diagnostic,
           }
         }
       }
       break
     case "absent":
-      return { result: "absent" }
+      return { result: "absent", ...diagnostic }
     case "unreadable":
     case "contradicted":
-      if (nonEmpty(verdict.reason)) return { result: verdict.result, reason: verdict.reason }
+      if (nonEmpty(verdict.reason)) return { result: verdict.result, reason: verdict.reason, ...diagnostic }
       break
   }
   throw new Error(`identity verifier ${path} returned a verdict outside the contract: ${JSON.stringify(value)}`)

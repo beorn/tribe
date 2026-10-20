@@ -25,7 +25,7 @@ import { join } from "node:path"
 import type { Server, Socket as NetSocket } from "node:net"
 import type { Database } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { getLogLevel, setLogLevel } from "loggily"
+import { addWriter, getLogLevel, setLogLevel } from "loggily"
 import { createScope } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
 import type { TribeRole } from "tribe-wire/lib/config"
@@ -1971,30 +1971,87 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
 
   /** @failure The one-shot consumer of an undecided verdict pages @chief as a broken verifier (28927).
    * @level l2 @consumer One-shot callers (session authority by identity token). */
-  it("refuses an undecided verdict retryably on the one-shot path and records no verifier fault", async () => {
-    const token = "secret-token-must-stay-private"
-    const harness = createDispatcherHarness({
-      identityVerifier: {
-        path: "/stub/identity-verifier.ts",
-        suppliesGen: true,
-        verify: async () => ({ result: "undecided", reason: "no verdict within 250ms" }),
-      },
-    })
-    cleanup = harness.dispose
-    const refusal = parseError(
-      await harness.request("cli_self_inbox_v1", { authority: null, idToken: token, limit: 5, peek: true }),
-    )
-    // The one-shot boundary wraps every authority refusal as unauthenticated; the site kind rides as
-    // its reason, exactly as identity-contradicted does.
-    expect(refusal).toMatchObject({ code: -32003, data: { kind: "unauthenticated", reason: "identity-undecided" } })
-    expect(
-      harness.db.prepare("SELECT count(*) AS n FROM messages WHERE type = 'health:identity-verifier-fault'").get(),
-    ).toEqual({ n: 0 })
-    expect(
-      harness.db.prepare("SELECT count(*) AS n FROM pending_request WHERE request_kind = 'incident'").get(),
-    ).toEqual({ n: 0 })
-    expect(JSON.stringify(refusal)).not.toContain(token)
-  })
+  it.each(["unregistered", "pending", "registered"] as const)(
+    "logs the actual one-shot caller context without changing its undecided refusal: %s",
+    async (caller) => {
+      const token = "secret-token-must-stay-private"
+      const connId = "conn-cli_self_inbox_v1-probe"
+      let undecided = caller !== "registered"
+      const harness = createDispatcherHarness({
+        identityVerifier: {
+          path: "/stub/identity-verifier.ts",
+          suppliesGen: true,
+          verify: async () =>
+            undecided
+              ? { result: "undecided", reason: "no verdict within 250ms", diagnostic: { probeId: "one-shot-probe" } }
+              : { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 },
+        },
+      })
+      cleanup = harness.dispose
+      let member: RegisterResult | undefined
+      if (caller !== "unregistered") harness.addPendingClient(connId)
+      if (caller === "registered") {
+        member = parseResult<RegisterResult>(
+          await harness.register(connId, {
+            name: "@dev/7",
+            pid: 4208,
+            project: "/tmp/p",
+            launchId: "sid-dev7@1",
+            launchParentPid: process.pid,
+            idToken: token,
+          }),
+        )
+        undecided = true
+      }
+      const events: unknown[] = []
+      const previousLevel = getLogLevel()
+      const output = vi.spyOn(console, "error").mockImplementation(() => {})
+      setLogLevel("info")
+      const unsubscribe = addWriter((_formatted, _level, _namespace, event) => {
+        if ("message" in event && event.message.startsWith("identity verdict undecided on a one-shot")) {
+          events.push(event)
+        }
+      })
+      try {
+        const refusal = parseError(
+          await harness.request("cli_self_inbox_v1", { authority: null, idToken: token, limit: 5, peek: true }),
+        )
+        // The one-shot boundary wraps every authority refusal as unauthenticated; the site kind rides as
+        // its reason, exactly as identity-contradicted does.
+        expect(refusal).toMatchObject({ code: -32003, data: { kind: "unauthenticated", reason: "identity-undecided" } })
+        expect(
+          harness.db.prepare("SELECT count(*) AS n FROM messages WHERE type = 'health:identity-verifier-fault'").get(),
+        ).toEqual({ n: 0 })
+        expect(
+          harness.db.prepare("SELECT count(*) AS n FROM pending_request WHERE request_kind = 'incident'").get(),
+        ).toEqual({ n: 0 })
+        expect(events).toEqual([
+          expect.objectContaining({
+            props: {
+              connection_id: connId,
+              ...(member === undefined
+                ? {}
+                : {
+                    member_id: member.sessionId,
+                    name: "@dev/7",
+                    role: "member",
+                    pid: 4208,
+                    launch_id: "sid-dev7@1",
+                    launch_parent_pid: process.pid,
+                  }),
+              caller_identity: caller === "registered" ? "registered" : "unobserved",
+              probe_id: "one-shot-probe",
+            },
+          }),
+        ])
+        expect(JSON.stringify({ refusal, events })).not.toContain(token)
+      } finally {
+        unsubscribe()
+        setLogLevel(previousLevel)
+        output.mockRestore()
+      }
+    },
+  )
 
   it("restores an open verifier incident into health after restart, then clears it on verified repair", async () => {
     const issue = "identity verifier /stub/identity-verifier.ts failed: signing key unreadable"

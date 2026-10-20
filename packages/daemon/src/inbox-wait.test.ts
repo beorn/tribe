@@ -4,7 +4,7 @@ import { createTribeContext } from "./lib/context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./lib/database.ts"
 import { messagingTools } from "./lib/compose/messaging-tools.ts"
 import { readAttentionProjection, type AttentionProjection, type HandlerOpts } from "./lib/handlers.ts"
-import { createInboxWaitManager, type InboxStatus } from "./lib/inbox-wait.ts"
+import { createInboxWaitManager, readInboxWaitWokenBy, type InboxStatus } from "./lib/inbox-wait.ts"
 import { sendMessage } from "./lib/messaging.ts"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -601,12 +601,18 @@ describe("createInboxWaitManager", () => {
         {},
         { reply: "missing-request" },
       )
+      // 30414: the unvalidated response settles nothing and wakes nothing live, but it is a direct response to the
+      // waiter that ARRIVED after this wait's baseline, so the deadline reports it instead of a plain timeout.
       await expect(
         manager.wait("@requester", "conn-after-invalid-gap", 1, {
           wakeOnCorrelatedReply: true,
           afterSeq: baseline.baseline_seq,
         }),
-      ).resolves.toMatchObject({ status: "timeout", timed_out: true })
+      ).resolves.toMatchObject({
+        status: "woken",
+        timed_out: false,
+        unread_count: 1,
+      })
 
       sendMessage(
         responder,
@@ -630,11 +636,19 @@ describe("createInboxWaitManager", () => {
           .get("@requester", "reply while between chunks"),
       ).toEqual({ correlated_reply_requester: "@requester" })
 
+      // 30414: both responses are direct responses to the waiter, so the attention projection lists them, and
+      // both ARRIVED after this wait's baseline. A default-mode wait still does not wake on them live, but its
+      // deadline is not quiet either: it settles woken naming the newest retained row instead of a plain timeout.
       await expect(
         manager.wait("@requester", "conn-default-after-gap", 1, {
           afterSeq: baseline.baseline_seq,
         }),
-      ).resolves.toMatchObject({ status: "timeout", timed_out: true })
+      ).resolves.toMatchObject({
+        status: "woken",
+        timed_out: false,
+        aborted: false,
+        unread_count: 2,
+      })
 
       await expect(
         manager.wait("@requester", "conn-after-gap", 1, {
@@ -670,10 +684,12 @@ describe("createInboxWaitManager", () => {
     })
   })
 
-  it("keeps deadline attention on a raw timeout so an outer logical wait can continue", async () => {
+  it("keeps attention that predates the wait on a raw timeout so an outer logical wait can continue", async () => {
     vi.useFakeTimers()
+    // 30414: the row is older than the wait. A fresh wait's baseline covers attention present at its start, and a
+    // resumed chunk is handed a baseline at or past it, so neither manufactures a wake from it (a15abfb7).
     const attention = {
-      actionable_unread: [{ id: "response-at-deadline", type: "response" }],
+      actionable_unread: [{ id: "response-before-wait", rowid: 5, type: "response" }],
       pending_balls: [],
       pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
     }
@@ -682,22 +698,148 @@ describe("createInboxWaitManager", () => {
       () => attention,
     )
 
-    const wait = manager.wait("@ci", "conn-1", 100)
+    const fresh = manager.wait("@ci", "conn-fresh", 100)
+    const resumed = manager.wait("@ci", "conn-resumed", 100, { afterSeq: 5 })
     vi.advanceTimersByTime(100)
 
-    await expect(wait).resolves.toMatchObject({
-      status: "timeout",
-      session: "@ci",
-      // Was asserted as 0, which pinned the contradiction this payload used to
-      // carry: a caller handed one actionable row and told the count is zero
-      // reads the count, concludes nothing arrived, and sleeps on top of it.
-      // The point of this test — attention survives a raw timeout so an outer
-      // logical wait can continue — is unchanged and still asserted below.
-      unread_count: 1,
-      timed_out: true,
-      aborted: false,
-      attention,
-    })
+    for (const wait of [fresh, resumed]) {
+      await expect(wait).resolves.toMatchObject({
+        status: "timeout",
+        session: "@ci",
+        // Was asserted as 0, which pinned the contradiction this payload used to
+        // carry: a caller handed one actionable row and told the count is zero
+        // reads the count, concludes nothing arrived, and sleeps on top of it.
+        // The point of this test — attention survives a raw timeout so an outer
+        // logical wait can continue — is unchanged and still asserted below.
+        unread_count: 1,
+        timed_out: true,
+        aborted: false,
+        attention,
+        baseline_seq: 5,
+      })
+    }
+  })
+
+  it("settles woken at the deadline when an actionable row arrived during the window (30414)", async () => {
+    vi.useFakeTimers()
+    // The wake predicate never fired for this row (a response wakes only when correlated), yet it is retained
+    // actionable attention that arrived after the baseline. Plain timeout here told @dev/10 a 2-minute window was
+    // quiet while the payload carried the row (#30414, recurrence of #22378).
+    const attention = {
+      actionable_unread: [{ id: "response-during-wait", rowid: 7, type: "response" }],
+      pending_balls: [],
+      pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
+    }
+    const manager = createInboxWaitManager(
+      (session) => status(session, 0),
+      () => attention,
+    )
+
+    const resumed = manager.wait("@ci", "conn-resumed", 100, { afterSeq: 5 })
+    const polled = manager.wait("@ci", "conn-polled", 0, { afterSeq: 5 })
+    vi.advanceTimersByTime(100)
+
+    for (const wait of [resumed, polled]) {
+      await expect(wait).resolves.toMatchObject({
+        status: "woken",
+        session: "@ci",
+        unread_count: 1,
+        timed_out: false,
+        aborted: false,
+        attention,
+        baseline_seq: 7,
+      })
+    }
+  })
+
+  it("AC2 (30414): a response whose ref names an already-closed ball settles the deadline woken under the opt-in", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-closed-ref-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const manager = createInboxWaitManager(
+      (session) => status(session, 0),
+      realAttentionReader(db, stmts),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply, true),
+      (session, seq, wakeOnCorrelatedReply) => readInboxWaitWokenBy(stmts, session, seq, wakeOnCorrelatedReply),
+    )
+    const requester = makeContext(db, stmts, "requester", "@requester", manager.onMessageInserted)
+    const responder = makeContext(db, stmts, "responder", "@responder", manager.onMessageInserted)
+
+    try {
+      // The ball opens and is settled before the wait: the specimen's 47e67b5f, answered eight minutes earlier.
+      sendMessage(
+        requester,
+        "@responder",
+        "please respond",
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        {
+          request: "req-settled",
+        },
+      )
+      const answer = sendMessage(
+        responder,
+        "@requester",
+        "the answer",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        {
+          reply: "req-settled",
+        },
+      )
+      expect(db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get("req-settled")).toBeNull()
+      // The requester read the answer (its own fetch advanced the mailbox cursor), as @dev/10 had.
+      stmts.advanceMailboxCursor.run({ $recipient: "@requester", $seq: answer.rowid, $now: Date.now() })
+
+      const wait = manager.wait("@requester", "conn-closed-ref", 40, { wakeOnCorrelatedReply: true })
+      let result: Awaited<typeof wait> | undefined
+      void wait.then((value) => {
+        result = value
+      })
+
+      // The follow-up: a direct response whose ref names the closed ball (no reply, no open ref-bound ball).
+      const followUp = sendMessage(
+        responder,
+        "@requester",
+        "follow-up on the settled thread",
+        "response",
+        undefined,
+        "req-settled",
+        "direct",
+      )
+      await Promise.resolve()
+      // By design it is not a live wake: the opt-in wakes only on a settlement or an OPEN ref-bound ball.
+      expect(result).toBeUndefined()
+
+      await expect(wait).resolves.toMatchObject({
+        status: "woken",
+        timed_out: false,
+        aborted: false,
+        // The acknowledged answer is gone from attention; the follow-up is the one retained row, and it arrived
+        // during the window.
+        unread_count: 1,
+        woken_by: {
+          kind: "message",
+          seq: followUp.rowid,
+          message_id: followUp.id,
+          type: "response",
+          sender: "@responder",
+          settles_request_id: null,
+          replay: false,
+        },
+      })
+      expect(result?.attention.actionable_unread.map((row) => row.id)).toContain(followUp.id)
+    } finally {
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
   })
 
   it("aborts pending waits when the connection closes", async () => {
@@ -919,12 +1061,18 @@ describe("createInboxWaitManager", () => {
     )
     const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
     const seat = "@dev/1"
-    const cursorBefore = stmts.getMailboxCursor.get({ $recipient: seat }) as
-      | { last_actionable_seq: number }
-      | undefined
+    const cursorBefore = stmts.getMailboxCursor.get({ $recipient: seat }) as { last_actionable_seq: number } | undefined
 
     try {
-      sendMessage(chief, seat, "the wait reports this row but must not consume it", "verdict", undefined, undefined, "direct")
+      sendMessage(
+        chief,
+        seat,
+        "the wait reports this row but must not consume it",
+        "verdict",
+        undefined,
+        undefined,
+        "direct",
+      )
 
       await expect(manager.wait(seat, "conn-non-retiring", 2_000)).resolves.toMatchObject({
         status: "woken",

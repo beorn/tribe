@@ -92,7 +92,9 @@ function seeingMetrics(usedFraction: number, sequence: number): HealthMetrics {
   const totalBytes = 4_096_000_000
   const usedBytes = Math.round(totalBytes * usedFraction)
   return {
-    cpu: { topProcesses: [] },
+    // 30382: a canonical fact that SEES carries `runnable`; without it the daemon is partially blind (the CPU
+    // rule cannot fire) and this fixture would be asserting on the wrong edge. The value itself is inert here.
+    cpu: { runnableTasks: 0, topProcesses: [] },
     // Inert here: `evaluateScalarMetrics` is derived from `scalarObservation`
     // alone, so the process lane cannot steer any assertion below. It is
     // present because `HealthMetrics` requires it.
@@ -106,6 +108,7 @@ function seeingMetrics(usedFraction: number, sequence: number): HealthMetrics {
       usedBytes,
     } as unknown as NonNullable<HealthMetrics["disk"]>,
     scalarObservation: {
+      boot: { kind: "unproved", reason: "oomKill absent" },
       kind: "canonical-available",
       observedAt: Date.now(),
       source: { epoch: "test-epoch", sequence },

@@ -241,7 +241,7 @@ export type CanonicalProcessObservation =
 type ScalarUnavailableMetric = {
   readonly detail?: string
   readonly kind: "unavailable"
-  readonly metric: "cpu" | "disk" | "disk.inodes" | "diskIo" | "memory" | "swap"
+  readonly metric: "cpu" | "disk" | "disk.inodes" | "diskIo" | "memory" | "oomKill" | "runnable" | "swap"
   readonly platform: string
   readonly reason: string
 }
@@ -267,6 +267,19 @@ export type CanonicalHostScalarObservation =
             readonly logicalCores: number
           }
         >
+        /**
+         * `procs_running` against the logical core count, from the same fact (30382). Optional because retained
+         * facts that predate the field omit it and a producer may decline it (darwin: unsupported-on-platform); an
+         * absent field is legal, a malformed one rejects the whole observation like every other scalar.
+         */
+        readonly runnable?: ScalarMetric<"runnable", { readonly logicalCores: number; readonly tasks: number }>
+        /**
+         * The kernel boot id the producer read beside its OOM-kill counter, from the same fact (30427): the optional
+         * boot-continuity proof the CPU window consults at a sampler replacement. Absent on retained facts and
+         * producers that predate it, unavailable where the producer declines it (darwin), and a present-but-malformed
+         * one rejects the whole observation like every other scalar.
+         */
+        readonly oomKill?: ScalarMetric<"oomKill", { readonly bootId: string; readonly count: number }>
         readonly disk: ScalarMetric<
           "disk",
           {
@@ -527,6 +540,18 @@ function isScalarMetric(value: unknown, metric: ScalarUnavailableMetric["metric"
         isNonNegativeInteger(free) && isNonNegativeInteger(used) && isPositiveInteger(total) && free + used === total,
     )
   }
+  if (metric === "runnable") {
+    // Placed before the unconditional swap validator at the end: that one would reject every runnable row.
+    return isSupportedScalarMetric(
+      value,
+      (item) => isNonNegativeInteger(item.tasks) && isPositiveInteger(item.logicalCores),
+    )
+  }
+  if (metric === "oomKill") {
+    // Also before the unconditional swap validator (30427): placed after it, every supported boot proof would read
+    // malformed, every boot would be unproved, and the continuity rule would silently never carry a window.
+    return isSupportedScalarMetric(value, (item) => isBoundedText(item.bootId) && isNonNegativeInteger(item.count))
+  }
   if (metric === "cpu") {
     return isSupportedScalarMetric(
       value,
@@ -609,6 +634,9 @@ function parseScalarObservation(value: unknown): CanonicalHostScalarObservation 
     !isScalarMetric(value.values.disk, "disk") ||
     !isScalarMetric(value.values.diskIo, "diskIo") ||
     !isScalarMetric(value.values.memory, "memory") ||
+    // Absent stays legal (older retained facts); present-but-malformed rejects the observation, never reads as zero.
+    (value.values.runnable !== undefined && !isScalarMetric(value.values.runnable, "runnable")) ||
+    (value.values.oomKill !== undefined && !isScalarMetric(value.values.oomKill, "oomKill")) ||
     !isScalarMetric(value.values.swap, "swap")
   ) {
     return undefined
