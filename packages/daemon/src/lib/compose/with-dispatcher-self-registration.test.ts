@@ -2743,7 +2743,7 @@ describe("dispatcher inbox-wait parsing", () => {
   // one waiting, attributed exactly like the read receipt above. Each owner form
   // gets its own seat: a wake leaves an unread actionable that would end the
   // next fresh wait on the same mailbox at once.
-  it("counts the owner's parked wait as a mailbox consumer, never an operator's wait on that mailbox", async () => {
+  it("reports mailbox authority separately from canonical read progress", async () => {
     const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
     cleanup = harness.dispose
     const launchId = "managed-consumer"
@@ -2785,14 +2785,36 @@ describe("dispatcher inbox-wait parsing", () => {
     const wait = (id: string, method: string, params: Record<string, unknown>, connId: string) =>
       harness.dispatcher.handleRequest({ jsonrpc: "2.0", id, method, params: { timeoutMs: 60_000, ...params } }, connId)
     const parked = () => new Promise((resolveParked) => setTimeout(resolveParked, 20))
-    const unconsumed = { delivery: "pull", answer_capability: "not-observed", answer_reason: "connected-no-consumer" }
-    const consumed = { answer_capability: "observed", answer_reason: "connected-pid-live-transport" }
+    const unobserved = {
+      delivery: "pull",
+      mailbox_read_capability: {
+        state: "available",
+        evidence_kind: "observed",
+        reason: "self-mailbox-authority-token",
+      },
+      mailbox_progress: {
+        state: "unobserved",
+        scope: "mailbox-name",
+        last_attention_read_at_ms: null,
+        last_attention_read_age_ms: null,
+        reason: "no-canonical-read-receipt",
+      },
+    }
+    const observed = {
+      mailbox_read_capability: unobserved.mailbox_read_capability,
+      mailbox_progress: expect.objectContaining({
+        state: "observed",
+        scope: "mailbox-name",
+        last_attention_read_at_ms: expect.any(Number),
+        last_attention_read_age_ms: expect.any(Number),
+      }),
+    }
 
-    expect(await member(cliSeat)).toMatchObject({ ...unconsumed, last_mailbox_read_age_ms: null })
+    expect(await member(cliSeat)).toMatchObject(unobserved)
     const operatorCli = wait("operator-cli", "cli_inbox_wait", { session: cliSeat }, "conn-operator")
     const operatorMcp = wait("operator-mcp", "tribe.inbox.wait", { session: cliSeat }, watcher.connId)
     await parked()
-    expect(await member(cliSeat)).toMatchObject(unconsumed)
+    expect(await member(cliSeat)).toMatchObject(unobserved)
     const ownerCli = wait(
       "owner-cli",
       "cli_inbox_wait_by_launch_v1",
@@ -2800,18 +2822,22 @@ describe("dispatcher inbox-wait parsing", () => {
       "conn-cli",
     )
     await parked()
-    expect(await member(cliSeat)).toMatchObject(consumed)
+    // Authority comes from the registered token already; parking a wait does
+    // not advance the canonical mailbox-read receipt.
+    expect(await member(cliSeat)).toMatchObject(unobserved)
     harness.sendActionable(cliSeat, "wake every wait on this mailbox")
     await Promise.all([operatorCli, operatorMcp, ownerCli])
-    expect(await member(cliSeat)).toMatchObject({ ...unconsumed, last_mailbox_read_age_ms: expect.any(Number) })
+    expect(await member(cliSeat)).toMatchObject(observed)
 
-    expect(await member(mcpSeat)).toMatchObject(unconsumed)
+    expect(await member(mcpSeat)).toMatchObject(unobserved)
     const ownerMcp = wait("owner-mcp", "tribe.inbox.wait", {}, mcpOwner.connId)
     await parked()
-    expect(await member(mcpSeat)).toMatchObject(consumed)
+    expect(await member(mcpSeat)).toMatchObject(unobserved)
     harness.sendActionable(mcpSeat, "wake the owner's own wait")
     await ownerMcp
-    expect(await member(mcpSeat)).toMatchObject(unconsumed)
+    // An owner's resolved wait consumes the message and advances canonical
+    // read progress; its authority remains a separate token-backed fact.
+    expect(await member(mcpSeat)).toMatchObject(observed)
   })
 })
 

@@ -1749,7 +1749,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           const result =
             canaryResult ??
             (request.method === "tribe.members"
-              ? { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }
+              ? { content: [{ type: "text", text: JSON.stringify({ schema: "tribe-members/2", sessions: [] }) }] }
               : request.method === "cli_status"
                 ? { sessions: [holder], daemon }
                 : request.method === "cli_health"
@@ -1853,7 +1853,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
                   },
                 }
               : request.method === "tribe.members"
-                ? { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }
+                ? { content: [{ type: "text", text: JSON.stringify({ schema: "tribe-members/2", sessions: [] }) }] }
                 : canaryResult
           socket.write(
             `${JSON.stringify({
@@ -1928,7 +1928,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
                   },
                 }
               : request.method === "tribe.members"
-                ? { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }
+                ? { content: [{ type: "text", text: JSON.stringify({ schema: "tribe-members/2", sessions: [] }) }] }
                 : canaryResult
           socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
         }
@@ -1991,7 +1991,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
                   },
                 }
               : request.method === "tribe.members"
-                ? { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }
+                ? { content: [{ type: "text", text: JSON.stringify({ schema: "tribe-members/2", sessions: [] }) }] }
                 : canaryResult
           socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
         }

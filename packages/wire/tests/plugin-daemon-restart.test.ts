@@ -46,7 +46,6 @@ type Member = {
   name?: string
   delivery?: "push" | "pull"
   launch_id?: string
-  launch_parent_pid?: number
   transport_pids?: number[]
   transport_state?: "connected" | "disconnected"
   owner_state?: "live" | "dead" | "unknown"
@@ -65,7 +64,6 @@ type MembershipDiscrepancy = {
     member_id?: string
     name?: string
     launch_id?: string
-    launch_parent_pid?: number
     state?: "missing-transport" | "never-registered" | "foreign-identity-transport"
     foreign_transport?: { name?: string; launch_id?: string; pid?: number }
   }>
@@ -486,8 +484,8 @@ process.exit(await child.exited)
     assertAfterRestart2: (
       rosterAfterRestart2: ToolJson,
       identities: {
-        withheld: { member_id: string; name: string; launch_id: string; launch_parent_pid: number }
-        finished: { member_id: string; name: string; launch_id: string; launch_parent_pid: number }
+        withheld: { member_id: string; name: string; launch_id: string }
+        finished: { member_id: string; name: string; launch_id: string }
       },
     ) => void
   }): Promise<void> {
@@ -622,7 +620,7 @@ process.exit(await child.exited)
       for (const persona of expectedPersonas) {
         const member = rejoined.get(persona)!
         expect(member.member_id).toBe(initialMembers.get(persona)?.member_id)
-        expect(member.launch_parent_pid).toBe(initialMembers.get(persona)?.launch_parent_pid)
+        expect(member.launch_id).toBe(initialMembers.get(persona)?.launch_id)
         for (const pid of member.transport_pids ?? []) adapterPids.add(pid)
       }
       priorTransportPids = new Map(
@@ -642,13 +640,11 @@ process.exit(await child.exited)
         member_id: initialMembers.get(withheldPersona)!.member_id!,
         name: withheldPersona,
         launch_id: personaLaunchId(`${opts.label}-2`, withheldPersona),
-        launch_parent_pid: initialMembers.get(withheldPersona)!.launch_parent_pid!,
       },
       finished: {
         member_id: initialMembers.get(finishedPersona)!.member_id!,
         name: finishedPersona,
         launch_id: personaLaunchId(`${opts.label}-3`, finishedPersona),
-        launch_parent_pid: initialMembers.get(finishedPersona)!.launch_parent_pid!,
       },
     })
 
@@ -766,12 +762,10 @@ process.exit(await child.exited)
     expect(firstMember).toMatchObject({
       member_id: expect.any(String),
       launch_id: personaLaunchId("restart-journey-launch"),
-      launch_parent_pid: harnessParentPid,
       transport_state: "connected",
       owner_state: "live",
       transport_pids: [expect.any(Number)],
     })
-    const firstLaunchParentPid = firstMember!.launch_parent_pid
     const firstTransportPid = firstMember!.transport_pids![0]!
     adapterPids.add(firstTransportPid)
 
@@ -797,7 +791,6 @@ process.exit(await child.exited)
     expect(rejoined).toMatchObject({
       member_id: firstMember?.member_id,
       launch_id: personaLaunchId("restart-journey-launch"),
-      launch_parent_pid: firstLaunchParentPid,
       transport_state: "connected",
       owner_state: "live",
     })
@@ -841,7 +834,6 @@ process.exit(await child.exited)
     expect(secondRejoined).toMatchObject({
       member_id: firstMember?.member_id,
       launch_id: personaLaunchId("restart-journey-launch"),
-      launch_parent_pid: firstLaunchParentPid,
       transport_state: "connected",
       owner_state: "live",
     })
@@ -952,7 +944,6 @@ process.exit(await child.exited)
     expect(restoredMember).toMatchObject({
       member_id: initialMember?.member_id,
       launch_id: personaLaunchId("adapter-crash-launch"),
-      launch_parent_pid: process.ppid,
       delivery: "pull",
       transport_state: "connected",
       owner_state: "live",
@@ -1900,7 +1891,7 @@ process.exit(await child.exited)
       for (const persona of expectedPersonas) {
         const member = rejoined.get(persona)!
         expect(member.member_id).toBe(initialMembers.get(persona)?.member_id)
-        expect(member.launch_parent_pid).toBe(initialMembers.get(persona)?.launch_parent_pid)
+        expect(member.launch_id).toBe(initialMembers.get(persona)?.launch_id)
         for (const pid of member.transport_pids ?? []) adapterPids.add(pid)
       }
       priorTransportPids = new Map(
@@ -1922,7 +1913,6 @@ process.exit(await child.exited)
               member_id: initialMembers.get(withheldPersona)?.member_id,
               name: withheldPersona,
               launch_id: personaLaunchId("restart-multi-2", withheldPersona),
-              launch_parent_pid: initialMembers.get(withheldPersona)?.launch_parent_pid,
               state: "missing-transport",
             },
           ],

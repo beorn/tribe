@@ -1767,7 +1767,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // call answers. Poll until the shared member record lists every persona
     // before asserting on its contents.
     const members = await callLaunchToolUntil<{
-      sessions?: Array<{ name?: string; launch_id?: string; launch_parent_pid?: number }>
+      sessions?: Array<{ name?: string; launch_id?: string; registration?: { source?: string; state?: string } }>
     }>(
       firstSeat,
       80,
@@ -1779,7 +1779,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     for (const persona of personas) {
       expect(members.sessions?.find((session) => session.name === persona)).toMatchObject({
         launch_id: `${launchId}::${encodeURIComponent(persona)}`,
-        launch_parent_pid: process.pid,
+        registration: { source: "durable-launch", state: "registered" },
       })
     }
 
@@ -2227,7 +2227,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       // registration" gate error instead of a members payload — the same
       // first-round-trip class as the transport_pids polls below. Re-ask
       // through the registration-aware helper instead of failing on gate text.
-      let result: { sessions?: Array<{ name?: string; alive?: boolean }> }
+      let result: { sessions?: Array<{ name?: string; transport_state?: string }> }
       try {
         result = toolResult(adapter.stdout, id) as typeof result
       } catch (error) {
@@ -2237,7 +2237,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         if (!registrationPending) throw error
         result = (await callLaunchToolWhenRegistered(adapter, 200 + index, "members", {})) as typeof result
       }
-      expect(result.sessions?.filter((session) => session.name === NAME && session.alive)).toHaveLength(1)
+      expect(
+        result.sessions?.filter((session) => session.name === NAME && session.transport_state === "connected"),
+      ).toHaveLength(1)
     }
 
     const members = await callLaunchToolUntil<{
@@ -2245,7 +2247,6 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         name?: string
         member_id?: string
         launch_id?: string
-        launch_parent_pid?: number
         transport_pids?: number[]
       }>
     }>(
@@ -2261,7 +2262,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const member = members.sessions?.find((session) => session.name === NAME)
     expect(member).toMatchObject({
       launch_id: `${launchId}::${encodeURIComponent(NAME)}`,
-      launch_parent_pid: process.pid,
+      registration: { source: "durable-launch", state: "registered" },
     })
     expect(member?.member_id).toEqual(expect.any(String))
     const initialMemberId = member!.member_id!
@@ -2514,7 +2515,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       sessions?: Array<{
         name?: string
         launch_id?: string
-        launch_parent_pid?: number
+        registration?: { source?: string; state?: string }
         transport_pids?: number[]
       }>
     }>(
@@ -2536,7 +2537,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // The test plays the native provider; the harness its supervisors declare is the test's own parent (29567).
     expect(member).toMatchObject({
       launch_id: `${launchId}::${encodeURIComponent(NAME)}`,
-      launch_parent_pid: process.ppid,
+      registration: { source: "durable-launch", state: "registered" },
     })
     expect(member?.transport_pids).toHaveLength(3)
     expect(readFileSync(join(tmpDir, "daemon.log"), "utf8")).not.toContain(

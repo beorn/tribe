@@ -266,8 +266,38 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       sessions: Array<Record<string, unknown>>
       membership_discrepancy: Record<string, unknown>
     }
-    expect(members.sessions).toEqual([expect.objectContaining({ name: "legacy-health" })])
-    expect(members.membership_discrepancy).toEqual(health.membership_discrepancy)
+    expect(members.sessions.map((row) => row.name).toSorted()).toEqual(["@agent/6", "legacy-health"])
+    expect(members.sessions).toContainEqual(
+      expect.objectContaining({
+        member_id: "durable-health",
+        name: "@agent/6",
+        registration: expect.objectContaining({ source: "durable-launch", state: "registered" }),
+        transport_state: "disconnected",
+      }),
+    )
+    expect(members.membership_discrepancy).toMatchObject({
+      status: "degraded",
+      missing: [
+        expect.objectContaining({
+          member_id: "durable-health",
+          name: "@agent/6",
+          launch_id: "launch-health",
+          state: "missing-transport",
+        }),
+      ],
+    })
+    expect(health.membership_discrepancy).toMatchObject({
+      status: "degraded",
+      missing: [
+        expect.objectContaining({
+          member_id: "durable-health",
+          name: "@agent/6",
+          launch_id: "launch-health",
+          launch_parent_pid: 6006,
+          state: "missing-transport",
+        }),
+      ],
+    })
   })
 
   it("keeps disconnected retired registrations as history without reporting a live-seat outage", () => {
@@ -315,7 +345,29 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
         transport_state: "disconnected",
       }),
     )
-    expect(members.membership_discrepancy).toEqual(health.membership_discrepancy)
+    expect(members.membership_discrepancy).toMatchObject({
+      status: "degraded",
+      missing: [
+        expect.objectContaining({
+          member_id: "durable-health",
+          name: "@agent/6",
+          launch_id: "launch-health",
+          state: "missing-transport",
+        }),
+      ],
+    })
+    expect(health.membership_discrepancy).toMatchObject({
+      status: "degraded",
+      missing: [
+        expect.objectContaining({
+          member_id: "durable-health",
+          name: "@agent/6",
+          launch_id: "launch-health",
+          launch_parent_pid: 6006,
+          state: "missing-transport",
+        }),
+      ],
+    })
     expect(countDurableSessionRows(db)).toBe(3)
     expect(countDurableSessionRows(db, retiredNames)).toBe(2)
   })

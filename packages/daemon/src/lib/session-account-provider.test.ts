@@ -120,14 +120,16 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
     // the process that registered it. PID reuse must remain unknown instead of
     // manufacturing an owner-live/no-transport wedge.
     expect(membersFor(ctx, makeOpts(new Set()), "@agent/wedged", true)).toMatchObject({
-      alive: false,
+      registration: { source: "connection", state: "registered" },
+      transport_registered: false,
       transport_state: "disconnected",
       owner_state: "unknown",
       transport_reason: "owner-unknown-no-transport",
     })
 
     expect(membersFor(ctx, makeOpts(new Set([sessionId])), "@agent/wedged")).toMatchObject({
-      alive: true,
+      registration: { source: "connection", state: "registered" },
+      transport_registered: true,
       transport_state: "connected",
       owner_state: "live",
       transport_reason: "registered-transport",
@@ -264,7 +266,7 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
     handleToolCall(ctx, "tribe.join", { name: "@agent/4" }, opts)
 
     expect(persisted()).toEqual({ pid: 94093, cwd: clientCwd })
-    expect(membersFor(ctx, opts, "@agent/4")).toMatchObject({ pid: 94093, cwd: clientCwd })
+    expect(membersFor(ctx, opts, "@agent/4")).toMatchObject({ cwd: clientCwd })
   })
 
   it("a join that omits account/provider preserves the existing labels", () => {

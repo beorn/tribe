@@ -170,10 +170,8 @@ describe("transport state is derived from current evidence, not registration pre
         // fact — but it is no longer allowed to speak for the transport.
         transport_registered: true,
         transport_state: "disconnected",
-        transport_alive: false,
+        owner_state: "dead",
         transport_reason: "registered-transport-pids-dead",
-        pid_alive: false,
-        alive: false,
       }),
     ])
   })
@@ -201,7 +199,7 @@ describe("transport state is derived from current evidence, not registration pre
     ])
   })
 
-  it("never emits transport_state connected alongside pid_alive false in one row", () => {
+  it("projects owner and transport evidence independently for dead and live connectors", () => {
     const deadPid = mintDeadPid()
     addSession(db, stmts, "zombie-transport", "@agent/6", deadPid)
     addSession(db, stmts, "healthy-transport", "@agent/7", process.pid)
@@ -214,10 +212,22 @@ describe("transport state is derived from current evidence, not registration pre
     const members = parseToolJson(handleToolCall(ctx, "tribe.members", {}, opts)) as {
       sessions: Array<Record<string, unknown>>
     }
-    const contradictory = members.sessions.filter(
-      (session) => session.transport_state === "connected" && session.pid_alive === false,
+    expect(members.sessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "@agent/6",
+          owner_state: "dead",
+          transport_state: "disconnected",
+          transport_reason: "registered-transport-pids-dead",
+        }),
+        expect.objectContaining({
+          name: "@agent/7",
+          owner_state: "live",
+          transport_state: "connected",
+          transport_reason: "registered-transport",
+        }),
+      ]),
     )
-    expect(contradictory).toEqual([])
   })
 
   it("still reports a live registered transport as connected", () => {
@@ -234,10 +244,8 @@ describe("transport state is derived from current evidence, not registration pre
         name: "@agent/7",
         transport_registered: true,
         transport_state: "connected",
-        transport_alive: true,
+        owner_state: "live",
         transport_reason: "registered-transport",
-        pid_alive: true,
-        alive: true,
       }),
     ])
   })
@@ -255,9 +263,11 @@ describe("transport state is derived from current evidence, not registration pre
     expect(members.sessions).toEqual([
       expect.objectContaining({
         name: "@agent/8",
+        transport_registered: true,
         transport_state: "connected",
-        transport_alive: true,
+        owner_state: "live",
         transport_reason: "registered-transport",
+        transport_pids: [],
       }),
     ])
   })
@@ -327,9 +337,18 @@ describe("a replaced registration is retired by projection and repair, never by 
       sessions: Array<Record<string, unknown>>
     }
 
-    // The default view is what consumers act on: only the live seat, and the
+    // The default view retains the latest nonfinished durable registration
+    // for an otherwise absent name; it remains visibly disconnected, and the
     // replaced row raises no discrepancy.
-    expect(members.sessions.map((session) => session.name)).toEqual(["@agent/6-2"])
+    expect(members.sessions.map((session) => session.name).toSorted()).toEqual(["@agent/6", "@agent/6-2"])
+    expect(members.sessions).toContainEqual(
+      expect.objectContaining({
+        name: "@agent/6",
+        launch_id: LAUNCH.id,
+        registration: expect.objectContaining({ source: "durable-launch", state: "registered" }),
+        transport_state: "disconnected",
+      }),
+    )
     expect(members.membership_discrepancy).toBeUndefined()
     // `all: true` is the deliberate full-DB diagnostic view, so the stored
     // replaced row stays visible there — retired from the projection, not
