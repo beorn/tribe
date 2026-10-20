@@ -177,6 +177,46 @@ export function createInboxWaitManager(
     return delivered
   }
 
+  /** The newest actionable attention row past `pastSeq`, or 0 when none is. */
+  function newestAttentionSeq(snapshot: InboxWaitSnapshot, pastSeq: number): number {
+    let newest = 0
+    for (const row of snapshot.attention.actionable_unread) {
+      if (typeof row.rowid === "number" && row.rowid > pastSeq && row.rowid > newest) newest = row.rowid
+    }
+    return newest
+  }
+
+  /**
+   * 30414 (recurrence of 22378): the terminal outcome of a deadline, timer or 0 ms poll. The wake predicate
+   * (actionable types, incidents, and under the opt-in a correlated reply) can leave an actionable attention row
+   * unwoken — every direct response is attention, and a response wakes only when it settles or names an OPEN
+   * ball. Such a row that ARRIVED during the window is not a quiet deadline: it settles `woken` naming the
+   * newest one, so a caller reading `status` alone never sleeps on real work. A row at or below the baseline
+   * predates the wait and keeps `timeout` with the attention listed, exactly as a15abfb7 ruled: old attention
+   * stays visible without manufacturing a wake, and nothing loops on it.
+   */
+  function deadlineOutcome(
+    snapshot: InboxWaitSnapshot,
+    baselineSeq: number,
+  ): { flags: { timedOut: boolean; aborted: boolean }; wakeSeq: number } {
+    const wakeSeq = newestAttentionSeq(snapshot, baselineSeq)
+    return wakeSeq > 0
+      ? { flags: { timedOut: false, aborted: false }, wakeSeq }
+      : { flags: { timedOut: true, aborted: false }, wakeSeq: 0 }
+  }
+
+  function settleAtDeadline(waiter: Waiter): void {
+    if (waiter.done) return
+    const snapshot = readSnapshot(waiter.session, waiter.wakeOnCorrelatedReply)
+    const outcome = deadlineOutcome(snapshot, waiter.baselineSeq)
+    if (outcome.wakeSeq > 0) {
+      log.info?.(
+        `inbox-wait: deadline for ${waiter.session} settles woken on retained attention row ${outcome.wakeSeq}, which arrived during the window past baseline ${waiter.baselineSeq} (30414)`,
+      )
+    }
+    settle(waiter, outcome.flags, outcome.wakeSeq, snapshot)
+  }
+
   function settle(
     waiter: Waiter,
     flags: { timedOut: boolean; aborted: boolean },
@@ -295,7 +335,11 @@ export function createInboxWaitManager(
     const wakeOnCorrelatedReply = opts.wakeOnCorrelatedReply === true
     const snapshot = readSnapshot(session, wakeOnCorrelatedReply)
     const freshLogicalWait = opts.afterSeq === undefined
-    const baselineSeq = opts.afterSeq ?? snapshot.latestQualifyingSeq
+    // 30414: a fresh logical wait's baseline also covers the actionable attention present at its start, so a
+    // deadline can tell a row that ARRIVED during the window from one that predates the wait (a15abfb7). Every
+    // settled chunk already hands back a baseline past its attention rows (deliveredBaselineSeq); this aligns
+    // the first chunk with the later ones.
+    const baselineSeq = opts.afterSeq ?? Math.max(snapshot.latestQualifyingSeq, newestAttentionSeq(snapshot, 0))
     const shouldWake = freshLogicalWait ? snapshot.currentQualifyingSeq > 0 : snapshot.latestQualifyingSeq > baselineSeq
     if (shouldWake) {
       const flags = { timedOut: false, aborted: false }
@@ -312,11 +356,16 @@ export function createInboxWaitManager(
       )
     }
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      const outcome = deadlineOutcome(snapshot, baselineSeq)
       return Promise.resolve(
-        assembleResult(snapshot, 0, effectiveTimeoutMs, deliveredBaselineSeq(snapshot, baselineSeq, 0), {
-          timedOut: true,
-          aborted: false,
-        }),
+        assembleResult(
+          snapshot,
+          0,
+          effectiveTimeoutMs,
+          deliveredBaselineSeq(snapshot, baselineSeq, outcome.wakeSeq),
+          outcome.flags,
+          wokenBy(session, wakeOnCorrelatedReply, outcome.wakeSeq, outcome.flags),
+        ),
       )
     }
     return new Promise((resolve) => {
@@ -332,7 +381,7 @@ export function createInboxWaitManager(
         done: false,
         timer: undefined as unknown as ReturnType<typeof setTimeout>,
       }
-      waiter.timer = setTimeout(() => settle(waiter, { timedOut: true, aborted: false }), effectiveTimeoutMs)
+      waiter.timer = setTimeout(() => settleAtDeadline(waiter), effectiveTimeoutMs)
       waiters.add(waiter)
 
       // Condition-variable discipline: check, subscribe, then recheck. A row
