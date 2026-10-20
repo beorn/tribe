@@ -47,14 +47,40 @@ export type LlmModelSelectionResult = {
 export type LlmUsage = {
   promptTokens: number
   completionTokens: number
-  estimatedCost?: number
+  classes?: Record<string, number>
+  raw?: unknown
+}
+
+// Structural boundary only: Bearly owns pricing, resolution and aggregation.
+// Standalone Tribe does not import its optional host's dependency tree.
+export type LlmCostAmount = { usd: number } | { reason: string }
+export type LlmCostBasis = {
+  rateSource: "litellm" | "sku" | "unrecorded"
+  rateDate?: string
+  matchedModelId?: string
+}
+export type LlmResolvedCost = {
+  charged: LlmCostAmount
+  listEquivalent: LlmCostAmount
+  listEquivalentBasis: LlmCostBasis[]
+}
+export type LlmCostFields = {
+  cost_usd?: number
+  cost_usd_reason?: string
+  list_equivalent_usd?: number
+  list_equivalent_reason?: string
+  list_equivalent_basis: LlmCostBasis[]
 }
 
 export type LlmQueryResult = {
   response: {
+    model?: LlmModel
     content?: string
     error?: string
     usage?: LlmUsage
+    cost_usd?: number
+    servedBy?: { model: string; [key: string]: unknown }
+    cacheHit?: boolean
   }
 }
 
@@ -71,7 +97,10 @@ export type LlmBackend = {
   getModel: (idOrName: string) => LlmModel | undefined
   getCheapModel: () => LlmModel | undefined
   getCheapModels: (max?: number) => LlmModel[]
-  estimateCost: (model: LlmModel, inputTokens?: number, outputTokens?: number) => number
+  resolveResponseCost: (response: LlmQueryResult["response"] & { model: LlmModel }) => LlmResolvedCost
+  aggregateCosts: (costs: readonly LlmResolvedCost[]) => LlmResolvedCost
+  serializeCost: (cost: LlmResolvedCost) => LlmCostFields
+  deserializeCost: (fields?: Partial<LlmCostFields>) => LlmResolvedCost
   isProviderAvailable: (provider: string) => boolean
   /** Resolved provider facts loaded from Bearly's shared observation store. */
   providerFacts?: readonly LlmProviderAvailabilityFact[]
@@ -304,7 +333,14 @@ let warned = false
 // runtime-variable (see the docstring above), so TS cannot infer it.
 type LlmBarrelModule = Pick<
   LlmBackend,
-  "queryModel" | "getModel" | "getCheapModel" | "getCheapModels" | "estimateCost"
+  | "queryModel"
+  | "getModel"
+  | "getCheapModel"
+  | "getCheapModels"
+  | "resolveResponseCost"
+  | "aggregateCosts"
+  | "serializeCost"
+  | "deserializeCost"
 > & {
   isProviderAvailable: (provider: string) => boolean
   createProviderObservationStore: () => unknown
@@ -324,7 +360,10 @@ const REQUIRED_LLM_BARREL_FUNCTIONS = [
   "getModel",
   "getCheapModel",
   "getCheapModels",
-  "estimateCost",
+  "resolveResponseCost",
+  "aggregateCosts",
+  "serializeCost",
+  "deserializeCost",
   "isProviderAvailable",
   "createProviderObservationStore",
   "readProviderAvailability",
@@ -429,7 +468,10 @@ export async function loadLlm(): Promise<LlmBackend | null> {
         getModel: bearly.getModel,
         getCheapModel: bearly.getCheapModel,
         getCheapModels: bearly.getCheapModels,
-        estimateCost: bearly.estimateCost,
+        resolveResponseCost: bearly.resolveResponseCost,
+        aggregateCosts: bearly.aggregateCosts,
+        serializeCost: bearly.serializeCost,
+        deserializeCost: bearly.deserializeCost,
         isProviderAvailable: bearly.isProviderAvailable,
         providerFacts,
         selectModels: (options) =>
