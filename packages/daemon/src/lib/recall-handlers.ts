@@ -33,6 +33,7 @@ import {
   RECALL_ERRORS,
   RECALL_PROTOCOL_VERSION,
   toAskResult,
+  toPlanOnlyResult,
   type AskParams,
   type AskResult,
   type CurrentBriefParams,
@@ -317,34 +318,31 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
 
   async function handlePlanOnly(_conn: RecallConnState, params: PlanOnlyParams): Promise<PlanOnlyResult> {
     const engine = await engineReady
-    if (!engine) return { ok: false, elapsedMs: 0, cost: 0, error: ENGINE_UNAVAILABLE }
+    if (!engine) {
+      return toPlanOnlyResult({
+        plan: null,
+        elapsedMs: 0,
+        calls: [],
+        error: ENGINE_UNAVAILABLE,
+        cost_usd_reason: ENGINE_UNAVAILABLE,
+        list_equivalent_reason: ENGINE_UNAVAILABLE,
+        list_equivalent_basis: [],
+      })
+    }
     const context = engine.buildQueryContext()
     try {
       const call = await engine.planQuery(params.query, context, { round: 1 })
-      if (!call.plan) {
-        return {
-          ok: false,
-          elapsedMs: call.elapsedMs,
-          cost: call.cost ?? 0,
-          model: call.model,
-          error: call.error ?? "plan-failed",
-        }
-      }
-      return {
-        ok: true,
-        plan: call.plan as unknown as Record<string, unknown>,
-        variants: engine.planVariants(call.plan),
-        model: call.model,
-        elapsedMs: call.elapsedMs,
-        cost: call.cost ?? 0,
-      }
+      return toPlanOnlyResult(call, call.plan ? engine.planVariants(call.plan) : undefined)
     } catch (err) {
-      return {
-        ok: false,
+      return toPlanOnlyResult({
+        plan: null,
         elapsedMs: 0,
-        cost: 0,
+        calls: [],
+        cost_usd_reason: "planner failed before returning its billing ledger",
+        list_equivalent_reason: "planner failed before returning its usage ledger",
+        list_equivalent_basis: [],
         error: err instanceof Error ? err.message : String(err),
-      }
+      })
     }
   }
 

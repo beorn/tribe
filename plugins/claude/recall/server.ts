@@ -45,6 +45,7 @@ import {
   type AskResult,
   type CurrentBriefResult,
   type PlanOnlyResult,
+  toPlanOnlyResult,
   type WorkspaceStateResult,
   type SessionStateResult,
   type InjectDeltaResult,
@@ -316,24 +317,9 @@ async function handlePlanOnly(args: Record<string, unknown>): Promise<string> {
   const context = buildQueryContext()
   const call = await planQuery(query, context, { round: 1 })
 
-  if (!call.plan) {
-    return JSON.stringify({
-      ok: false,
-      error: call.error ?? "plan-failed",
-      model: call.model,
-      elapsedMs: call.elapsedMs,
-      mode: "library",
-    })
-  }
-
   return JSON.stringify(
     {
-      ok: true,
-      model: call.model,
-      elapsedMs: call.elapsedMs,
-      cost: call.cost,
-      plan: call.plan,
-      variants: planVariants(call.plan),
+      ...toPlanOnlyResult(call, call.plan ? planVariants(call.plan) : undefined),
       mode: "library",
     },
     null,

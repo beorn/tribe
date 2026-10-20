@@ -14,6 +14,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, beforeEach, describe, expect, test, vi } from "vitest"
 
+import { unavailableCostMethods } from "../helpers/llm-mock.ts"
+
 const DAY = "2026-10-01"
 const OLD_MARKER = "MARKER-OLD-END"
 const NEW_MARKER = "MARKER-NEW-END"
@@ -92,7 +94,7 @@ vi.mock("../../src/lib/llm-backend.ts", async (importOriginal) => {
       getModel: () => undefined,
       getCheapModel: () => model,
       getCheapModels: () => [model],
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     }),
   }

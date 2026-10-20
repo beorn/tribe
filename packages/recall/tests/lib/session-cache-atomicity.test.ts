@@ -15,6 +15,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, beforeEach, describe, expect, test, vi } from "vitest"
 
+import { unavailableCostMethods } from "../helpers/llm-mock.ts"
+
 const h = vi.hoisted(() => ({
   home: "",
   project: "",
@@ -80,7 +82,7 @@ vi.mock("../../src/lib/llm-backend.ts", async (importOriginal) => {
       getModel: () => undefined,
       getCheapModel: () => model,
       getCheapModels: () => [model],
-      estimateCost: () => 0,
+      ...unavailableCostMethods,
       isProviderAvailable: () => true,
     }),
   }

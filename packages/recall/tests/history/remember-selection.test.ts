@@ -10,6 +10,8 @@ import { join } from "node:path"
 import { afterEach, describe, expect, test, vi } from "vitest"
 import type { LlmBackend, LlmModel } from "../../src/lib/llm-backend.ts"
 
+import { unavailableCostMethods } from "../helpers/llm-mock.ts"
+
 const { loadLlmMock } = vi.hoisted(() => ({ loadLlmMock: vi.fn() }))
 
 vi.mock("../../src/lib/llm-backend.ts", async (importOriginal) => {
@@ -62,7 +64,7 @@ describe("remember model selection", () => {
       getModel: vi.fn(),
       getCheapModel: vi.fn(() => preferred),
       getCheapModels: vi.fn(() => [preferred, live]),
-      estimateCost: vi.fn(() => 0),
+      ...unavailableCostMethods,
       isProviderAvailable: vi.fn((provider) => provider === "anthropic"),
       explainUnavailable: vi.fn(() => "OPENAI_API_KEY unset"),
     }
@@ -85,7 +87,7 @@ describe("remember model selection", () => {
       getModel: vi.fn(),
       getCheapModel: vi.fn(() => preferred),
       getCheapModels: vi.fn(() => [preferred, other]),
-      estimateCost: vi.fn(() => 0),
+      ...unavailableCostMethods,
       isProviderAvailable: vi.fn(() => false),
       explainUnavailable: vi.fn((provider) => `${provider.toUpperCase()}_API_KEY unset`),
     }
