@@ -344,7 +344,7 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   // of the documented 3 (degraded-but-useful).
   // @i/20-search-and-memory/agent-mode-skips-exit-3
   if (result.synthesisFailure) {
-    renderSynthesisFailure(result, result.synthesisFailure, { json: options.json })
+    await formatRecallOutput(result, { json: options.json })
     return
   }
 
@@ -365,6 +365,8 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
         `${YELLOW}⚠ recall: agent variants missed literal raw matches; showing raw hits for "${rawProbe.token}".${RESET}\n`,
       )
       formatRawRecallResults(rawProbe.result)
+      const costText = await formatRecallCost(result)
+      if (costText) console.log(`${DIM}${costText}${RESET}`)
       return
     }
   }
@@ -593,13 +595,16 @@ export function emitRefreshNote(r: RefreshResult): void {
   }
 }
 
-async function formatRecallOutput(result: RecallResult, options: { json?: boolean }): Promise<void> {
-  let costText: string | undefined
+async function formatRecallCost(result: RecallResult): Promise<string | undefined> {
   if (result.list_equivalent_basis !== undefined) {
     const { requireLlm } = await import("./llm-backend.ts")
     const llm = await requireLlm("Recall cost display")
-    costText = llm.formatCostColumns(llm.deserializeCost(result))
+    return llm.formatCostColumns(llm.deserializeCost(result))
   }
+}
+
+async function formatRecallOutput(result: RecallResult, options: { json?: boolean }): Promise<void> {
+  const costText = options.json ? undefined : await formatRecallCost(result)
   // Check FIRST, before requireSynthesizedAnswer would throw a generic
   // "no synthesized answer" error that discards the rich diagnostic report
   // recall() already built. A synthesis failure with lexical results in

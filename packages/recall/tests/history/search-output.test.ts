@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url"
 import { Database } from "bun:sqlite"
 import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
+import { unavailableCostMethods } from "../helpers/llm-mock.ts"
 
 process.env.RECALL_DB_PATH = ":memory:"
 
@@ -1050,6 +1051,76 @@ describe("recall search output", () => {
   // lexical hits and exiting 1 (generic crash) instead of 3
   // (degraded-but-useful). Mirrors the non-agent "reports a loud
   // tool-broken failure" test above.
+  // Existing cases pin hits/exits but never supply a financial receipt. The
+  // shared formatter's arithmetic is covered by the root real-export journey;
+  // this seam pins delegation of the ORIGINAL result on these early returns.
+  test.each([
+    { path: "failure", json: false },
+    { path: "raw", json: false },
+    { path: "failure", json: true },
+  ])("agent terminal paths retain the original financial projection ($path, JSON $json)", async ({ path, json }) => {
+    seedMessage("receiptneedle preserves the literal match")
+    setIndexMeta(getDb(), "last_rebuild", new Date().toISOString())
+    const financial = {
+      cost_usd: 0.125,
+      list_equivalent_usd: 0.002,
+      list_equivalent_basis: [
+        { rateSource: "litellm" as const, rateDate: "2026-10-20", matchedModelId: "actual-priced-model" },
+      ],
+    }
+    const result = {
+      ...(path === "failure"
+        ? synthesisFailureAgentResult("receiptneedle")
+        : zeroAgentResult("receiptneedle", { provenance: "complete" })),
+      ...financial,
+    }
+    mockAgent.result = async () => result as never
+    const decoded = {
+      charged: { usd: 0.125 },
+      listEquivalent: { usd: 0.002 },
+      listEquivalentBasis: financial.list_equivalent_basis,
+    }
+    const deserialize = vi.fn(() => decoded)
+    // Opaque projection: the mock does not implement the monetary behavior.
+    const format = vi.fn(() => "original-financial-projection")
+    const query = vi.fn(async () => {
+      throw new Error("display must not dispatch a provider")
+    })
+    const backend = await import("../../src/lib/llm-backend.ts")
+    const requireBackend = vi.spyOn(backend, "requireLlm").mockResolvedValue({
+      ...unavailableCostMethods,
+      deserializeCost: deserialize,
+      formatCostColumns: format,
+      queryModel: query,
+      getModel: () => undefined,
+      getCheapModel: () => undefined,
+      getCheapModels: () => [],
+      isProviderAvailable: () => false,
+    })
+    const previousExitCode = process.exitCode
+    process.exitCode = 0
+    try {
+      await cmdSearch("receiptneedle", { agent: true, json, project: "*", round2: "off" })
+      expect(process.exitCode).toBe(path === "failure" ? 3 : 0)
+      if (json) {
+        expect(jsonStdout(logSpy)).toMatchObject(financial)
+        expect(requireBackend).not.toHaveBeenCalled()
+      } else {
+        const output = callsText(logSpy)
+        expect(output).toContain(
+          path === "failure" ? "RECALL SYNTHESIS FAILED" : "agent variants missed literal raw matches",
+        )
+        expect(deserialize).toHaveBeenCalledExactlyOnceWith(result)
+        expect(format).toHaveBeenCalledExactlyOnceWith(decoded)
+        expect(output.match(/original-financial-projection/g)).toHaveLength(1)
+      }
+      expect(query).not.toHaveBeenCalled()
+    } finally {
+      process.exitCode = previousExitCode
+      requireBackend.mockRestore()
+    }
+  })
+
   test("agent mode preserves lexical results and exits 3 on synthesis failure, instead of discarding them and exiting 1", async () => {
     mockAgent.result = async (query, options) => synthesisFailureAgentResult(query, options) as never
     const previousExitCode = process.exitCode
