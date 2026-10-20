@@ -249,9 +249,12 @@ describe("Tribe command descriptors", () => {
     expect(cli.options?.some((option) => option.name === "receipt")).toBe(false)
   })
 
-  test("members carries a --json flag for scripts (27519)", () => {
+  test("members carries a JSON flag and directs pane activity readers to Hab (27519, 30368)", () => {
     const members = visibleCliProjection(commandDescriptorByMcpName("members")!)
     expect(members.options?.find((option) => option.name === "json")?.flags).toContain("--json")
+    const help = findCmd(buildProgram(), "members")!.helpInformation().replace(/\s+/g, " ")
+    expect(help).toContain("Hab")
+    expect(help).toContain("hab ps --agents")
   })
 
   test("pins semantic actionable ownership without inventing a delivery-ack surface", () => {

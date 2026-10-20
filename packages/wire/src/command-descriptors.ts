@@ -890,7 +890,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "members",
       description:
-        "List member sessions as JSON with transport, connector ownership, and mailbox-read observations. These do not establish agent process life or current pane state; inspect the exact pane separately.",
+        "List member sessions as JSON with transport, connector ownership, and mailbox-read observations. These do not establish agent process life or current pane state. For qualified pane activity, use Hab: hab ps --agents with your habitat selected.",
       lifetime: "one-shot",
       mapsToMcp: "members",
       options: [
