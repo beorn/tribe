@@ -4,6 +4,7 @@ import {
   defaultThresholds,
   deliverHealthAlert,
   evaluateAlerts,
+  measureCpuWindow,
   planHealthAlertDelivery,
   type HealthMetrics,
 } from "./health-monitor-plugin.ts"
@@ -328,27 +329,35 @@ describe("health alert delivery", () => {
   })
 
   test("30427: carried credit still needs the current observation to qualify, and pages on the next one that does", () => {
-    const thresholds = { ...defaultThresholds(), cpuQualifyingMs: 45_000 }
+    // Accrue 40 s of critical credit under a 45 s threshold: nothing fires, so neither dedupe nor cooldown is armed.
+    const accrue = { ...defaultThresholds(), cpuQualifyingMs: 45_000 }
     const state = createAlertState()
     for (let sample = 0; sample < 5; sample += 1) {
       expect(
-        evaluateAlerts(
-          canonical(sample + 1, BASE_TIME_MS + sample * 10_000, 9, 7, "host-a", "boot-1"),
-          thresholds,
-          state,
-        ),
+        evaluateAlerts(canonical(sample + 1, BASE_TIME_MS + sample * 10_000, 9, 7, "host-a", "boot-1"), accrue, state),
       ).toEqual([])
     }
-    // 40 s of critical credit carried across the replacement at 50 s; the crossing is excluded, so 40 s, not 50 s.
-    expect(evaluateAlerts(canonical(1, BASE_TIME_MS + 50_000, 9, 7, "host-b", "boot-1"), thresholds, state)).toEqual([])
-    // A drained queue on the new sampler pages nothing on the carried 40 s, and lends the next sample no credit.
-    expect(evaluateAlerts(canonical(2, BASE_TIME_MS + 60_000, 9, 2, "host-b", "boot-1"), thresholds, state)).toEqual([])
-    expect(evaluateAlerts(canonical(3, BASE_TIME_MS + 70_000, 9, 7, "host-b", "boot-1"), thresholds, state)).toEqual([])
-    // The next qualifying interval makes 50 s and the carried history pages; without the carry this would be 10 s.
-    const fired = evaluateAlerts(canonical(4, BASE_TIME_MS + 80_000, 9, 7, "host-b", "boot-1"), thresholds, state)
+    // Carried across the replacement at 50 s with the crossing excluded: still 40 s, still nothing fired.
+    expect(evaluateAlerts(canonical(1, BASE_TIME_MS + 50_000, 9, 7, "host-b", "boot-1"), accrue, state)).toEqual([])
+    expect(state.cpuWindow[5]).toMatchObject({ crossing: true, epoch: "host-b" })
+    // Judge what follows against a 30 s threshold (thresholds are a per-call input), so the retained 40 s sits ABOVE
+    // qualification while no page has ever fired: nothing but the current-observation predicate can hold a page back.
+    const judge = { ...defaultThresholds(), cpuQualifyingMs: 30_000 }
+    const retained = measureCpuWindow(state.cpuWindow, BASE_TIME_MS + 60_000, judge.cpuWindowMs, judge.cpuGapMs)
+    expect(retained).toMatchObject({ criticalMs: 40_000, crossings: 1, crossingMs: 10_000 })
+    expect(retained.criticalMs).toBeGreaterThanOrEqual(judge.cpuQualifyingMs)
+    expect(state.firedAlerts.size, "no dedupe entry can explain a held page").toBe(0)
+    expect(state.firedAt.size, "no cooldown can explain a held page").toBe(0)
+    // A drained queue on the new sampler: retained credit above the line, current observation not qualifying, no page.
+    expect(evaluateAlerts(canonical(2, BASE_TIME_MS + 60_000, 9, 2, "host-b", "boot-1"), judge, state)).toEqual([])
+    expect(state.firedAlerts.size).toBe(0)
+    expect(state.firedAt.size).toBe(0)
+    // The next qualifying observation pages on the retained credit alone — its own interval is uncredited because the
+    // observation before it did not qualify — and the page still names the excluded replacement.
+    const fired = evaluateAlerts(canonical(3, BASE_TIME_MS + 70_000, 9, 7, "host-b", "boot-1"), judge, state)
     expect(kinds(fired)).toEqual(["cpu:critical"])
     expect(fired[0]!.message).toContain(
-      "for 50s of the last 180s observed (9 observations covering 70s; 1 sampler replacement(s) totalling 10s excluded)",
+      "for 40s of the last 180s observed (8 observations covering 60s; 1 sampler replacement(s) totalling 10s excluded)",
     )
   })
 
