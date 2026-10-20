@@ -11,11 +11,11 @@ Cross-session coordination. Parse the subcommand from ARGUMENTS.
 
 | User Says                      | Action                                                                                                                                                              |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/tribe`                       | `tribe.members()` — show registrations, connector transport and mailbox progress                                                                                                                               |
+| `/tribe`                       | `tribe.members()` — show registrations, connector transport and mailbox progress                                                                                    |
 | `/tribe status`                | `tribe.members()` + `tribe.health()` — full dashboard                                                                                                               |
 | `/tribe health`                | `tribe.health()` — warnings, silent members, unread counts                                                                                                          |
-| `/tribe sessions`              | `tribe.members()` — list known registrations without an agent-life verdict                                                                                                                            |
-| `/tribe sessions --all`        | `tribe.members(all=true)` — add retained registration history to transport and mailbox observations                                                            |
+| `/tribe sessions`              | `tribe.members()` — list known registrations without an agent-life verdict                                                                                          |
+| `/tribe sessions --all`        | `tribe.members(all=true)` — add retained registration history to transport and mailbox observations                                                                 |
 | `/tribe send <to> <message>`   | `tribe.send(to, message)` — send notify message                                                                                                                     |
 | `/tribe assign <to> <message>` | `tribe.send(to, message, type="assign")` — assign work                                                                                                              |
 | `/tribe query <to> <message>`  | `tribe.send(to, message, type="query")` — ask a question                                                                                                            |
@@ -141,7 +141,7 @@ Every listed MCP tool is re-read by the model on every turn, so the tool descrip
 
 ### `inbox.wait`
 
-- `unread_count` is unread attention plus tracked actionable direct or broadcast messages without a later owner TAKING receipt, de-duplicated by message; incident balls are excluded. `timed_out` is true only when no qualifying row newer than the wait baseline arrived.
+- `unread_count` is unread attention plus tracked actionable direct or broadcast messages without a later owner TAKING receipt, de-duplicated by message; incident balls are excluded. `timed_out` is true only when no qualifying row newer than the wait baseline arrived AND no actionable attention row arrived during the window: at the deadline, a retained `actionable_unread` row that arrived after the baseline (a direct response wakes nothing live unless correlated, yet it is attention) settles `woken` with `woken_by` naming the newest such row (30414); attention that predates the wait keeps `timeout` and stays listed.
 - `woken_by.kind` is `message` (with `seq`, `message_id`, `type`, `sender`, `summary`, the ball it opened or moved as `request_id`, and for a correlated reply `settles_request_id`), `daemon-shutdown` (reconnect), or `row-retired` (only `seq`). `replay: true` means the wake re-presents an untaken ball the mailbox already passed, so it is not new and must not be re-acknowledged; `sent_at` keeps the original timestamp.
 - `wake_on_correlated_reply: true` also wakes on a validated reply settlement to one of this seat's tracked requests, and on a direct status or response whose ref names an open ball this seat requested; verdicts already wake, and status/notify correlation never closes anything.
 

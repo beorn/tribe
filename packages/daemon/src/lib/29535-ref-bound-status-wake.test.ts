@@ -230,7 +230,12 @@ describe("29535 a ref-bound status wakes only its requester, and only under the 
     await new Promise((resolve) => setTimeout(resolve, 50))
     const precision = sendMessage(owner.peer, REQUESTER, "a precision arriving mid-wait", "status", undefined, BALL)
     const quiet = await ownerParked
-    expect(quiet.status).toBe("timeout")
+    // Still no LIVE wake on the owner side: the wait ran to its 400 ms deadline. 30414: that deadline is not
+    // quiet, though — the precision is attention for the owner (C2, either party) and ARRIVED during the window,
+    // so the deadline settles woken naming it instead of a plain timeout beside unread_count 1.
+    expect(quiet.waited_ms).toBeGreaterThanOrEqual(390)
+    expect(quiet.status).toBe("woken")
+    expect(quiet.timed_out).toBe(false)
     expect(quiet.attention.actionable_unread.map((r) => r.id)).toContain(precision.id)
   })
 
