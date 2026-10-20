@@ -195,8 +195,14 @@ if (partialShape.config.identityVerifierPath) {
     identityVerifier = boundedIdentityVerifier(await loadIdentityVerifier(partialShape.config.identityVerifierPath), {
       // 28947 (@cto must): every probe that outlived a caller's wait reports its eventual duration
       // when it lands, so the wait bound is next set from the cold tail actually observed.
-      onOutlivedProbe: ({ elapsedMs, result }) => {
-        log.info?.(`identity probe that outlived the wait landed after ${elapsedMs}ms with verdict ${result}`)
+      onOutlivedProbe: ({ probeId, elapsedMs, result, reason, actor, launchId, diagnostic }) => {
+        log.info?.(`identity probe that outlived the wait landed after ${elapsedMs}ms with verdict ${result}`, {
+          probe_id: probeId,
+          reason,
+          actor: actor ?? null,
+          launch_id: launchId ?? null,
+          diagnostic,
+        })
       },
     })
   } catch (error) {
