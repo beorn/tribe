@@ -6,6 +6,7 @@ import { createLogger } from "loggily"
 import type { ContentType } from "./types.ts"
 import type { IndexFreshness } from "../lib/staleness.ts"
 import type { VaultQuery } from "./vault-fts.ts"
+import type { LlmCostCall, LlmCostFields } from "../lib/llm-backend.ts"
 
 // ============================================================================
 // Logging
@@ -228,7 +229,9 @@ export interface ExcludedProvider {
  * needs to diagnose the failure without a second run. § Fail Loud: what I
  * queried, where I looked, what I excluded.
  */
-export interface SynthesisDiagnostics {
+export interface SynthesisDiagnostics extends Partial<LlmCostFields> {
+  /** Original monetary call facts, including failed attempts, when recorded. */
+  calls?: LlmCostCall[]
   /**
    * One-line human summary of what went wrong — the SAME text as the
    * thrown error's `.message`. Some failure modes (e.g. no LLM backend

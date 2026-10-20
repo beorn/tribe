@@ -14,7 +14,29 @@
  * @fakes tribe-recall
  */
 
-import type { LlmModel } from "../../src/lib/llm-backend.ts"
+import type { LlmBackend, LlmModel, LlmResolvedCost } from "../../src/lib/llm-backend.ts"
+
+// Selection/planning fixtures do not supply rates or billing. Keep those
+// amounts explicitly unknown; the root coupled-contract test uses real Bearly
+// resolution and aggregation rather than reproducing its arithmetic here.
+const unavailableCost: LlmResolvedCost = {
+  charged: { reason: "fixture billing unavailable" },
+  listEquivalent: { reason: "fixture pricing unavailable" },
+  listEquivalentBasis: [],
+}
+export const unavailableCostMethods: Pick<
+  LlmBackend,
+  "resolveResponseCost" | "aggregateCosts" | "serializeCost" | "deserializeCost"
+> = {
+  resolveResponseCost: () => unavailableCost,
+  aggregateCosts: () => unavailableCost,
+  serializeCost: () => ({
+    cost_usd_reason: "fixture billing unavailable",
+    list_equivalent_reason: "fixture pricing unavailable",
+    list_equivalent_basis: [],
+  }),
+  deserializeCost: () => unavailableCost,
+}
 
 // ============================================================================
 // Scenario-based mock for queryModel
