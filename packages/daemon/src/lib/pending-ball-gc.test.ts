@@ -15,7 +15,8 @@
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { assertSingleStatement } from "@bearly/sqlite"
 import { incidentKey } from "tribe-wire"
 
 import { createTribeContext } from "./context.ts"
@@ -167,10 +168,19 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       if (original === "archived") archive("subject-msg")
       openBall(stmts, { id: "subject", recipient: "@agent/9", openedAt: now - 10_000, expiresAt: now - 1_000 })
       db.prepare("UPDATE pending_request SET request_kind=? WHERE request_id='subject'").run(kind)
-      insertTaking(stmts, { id: "before-due", ballId: "subject", owner: "@agent/9", requester: "@chief", ts: now - 2_000 })
+      insertTaking(stmts, {
+        id: "before-due",
+        ballId: "subject",
+        owner: "@agent/9",
+        requester: "@chief",
+        ts: now - 2_000,
+      })
       if (receipt === "archived") archive("before-due")
       const before = parseToolJson(handleToolCall(ctx, "tribe.pending", { all: true }, makeOpts()))
-      expect(before).toMatchObject({ count: 1, pending: [{ request_id: "subject", taking_receipt_at_ms: now - 2_000 }] })
+      expect(before).toMatchObject({
+        count: 1,
+        pending: [{ request_id: "subject", taking_receipt_at_ms: now - 2_000 }],
+      })
       insertTaking(stmts, { id: "after-due", ballId: "subject-msg", owner: "@agent/9", requester: "@chief", ts: now })
       if (receipt === "archived") archive("after-due")
       const all = parseToolJson(handleToolCall(ctx, "tribe.pending", { all: true }, makeOpts()))
@@ -184,8 +194,126 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         pending_balls: { requests: { owners: Array<{ pending: Array<{ taking_receipt_at_ms: number | null }> }> } }
       }
       const detailed = health.pending_balls.requests.owners.flatMap((owner) => owner.pending)
-      expect(detailed).toEqual(kind === "incident" ? [] : [expect.objectContaining({ taking_receipt_at_ms: original === "missing" ? null : now })])
+      expect(detailed).toEqual(
+        kind === "incident"
+          ? []
+          : [expect.objectContaining({ taking_receipt_at_ms: original === "missing" ? null : now })],
+      )
     } finally {
+      db.close()
+    }
+  })
+
+  // AC1/AC4: full pending must expose absence and zero without letting timestamps
+  // replace sequence, or unrelated status/reply messages manufacture attendance.
+  it("full pending receipt rejects false matches, preserves zero and selects MAX after sequence", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      const ctx = makeContext(db, stmts, "@agent/9")
+      insertTaking(stmts, {
+        id: "too-early",
+        ballId: "subject",
+        owner: "@agent/9",
+        requester: "@chief",
+        ts: now + 100_000,
+      })
+      insertBallMessage(stmts, { id: "subject", openedAt: now - 10_000 })
+      openBall(stmts, { id: "subject", recipient: "@agent/9", openedAt: now - 10_000 })
+      const invalid = [
+        { column: "kind", value: "broadcast" },
+        { column: "type", value: "notify" },
+        { column: "sender", value: "@other" },
+        { column: "recipient", value: "@other" },
+        { column: "ref", value: "other" },
+        { column: "ref", value: null },
+      ]
+      for (const [index, change] of invalid.entries()) {
+        const id = `invalid-${index}`
+        insertTaking(stmts, { id, ballId: "subject", owner: "@agent/9", requester: "@chief", ts: now + index })
+        db.prepare(assertSingleStatement(`UPDATE messages SET ${change.column}=? WHERE id=?`)).run(change.value, id)
+      }
+      // A generic reply with no status/ref receipt is not attendance.
+      db.prepare("UPDATE messages SET type='response', reply='subject' WHERE id='invalid-5'").run()
+      const read = () => parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts()))
+      expect(read()).toMatchObject({ count: 1, pending: [{ taking_receipt_at_ms: null }] })
+      insertTaking(stmts, { id: "zero", ballId: "subject", owner: "@agent/9", requester: "@chief", ts: 0 })
+      expect(read()).toMatchObject({ count: 1, pending: [{ taking_receipt_at_ms: 0 }] })
+      insertTaking(stmts, { id: "maximum", ballId: "subject-msg", owner: "@agent/9", requester: "@chief", ts: 12 })
+      insertTaking(stmts, { id: "later-sequence", ballId: "subject", owner: "@agent/9", requester: "@chief", ts: 3 })
+      expect(read()).toMatchObject({ count: 1, pending: [{ taking_receipt_at_ms: 12 }] })
+      // A receipt for one fanout owner cannot attend the other owner's row.
+      openBall(stmts, { id: "subject", recipient: "@agent/8", openedAt: now - 10_000 })
+      const fleet = parseToolJson(handleToolCall(ctx, "tribe.pending", { all: true }, makeOpts()))
+      expect(fleet).toMatchObject({ count: 2 })
+      expect(fleet.pending).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ recipient: "@agent/8", taking_receipt_at_ms: null }),
+          expect.objectContaining({ recipient: "@agent/9", taking_receipt_at_ms: 12 }),
+        ]),
+      )
+      // Reopened message generations must not inherit an older receipt.
+      insertBallMessage(stmts, { id: "replacement", openedAt: now })
+      db.prepare(
+        "UPDATE pending_request SET message_id='replacement-msg' WHERE request_id='subject' AND recipient='@agent/9'",
+      ).run()
+      expect(read()).toMatchObject({ count: 1, pending: [{ taking_receipt_at_ms: null }] })
+    } finally {
+      db.close()
+    }
+  })
+
+  // A genuine read failure must escape through the existing error path, never
+  // become a successful all-null pending projection.
+  it("full pending receipt query failure remains an explicit failure", () => {
+    const { db, stmts } = setup()
+    const failure = vi.spyOn(stmts.selectTakingReceiptsForPendingBalls, "all").mockImplementation(() => {
+      throw new Error("receipt read unavailable")
+    })
+    try {
+      openBall(stmts, { id: "subject", recipient: "@agent/9", openedAt: Date.now() })
+      expect(() => handleToolCall(makeContext(db, stmts, "@agent/9"), "tribe.pending", {}, makeOpts())).toThrow(
+        "receipt read unavailable",
+      )
+    } finally {
+      failure.mockRestore()
+      db.close()
+    }
+  })
+
+  // A second native WAL connection commits between the two reads. The first
+  // projection must keep its original snapshot; the next read observes it.
+  it("full pending rows and receipt facts share one SQLite read snapshot", () => {
+    const { db, stmts } = setup()
+    const writer = openDatabase(db.filename)
+    const writerStmts = createStatements(writer)
+    let interleaving: ReturnType<typeof vi.spyOn> | undefined
+    try {
+      const now = Date.now()
+      insertBallMessage(stmts, { id: "subject", openedAt: now })
+      openBall(stmts, { id: "subject", recipient: "@agent/9", openedAt: now })
+      const originalRead = stmts.selectPendingForRecipientWithContent.all.bind(
+        stmts.selectPendingForRecipientWithContent,
+      )
+      interleaving = vi.spyOn(stmts.selectPendingForRecipientWithContent, "all").mockImplementationOnce((...args) => {
+        const rows = originalRead(...args)
+        insertTaking(writerStmts, {
+          id: "concurrent",
+          ballId: "subject",
+          owner: "@agent/9",
+          requester: "@chief",
+          ts: now,
+        })
+        return rows
+      })
+      const ctx = makeContext(db, stmts, "@agent/9")
+      const first = parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts()))
+      expect(first).toMatchObject({ count: 1, pending: [{ taking_receipt_at_ms: null }] })
+      const next = parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts()))
+      expect(next).toMatchObject({ count: 1, pending: [{ taking_receipt_at_ms: now }] })
+    } finally {
+      interleaving?.mockRestore()
+      writer.close()
       db.close()
     }
   })

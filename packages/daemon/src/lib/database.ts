@@ -1838,6 +1838,32 @@ function takingStatusForOpenRequestMatchSql(
     AND ${receipt}.${receiptSequence} > ${originalSequence}`
 }
 
+/** Health requires the original; full pending preserves the explicit zero fallback.
+ * Both projections use the same reciprocal receipt matcher and aggregate. */
+function takingReceiptsForOpenBallsSql(
+  originalSequence:
+    | "COALESCE(pending_message.rowid, pending_archive.seq)"
+    | "COALESCE(pending_message.rowid, pending_archive.seq, 0)",
+): string {
+  return `
+    SELECT request_id, recipient, message_id, MAX(taking_receipt_at_ms) AS taking_receipt_at_ms
+    FROM (
+      SELECT p.request_id AS request_id, p.recipient, p.message_id, r.ts AS taking_receipt_at_ms
+      FROM pending_request p
+      LEFT JOIN messages pending_message ON pending_message.id = p.message_id
+      LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
+      CROSS JOIN messages r ON ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", originalSequence)}
+      UNION ALL
+      SELECT p.request_id AS request_id, p.recipient, p.message_id, r.ts AS taking_receipt_at_ms
+      FROM pending_request p
+      LEFT JOIN messages pending_message ON pending_message.id = p.message_id
+      LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
+      CROSS JOIN messages_archive r ON ${takingStatusForOpenRequestMatchSql("r", "seq", "p", originalSequence)}
+    )
+    GROUP BY request_id, recipient, message_id
+  `
+}
+
 /** One correlation, two callers — so the attention classification and the
  *  opt-in wake arm cannot drift (@cto 29535).
  *
@@ -2399,23 +2425,10 @@ export function createStatements(db: Database) {
      *  oldest ball it reports an age for. Same match the close and retention
      *  paths use; an archived receipt still counts. */
     selectTakingReceiptsForOpenBalls: db.prepare(
-      assertSingleStatement(`
-		SELECT request_id, recipient, message_id, MAX(taking_receipt_at_ms) AS taking_receipt_at_ms
-		FROM (
-			SELECT p.request_id AS request_id, p.recipient, p.message_id, r.ts AS taking_receipt_at_ms
-			FROM pending_request p
-			LEFT JOIN messages pending_message ON pending_message.id = p.message_id
-			LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
-			CROSS JOIN messages r ON ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", "COALESCE(pending_message.rowid, pending_archive.seq)")}
-			UNION ALL
-			SELECT p.request_id AS request_id, p.recipient, p.message_id, r.ts AS taking_receipt_at_ms
-			FROM pending_request p
-			LEFT JOIN messages pending_message ON pending_message.id = p.message_id
-			LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
-			CROSS JOIN messages_archive r ON ${takingStatusForOpenRequestMatchSql("r", "seq", "p", "COALESCE(pending_message.rowid, pending_archive.seq)")}
-		)
-		GROUP BY request_id, recipient, message_id
-	`),
+      assertSingleStatement(takingReceiptsForOpenBallsSql("COALESCE(pending_message.rowid, pending_archive.seq)")),
+    ),
+    selectTakingReceiptsForPendingBalls: db.prepare(
+      assertSingleStatement(takingReceiptsForOpenBallsSql("COALESCE(pending_message.rowid, pending_archive.seq, 0)")),
     ),
 
     /** Ball-tracker GC (@km/tribe/20008): delete pending rows opened before a

@@ -507,7 +507,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           pending: {
             type: "array",
             description:
-              "Open requests, or derived expired outcomes (backing live|journal, superseded_count). Each row carries the owner's transport snapshot; vocabulary: /tribe.",
+              "Open requests, or derived expired outcomes (backing live|journal, superseded_count). Ordinary live owner/all rows include taking_receipt_at_ms (number|null), the latest matching reciprocal status/ref timestamp; zero is valid, null is observed absence. Includes incidents and overdue rows, independent of deadlines. Missing originals use sequence zero; health keeps its stricter original requirement. Emitter and expired/history shapes are unchanged. Each row carries the owner's transport snapshot; vocabulary: /tribe.",
             items: { type: "object", additionalProperties: true },
           },
           owners: {

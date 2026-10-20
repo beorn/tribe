@@ -2584,8 +2584,11 @@ function pendingOwnerSummaries(pending: readonly PendingBall[], takingReceipts?:
  * "nobody answered". Both retention tiers are read; an archived receipt is
  * still the owner's evidence.
  */
-function takingReceiptsForOpenBalls(ctx: TribeContext): ReadonlyMap<string, number> {
-  const rows = ctx.stmts.selectTakingReceiptsForOpenBalls.all() as Array<{
+function takingReceiptsForOpenBalls(
+  ctx: TribeContext,
+  statement = ctx.stmts.selectTakingReceiptsForOpenBalls,
+): ReadonlyMap<string, number> {
+  const rows = statement.all() as Array<{
     request_id: string
     recipient: string
     message_id: string
@@ -2860,6 +2863,15 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
     })
   }
 
+  // Read rows and receipts in one SQLite snapshot. History and emitter reads
+  // keep their existing projections; this fact carries no deadline policy.
+  const liveRows = () =>
+    ctx.db.transaction(() => {
+      const rows = all ? allPendingBallsWithContent(ctx, now) : pendingBallsForOwnerWithContent(ctx, owner, now)
+      const receipts = takingReceiptsForOpenBalls(ctx, ctx.stmts.selectTakingReceiptsForPendingBalls)
+      return rows.map((row) => ({ ...row, taking_receipt_at_ms: receipts.get(pendingFactKey(row)) ?? null }))
+    })()
+
   if (all) {
     const rows = expired
       ? withQuestionBodies(
@@ -2868,8 +2880,8 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
             (row) => (!owed || row.backing === "live") && (staleMs === null || row.age_ms >= staleMs),
           ),
         )
-      : allPendingBallsWithContent(ctx, now).filter((row) => staleMs === null || row.age_ms >= staleMs)
-    const pending: PendingBallWithOwnerTransport[] = withOwnerTransport(rows)
+      : liveRows().filter((row) => staleMs === null || row.age_ms >= staleMs)
+    const pending: PendingBallWithOwnerTransport[] = withOwnerTransport<PendingBall>(rows)
     const owners = pendingOwnerGroups(pending)
     const warning = expired ? settlementConflictWarning(rows as PendingOutcomeBall[]) : undefined
     return jsonResult({
@@ -2894,8 +2906,8 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
             row.recipient === owner && (!owed || row.backing === "live") && (staleMs === null || row.age_ms >= staleMs),
         ),
       )
-    : pendingBallsForOwnerWithContent(ctx, owner, now).filter((row) => staleMs === null || row.age_ms >= staleMs)
-  const pending: PendingBallWithOwnerTransport[] = withOwnerTransport(rows)
+    : liveRows().filter((row) => staleMs === null || row.age_ms >= staleMs)
+  const pending: PendingBallWithOwnerTransport[] = withOwnerTransport<PendingBall>(rows)
   const warning = expired ? settlementConflictWarning(rows as PendingOutcomeBall[]) : undefined
   return jsonResult({
     owner,

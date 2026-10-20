@@ -281,11 +281,14 @@ describe("health projection reads the archive through an index", () => {
         ('ball', 'owner', 'caller', 100, 10000, 'original', 'first')
     `),
     )
-    expect(stmts.selectTakingReceiptsForOpenBalls.all()).toEqual([
-      { request_id: "ball", recipient: "owner", message_id: "original", taking_receipt_at_ms: 300 },
-    ])
-    const queryPlan = plan(db, stmts.selectTakingReceiptsForOpenBalls.toString())
-    expect(queryPlan).not.toMatch(/\bSCAN\s+(?:r|messages|messages_archive)\b/i)
+    // Both approved original-sequence expressions keep the existing index seeks.
+    for (const statement of [stmts.selectTakingReceiptsForOpenBalls, stmts.selectTakingReceiptsForPendingBalls]) {
+      expect(statement.all()).toEqual([
+        { request_id: "ball", recipient: "owner", message_id: "original", taking_receipt_at_ms: 300 },
+      ])
+      const queryPlan = plan(db, statement.toString())
+      expect(queryPlan).not.toMatch(/\bSCAN\s+(?:r|messages|messages_archive)\b/i)
+    }
   })
 
   it("bounds the 7d growth window by archived_at instead of scanning the archive", () => {
