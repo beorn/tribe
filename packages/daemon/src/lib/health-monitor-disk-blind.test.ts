@@ -108,6 +108,7 @@ function seeingMetrics(usedFraction: number, sequence: number): HealthMetrics {
       usedBytes,
     } as unknown as NonNullable<HealthMetrics["disk"]>,
     scalarObservation: {
+      boot: { kind: "unproved", reason: "oomKill absent" },
       kind: "canonical-available",
       observedAt: Date.now(),
       source: { epoch: "test-epoch", sequence },

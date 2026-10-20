@@ -299,6 +299,39 @@ describe("health monitor managed process source", () => {
     }
   })
 
+  it("projects the oomKill boot proof onto the scalar observation, disclosed when absent or unavailable (30427)", async () => {
+    const spawn = stubPeripheralCommands()
+    const base = scalarObservation()
+    const proved = await collectFullMetrics(
+      managed(observation(), {
+        ...base,
+        values: { ...base.values, oomKill: { kind: "supported", value: { bootId: "boot-1", count: 2 } } },
+      }),
+    )
+    expect(proved.metrics.scalarObservation).toMatchObject({ boot: { id: "boot-1", kind: "proved" }, unavailable: [] })
+    const unavailable = await collectFullMetrics(
+      managed(observation(), {
+        ...base,
+        values: {
+          ...base.values,
+          oomKill: {
+            detail: "no /proc/vmstat",
+            kind: "unavailable",
+            metric: "oomKill",
+            platform: "darwin",
+            reason: "unsupported-on-platform",
+          },
+        },
+      }),
+    )
+    // Disclosed on the boot proof itself; it never joins the metrics-unavailable list that drives other alerts.
+    expect(unavailable.metrics.scalarObservation).toMatchObject({
+      boot: { kind: "unproved", reason: "unsupported-on-platform: no /proc/vmstat" },
+      unavailable: [],
+    })
+    spawn.mockRestore()
+  })
+
   it("maps canonical host scalars and never invokes standalone OS acquisition", async () => {
     const spawn = stubPeripheralCommands()
     const osSampler = vi.fn(() => {
@@ -320,6 +353,7 @@ describe("health monitor managed process source", () => {
       },
       memory: { availableMB: 6_144, pressurePercent: 40, swapUsedMB: 100, totalMB: 10_240, usedMB: 4_096 },
       scalarObservation: {
+        boot: { kind: "unproved", reason: "oomKill absent" },
         kind: "canonical-available",
         observedAt: 1_500,
         source: { epoch: "host-a", sequence: 8 },

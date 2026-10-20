@@ -560,6 +560,34 @@ describe("neutral health process source", () => {
           reason: "probably-fine",
         }),
     ],
+    // 30427: a PRESENT but malformed `oomKill` boot proof is a protocol violation, never read as an unproved boot.
+    [
+      "oomKill without a boot id",
+      (payload: any) => (payload.values.oomKill = { kind: "supported", value: { count: 3 } }),
+    ],
+    [
+      "empty oomKill boot id",
+      (payload: any) => (payload.values.oomKill = { kind: "supported", value: { bootId: "", count: 3 } }),
+    ],
+    [
+      "negative oomKill count",
+      (payload: any) => (payload.values.oomKill = { kind: "supported", value: { bootId: "boot-1", count: -1 } }),
+    ],
+    [
+      "fractional oomKill count",
+      (payload: any) => (payload.values.oomKill = { kind: "supported", value: { bootId: "boot-1", count: 1.5 } }),
+    ],
+    ["oomKill without a value", (payload: any) => (payload.values.oomKill = { kind: "supported" })],
+    [
+      "invented oomKill unavailable reason",
+      (payload: any) =>
+        (payload.values.oomKill = {
+          kind: "unavailable",
+          metric: "oomKill",
+          platform: "linux",
+          reason: "probably-fine",
+        }),
+    ],
   ])("rejects %s in host-scalar-observation/1", async (_name, mutate) => {
     const payload = structuredClone(scalarPayload) as any
     mutate(payload)
@@ -607,6 +635,44 @@ describe("neutral health process source", () => {
     if (source.kind !== "managed") throw new Error("expected managed source")
 
     await expect(source.readScalars()).resolves.toMatchObject({ kind: "available", values: { runnable } })
+  })
+
+  // 30427: `oomKill` carries the kernel boot id the CPU window consults at a sampler replacement. A supported row
+  // must survive the validator (its branch sits before the unconditional swap branch); an unavailable one is typed.
+  it.each([
+    [
+      "a supported oomKill boot proof",
+      { kind: "supported", value: { bootId: "a931e012-0dc5-4a9a-a0b7-0d3d7139aa23", count: 1_656 } },
+    ],
+    [
+      "an oomKill unavailable on this platform",
+      { kind: "unavailable", metric: "oomKill", platform: "darwin", reason: "unsupported-on-platform" },
+    ],
+  ])("preserves %s in host-scalar-observation/1", async (_name, oomKill) => {
+    const payload = structuredClone(scalarPayload) as any
+    payload.values.oomKill = oomKill
+    const source = createHealthProcessSource({
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
+      runCommand: async () => ({ exitCode: 0, stderr: "", stdout: `${JSON.stringify(payload)}\n` }),
+    })
+    if (source.kind !== "managed") throw new Error("expected managed source")
+
+    await expect(source.readScalars()).resolves.toMatchObject({ kind: "available", values: { oomKill } })
+  })
+
+  it("admits a host-scalar-observation/1 without `oomKill` as an older emitter, with no boot proof invented", async () => {
+    const payload = structuredClone(scalarPayload) as any
+    expect(payload.values.oomKill).toBeUndefined()
+    const source = createHealthProcessSource({
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
+      runCommand: async () => ({ exitCode: 0, stderr: "", stdout: `${JSON.stringify(payload)}\n` }),
+    })
+    if (source.kind !== "managed") throw new Error("expected managed source")
+
+    const read = await source.readScalars()
+    expect(read.kind).toBe("available")
+    if (read.kind !== "available") throw new Error("expected an available observation")
+    expect(read.values.oomKill).toBeUndefined()
   })
 
   it("admits a host-scalar-observation/1 without `runnable` as an older emitter, not a protocol violation", async () => {

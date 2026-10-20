@@ -241,7 +241,7 @@ export type CanonicalProcessObservation =
 type ScalarUnavailableMetric = {
   readonly detail?: string
   readonly kind: "unavailable"
-  readonly metric: "cpu" | "disk" | "disk.inodes" | "diskIo" | "memory" | "runnable" | "swap"
+  readonly metric: "cpu" | "disk" | "disk.inodes" | "diskIo" | "memory" | "oomKill" | "runnable" | "swap"
   readonly platform: string
   readonly reason: string
 }
@@ -273,6 +273,13 @@ export type CanonicalHostScalarObservation =
          * absent field is legal, a malformed one rejects the whole observation like every other scalar.
          */
         readonly runnable?: ScalarMetric<"runnable", { readonly logicalCores: number; readonly tasks: number }>
+        /**
+         * The kernel boot id the producer read beside its OOM-kill counter, from the same fact (30427): the optional
+         * boot-continuity proof the CPU window consults at a sampler replacement. Absent on retained facts and
+         * producers that predate it, unavailable where the producer declines it (darwin), and a present-but-malformed
+         * one rejects the whole observation like every other scalar.
+         */
+        readonly oomKill?: ScalarMetric<"oomKill", { readonly bootId: string; readonly count: number }>
         readonly disk: ScalarMetric<
           "disk",
           {
@@ -540,6 +547,11 @@ function isScalarMetric(value: unknown, metric: ScalarUnavailableMetric["metric"
       (item) => isNonNegativeInteger(item.tasks) && isPositiveInteger(item.logicalCores),
     )
   }
+  if (metric === "oomKill") {
+    // Also before the unconditional swap validator (30427): placed after it, every supported boot proof would read
+    // malformed, every boot would be unproved, and the continuity rule would silently never carry a window.
+    return isSupportedScalarMetric(value, (item) => isBoundedText(item.bootId) && isNonNegativeInteger(item.count))
+  }
   if (metric === "cpu") {
     return isSupportedScalarMetric(
       value,
@@ -624,6 +636,7 @@ function parseScalarObservation(value: unknown): CanonicalHostScalarObservation 
     !isScalarMetric(value.values.memory, "memory") ||
     // Absent stays legal (older retained facts); present-but-malformed rejects the observation, never reads as zero.
     (value.values.runnable !== undefined && !isScalarMetric(value.values.runnable, "runnable")) ||
+    (value.values.oomKill !== undefined && !isScalarMetric(value.values.oomKill, "oomKill")) ||
     !isScalarMetric(value.values.swap, "swap")
   ) {
     return undefined

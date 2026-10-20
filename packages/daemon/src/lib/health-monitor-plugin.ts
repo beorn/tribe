@@ -121,6 +121,13 @@ export interface HealthMetrics {
   scalarObservation:
     | { readonly kind: "standalone-os"; readonly unavailable: readonly ["disk.bytes", "disk.inodes"] }
     | {
+        /**
+         * Boot continuity proof (30427): the kernel boot id the producer read beside `values.oomKill` in the same
+         * fact, or why there is none. Consulted only at a sampler replacement, never in same-epoch accounting.
+         */
+        readonly boot:
+          | { readonly id: string; readonly kind: "proved" }
+          | { readonly kind: "unproved"; readonly reason: string }
         readonly kind: "canonical-available"
         readonly observedAt: number
         readonly source: { readonly epoch: string; readonly sequence: number }
@@ -1690,7 +1697,14 @@ function scalarFactIdentity(observation: HealthMetrics["scalarObservation"]): st
 /** One judged canonical observation in the CPU window (30382). `at` is the fact's own `observedAt`. */
 export interface CpuWindowSample {
   readonly at: number
+  /** The validated kernel boot id the fact carried (`values.oomKill`), or undefined while the boot is unproved (30427). */
+  readonly boot: string | undefined
   readonly critical: boolean
+  /**
+   * True on the first sample of a new sampler epoch whose credit was carried from the previous one (30427): the
+   * interval ending here is a sampler replacement, excluded from every reduction for as long as the sample is kept.
+   */
+  readonly crossing: boolean
   readonly epoch: string
   readonly sequence: number
   readonly warning: boolean
@@ -1706,6 +1720,9 @@ export interface CpuWindowMeasure {
   /** Intervals inside the window longer than the gap bound (`HealthThresholds.cpuGapMs`): disclosed, never credited. */
   readonly gaps: number
   readonly gapMs: number
+  /** Sampler replacements inside the window whose credit was carried (30427): disclosed, their interval excluded. */
+  readonly crossings: number
+  readonly crossingMs: number
   /** Distinct observations inside the window, the current one included. */
   readonly observations: number
 }
@@ -1718,8 +1735,11 @@ export type ScalarBlindCause =
 /**
  * THE CANONICAL CPU RULE, in one paragraph (30382). Each observation is identified by its own `observedAt` and its
  * source `epoch`/`sequence`; a repeated pair never reaches here (the fact-identity gate in `evaluateAlerts` declines
- * to re-judge it) and so contributes no new time, while an epoch change, a rewound sequence or a rewound clock is a
- * source reset and starts the window over. The window is `windowMs` of ACTUAL observation time ending at the current
+ * to re-judge it) and so contributes no new time, while a rewound sequence or a rewound clock is a source reset and
+ * starts the window over. An epoch change is a sampler replacement (30427): the window is carried across it only
+ * when both sides prove the same kernel boot (`CpuWindowSample.boot`), the clock did not rewind and the crossing is
+ * inside `gapBoundMs`; that crossing interval is then excluded from every reduction, and any other replacement
+ * resets. The window is `windowMs` of ACTUAL observation time ending at the current
  * observation, never a count of polls. Qualifying time is the sum of the intervals between consecutive observations
  * whose BOTH ends qualify, clipped to the window's trailing boundary; an interval longer than `gapBoundMs` (one and a half
  * polls of the effective cadence, `HealthThresholds.cpuGapMs`, derived from HEALTH_POLL_INTERVAL) is an
@@ -1735,10 +1755,28 @@ export function recordCpuWindowSample(
   gapBoundMs: number,
 ): CpuWindowMeasure {
   const last = window[window.length - 1]
-  if (last !== undefined && (last.epoch !== sample.epoch || sample.sequence < last.sequence || sample.at < last.at)) {
-    window.length = 0
+  let crossing = false
+  if (last !== undefined) {
+    if (last.epoch === sample.epoch) {
+      // Unchanged (30382): a rewound sequence or a rewound clock is a source reset; a long same-epoch interval stays
+      // a disclosed, uncredited gap in `measureCpuWindow` and never resets earlier history.
+      if (sample.sequence < last.sequence || sample.at < last.at) window.length = 0
+    } else {
+      // A sampler replacement (30427). Credit is carried only when BOTH sides carry a validated boot id, the ids
+      // match, the clock did not rewind and the crossing is inside the cadence-derived gap bound. A changed boot
+      // resets even at a 1 s gap; an unproved boot on either side keeps the 30382 reset; sequence numbers are never
+      // compared across epochs (the new sampler restarts at 1).
+      const carried =
+        last.boot !== undefined &&
+        sample.boot !== undefined &&
+        last.boot === sample.boot &&
+        sample.at >= last.at &&
+        sample.at - last.at <= gapBoundMs
+      if (carried) crossing = true
+      else window.length = 0
+    }
   }
-  window.push(sample)
+  window.push(crossing ? { ...sample, crossing: true } : sample)
   // Anything older than this cannot even be the left endpoint of an in-window interval without bracketing a gap.
   const oldest = sample.at - windowMs - gapBoundMs
   let first = window[0]
@@ -1761,6 +1799,8 @@ export function measureCpuWindow(
   let coveredMs = 0
   let gaps = 0
   let gapMs = 0
+  let crossings = 0
+  let crossingMs = 0
   let observations = 0
   let previous: CpuWindowSample | undefined
   for (const current of window) {
@@ -1770,6 +1810,13 @@ export function measureCpuWindow(
     observations += 1
     if (before === undefined) continue
     const span = current.at - Math.max(before.at, start)
+    // A carried sampler replacement (30427): a real observation that credits no time, tested strictly before the gap
+    // test so the gap disclosure can never shadow the exclusion.
+    if (current.crossing) {
+      crossings += 1
+      crossingMs += span
+      continue
+    }
     if (current.at - before.at > gapBoundMs) {
       gaps += 1
       gapMs += span
@@ -1779,7 +1826,7 @@ export function measureCpuWindow(
     if (before.critical && current.critical) criticalMs += span
     if (before.warning && current.warning) warningMs += span
   }
-  return { coveredMs, criticalMs, gapMs, gaps, observations, warningMs }
+  return { coveredMs, criticalMs, crossingMs, crossings, gapMs, gaps, observations, warningMs }
 }
 
 function seconds(ms: number): string {
@@ -1787,10 +1834,14 @@ function seconds(ms: number): string {
 }
 
 function describeCpuWindow(measured: CpuWindowMeasure): string {
-  const coverage = `${measured.observations} observations covering ${seconds(measured.coveredMs)}`
-  return measured.gaps === 0
-    ? coverage
-    : `${coverage}; ${measured.gaps} sampling gap(s) totalling ${seconds(measured.gapMs)} not credited`
+  const parts = [`${measured.observations} observations covering ${seconds(measured.coveredMs)}`]
+  if (measured.gaps > 0) {
+    parts.push(`${measured.gaps} sampling gap(s) totalling ${seconds(measured.gapMs)} not credited`)
+  }
+  if (measured.crossings > 0) {
+    parts.push(`${measured.crossings} sampler replacement(s) totalling ${seconds(measured.crossingMs)} excluded`)
+  }
+  return parts.join("; ")
 }
 
 function describeDiskCapacity(capacity: CanonicalDiskCapacity): { detail: string; usagePercent: number } {
@@ -1950,7 +2001,9 @@ export function evaluateAlerts(
     const saturated = runnable > cores
     const sample: CpuWindowSample = {
       at: metrics.timestamp,
+      boot: metrics.scalarObservation.boot.kind === "proved" ? metrics.scalarObservation.boot.id : undefined,
       critical: saturated && load > cpuCriticalThreshold,
+      crossing: false,
       epoch: metrics.scalarObservation.source.epoch,
       sequence: metrics.scalarObservation.source.sequence,
       warning: saturated && load > cpuWarningThreshold,
@@ -2643,6 +2696,22 @@ export function readDiskCapacityDirect(
   }
 }
 
+/**
+ * The boot-continuity proof of one validated observation (30427): the boot id from a supported `oomKill`, else why
+ * there is none. Typed from the parsed observation; an absent or unavailable proof is disclosed, never guessed, and it
+ * never joins the metrics-unavailable list that drives other alerts.
+ */
+function bootProof(
+  oomKill: Extract<CanonicalHostScalarObservation, { kind: "available" }>["values"]["oomKill"],
+): Extract<HealthMetrics["scalarObservation"], { kind: "canonical-available" }>["boot"] {
+  if (oomKill?.kind === "supported") return { id: oomKill.value.bootId, kind: "proved" }
+  if (oomKill === undefined) return { kind: "unproved", reason: "oomKill absent" }
+  return {
+    kind: "unproved",
+    reason: oomKill.detail === undefined ? oomKill.reason : `${oomKill.reason}: ${oomKill.detail}`,
+  }
+}
+
 function canonicalScalarMetrics(
   observation: CanonicalHostScalarObservation,
 ): Pick<HealthMetrics, "cpu" | "disk" | "memory" | "scalarObservation" | "timestamp"> {
@@ -2699,6 +2768,7 @@ function canonicalScalarMetrics(
     ...(disk === undefined ? {} : { disk }),
     ...(memory === undefined ? {} : { memory }),
     scalarObservation: {
+      boot: bootProof(values.oomKill),
       kind: "canonical-available",
       observedAt: observation.observedAt,
       source: observation.source,

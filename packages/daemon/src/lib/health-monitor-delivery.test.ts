@@ -137,10 +137,13 @@ describe("health alert delivery", () => {
     load: number,
     runnableTasks: number,
     epoch = "host-a",
+    boot?: string,
   ): HealthMetrics => ({
     ...metrics(load, at),
     cpu: { loadAvg1m: load, loadAvg5m: load, coreCount: 4, runnableTasks, topProcesses: [] },
     scalarObservation: {
+      // 30427: `boot` is the validated oomKill boot id; without one the observation's boot is unproved.
+      boot: boot === undefined ? { kind: "unproved", reason: "oomKill absent" } : { id: boot, kind: "proved" },
       kind: "canonical-available",
       observedAt: at,
       source: { epoch, sequence },
@@ -259,6 +262,7 @@ describe("health alert delivery", () => {
     expect(fired[0]!.message).toContain(
       "for 30s of the last 180s observed (5 observations covering 30s; 1 sampling gap(s) totalling 40s not credited)",
     )
+    expect(state.cpuWindow, "the earlier credit is retained across the gap, not reset by it").toHaveLength(5)
   })
 
   test("30382: the gap bound is the cadence — a late sample is credited, a missed poll is disclosed", () => {
@@ -296,9 +300,144 @@ describe("health alert delivery", () => {
     expect(evaluateAlerts(canonical(1, BASE_TIME_MS, 9, 7), thresholds, state)).toEqual([])
     expect(evaluateAlerts(canonical(2, BASE_TIME_MS + 10_000, 9, 7), thresholds, state)).toEqual([])
     expect(evaluateAlerts(canonical(3, BASE_TIME_MS + 20_000, 9, 7), thresholds, state)).toEqual([])
-    // A restarted producer: new epoch, sequence back at 1. Without the reset this sample would page (30 s).
+    // A restarted producer: new epoch, sequence back at 1. Without the reset this sample would page (30 s). Neither
+    // side carries a boot proof (30427), so the reset stands.
     expect(evaluateAlerts(canonical(1, BASE_TIME_MS + 30_000, 9, 7, "host-b"), thresholds, state)).toEqual([])
     expect(state.cpuWindow).toHaveLength(1)
+  })
+
+  test("30427: a sampler replacement on the same proven boot carries the window; the crossing itself is excluded", () => {
+    const thresholds = { ...defaultThresholds(), cpuQualifyingMs: 30_000 }
+    const state = createAlertState()
+    // 20 s of critical credit under sampler host-a, every fact proving kernel boot "boot-1".
+    expect(evaluateAlerts(canonical(1, BASE_TIME_MS, 9, 7, "host-a", "boot-1"), thresholds, state)).toEqual([])
+    expect(evaluateAlerts(canonical(2, BASE_TIME_MS + 10_000, 9, 7, "host-a", "boot-1"), thresholds, state)).toEqual([])
+    expect(evaluateAlerts(canonical(3, BASE_TIME_MS + 20_000, 9, 7, "host-a", "boot-1"), thresholds, state)).toEqual([])
+    // The sampler is replaced 10 s later: new epoch, sequence back at 1, the same kernel boot. The credit is carried
+    // but the 10 s crossing is excluded — were it credited, this sample would page at 30 s.
+    expect(evaluateAlerts(canonical(1, BASE_TIME_MS + 30_000, 9, 7, "host-b", "boot-1"), thresholds, state)).toEqual([])
+    expect(state.cpuWindow).toHaveLength(4)
+    expect(state.cpuWindow[3]).toMatchObject({ crossing: true, epoch: "host-b", sequence: 1 })
+    // The next qualifying observation pages on 30 s (20 s before + 10 s after the replacement) and the page names the
+    // excluded crossing: the exclusion holds on this later measurement as well.
+    const fired = evaluateAlerts(canonical(2, BASE_TIME_MS + 40_000, 9, 7, "host-b", "boot-1"), thresholds, state)
+    expect(kinds(fired)).toEqual(["cpu:critical"])
+    expect(fired[0]!.message).toContain(
+      "for 30s of the last 180s observed (5 observations covering 30s; 1 sampler replacement(s) totalling 10s excluded)",
+    )
+  })
+
+  test("30427: carried credit still needs the current observation to qualify, and pages on the next one that does", () => {
+    const thresholds = { ...defaultThresholds(), cpuQualifyingMs: 45_000 }
+    const state = createAlertState()
+    for (let sample = 0; sample < 5; sample += 1) {
+      expect(
+        evaluateAlerts(
+          canonical(sample + 1, BASE_TIME_MS + sample * 10_000, 9, 7, "host-a", "boot-1"),
+          thresholds,
+          state,
+        ),
+      ).toEqual([])
+    }
+    // 40 s of critical credit carried across the replacement at 50 s; the crossing is excluded, so 40 s, not 50 s.
+    expect(evaluateAlerts(canonical(1, BASE_TIME_MS + 50_000, 9, 7, "host-b", "boot-1"), thresholds, state)).toEqual([])
+    // A drained queue on the new sampler pages nothing on the carried 40 s, and lends the next sample no credit.
+    expect(evaluateAlerts(canonical(2, BASE_TIME_MS + 60_000, 9, 2, "host-b", "boot-1"), thresholds, state)).toEqual([])
+    expect(evaluateAlerts(canonical(3, BASE_TIME_MS + 70_000, 9, 7, "host-b", "boot-1"), thresholds, state)).toEqual([])
+    // The next qualifying interval makes 50 s and the carried history pages; without the carry this would be 10 s.
+    const fired = evaluateAlerts(canonical(4, BASE_TIME_MS + 80_000, 9, 7, "host-b", "boot-1"), thresholds, state)
+    expect(kinds(fired)).toEqual(["cpu:critical"])
+    expect(fired[0]!.message).toContain(
+      "for 50s of the last 180s observed (9 observations covering 70s; 1 sampler replacement(s) totalling 10s excluded)",
+    )
+  })
+
+  /**
+   * 30427 reset rows. Each first accrues 30 s of critical credit under sampler host-a with a proven boot — the page
+   * proves the credit is real — then replaces the sampler and reads the window: 1 sample is a reset, 5 is a carry.
+   */
+  const accrueAndPage = (
+    state: ReturnType<typeof createAlertState>,
+    thresholds: ReturnType<typeof defaultThresholds>,
+    boot?: string,
+  ) => {
+    for (let sample = 0; sample < 3; sample += 1) {
+      expect(
+        evaluateAlerts(canonical(sample + 1, BASE_TIME_MS + sample * 10_000, 9, 7, "host-a", boot), thresholds, state),
+      ).toEqual([])
+    }
+    expect(kinds(evaluateAlerts(canonical(4, BASE_TIME_MS + 30_000, 9, 7, "host-a", boot), thresholds, state))).toEqual(
+      ["cpu:critical"],
+    )
+    expect(state.cpuWindow).toHaveLength(4)
+  }
+
+  test("30427: a changed kernel boot resets the window even across a 1 s gap", () => {
+    const thresholds = { ...defaultThresholds(), cpuQualifyingMs: 30_000 }
+    const state = createAlertState()
+    accrueAndPage(state, thresholds, "boot-1")
+    expect(evaluateAlerts(canonical(1, BASE_TIME_MS + 31_000, 9, 7, "host-b", "boot-2"), thresholds, state)).toEqual([])
+    expect(state.cpuWindow).toHaveLength(1)
+    expect(state.cpuWindow[0]).toMatchObject({ boot: "boot-2", crossing: false, epoch: "host-b" })
+  })
+
+  test("30427: an unproved boot on either side of the replacement keeps the reset", () => {
+    const thresholds = { ...defaultThresholds(), cpuQualifyingMs: 30_000 }
+    // History proved, the new sampler's boot unproved (a producer that predates oomKill, or darwin).
+    const proved = createAlertState()
+    accrueAndPage(proved, thresholds, "boot-1")
+    expect(evaluateAlerts(canonical(1, BASE_TIME_MS + 40_000, 9, 7, "host-b"), thresholds, proved)).toEqual([])
+    expect(proved.cpuWindow).toHaveLength(1)
+    // History unproved, the new sampler's boot proved: nothing to compare against, so the reset stands too.
+    const unproved = createAlertState()
+    accrueAndPage(unproved, thresholds)
+    expect(evaluateAlerts(canonical(1, BASE_TIME_MS + 40_000, 9, 7, "host-b", "boot-1"), thresholds, unproved)).toEqual(
+      [],
+    )
+    expect(unproved.cpuWindow).toHaveLength(1)
+  })
+
+  test("30427: a matched boot is carried at exactly the gap bound and reset one millisecond past it", () => {
+    const thresholds = { ...defaultThresholds(), cpuQualifyingMs: 30_000 }
+    expect(thresholds.cpuGapMs).toBe(15_000)
+    const atBound = createAlertState()
+    accrueAndPage(atBound, thresholds, "boot-1")
+    expect(evaluateAlerts(canonical(1, BASE_TIME_MS + 45_000, 9, 7, "host-b", "boot-1"), thresholds, atBound)).toEqual(
+      [],
+    )
+    expect(atBound.cpuWindow).toHaveLength(5)
+    expect(atBound.cpuWindow[4]).toMatchObject({ crossing: true })
+    const pastBound = createAlertState()
+    accrueAndPage(pastBound, thresholds, "boot-1")
+    expect(
+      evaluateAlerts(canonical(1, BASE_TIME_MS + 45_001, 9, 7, "host-b", "boot-1"), thresholds, pastBound),
+    ).toEqual([])
+    expect(pastBound.cpuWindow).toHaveLength(1)
+  })
+
+  test("30427: a matched boot never carries across a rewound clock, and same-epoch rewinds still reset", () => {
+    const thresholds = { ...defaultThresholds(), cpuQualifyingMs: 30_000 }
+    // The replacement's first fact is stamped before the old sampler's last one: a clock rewind, no carry.
+    const rewoundAcross = createAlertState()
+    accrueAndPage(rewoundAcross, thresholds, "boot-1")
+    expect(
+      evaluateAlerts(canonical(1, BASE_TIME_MS + 29_000, 9, 7, "host-b", "boot-1"), thresholds, rewoundAcross),
+    ).toEqual([])
+    expect(rewoundAcross.cpuWindow).toHaveLength(1)
+    // Same epoch, sequence rewound (30382 rule, row added here): reset.
+    const sequenceRewind = createAlertState()
+    accrueAndPage(sequenceRewind, thresholds, "boot-1")
+    expect(
+      evaluateAlerts(canonical(2, BASE_TIME_MS + 40_000, 9, 7, "host-a", "boot-1"), thresholds, sequenceRewind),
+    ).toEqual([])
+    expect(sequenceRewind.cpuWindow).toHaveLength(1)
+    // Same epoch, clock rewound (30382 rule, row added here): reset.
+    const clockRewind = createAlertState()
+    accrueAndPage(clockRewind, thresholds, "boot-1")
+    expect(
+      evaluateAlerts(canonical(5, BASE_TIME_MS + 29_000, 9, 7, "host-a", "boot-1"), thresholds, clockRewind),
+    ).toEqual([])
+    expect(clockRewind.cpuWindow).toHaveLength(1)
   })
 
   test("30382 AC3: a canonical fact without `runnable` is PARTIALLY blind — no CPU page, disk and memory still judged", () => {
