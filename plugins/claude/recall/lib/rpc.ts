@@ -8,6 +8,8 @@
 
 import type { IndexProvenance, SynthesisDiagnostics } from "../../../../packages/recall/src/history/recall-shared.ts"
 import type { AgentRecallResult } from "../../../../packages/recall/src/lib/agent.ts"
+import type { LlmCostFields, LlmCostCall } from "../../../../packages/recall/src/lib/llm-backend.ts"
+import type { PlanCall } from "../../../../packages/recall/src/lib/plan.ts"
 
 // ---------------------------------------------------------------------------
 // Protocol
@@ -78,7 +80,7 @@ export type AskParams = {
   rawTrace?: boolean
 }
 
-export type AskResult = {
+export type AskResult = Partial<LlmCostFields> & {
   query: string
   answer: string | null
   provenance: IndexProvenance
@@ -90,7 +92,7 @@ export type AskResult = {
     snippet?: string
   }>
   durationMs: number
-  cost: number
+  calls?: LlmCostCall[]
   synthPath: "speculative-round1" | "fresh-merged" | "single-pass" | "none" | "no-synth"
   synthCallsUsed: number
   fellThrough: boolean
@@ -112,7 +114,12 @@ export function toAskResult(result: AgentRecallResult, options: { includeTrace?:
       snippet: item.snippet,
     })),
     durationMs: result.durationMs,
-    cost: result.llmCost ?? 0,
+    cost_usd: result.cost_usd,
+    cost_usd_reason: result.cost_usd_reason,
+    list_equivalent_usd: result.list_equivalent_usd,
+    list_equivalent_reason: result.list_equivalent_reason,
+    list_equivalent_basis: result.list_equivalent_basis,
+    calls: result.calls,
     synthPath: result.trace.synthPath ?? "no-synth",
     synthCallsUsed: result.trace.synthCallsUsed ?? 0,
     fellThrough: result.fellThrough ?? false,
@@ -149,14 +156,31 @@ export type PlanOnlyParams = {
   query: string
 }
 
-export type PlanOnlyResult = {
+export type PlanOnlyResult = Partial<LlmCostFields> & {
   ok: boolean
   plan?: Record<string, unknown>
   variants?: string[]
   model?: string
   elapsedMs: number
-  cost: number
+  calls: LlmCostCall[]
   error?: string
+}
+
+/** Both daemon and library planner paths expose the same original receipt facts. */
+export function toPlanOnlyResult(call: PlanCall, variants?: string[]): PlanOnlyResult {
+  return {
+    ok: call.plan !== null,
+    ...(call.plan ? { plan: call.plan as unknown as Record<string, unknown>, variants } : {}),
+    model: call.model,
+    elapsedMs: call.elapsedMs,
+    calls: call.calls,
+    cost_usd: call.cost_usd,
+    cost_usd_reason: call.cost_usd_reason,
+    list_equivalent_usd: call.list_equivalent_usd,
+    list_equivalent_reason: call.list_equivalent_reason,
+    list_equivalent_basis: call.list_equivalent_basis,
+    ...(!call.plan ? { error: call.error ?? "plan-failed" } : {}),
+  }
 }
 
 // ---------------------------------------------------------------------------
