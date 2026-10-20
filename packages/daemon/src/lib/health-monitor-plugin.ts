@@ -49,6 +49,19 @@ import {
 
 const log = createLogger("tribe:health")
 const CPU_ALERT_COOLDOWN_MS = 5 * 60_000
+/**
+ * The canonical CPU window's gap bound (30382), in polls of the EFFECTIVE cadence: one late sample (an interval up to
+ * one and a half polls) is still observation time, a missed poll is not. Two observations further apart than the
+ * bound bracket an undisclosed sampling gap, so the interval between them earns no qualifying credit and is named in
+ * the message instead of silently shortening the window. The bound follows HEALTH_POLL_INTERVAL through
+ * `cpuGapMsForCadence`, never a fixed number of seconds: a fixed 30 s would have made every interval a gap at a 40 s
+ * cadence and silently killed CPU paging (@dev/5 review, 2026-10-20).
+ */
+const CPU_WINDOW_GAP_POLLS = 1.5
+/** The gap bound for a poll cadence, in ms (30382): see CPU_WINDOW_GAP_POLLS. */
+export function cpuGapMsForCadence(pollIntervalSec: number): number {
+  return Math.round(pollIntervalSec * 1000 * CPU_WINDOW_GAP_POLLS)
+}
 const CPU_OFFENDER_MIN_PERCENT = 3
 const HEALTH_ALERT_ARGV_MAX_CHARS = 160
 type CanonicalDiskCapacity = Extract<
@@ -65,6 +78,10 @@ export interface HealthMetrics {
     loadAvg1m?: number
     loadAvg5m?: number
     coreCount?: number
+    /** `procs_running` from the same host:scalars fact as the load (30382); only a canonical observation carries it. */
+    runnableTasks?: number
+    /** Why a canonical observation carries no `runnableTasks`: the producer omitted (`not-reported`) or declined it. */
+    runnableUnavailable?: { readonly reason: string; readonly detail?: string }
     topProcesses: Array<{ pid: number; cpu: number; mem?: number; command: string }>
   }
   memory?: {
@@ -175,6 +192,20 @@ export interface HealthThresholds {
   ghRateLimitWarning: number
   /** How many consecutive samples above threshold before alerting */
   sustainedSamples: number
+  /**
+   * Canonical CPU rule (30382): the trailing span of ACTUAL observation time the qualifying time is measured in
+   * (default 180 s). Internal to this detector, not an operator knob; `sustainedSamples` is shared with the
+   * attribution-blindness page and stays untouched.
+   */
+  cpuWindowMs: number
+  /** Canonical CPU rule (30382): qualifying observation time inside that window before a page (default 50 s). */
+  cpuQualifyingMs: number
+  /**
+   * Canonical CPU rule (30382): two consecutive observations further apart than this bracket a sampling gap that is
+   * disclosed and never credited. One and a half polls of the EFFECTIVE cadence (`cpuGapMsForCadence`), set by
+   * `start()` from the parsed HEALTH_POLL_INTERVAL; the default carries the 10 s cadence (15 s).
+   */
+  cpuGapMs: number
   /** Reaper: enabled (default: true) */
   reaperEnabled: boolean
   /** Reaper: CPU % threshold for suspect detection (default: 80) */
@@ -295,7 +326,7 @@ export function formatThresholdRefusals(refusals: readonly ThresholdRefusal[]): 
  * numbers is unaffected. No refusal throws on its way back to the plugin loader, because that loader disables the whole
  * plugin whose start throws.
  */
-export function defaultThresholds(): HealthThresholds {
+export function defaultThresholds(pollIntervalSec: number = DEFAULT_HEALTH_POLL_INTERVAL_SEC): HealthThresholds {
   const refusals: ThresholdRefusal[] = []
   const off = (check: string): ThresholdConsequence => ({ kind: "off", check })
   const useDefault: ThresholdConsequence = { kind: "default" }
@@ -340,6 +371,10 @@ export function defaultThresholds(): HealthThresholds {
     ghRateLimitWarning,
     // At 10s interval, 3 samples = 30s sustained
     sustainedSamples: 3,
+    // 30382: 180 s of observation time, 50 s of it qualifying — the replayed candidate, deliberately not an env knob.
+    cpuWindowMs: 180_000,
+    cpuQualifyingMs: 50_000,
+    cpuGapMs: cpuGapMsForCadence(pollIntervalSec),
     reaperEnabled: process.env.HEALTH_REAPER_ENABLED !== "0" && !reaperRefused,
     reaperCpuThreshold,
     reaperAgeMinutes,
@@ -1149,12 +1184,21 @@ export interface AlertState {
   canonicalReaper: CanonicalReaperState
   /** Last canonical scalar fact evaluated for sustained thresholds. */
   lastScalarFact?: string
+  /**
+   * The canonical CPU window (30382): the evaluated observations inside the trailing `cpuWindowMs`, oldest first,
+   * plus at most one older neighbour that serves as the left endpoint of the first in-window interval. The
+   * standalone-os path never writes it; it keeps `cpuAboveCritical`/`cpuAboveWarning` above.
+   */
+  cpuWindow: CpuWindowSample[]
+  /** What the sample that advanced `scalarBlindSamples` lacked: the whole scalar fact, or only `runnable` (30382). */
+  scalarBlindCause?: ScalarBlindCause
 }
 
 export function createAlertState(): AlertState {
   return {
     cpuAboveCritical: 0,
     cpuAboveWarning: 0,
+    cpuWindow: [],
     memAboveCritical: 0,
     memAboveWarning: 0,
     scalarBlindSamples: 0,
@@ -1643,6 +1687,112 @@ function scalarFactIdentity(observation: HealthMetrics["scalarObservation"]): st
     : undefined
 }
 
+/** One judged canonical observation in the CPU window (30382). `at` is the fact's own `observedAt`. */
+export interface CpuWindowSample {
+  readonly at: number
+  readonly critical: boolean
+  readonly epoch: string
+  readonly sequence: number
+  readonly warning: boolean
+}
+
+export interface CpuWindowMeasure {
+  /** Observation time inside the window whose bracketing observations were BOTH critical-qualifying. */
+  readonly criticalMs: number
+  /** The same for warning-qualifying (critical implies warning). */
+  readonly warningMs: number
+  /** Observation time inside the window that consecutive observations cover without a gap. */
+  readonly coveredMs: number
+  /** Intervals inside the window longer than the gap bound (`HealthThresholds.cpuGapMs`): disclosed, never credited. */
+  readonly gaps: number
+  readonly gapMs: number
+  /** Distinct observations inside the window, the current one included. */
+  readonly observations: number
+}
+
+/** What advanced the scalar blindness counter (30382): the whole fact was unreadable, or only `runnable` was missing. */
+export type ScalarBlindCause =
+  | { readonly kind: "scalar-fact"; readonly reason: string; readonly detail?: string }
+  | { readonly kind: "runnable"; readonly reason: string; readonly detail?: string }
+
+/**
+ * THE CANONICAL CPU RULE, in one paragraph (30382). Each observation is identified by its own `observedAt` and its
+ * source `epoch`/`sequence`; a repeated pair never reaches here (the fact-identity gate in `evaluateAlerts` declines
+ * to re-judge it) and so contributes no new time, while an epoch change, a rewound sequence or a rewound clock is a
+ * source reset and starts the window over. The window is `windowMs` of ACTUAL observation time ending at the current
+ * observation, never a count of polls. Qualifying time is the sum of the intervals between consecutive observations
+ * whose BOTH ends qualify, clipped to the window's trailing boundary; an interval longer than `gapBoundMs` (one and a half
+ * polls of the effective cadence, `HealthThresholds.cpuGapMs`, derived from HEALTH_POLL_INTERVAL) is an
+ * undisclosed sampling gap that earns no credit and is reported instead of shortening the window; a stale or
+ * unavailable fact never arrives here at all (the caller resets the window). The current observation must itself
+ * qualify before anything fires; severity precedence (critical supersedes warning) and the cooldown are the caller's
+ * and unchanged. Retained-series replays must apply exactly this accounting.
+ */
+export function recordCpuWindowSample(
+  window: CpuWindowSample[],
+  sample: CpuWindowSample,
+  windowMs: number,
+  gapBoundMs: number,
+): CpuWindowMeasure {
+  const last = window[window.length - 1]
+  if (last !== undefined && (last.epoch !== sample.epoch || sample.sequence < last.sequence || sample.at < last.at)) {
+    window.length = 0
+  }
+  window.push(sample)
+  // Anything older than this cannot even be the left endpoint of an in-window interval without bracketing a gap.
+  const oldest = sample.at - windowMs - gapBoundMs
+  let first = window[0]
+  while (first !== undefined && first.at < oldest) {
+    window.shift()
+    first = window[0]
+  }
+  return measureCpuWindow(window, sample.at, windowMs, gapBoundMs)
+}
+
+export function measureCpuWindow(
+  window: readonly CpuWindowSample[],
+  now: number,
+  windowMs: number,
+  gapBoundMs: number,
+): CpuWindowMeasure {
+  const start = now - windowMs
+  let criticalMs = 0
+  let warningMs = 0
+  let coveredMs = 0
+  let gaps = 0
+  let gapMs = 0
+  let observations = 0
+  let previous: CpuWindowSample | undefined
+  for (const current of window) {
+    const before = previous
+    previous = current
+    if (current.at <= start) continue
+    observations += 1
+    if (before === undefined) continue
+    const span = current.at - Math.max(before.at, start)
+    if (current.at - before.at > gapBoundMs) {
+      gaps += 1
+      gapMs += span
+      continue
+    }
+    coveredMs += span
+    if (before.critical && current.critical) criticalMs += span
+    if (before.warning && current.warning) warningMs += span
+  }
+  return { coveredMs, criticalMs, gapMs, gaps, observations, warningMs }
+}
+
+function seconds(ms: number): string {
+  return `${Math.round(ms / 1000)}s`
+}
+
+function describeCpuWindow(measured: CpuWindowMeasure): string {
+  const coverage = `${measured.observations} observations covering ${seconds(measured.coveredMs)}`
+  return measured.gaps === 0
+    ? coverage
+    : `${coverage}; ${measured.gaps} sampling gap(s) totalling ${seconds(measured.gapMs)} not credited`
+}
+
 function describeDiskCapacity(capacity: CanonicalDiskCapacity): { detail: string; usagePercent: number } {
   const byteUsage = Math.round((capacity.usedBytes / capacity.totalBytes) * 100)
   const inodes = capacity.inodes
@@ -1697,15 +1847,39 @@ export function evaluateAlerts(
   // deleted. They are now redundant for every case this one covers, and keeping
   // them makes this change strictly additive: no sample that cleared before can
   // stop clearing because of it.
-  if (metrics.scalarObservation.kind !== "canonical-unavailable") {
+  //
+  // SEEING ALSO NEEDS `runnable` ON A CANONICAL FACT (30382). A readable fact
+  // without it still evaluates disk and memory but cannot judge the CPU rule,
+  // and that partial state is blindness to disclose, not a reading that
+  // clears it. A standalone-os observation has no runnable by platform and is
+  // still seeing: a platform limit is not an outage.
+  const scalarSeeing =
+    metrics.scalarObservation.kind === "standalone-os" ||
+    (metrics.scalarObservation.kind === "canonical-available" && metrics.cpu.runnableTasks !== undefined)
+  if (scalarSeeing) {
     state.scalarBlindSamples = 0
     state.firedAlerts.delete("disk:blind")
+    delete state.scalarBlindCause
   }
   const cores = metrics.cpu.coreCount
   const load = metrics.cpu.loadAvg1m
+  const runnable = metrics.cpu.runnableTasks
 
   // --- CPU ---
-  if (evaluateScalarMetrics && cores !== undefined && load !== undefined) {
+  // TWO SOURCES, TWO RULES (30382). A standalone-os sampler reads loadavg and
+  // has no runnable count, so it keeps the load-only consecutive-sample rule
+  // exactly as it was: applying the AND there would silence CPU on every host
+  // outside hab. A canonical host:scalars fact carries `runnable`, and there
+  // the rule is MEASURED OBSERVATION TIME — see `recordCpuWindowSample`. A
+  // canonical observation without `runnable` cannot be judged: it resets the
+  // window (no inferred credit across it) and is disclosed further down as
+  // partial blindness rather than silently taking the load-only rule.
+  if (
+    evaluateScalarMetrics &&
+    metrics.scalarObservation.kind === "standalone-os" &&
+    cores !== undefined &&
+    load !== undefined
+  ) {
     const cpuCriticalThreshold = cores * thresholds.cpuCriticalMultiplier
     const cpuWarningThreshold = cores * thresholds.cpuWarningMultiplier
     const cpuCriticalCoolingDown =
@@ -1758,7 +1932,83 @@ export function evaluateAlerts(
         topOffenders: metrics.cpu.topProcesses.slice(0, 5),
       })
     }
+  } else if (
+    evaluateScalarMetrics &&
+    metrics.scalarObservation.kind === "canonical-available" &&
+    cores !== undefined &&
+    load !== undefined &&
+    runnable !== undefined
+  ) {
+    const cpuCriticalThreshold = cores * thresholds.cpuCriticalMultiplier
+    const cpuWarningThreshold = cores * thresholds.cpuWarningMultiplier
+    const cpuCriticalCoolingDown =
+      metrics.timestamp - (state.firedAt.get("cpu:critical") ?? Number.NEGATIVE_INFINITY) < CPU_ALERT_COOLDOWN_MS
+    const cpuWarningCoolingDown =
+      metrics.timestamp - (state.firedAt.get("cpu:warning") ?? Number.NEGATIVE_INFINITY) < CPU_ALERT_COOLDOWN_MS
+    // Qualifying = load above the line AND more runnable tasks than cores. A load average outlives the queue by
+    // minutes (measured 2026-10-19: 327 s on the warning line against a 50 s runnable run), so load alone is churn.
+    const saturated = runnable > cores
+    const sample: CpuWindowSample = {
+      at: metrics.timestamp,
+      critical: saturated && load > cpuCriticalThreshold,
+      epoch: metrics.scalarObservation.source.epoch,
+      sequence: metrics.scalarObservation.source.sequence,
+      warning: saturated && load > cpuWarningThreshold,
+    }
+    const measured = recordCpuWindowSample(state.cpuWindow, sample, thresholds.cpuWindowMs, thresholds.cpuGapMs)
+    const where = `with ${runnable} runnable tasks over ${cores} cores`
+    const window = `of the last ${seconds(thresholds.cpuWindowMs)} observed (${describeCpuWindow(measured)})`
+
+    // Below the warning line on either leg clears both dedupe entries, as the load-only rule does below its
+    // warning line; inside the warning band `cpu:critical` stays fired, also as before.
+    if (!sample.warning) {
+      state.firedAlerts.delete("cpu:critical")
+      state.firedAlerts.delete("cpu:warning")
+    }
+
+    // THE CURRENT OBSERVATION MUST ITSELF QUALIFY: retained history alone never pages.
+    if (
+      sample.critical &&
+      measured.criticalMs >= thresholds.cpuQualifyingMs &&
+      !state.firedAlerts.has("cpu:critical") &&
+      !cpuCriticalCoolingDown
+    ) {
+      state.firedAlerts.add("cpu:critical")
+      state.firedAlerts.delete("cpu:warning") // Supersedes warning
+      state.firedAt.set("cpu:critical", metrics.timestamp)
+      state.firedAt.set("cpu:warning", metrics.timestamp)
+      alerts.push({
+        type: "cpu",
+        severity: "critical",
+        message:
+          `CPU critical: load ${load} exceeds ${cpuCriticalThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuCriticalMultiplier}) ` +
+          `${where} for ${seconds(measured.criticalMs)} ${window}`,
+        metrics: { cpu: metrics.cpu },
+        topOffenders: metrics.cpu.topProcesses.slice(0, 5),
+      })
+    } else if (
+      sample.warning &&
+      measured.warningMs >= thresholds.cpuQualifyingMs &&
+      !state.firedAlerts.has("cpu:warning") &&
+      !state.firedAlerts.has("cpu:critical") &&
+      !cpuWarningCoolingDown
+    ) {
+      state.firedAlerts.add("cpu:warning")
+      state.firedAt.set("cpu:warning", metrics.timestamp)
+      alerts.push({
+        type: "cpu",
+        severity: "warning",
+        message:
+          `CPU warning: load ${load} exceeds ${cpuWarningThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuWarningMultiplier}) ` +
+          `${where} for ${seconds(measured.warningMs)} ${window}`,
+        metrics: { cpu: metrics.cpu },
+        topOffenders: metrics.cpu.topProcesses.slice(0, 5),
+      })
+    }
   } else if (evaluateScalarMetrics) {
+    // An unavailable scalar fact, or a canonical one without `runnable`, breaks the sequence without inventing
+    // healthy values: no credit is inferred across it, so the window starts over on the next judged observation.
+    state.cpuWindow.length = 0
     state.cpuAboveCritical = 0
     state.cpuAboveWarning = 0
     state.firedAlerts.delete("cpu:critical")
@@ -1920,7 +2170,7 @@ export function evaluateAlerts(
     // is the noise that gets an alert muted. Muted is how the real one stayed
     // invisible, so the narrow rule is the useful one. Three existing delivery
     // tests caught the broad version; they were right and are untouched.
-    if (metrics.scalarObservation.kind !== "canonical-unavailable") {
+    if (scalarSeeing) {
       // A NON-BLIND OBSERVATION IS THE CLEARING EDGE, and it has to clear the
       // DEDUPE ENTRY as well as the counter. Resetting only the counter latches
       // the condition: `disk:blind` stays in firedAlerts, so the next real
@@ -1933,8 +2183,54 @@ export function evaluateAlerts(
       state.scalarBlindSamples = 0
       state.firedAlerts.delete("disk:blind")
     } else {
+      // ONE COUNTER, because it is one question — can this process evaluate the
+      // full scalar rule set — and the cause recorded beside it is the firing
+      // sample's own: the whole fact unreadable, or (30382) a readable fact
+      // whose `runnable` the producer omitted or declined, which leaves disk and
+      // memory judged and only the CPU rule blind.
       state.scalarBlindSamples++
-      if (state.scalarBlindSamples >= 2 && !state.firedAlerts.has("disk:blind")) {
+      state.scalarBlindCause =
+        metrics.scalarObservation.kind === "canonical-unavailable"
+          ? {
+              kind: "scalar-fact",
+              reason: metrics.scalarObservation.reason,
+              ...(metrics.scalarObservation.detail === undefined ? {} : { detail: metrics.scalarObservation.detail }),
+            }
+          : {
+              kind: "runnable",
+              reason: metrics.cpu.runnableUnavailable?.reason ?? "not-reported",
+              ...(metrics.cpu.runnableUnavailable?.detail === undefined
+                ? {}
+                : { detail: metrics.cpu.runnableUnavailable.detail }),
+            }
+      if (
+        state.scalarBlindSamples >= 2 &&
+        !state.firedAlerts.has("disk:blind") &&
+        metrics.scalarObservation.kind !== "canonical-unavailable"
+      ) {
+        // PARTIAL: say exactly which rule is blind and which are not, so the
+        // reader is never sent to repair a disk or memory lane that is working.
+        state.firedAlerts.add("disk:blind")
+        const cause = state.scalarBlindCause
+        alerts.push({
+          type: "disk",
+          severity: "warning",
+          message:
+            "Host scalar monitoring is PARTIALLY BLIND: the host scalar fact is readable but `runnable` is " +
+            `unavailable (reason \`${cause.reason}\`${cause.detail === undefined ? "" : `: ${cause.detail}`}) for ` +
+            `${String(state.scalarBlindSamples)} consecutive samples, so the canonical CPU rule (load above the ` +
+            "line AND more runnable tasks than cores) cannot fire for this ONE reason. Disk and memory ARE still " +
+            "being evaluated, and the load-only CPU rule does not apply to a canonical observation (30382). " +
+            "Check `values.runnable` in `hab sysmon snapshot --kind scalars`; a Linux producer reads it from " +
+            "/proc/stat `procs_running`, and `unsupported-on-platform` means this host cannot supply it.",
+          metrics: {},
+          topOffenders: [],
+        })
+      } else if (
+        state.scalarBlindSamples >= 2 &&
+        !state.firedAlerts.has("disk:blind") &&
+        metrics.scalarObservation.kind === "canonical-unavailable"
+      ) {
         state.firedAlerts.add("disk:blind")
         // THE REASON NAMES A DIFFERENT STAGE FOR EACH VALUE, and reporting the
         // wrong one sends the reader to the wrong repair — worse than saying
@@ -2369,6 +2665,19 @@ function canonicalScalarMetrics(
           coreCount: values.cpu.value.logicalCores,
           loadAvg1m: values.cpu.value.loadAverage1m,
           loadAvg5m: values.cpu.value.loadAverage5m,
+          // Same fact, no new read (30382). Absent when the producer omitted or declined it — and then NAMED, so the
+          // evaluator discloses the missing cause instead of reading it as zero or as healthy.
+          ...(values.runnable?.kind === "supported"
+            ? { runnableTasks: values.runnable.value.tasks }
+            : {
+                runnableUnavailable:
+                  values.runnable === undefined
+                    ? { reason: "not-reported" }
+                    : {
+                        reason: values.runnable.reason,
+                        ...(values.runnable.detail === undefined ? {} : { detail: values.runnable.detail }),
+                      },
+              }),
           topProcesses: [],
         }
       : { topProcesses: [] }
@@ -2682,7 +2991,7 @@ export const healthMonitorPlugin: TribePluginApi = {
     const pollIntervalSec =
       parseInt(process.env.HEALTH_POLL_INTERVAL ?? String(DEFAULT_HEALTH_POLL_INTERVAL_SEC), 10) ||
       DEFAULT_HEALTH_POLL_INTERVAL_SEC
-    const thresholds = defaultThresholds()
+    const thresholds = defaultThresholds(pollIntervalSec)
     // 29561 item 4: a refused reaper threshold turns the reaper OFF and says so ONCE, here, rather than throwing out
     // of start(). A throw would have made the plugin loader disable this whole plugin - disk, bridge-lost paging and
     // the reaper together - behind one log line (@cto, 2026-10-15). Severity critical because the page is the point:
