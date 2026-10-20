@@ -66,6 +66,8 @@ function selectionBackend(opts: {
     getCheapModels: vi.fn((max = 2) => opts.candidates.slice(0, max)),
     resolveResponseCost: vi.fn(),
     aggregateCosts: vi.fn(),
+    averageCost: vi.fn(),
+    formatCostColumns: vi.fn(),
     serializeCost: vi.fn(),
     deserializeCost: vi.fn(),
     isProviderAvailable: vi.fn((provider) => available.has(provider)),
@@ -323,6 +325,8 @@ describe("loadLlm shared provider-health surface", () => {
         }
         export const serializeCost = () => ({ cost_usd: 0.125, list_equivalent_reason: "fixture rate unavailable", list_equivalent_basis: [] })
         export const deserializeCost = () => cost
+        export const averageCost = (total) => total
+        export const formatCostColumns = () => "fixture cost columns"
         export const isProviderAvailable = () => true
         export const createProviderObservationStore = () => ({})
         export const readProviderAvailability = async (provider) => ({

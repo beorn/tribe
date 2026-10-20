@@ -26,10 +26,13 @@ const unavailableCost: LlmResolvedCost = {
 }
 export const unavailableCostMethods: Pick<
   LlmBackend,
-  "resolveResponseCost" | "aggregateCosts" | "serializeCost" | "deserializeCost"
+  "resolveResponseCost" | "aggregateCosts" | "averageCost" | "formatCostColumns" | "serializeCost" | "deserializeCost"
 > = {
   resolveResponseCost: () => unavailableCost,
   aggregateCosts: () => unavailableCost,
+  averageCost: () => unavailableCost,
+  formatCostColumns: () =>
+    "charged unknown (fixture billing unavailable); list-equivalent unknown (fixture pricing unavailable)",
   serializeCost: () => ({
     cost_usd_reason: "fixture billing unavailable",
     list_equivalent_reason: "fixture pricing unavailable",

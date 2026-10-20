@@ -9,7 +9,7 @@ import type { Database } from "bun:sqlite"
 import { getDb, closeDb, DB_PATH, getActiveSessionsInWindow, getActivitySummary, getIndexMeta } from "../history/db"
 import { reviewMemorySystem } from "../history/recall"
 import { getVaultDbPath } from "../history/vault-fts.ts"
-import { formatCost } from "./llm-backend.ts"
+import { requireLlm } from "./llm-backend.ts"
 import { discoverActiveSession, renderDiscoveryDiagnostics } from "./session-discovery.ts"
 import { resolveHostProjectRoot } from "./project-root.ts"
 import {
@@ -336,6 +336,7 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
 
   // ── LLM Race Benchmark ─────────────────────────────────────────────────
   if (review.llmRaceBenchmark) {
+    const llm = await requireLlm("benchmark cost display")
     const bench = review.llmRaceBenchmark
     console.log(`${BOLD}LLM Race Benchmark${RESET}`)
     console.log(`  Models: ${bench.models.join(" vs ")}  (${bench.queries} queries, 10s timeout)`)
@@ -347,11 +348,11 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
       const modelParts = r.perModel
         .map((m) => {
           const ms = `${(m.ms / 1000).toFixed(1)}s`
-          const costStr = m.cost ? ` ${formatCost(m.cost)}` : ""
+          const costStr = ` ${llm.formatCostColumns(m)}`
           const tokStr = m.tokens ? ` ${m.tokens.input}+${m.tokens.output}tok` : ""
           if (m.status === "ok") return `${GREEN}${m.model}=${ms}${tokStr}${costStr}${RESET}`
-          if (m.status === "timeout") return `${DIM}${m.model}=${ms}(timeout)${RESET}`
-          return `${RED}${m.model}=${ms}(error)${RESET}`
+          if (m.status === "timeout") return `${DIM}${m.model}=${ms}(timeout)${costStr}${RESET}`
+          return `${RED}${m.model}=${ms}(error)${costStr}${RESET}`
         })
         .join("  ")
       console.log(`  "${r.query}" → ${winnerLabel}  search=${r.searchMs}ms  [${modelParts}]`)
@@ -372,7 +373,7 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
     )
     console.log(`  Avg search: ${s.avgSearchMs}ms`)
     console.log(
-      `  Cost: ${formatCost(s.totalCost)} total  ${formatCost(s.costPerQuery)}/query  (racing ${bench.models.length} models = ${bench.models.length}x per query)`,
+      `  Total: ${llm.formatCostColumns(s.total)}; average/query: ${llm.formatCostColumns(s.average)} (racing ${bench.models.length} models per query)`,
     )
     console.log()
   }

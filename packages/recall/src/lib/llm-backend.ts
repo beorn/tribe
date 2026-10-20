@@ -114,6 +114,8 @@ export type LlmBackend = {
   getCheapModels: (max?: number) => LlmModel[]
   resolveResponseCost: (response: LlmQueryResult["response"] & { model: LlmModel }) => LlmResolvedCost
   aggregateCosts: (costs: readonly LlmResolvedCost[]) => LlmResolvedCost
+  averageCost: (total: LlmResolvedCost, observations: number) => LlmResolvedCost
+  formatCostColumns: (cost: LlmResolvedCost | LlmCostFields) => string
   serializeCost: (cost: LlmResolvedCost) => LlmCostFields
   deserializeCost: (fields?: Partial<LlmCostFields>) => LlmResolvedCost
   isProviderAvailable: (provider: string) => boolean
@@ -354,6 +356,8 @@ type LlmBarrelModule = Pick<
   | "getCheapModels"
   | "resolveResponseCost"
   | "aggregateCosts"
+  | "averageCost"
+  | "formatCostColumns"
   | "serializeCost"
   | "deserializeCost"
 > & {
@@ -377,6 +381,8 @@ const REQUIRED_LLM_BARREL_FUNCTIONS = [
   "getCheapModels",
   "resolveResponseCost",
   "aggregateCosts",
+  "averageCost",
+  "formatCostColumns",
   "serializeCost",
   "deserializeCost",
   "isProviderAvailable",
@@ -485,6 +491,8 @@ export async function loadLlm(): Promise<LlmBackend | null> {
         getCheapModels: bearly.getCheapModels,
         resolveResponseCost: bearly.resolveResponseCost,
         aggregateCosts: bearly.aggregateCosts,
+        averageCost: bearly.averageCost,
+        formatCostColumns: bearly.formatCostColumns,
         serializeCost: bearly.serializeCost,
         deserializeCost: bearly.deserializeCost,
         isProviderAvailable: bearly.isProviderAvailable,
@@ -542,11 +550,4 @@ function warnOnce(reason: string): void {
   process.stderr.write(
     `[recall:llm-backend] LLM backend unavailable (${reason}) — LLM features degrade to no-LLM paths\n`,
   )
-}
-
-/** Synchronous display formatting for USD costs. */
-export function formatCost(cost: number): string {
-  if (cost < 0.01) return `$${(cost * 100).toFixed(2)}¢`
-  if (cost < 1) return `$${cost.toFixed(3)}`
-  return `$${cost.toFixed(2)}`
 }

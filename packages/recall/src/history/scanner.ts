@@ -19,7 +19,7 @@ import {
 } from "./db.ts"
 import { HAB_SESSION_HABITAT_ROOT_ENV } from "tribe-wire/lib/hab-session-env"
 import type { ContentType } from "./types.ts"
-import { loadLlm, selectAvailableCheapModels } from "../lib/llm-backend.ts"
+import { loadLlm, selectAvailableCheapModels, type LlmCostFields, type LlmCostCall } from "../lib/llm-backend.ts"
 import { log, THIRTY_DAYS_MS } from "./recall-shared.ts"
 import { describeFreshness, judgeIndexFreshness, type IndexFreshness } from "../lib/staleness.ts"
 import type { RecallSearchResult } from "./recall-shared.ts"
@@ -198,27 +198,29 @@ export interface ReviewResult {
     uniqueSessions: number
     hasTitles: boolean
   }[]
-  recallTest: {
-    query: string
-    synthesisOk: boolean
-    synthesisLength: number
-    llmCost: number | null
-    durationMs: number
-    resultCount: number
-    uniqueSessions: number
-  } | null
+  recallTest:
+    | ({
+        query: string
+        synthesisOk: boolean
+        synthesisLength: number
+        calls?: LlmCostCall[]
+        durationMs: number
+        resultCount: number
+        uniqueSessions: number
+      } & Partial<LlmCostFields>)
+    | null
   llmRaceBenchmark: {
     models: string[]
     queries: number
-    results: {
+    results: ({
       query: string
       searchMs: number
       winner: string | null
       timedOut: boolean
       totalMs: number
       perModel: LlmRaceModelResult[]
-      raceCost: number
-    }[]
+      calls: LlmCostCall[]
+    } & LlmCostFields)[]
     summary: {
       winsByModel: Record<string, number>
       timeoutCount: number
@@ -227,8 +229,8 @@ export interface ReviewResult {
       p95Ms: number
       avgSearchMs: number
       avgLlmMs: number
-      totalCost: number
-      costPerQuery: number
+      total: LlmCostFields
+      average: LlmCostFields
     }
   } | null
   recommendations: string[]
@@ -433,6 +435,7 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
 
   // ── Recall Quality Test ───────────────────────────────────────────────
   let recallTest: ReviewResult["recallTest"] = null
+  const reviewLlm = skipLlm ? null : await loadLlm()
   if (skipLlm) {
     log(`review: skipping live LLM synthesis test (bounded mode)`)
   } else {
@@ -444,6 +447,7 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
         limit: 5,
         timeout: 8000,
         vaultDb: opts.vaultDb,
+        deps: { llm: reviewLlm ?? undefined },
       })
       const durationMs = Date.now() - startTime
       const uniqueSessions = new Set(result.results.map((r) => r.sessionId)).size
@@ -452,7 +456,8 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
         query: testQuery,
         synthesisOk: result.synthesis !== null && result.synthesis.length > 0,
         synthesisLength: result.synthesis?.length ?? 0,
-        llmCost: result.llmCost ?? null,
+        calls: result.calls,
+        ...(reviewLlm ? reviewLlm.serializeCost(reviewLlm.deserializeCost(result)) : {}),
         durationMs,
         resultCount: result.results.length,
         uniqueSessions,
@@ -476,7 +481,9 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
           recallTest.synthesisLength <= 2000 &&
           durationMs <= 8000
         ) {
-          const cost = recallTest.llmCost ? `$${recallTest.llmCost.toFixed(4)}` : "N/A"
+          const cost = reviewLlm
+            ? reviewLlm.formatCostColumns(reviewLlm.deserializeCost(recallTest))
+            : "charged unknown; list-equivalent unknown (no LLM backend)"
           recommendations.push(
             `Synthesis working — ${recallTest.synthesisLength} chars in ${(durationMs / 1000).toFixed(1)}s (${cost})`,
           )
@@ -493,14 +500,13 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
     log(`review: skipping LLM race benchmark (bounded mode)`)
     recommendations.push("Bounded status: LLM checks skipped — run `recall status --bench` to benchmark providers")
   }
-  const reviewLlm = skipLlm ? null : await loadLlm()
   const raceSelection = reviewLlm ? selectAvailableCheapModels(reviewLlm, { limit: 2, order: "registry" }) : null
   const raceModels = raceSelection?.models ?? []
   if (!skipLlm && !reviewLlm) {
     recommendations.push("LLM backend unavailable (TRIBE_LLM_DIR unset or failed) — race benchmark skipped")
   }
 
-  if (!skipLlm && raceModels.length > 0) {
+  if (!skipLlm && reviewLlm && raceModels.length > 0) {
     log(`review: running LLM race benchmark...`)
     const raceQueries = ["inline edit", "bug fix", "refactor", "test failure", "keyboard input"]
     const raceTimeoutMs = 10000 // generous for benchmarking
@@ -556,7 +562,7 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
           `review: racing "${q}" context=${context.length} chars across [${raceModels.map((m) => m.modelId).join(", ")}]`,
         )
 
-        const race = await raceLlmModels(context, SYNTHESIS_PROMPT, raceModels, raceTimeoutMs)
+        const race = await raceLlmModels(context, SYNTHESIS_PROMPT, raceModels, raceTimeoutMs, reviewLlm ?? undefined)
 
         raceResults.push({
           query: q,
@@ -565,7 +571,8 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
           timedOut: race.timedOut,
           totalMs: race.totalMs,
           perModel: race.perModel,
-          raceCost: race.totalCost,
+          calls: race.calls,
+          ...reviewLlm.serializeCost(reviewLlm.deserializeCost(race)),
         })
 
         log(
@@ -589,7 +596,9 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
 
       const allLlmMs = raceResults.map((r) => r.totalMs).sort((a, b) => a - b)
 
-      const totalCost = raceResults.reduce((s, r) => s + r.raceCost, 0)
+      const total = reviewLlm.aggregateCosts(
+        raceResults.flatMap((r) => r.calls).map((call) => reviewLlm.resolveResponseCost(call)),
+      )
       llmRaceBenchmark = {
         models: raceModels.map((m) => m.modelId),
         queries: raceResults.length,
@@ -602,8 +611,8 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
           p95Ms: percentile(allLlmMs, 95),
           avgSearchMs: Math.round(raceResults.reduce((s, r) => s + r.searchMs, 0) / raceResults.length),
           avgLlmMs: Math.round(raceResults.reduce((s, r) => s + r.totalMs, 0) / raceResults.length),
-          totalCost,
-          costPerQuery: raceResults.length > 0 ? totalCost / raceResults.length : 0,
+          total: reviewLlm.serializeCost(total),
+          average: reviewLlm.serializeCost(reviewLlm.averageCost(total, raceResults.length)),
         },
       }
 
