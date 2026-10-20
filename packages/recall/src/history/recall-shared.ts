@@ -6,7 +6,7 @@ import { createLogger } from "loggily"
 import type { ContentType } from "./types.ts"
 import type { IndexFreshness } from "../lib/staleness.ts"
 import type { VaultQuery } from "./vault-fts.ts"
-import type { LlmCostCall, LlmCostFields } from "../lib/llm-backend.ts"
+import type { LlmBackend, LlmCostCall, LlmCostFields } from "../lib/llm-backend.ts"
 
 // ============================================================================
 // Logging
@@ -55,6 +55,8 @@ export type IndexProvenanceDetail =
     }
 
 export interface RecallOptions {
+  /** Existing host backend, also forwarded by the agent's fallback path. */
+  deps?: { llm?: LlmBackend }
   limit?: number // Max results to include (default 10)
   raw?: boolean // Return raw results without LLM synthesis
   since?: string // Time filter (1h, 1d, 1w, etc.)
@@ -130,7 +132,7 @@ export interface HookSearchSummary {
   survivors: number
 }
 
-export interface RecallResult {
+export interface RecallResult extends Partial<LlmCostFields> {
   query: string
   provenance: IndexProvenance
   /**
@@ -141,7 +143,7 @@ export interface RecallResult {
   synthesis: string | null // LLM synthesis (null if raw mode, no results, or synthesis failed)
   results: RecallSearchResult[]
   durationMs: number
-  llmCost?: number
+  calls?: LlmCostCall[]
   timing?: {
     searchMs: number
     llmMs?: number
