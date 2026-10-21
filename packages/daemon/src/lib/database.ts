@@ -1905,6 +1905,27 @@ export function refBoundOpenRequestPredicateSql(
 					)`
 }
 
+/** 30490 — inbox-lag attention counts only rows that are still open balls or
+ *  still unsettled actionable rows. A ball-bearing row (`request` set) is
+ *  open iff its tracker row is still in `pending_request` for that recipient
+ *  (29327: closePendingRequest deletes the tracker row, and the missing row
+ *  is the one authority). A correlated `status`/`notify` row whose `ref`
+ *  classified it as attention at insert stays attention only while that
+ *  referenced request ball remains open. `selectAttention` deliberately omits
+ *  this predicate so `settlementBatch` can still present and label unread
+ *  closed-ball rows `{ settled: true }` on the recipient's next read. */
+export function unsettledAttentionPredicateSql(alias: string): string {
+  const row = `${alias}.`
+  return `(${row}request IS NULL OR ${row}request = '' OR EXISTS (
+    SELECT 1
+    FROM pending_request AS pending_ball
+    WHERE pending_ball.recipient = ${row}recipient
+      AND pending_ball.request_kind != 'incident'
+      AND (pending_ball.request_id = ${row}request OR pending_ball.message_id = ${row}id)
+  ))
+    AND (${row}type NOT IN ('status', 'notify') OR ${row}ref IS NULL OR ${row}ref = '' OR ${refBoundOpenRequestPredicateSql(`${row}ref`, `${row}recipient`, "either")})`
+}
+
 function takingStatusProtectsOpenBallPredicateSql(receipt: string, receiptSequence: string): string {
   const pending = "taking_pending"
   const originalMessage = "taking_original_message"

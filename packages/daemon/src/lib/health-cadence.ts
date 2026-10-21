@@ -5,6 +5,7 @@ import {
   NON_EVENT_KINDS_SQL,
   noOpenIncidentAttentionPredicateSql,
   unretiredAttentionPredicateSql,
+  unsettledAttentionPredicateSql,
   wakePredicateSql,
 } from "./database.ts"
 import { TRIBE_SLA_ROLE_ENV } from "tribe-wire/lib/session-identity-env"
@@ -510,6 +511,7 @@ function inboxLagProjection(
       AND m.sender != $session
       AND ${ATTENTION_PREDICATE_SQL}
       AND ${noOpenIncidentAttentionPredicateSql("m")}
+      AND ${unsettledAttentionPredicateSql("m")}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence })}${extraPredicate}
   `
   }
@@ -535,6 +537,7 @@ function inboxLagProjection(
       AND m.sender != $session
       AND ${ATTENTION_PREDICATE_SQL}
       AND ${noOpenIncidentAttentionPredicateSql("m")}
+      AND ${unsettledAttentionPredicateSql("m")}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
     ORDER BY m.rowid ASC
     LIMIT 1
@@ -553,6 +556,7 @@ function inboxLagProjection(
       AND m.sender != $session
       AND ${ATTENTION_PREDICATE_SQL}
       AND ${noOpenIncidentAttentionPredicateSql("m")}
+      AND ${unsettledAttentionPredicateSql("m")}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
     ORDER BY m.seq ASC
     LIMIT 1

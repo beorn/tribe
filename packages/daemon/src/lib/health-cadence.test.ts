@@ -496,6 +496,15 @@ describe("20876 Tribe health cadence", () => {
       ts: now - 2 * HOUR,
       request: "dev-2-older-open",
     })
+    stmts.openPendingRequest.run({
+      $request_id: "dev-2-older-open",
+      $recipient: "@dev/2",
+      $sender: "@chief",
+      $opened_at: now - 2 * HOUR,
+      $expires_at: null,
+      $message_id: "dev-2-older-open",
+      $fanout: "first",
+    })
     insertResponsePair(db, {
       id: "dev-2-newer-replied",
       type: "request",
@@ -512,6 +521,110 @@ describe("20876 Tribe health cadence", () => {
       actionable_oldest_age_ms: 2 * HOUR,
       oldest_actionable: {
         id: "dev-2-older-open",
+        type: "request",
+        sender: "@chief",
+      },
+    })
+  })
+
+  it("30490 excludes settled unread balls and closed-ball status refs from WATCH demand while preserving real open balls and unsettled actionables", () => {
+    insertSession(db, { id: "sess-luna-5", name: "@dev/luna5", role: "member", now })
+    db.prepare(
+      "INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at, last_attention_read_at) VALUES (?, 0, ?, ?)",
+    ).run("@dev/luna5", now - 50 * MINUTE, now - 50 * MINUTE)
+
+    // @cpo/update sends a tracked query + follow-up request + correlated status while @dev/luna5 is mid-turn,
+    // then withdraws/closes both balls before @dev/luna5's mailbox cursor advances past them.
+    for (const [id, type, tsOffset] of [
+      ["poll-58641e8c", "query", 50 * MINUTE],
+      ["followup-d737d84e", "request", 36 * MINUTE],
+    ] as const) {
+      insertMessage(db, {
+        id,
+        type,
+        sender: "@cpo/update",
+        recipient: "@dev/luna5",
+        ts: now - tsOffset,
+        request: id,
+      })
+      stmts.openPendingRequest.run({
+        $request_id: id,
+        $recipient: "@dev/luna5",
+        $sender: "@cpo/update",
+        $opened_at: now - tsOffset,
+        $expires_at: null,
+        $message_id: id,
+        $fanout: "first",
+      })
+    }
+    db.prepare(`
+      INSERT INTO messages (
+        id, type, sender, recipient, kind, content, ref, ts, delivery, summary, attention_required
+      ) VALUES (
+        'status-on-poll', 'status', '@cpo/update', '@dev/luna5', 'direct',
+        'follow-up note on poll', 'poll-58641e8c', $ts, 'push', 'status-on-poll', 1
+      )
+    `).run({ $ts: now - 35 * MINUTE })
+    db.prepare(`
+      INSERT INTO messages_archive (
+        seq, id, type, sender, recipient, kind, content, ts, delivery, archived_at, request, summary
+      ) VALUES (
+        900, 'archived-settled', 'request', '@cpo/update', '@dev/luna5', 'direct',
+        'archived withdrawn request', $ts, 'push', $archived_at, 'archived-settled', 'archived-settled'
+      )
+    `).run({ $ts: now - 55 * MINUTE, $archived_at: now - 30 * MINUTE })
+
+    stmts.closePendingRequest.run({ $request_id: "poll-58641e8c", $recipient: "@dev/luna5" })
+    stmts.closePendingRequest.run({ $request_id: "followup-d737d84e", $recipient: "@dev/luna5" })
+
+    const settledOnly = projectHealthCadence(db, { now, connectedSessionNames: ["@dev/luna5"] }).inbox_lag[0]
+    expect(settledOnly).toMatchObject({
+      session: "@dev/luna5",
+      actionable_rows: 0,
+      actionable_oldest_age_ms: 0,
+      waking_rows: 0,
+      waking_oldest_age_ms: 0,
+      last_attention_read_age_ms: 50 * MINUTE,
+      oldest_actionable: null,
+    })
+
+    // Control: a real open ball in pending_request and an unsettled untracked actionable row
+    // on a silent mailbox still count toward busy-not-draining demand.
+    insertMessage(db, {
+      id: "real-open-ball",
+      type: "request",
+      sender: "@chief",
+      recipient: "@dev/luna5",
+      ts: now - 40 * MINUTE,
+      request: "real-open-ball",
+    })
+    stmts.openPendingRequest.run({
+      $request_id: "real-open-ball",
+      $recipient: "@dev/luna5",
+      $sender: "@chief",
+      $opened_at: now - 40 * MINUTE,
+      $expires_at: null,
+      $message_id: "real-open-ball",
+      $fanout: "first",
+    })
+    insertMessage(db, {
+      id: "unsettled-verdict",
+      type: "verdict",
+      sender: "@cto",
+      recipient: "@dev/luna5",
+      ts: now - 25 * MINUTE,
+    })
+
+    const withOpenBall = projectHealthCadence(db, { now, connectedSessionNames: ["@dev/luna5"] }).inbox_lag[0]
+    expect(withOpenBall).toMatchObject({
+      session: "@dev/luna5",
+      actionable_rows: 2,
+      actionable_oldest_age_ms: 40 * MINUTE,
+      waking_rows: 2,
+      waking_oldest_age_ms: 40 * MINUTE,
+      last_attention_read_age_ms: 50 * MINUTE,
+      oldest_actionable: {
+        id: "real-open-ball",
         type: "request",
         sender: "@chief",
       },
@@ -543,6 +656,15 @@ describe("20876 Tribe health cadence", () => {
       ts: now - HOUR,
       request: "dev9-live-small-seq",
     })
+    stmts.openPendingRequest.run({
+      $request_id: "dev9-live-small-seq",
+      $recipient: "@dev/9",
+      $sender: "@chief",
+      $opened_at: now - HOUR,
+      $expires_at: null,
+      $message_id: "dev9-live-small-seq",
+      $fanout: "first",
+    })
     const liveRowid = (
       db.prepare("SELECT rowid FROM messages WHERE id = 'dev9-live-small-seq'").get() as { rowid: number }
     ).rowid
@@ -555,6 +677,15 @@ describe("20876 Tribe health cadence", () => {
         'archived actionable', $ts, 'push', $archived_at, 'dev9-archived-large-seq', 'dev9-archived-large-seq'
       )
     `).run({ $seq: liveRowid + 1000, $ts: now - 10 * HOUR, $archived_at: now - HOUR })
+    stmts.openPendingRequest.run({
+      $request_id: "dev9-archived-large-seq",
+      $recipient: "@dev/9",
+      $sender: "@chief",
+      $opened_at: now - 10 * HOUR,
+      $expires_at: null,
+      $message_id: "dev9-archived-large-seq",
+      $fanout: "first",
+    })
 
     const row = projectHealthCadence(db, { now, connectedSessionNames: ["@dev/9"] }).inbox_lag[0]
     expect(row).toMatchObject({

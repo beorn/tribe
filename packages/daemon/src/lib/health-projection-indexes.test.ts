@@ -41,6 +41,7 @@ import {
   noOpenIncidentAttentionPredicateSql,
   openDatabase,
   unretiredAttentionPredicateSql,
+  unsettledAttentionPredicateSql,
 } from "./database.ts"
 
 /** A seat with no mail is the shape that paid the whole-archive walk. */
@@ -323,6 +324,7 @@ describe("health projection reads the archive through an index", () => {
         AND m.sender != $session
         AND ${ATTENTION_PREDICATE_SQL}
         AND ${noOpenIncidentAttentionPredicateSql("m")}
+        AND ${unsettledAttentionPredicateSql("m")}
         AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
       ORDER BY m.seq ASC
       LIMIT 1`
