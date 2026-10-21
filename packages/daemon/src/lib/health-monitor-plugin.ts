@@ -1353,6 +1353,11 @@ export interface BridgeLostFacts {
     readonly name: string
     readonly launchParentPid: number | null
     readonly expectedRecord?: string
+    /** The seat's last authenticated call (its presence heartbeat). A pull seat such as agy answers by calls and
+     *  never holds a transport, so a fresh call means its bridge is serving (#30614). */
+    readonly lastCallAt?: number
+    /** The provider its row recorded at join, for repair advice that matches the seat; null when unrecorded. */
+    readonly provider?: string | null
   }>
   /** Names with a live transport now. */
   readonly connected: ReadonlySet<string>
@@ -1407,6 +1412,15 @@ export interface BridgeLostAction {
   readonly incident?: { readonly emitter: string; readonly subject: string; readonly condition: string }
 }
 
+/** The /mcp menu is Claude's; any other recorded provider is told what works for it (#30614). An unrecorded
+ *  provider keeps the advice it always had. */
+function bridgeRepairAdvice(provider: string | null | undefined): string {
+  if (provider === null || provider === undefined || provider === "claude") {
+    return "Repair from its pane: /mcp, plugin:tribe:tribe, Reconnect."
+  }
+  return `${provider} has no /mcp menu: read its pane, then recover it through hab.`
+}
+
 const bridgeLostIncident = (seat: string) => ({
   emitter: BRIDGE_LOST_EMITTER,
   subject: seat,
@@ -1424,7 +1438,12 @@ export function checkBridgeLost(
   config: BridgeLostConfig,
 ): BridgeLostAction[] {
   const actions: BridgeLostAction[] = []
-  const missingNames = new Set(facts.missing.map((seat) => seat.name))
+  const serving = new Map<string, number>()
+  for (const seat of facts.missing) {
+    if (seat.lastCallAt !== undefined && now - seat.lastCallAt < config.graceMs) serving.set(seat.name, seat.lastCallAt)
+  }
+  const lostSeats = facts.missing.filter((seat) => !serving.has(seat.name))
+  const missingNames = new Set(lostSeats.map((seat) => seat.name))
   const open = new Map(facts.openIncidents.map((incident) => [incident.subject, incident.recipient]))
 
   for (const [subject, recipient] of open) {
@@ -1442,12 +1461,15 @@ export function checkBridgeLost(
       continue
     }
     const exit = facts.exited.get(subject)
+    const lastCall = serving.get(subject)
     const why =
       exit !== undefined
         ? `${subject} exited (${exit}); hab owns the restart`
         : facts.connected.has(subject)
           ? `${subject}'s transport is live again`
-          : `${subject} is no longer a seat hab expects up`
+          : lastCall !== undefined
+            ? `${subject}'s calls are serving (last ${Math.round((now - lastCall) / 1000)}s ago); it holds no transport`
+            : `${subject} is no longer a seat hab expects up`
     actions.push({
       kind: "clear",
       recipient,
@@ -1466,15 +1488,16 @@ export function checkBridgeLost(
     if (!facts.unreachable.has(seat) || !open.has(seat)) memory.namedState.delete(seat)
   }
 
-  for (const seat of facts.missing) {
-    const since = memory.firstSeen.get(seat.name) ?? now
+  for (const seat of lostSeats) {
+    // A seat that answered by calls went silent at its last call, not when this monitor first saw it.
+    const since = seat.lastCallAt ?? memory.firstSeen.get(seat.name) ?? now
     memory.firstSeen.set(seat.name, since)
     if (now - since < config.graceMs || open.has(seat.name)) continue
     const minutes = Math.floor((now - since) / 60_000)
     const expectedSource = seat.expectedRecord ? ` (${seat.expectedRecord})` : " (declared roster)"
     const content =
       `${seat.name}'s tribe bridge is lost ${minutes} min: hab expects it up${expectedSource}, its launch parent ` +
-      `${seat.launchParentPid ?? "unknown"} has no transport. Repair from its pane: /mcp, plugin:tribe:tribe, Reconnect.`
+      `${seat.launchParentPid ?? "unknown"} has no transport. ${bridgeRepairAdvice(seat.provider)}`
     // Only an owner with a live transport can read the page: a lost, exited or never-registered owner cannot.
     const owner = config.owners.find((candidate) => candidate !== seat.name && facts.connected.has(candidate))
     if (owner !== undefined) {

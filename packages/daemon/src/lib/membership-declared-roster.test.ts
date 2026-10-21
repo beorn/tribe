@@ -227,13 +227,16 @@ describe("membership projection: declared-roster membership is a function of a p
           state: "missing-transport",
         },
       ])
-      // 25662: the same row is what the bridge-lost check pages about.
+      // 25662: the same row is what the bridge-lost check pages about. #30614: it carries the row's last
+      // authenticated call and recorded provider, so a pull seat that answers by calls reads as serving.
       const seats = readSeatTransportFacts(opCtx, opts)
       expect(seats.missing).toEqual([
         {
           name: "@agent/restart-onfailure",
           launchParentPid: 30002,
           expectedRecord: "declared roster TRIBE_EXPECTED_MEMBERS",
+          lastCallAt: 30_100_000,
+          provider: "codex",
         },
       ])
       expect(seats.exited).toEqual(new Map())

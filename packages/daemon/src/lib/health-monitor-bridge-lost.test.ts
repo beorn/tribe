@@ -249,6 +249,47 @@ describe("checkBridgeLost", () => {
     ])
     expect(mem.namedState.has("@dev/3")).toBe(false)
   })
+
+  // @failure An agy seat answers by authenticated calls and holds no transport, so membership reads it
+  //          missing-transport forever: @dev/12 re-paged 14 times in 23 min (12:40-13:03 PDT 2026-10-21) while its last
+  //          call was seconds old, each page telling the owner to use a /mcp menu agy does not have (#30614).
+  test("a seat with no transport whose authenticated calls are fresh is serving, not lost (#30614)", () => {
+    const mem = memory()
+    const callingAt = (lastCallAt: number) =>
+      facts({
+        missing: [{ ...lost("@dev/12", 1584763), lastCallAt, provider: "agy" }],
+        connected: new Set(["@chief"]),
+      })
+    expect(checkBridgeLost(callingAt(T0), T0, mem, CONFIG)).toEqual([])
+    expect(checkBridgeLost(callingAt(T0 + 3 * MIN), T0 + 3 * MIN + 17_000, mem, CONFIG)).toEqual([])
+    expect(checkBridgeLost(callingAt(T0 + 6 * MIN), T0 + 6 * MIN + 17_000, mem, CONFIG)).toEqual([])
+
+    // An incident already open for it clears, naming why.
+    const held = facts({ ...callingAt(T0 + 6 * MIN), openIncidents: [{ subject: "@dev/12", recipient: "@chief" }] })
+    expect(checkBridgeLost(held, T0 + 6 * MIN + 17_000, mem, CONFIG)).toMatchObject([
+      { kind: "clear", recipient: "@chief", content: expect.stringMatching(/@dev\/12's calls are serving/u) },
+    ])
+  })
+
+  test("a calling seat that falls silent past the grace pages, with advice for its own provider (#30614)", () => {
+    const mem = memory()
+    const silent = facts({
+      missing: [{ ...lost("@dev/12", 1584763), lastCallAt: T0, provider: "agy" }],
+      connected: new Set(["@chief"]),
+    })
+    expect(checkBridgeLost(silent, T0 + MIN, mem, CONFIG)).toEqual([])
+    const [page, ...rest] = checkBridgeLost(silent, T0 + 4 * MIN, mem, CONFIG)
+    expect(rest).toEqual([])
+    expect(page).toMatchObject({ kind: "raise", recipient: "@chief", incident: { subject: "@dev/12" } })
+    expect(page?.content).toMatch(/agy has no \/mcp menu: read its pane, then recover it through hab/u)
+    expect(page?.content).not.toMatch(/Reconnect/u)
+
+    const claude = facts({ missing: [{ ...lost("@dev/3"), provider: "claude" }], connected: new Set(["@chief"]) })
+    const claudeMem = memory([["@dev/3", T0]])
+    expect(checkBridgeLost(claude, T0 + 3 * MIN, claudeMem, CONFIG)[0]?.content).toMatch(
+      /\/mcp, plugin:tribe:tribe, Reconnect/u,
+    )
+  })
 })
 
 describe("parseBridgeLostConfig", () => {

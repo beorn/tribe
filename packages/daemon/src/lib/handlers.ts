@@ -4071,6 +4071,7 @@ type HealthSessionRow = {
   identity_sid: string | null
   launch_id: string | null
   launch_parent_pid: number | null
+  provider: string | null
 }
 
 /** The membership read tribe.health answers from. Liveness comes from the daemon's in-memory clients Map: dead
@@ -4110,12 +4111,19 @@ export function readSeatTransportFacts(
   ctx: TribeContext,
   opts: HandlerOpts,
 ): {
-  missing: Array<{ name: string; launchParentPid: number | null; expectedRecord?: string }>
+  missing: Array<{
+    name: string
+    launchParentPid: number | null
+    expectedRecord?: string
+    lastCallAt?: number
+    provider?: string | null
+  }>
   exited: Map<string, string>
   connected: Set<string>
   unreachable: Map<string, string>
 } {
-  const { liveSessions, discrepancy } = projectHealthMembership(ctx, opts)
+  const { liveSessions, discrepancy, rows } = projectHealthMembership(ctx, opts)
+  const rowById = new Map(rows.map((row) => [row.id, row]))
   const isAlive = opts.isPidAlive ?? pidStillAlive
   const roster = opts.getExpectedMembers?.()
   const expectedRecord = roster?.loadedAt
@@ -4124,7 +4132,13 @@ export function readSeatTransportFacts(
       ? "declared roster TRIBE_EXPECTED_MEMBERS"
       : undefined
 
-  const missing: Array<{ name: string; launchParentPid: number | null; expectedRecord?: string }> = []
+  const missing: Array<{
+    name: string
+    launchParentPid: number | null
+    expectedRecord?: string
+    lastCallAt?: number
+    provider?: string | null
+  }> = []
   const exited = new Map<string, string>()
   const unreachable = new Map<string, string>()
   for (const launch of discrepancy?.missing ?? []) {
@@ -4133,10 +4147,14 @@ export function readSeatTransportFacts(
       if (pid !== null && pid > 0 && !isAlive(pid)) {
         exited.set(launch.name, `launch parent ${pid} dead`)
       } else {
+        // updated_at is the presence heartbeat every authenticated call touches (19784): a pull seat that answers by
+        // calls holds no transport, and its last call is what says its bridge is serving (#30614).
+        const row = rowById.get(launch.member_id)
         missing.push({
           name: launch.name,
           launchParentPid: pid,
           ...(expectedRecord !== undefined ? { expectedRecord } : {}),
+          ...(row !== undefined ? { lastCallAt: row.updated_at, provider: row.provider } : {}),
         })
       }
     }
