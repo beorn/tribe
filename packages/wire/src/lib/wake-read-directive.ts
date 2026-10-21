@@ -26,6 +26,8 @@
  * prefix, the separator or the casing rule.
  */
 export const WAKE_READ_DIRECTIVE_PREFIX = "read your tribe inbox now"
+/** Historical wake prefix, shared by the pane boundary and saved-history sanitation. */
+export const WAKE_READ_DIRECTIVE_SHAPE = /^read your (?:tribe )?inbox now\b/iu
 export const WAKE_READ_DIRECTIVE_MESSAGE_ID =
   /^read your tribe inbox now: [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
 
