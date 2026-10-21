@@ -1607,8 +1607,7 @@ function deliveryReport(
     if (recipient === "*") return { state: resolution.state, recipient }
     const owner = transport.observe(recipient)
     return {
-      state:
-        resolution.state === "online" && owner.owner_answer_capability !== "observed" ? "offline" : resolution.state,
+      state: resolution.state === "online" && ownerCannotAnswer(owner) ? "offline" : resolution.state,
       recipient,
       reason: owner.owner_transport_reason,
       last_mailbox_read_age_ms: owner.owner_last_mailbox_read_age_ms,
@@ -2258,15 +2257,19 @@ function closeOneBall(
     const reason = formatPendingCloseCause(pendingCloseCause(ctx, requestId, owner), requestId, owner)
     return { request_id: requestId, closed: 0, reason }
   }
+  const offlineOwner =
+    closeEvidence === undefined && ctx.getName() !== owner && ctx.getName() !== row.sender
+      ? offlineOwnerCloseFact(ctx, row, now, transport)
+      : undefined
   const settlement =
     closeEvidence !== undefined
       ? "manual-close"
-      : ctx.getName() !== owner && ctx.getName() !== row.sender && offlineOwnerCloseAllowed(ctx, row, now, transport)
+      : offlineOwner !== undefined
         ? "offline-owner-close"
         : ctx.getName() === row.sender && ctx.getName() !== owner
           ? "sender-withdrawn"
           : "manual-close"
-  const closed = settlePendingRows(ctx, [row], settlement, ctx.getName(), now, closeEvidence)
+  const closed = settlePendingRows(ctx, [row], settlement, ctx.getName(), now, closeEvidence, offlineOwner)
   return {
     request_id: requestId,
     closed,
@@ -2299,19 +2302,60 @@ function deliverOfflineOwnerCloseNotices(
 }
 
 /** Dispatcher custody uses daemon facts; habitat roster policy stays with the caller. */
+/**
+ * The one reading of "this owner cannot answer": its transport is not live, or
+ * nothing is observed consuming its mailbox. Delivery reports such an owner
+ * offline and @chief's offline-owner close relies on the same judgment (30621).
+ */
+function ownerCannotAnswer(owner: OwnerTransportObservation): boolean {
+  return owner.owner_transport_live !== true || owner.owner_answer_capability !== "observed"
+}
+
 function offlineOwnerCloseAllowed(
   ctx: TribeContext,
   row: PendingSettlementRow,
   now: number,
   transport: OwnerTransportProjector,
 ): boolean {
-  if (ctx.getName() !== ANDON_OWNER) return false
+  return offlineOwnerCloseFact(ctx, row, now, transport) !== undefined
+}
+
+/** Why @chief may close this ball unanswered, or undefined when it may not. */
+function offlineOwnerCloseFact(
+  ctx: TribeContext,
+  row: PendingSettlementRow,
+  now: number,
+  transport: OwnerTransportProjector,
+): OfflineOwnerCloseFact | undefined {
+  if (ctx.getName() !== ANDON_OWNER) return undefined
   // 25057: a legacy ball with no structured expiry derives the same deadline
   // the roster sweep derives (ballDeadline) instead of refusing forever.
   const deadline = ballDeadline(row)
-  if (deadline === undefined || deadline > now) return false
+  if (deadline === undefined || deadline > now) return undefined
   const owner = transport.observe(row.recipient)
-  return !owner.owner_transport_live && owner.owner_transport_offline_since !== null
+  if (!ownerCannotAnswer(owner)) return undefined
+  const readAge = owner.owner_last_mailbox_read_age_ms
+  const allowed =
+    owner.owner_transport_live !== true
+      ? owner.owner_transport_offline_since !== null
+      : // 30621: a live transport that nobody reads; one mailbox read after the
+        // deadline keeps the ball open, so a pull seat between ticks stays safe.
+        readAge !== null && readAge > now - deadline
+  if (!allowed) return undefined
+  return {
+    deadline,
+    answer_capability: owner.owner_answer_capability,
+    transport_reason: owner.owner_transport_reason,
+    last_mailbox_read_age_ms: readAge,
+  }
+}
+
+/** The owner reading an offline-owner close journals with its settlement (30621). */
+type OfflineOwnerCloseFact = {
+  readonly deadline: number
+  readonly answer_capability: OwnerTransportObservation["owner_answer_capability"]
+  readonly transport_reason: OwnerTransportReason
+  readonly last_mailbox_read_age_ms: number | null
 }
 
 function pendingRequestIdForOwner(ctx: TribeContext, owner: string, attemptedId: string): string {

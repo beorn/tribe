@@ -350,6 +350,79 @@ describe("closing a ball backlog in one call", () => {
     }
   })
 
+  // @failure A past-deadline ball whose owner holds a live transport nobody reads can be
+  // closed by no one, while delivery already calls that owner offline (30621).
+  // @level l2
+  // @consumer tribe.pending offline-owner-close and coordination-watch's close advice
+  it.each([
+    { name: "no mailbox read since the deadline closes", readAfterDeadline: -60_000, closed: 1 },
+    { name: "one mailbox read after the deadline refuses", readAfterDeadline: 30_000, closed: 0 },
+  ])("a live owner whose answers are not observed: $name", ({ readAfterDeadline, closed }) => {
+    const owner = "@adhoc/0"
+    const now = Date.now()
+    const deadline = now - 120_000
+    openBall("unread-custody", owner, "page-mailbox-projection")
+    db.prepare("UPDATE pending_request SET expires_at = $deadline WHERE request_id = 'unread-custody'").run({
+      $deadline: deadline,
+    })
+    db.prepare(`INSERT INTO sessions (id, name, role, domains, pid, started_at, updated_at)
+      VALUES ('rc-owner', $owner, 'member', '[]', $pid, $at, $at)`).run({
+      $owner: owner,
+      $pid: process.pid,
+      $at: now - 200_000,
+    })
+    db.prepare(`INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at, last_attention_read_at)
+      VALUES ($owner, 0, $at, $at)`).run({ $owner: owner, $at: deadline + readAfterDeadline })
+    const closeOpts: HandlerOpts = {
+      ...opts,
+      getActiveSessionInfo: () => [
+        {
+          id: "rc-owner",
+          name: owner,
+          role: "member",
+          pid: process.pid,
+          cwd: tmpDir,
+          claudeSessionId: null,
+          registeredAt: now - 200_000,
+          launchId: null,
+          launchParentPid: null,
+          transportPids: [process.pid],
+          pushTransportPids: [],
+        },
+      ],
+    }
+    const result = JSON.parse(
+      (
+        handleToolCall(caller("@chief"), "tribe.pending", { owner, close: "unread-custody" }, closeOpts) as {
+          content: Array<{ text: string }>
+        }
+      ).content[0]!.text,
+    ) as { closed?: number; error?: string }
+    expect(result.closed ?? 0).toBe(closed)
+    expect(openCount()).toBe(1 - closed)
+    const facts = db.prepare("SELECT content FROM messages WHERE type = 'event.ball.settled'").all() as Array<{
+      content: string
+    }>
+    expect(facts).toHaveLength(closed)
+    if (!closed) expect(result.error).toContain("@chief")
+    if (closed) {
+      // The close says why a ball owed by a connected seat closed unanswered.
+      expect(JSON.parse(facts[0]!.content)).toMatchObject({
+        recipient: owner,
+        settlement: "offline-owner-close",
+        settled_by: "@chief",
+        offline_owner: {
+          deadline,
+          answer_capability: "not-observed",
+          transport_reason: expect.any(String),
+        },
+      })
+      const age = (JSON.parse(facts[0]!.content) as { offline_owner: { last_mailbox_read_age_ms: number } })
+        .offline_owner.last_mailbox_read_age_ms
+      expect(age).toBeGreaterThan(now - deadline)
+    }
+  })
+
   // @failure A legacy ball with no structured expiry refuses chief closure
   // forever, or closes before its derived deadline (25057).
   // @level l2

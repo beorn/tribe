@@ -308,6 +308,7 @@ export function settlePendingRows(
   settledBy: string,
   settledAt = Date.now(),
   closeEvidence?: string,
+  offlineOwner?: Readonly<Record<string, unknown>>,
 ): number {
   for (const row of rows) {
     if (row.request_kind === "incident") {
@@ -339,6 +340,7 @@ export function settlePendingRows(
         settled_at: settledAt,
         settled_by: settledBy,
         ...(closeEvidence === undefined ? {} : { close_evidence: closeEvidence }),
+        ...(offlineOwner === undefined ? {} : { offline_owner: offlineOwner }),
       },
       { sender: "daemon", ref: row.request_id, ts: settledAt },
     )
