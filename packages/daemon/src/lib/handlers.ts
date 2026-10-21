@@ -870,7 +870,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // condition it observed instead of letting the tracker key on the message
   // id, so N observations hold ONE obligation. Validation is a typed refusal
   // with the supported shape named, never a throw across the RPC boundary.
-  let incident: (IncidentIdentity & { active?: boolean }) | undefined
+  let incident: (IncidentIdentity & { active?: boolean; suppressAfterEvidence?: boolean }) | undefined
   if (a.incident !== undefined) {
     const raw = a.incident
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -889,6 +889,11 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     if (fields.active !== undefined && typeof fields.active !== "boolean") {
       return jsonResult({
         error: "tribe.send: invalid incident.active - must be a boolean",
+      })
+    }
+    if (fields.suppress_after_evidence !== undefined && typeof fields.suppress_after_evidence !== "boolean") {
+      return jsonResult({
+        error: "tribe.send: invalid incident.suppress_after_evidence - must be a boolean",
       })
     }
     if (requestFlag || requestId !== null) {
@@ -913,6 +918,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       subject: (fields.subject as string).trim(),
       condition: (fields.condition as string).trim(),
       ...(fields.active === undefined ? {} : { active: fields.active as boolean }),
+      ...(fields.suppress_after_evidence === true ? { suppressAfterEvidence: true } : {}),
     }
   }
   let ifCurrent: BallTracker["ifCurrent"]

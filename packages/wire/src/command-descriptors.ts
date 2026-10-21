@@ -244,6 +244,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               subject: { type: "string", minLength: 1, description: "What the condition is about, e.g. a seat name." },
               condition: { type: "string", minLength: 1, description: "Which condition holds, e.g. transport-wedged." },
               active: { type: "boolean", description: "Omit or true while the condition holds; false clears it." },
+              suppress_after_evidence: {
+                type: "boolean",
+                description:
+                  "After the owner closes this incident with evidence, an identical summary is recorded as suppressed and pages no one. Set it only when your summary changes with each episode, or you send the clear from your own state.",
+              },
             },
             required: ["emitter", "subject", "condition"],
             description:
@@ -283,7 +288,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             properties: {
               transition: {
                 type: "string",
-                enum: ["opened", "changed", "repeated", "cleared"],
+                enum: ["opened", "changed", "repeated", "suppressed", "cleared"],
                 description: "Incident edge decided in this send.",
               },
               wakesOwner: { type: "boolean", description: "True for opened or changed." },

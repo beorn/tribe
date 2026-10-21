@@ -2080,6 +2080,23 @@ export function createStatements(db: Database) {
 		WHERE p.request_id = $request_id AND p.recipient = $recipient AND p.request_kind = 'incident'
 	`),
 
+    /** #30551 - the newest closing fact for one incident owner, read in both retention tiers when no ball stands:
+     *  that owner's settlement (`event.ball.settled`, carrying the closed summary and any close_evidence) or an
+     *  emitter's clear that settled no ball (`event.incident.cleared`). Only an evidence settlement suppresses a
+     *  later identical send; a clear, or no fact at all once retention deleted it, lets the next send open. A point
+     *  read on idx_messages_event_type_ref_ts and its archive twin. */
+    selectLatestIncidentClosingFact: db.prepare(`
+		SELECT type, ts, content FROM messages
+		WHERE kind = 'event' AND type IN ('event.ball.settled', 'event.incident.cleared') AND ref = $request_id
+			AND (type = 'event.incident.cleared' OR json_extract(content, '$.recipient') = $recipient)
+		UNION ALL
+		SELECT type, ts, content FROM messages_archive
+		WHERE kind = 'event' AND type IN ('event.ball.settled', 'event.incident.cleared') AND ref = $request_id
+			AND (type = 'event.incident.cleared' OR json_extract(content, '$.recipient') = $recipient)
+		ORDER BY ts DESC
+		LIMIT 1
+	`),
+
     openIncidentRequest: db.prepare(`
 		INSERT INTO pending_request (
 			request_id, recipient, sender, opened_at, expires_at, message_id, fanout, request_kind

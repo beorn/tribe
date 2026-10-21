@@ -181,7 +181,7 @@ export type BallTracker = {
    * `pending_request` open/close transitions, which remain the only place a
    * ball begins or ends.
    */
-  incident?: IncidentIdentity & { active?: boolean }
+  incident?: IncidentIdentity & { active?: boolean; suppressAfterEvidence?: boolean }
   /** Opaque JSON observation data, outside the stable incident identity. */
   incidentData?: unknown
   /** Complete expected holdings for this identity, compared in the mutation transaction. */
@@ -254,7 +254,7 @@ export function serializeIncidentData(value: unknown): string | null {
   return JSON.stringify(value)
 }
 
-type IncidentTransition = "opened" | "changed" | "repeated" | "cleared"
+type IncidentTransition = "opened" | "changed" | "repeated" | "suppressed" | "cleared"
 
 /** Read the standing condition inside sendMessage's transaction, beside the upsert it classifies. */
 function incidentTransitionForSend(
@@ -265,6 +265,7 @@ function incidentTransitionForSend(
     active: boolean
     recipient: string
     summary: string | null
+    suppressAfterEvidence: boolean
   },
 ): IncidentTransition | undefined {
   if (input.kind !== "direct" || input.requestId === null) return undefined
@@ -273,8 +274,35 @@ function incidentTransitionForSend(
     $request_id: input.requestId,
     $recipient: input.recipient,
   }) as { summary: string | null } | null
-  if (standing === null) return "opened"
+  if (standing === null) {
+    // #30551: only a send that opts in, on THIS send, may be suppressed; a flag on an earlier send never decides.
+    return input.suppressAfterEvidence
+      ? closedWithEvidenceAt(ctx, input.requestId, input.recipient, input.summary)
+      : "opened"
+  }
   return standing.summary === input.summary ? "repeated" : "changed"
+}
+
+/**
+ * #30551 - an owner's evidence close is remembered: with no ball standing, a send that sets suppress_after_evidence
+ * and whose summary equals the summary that owner closed with evidence is recorded and pages no one. A newer clear, a settlement without evidence
+ * (answered, gc-expired, the emitter's own clear), a changed summary, a null summary on either side, or a fact that
+ * retention deleted all open, so the rule only ever fails toward paging.
+ */
+function closedWithEvidenceAt(
+  ctx: TribeContext,
+  requestId: string,
+  recipient: string,
+  summary: string | null,
+): "opened" | "suppressed" {
+  if (summary === null) return "opened"
+  const fact = ctx.stmts.selectLatestIncidentClosingFact.get({
+    $request_id: requestId,
+    $recipient: recipient,
+  }) as { type: string; content: string } | null
+  if (fact === null || fact.type !== "event.ball.settled") return "opened"
+  const settled = JSON.parse(fact.content) as { summary?: unknown; close_evidence?: unknown }
+  return typeof settled.close_evidence === "string" && settled.summary === summary ? "suppressed" : "opened"
 }
 
 export const DEFAULT_BALL_TTL_MS_BY_CLASS = {
@@ -607,7 +635,7 @@ export function sendMessage(
   tracker?: { request_id: string; closed: number }
   deduplicated?: boolean
   incident?: {
-    transition: "opened" | "changed" | "repeated" | "cleared"
+    transition: IncidentTransition
     wakesOwner: boolean
   }
 } {
@@ -745,6 +773,7 @@ export function sendMessage(
       active: incidentActive,
       recipient: ballTracker.owner ?? recipient,
       summary: classification.summary ?? null,
+      suppressAfterEvidence: incident?.suppressAfterEvidence === true,
     })
     const wakesOwner = incidentTransition === "opened" || incidentTransition === "changed"
     const result = ctx.stmts.insertMessage.run({
@@ -766,7 +795,8 @@ export function sendMessage(
       $delivery: delivery,
       $topic: classification.topic ?? null,
       $room_id: classification.roomId ?? null,
-      $request: persistedRequest,
+      // A suppressed send is a record of the observation, never a ball: no request id, no pending row (#30551).
+      $request: incidentTransition === "suppressed" ? null : persistedRequest,
       $reply: canonicalReplyId,
       $correlated_reply_requester: correlatedReply?.requester ?? null,
       $summary: classification.summary ?? null,
@@ -821,7 +851,7 @@ export function sendMessage(
     // snapshots remain handleSend's responsibility; direct rows are complete
     // before this transaction returns.
     if (resolvedKind === "direct") {
-      if (requestId) {
+      if (requestId && incidentTransition !== "suppressed") {
         const openRequest = incidentRequestId === null ? ctx.stmts.openPendingRequest : ctx.stmts.openIncidentRequest
         const opened = openRequest.run({
           $request_id: requestId,
@@ -854,6 +884,20 @@ export function sendMessage(
         tracker = {
           request_id: incidentRequestId,
           closed: settlePendingRows(ctx, rows, "incident-cleared", sender, ts),
+        }
+        // #30551: a clear that settles no ball still leaves a fact, so it ends an evidence close's suppression.
+        if (tracker.closed === 0) {
+          logEvent(
+            ctx,
+            "incident.cleared",
+            undefined,
+            { schema_version: 1, request_id: incidentRequestId, sender },
+            {
+              sender: "daemon",
+              ref: incidentRequestId,
+              ts,
+            },
+          )
         }
       }
       // A daemon boundary settles expired rows before this send path runs.
