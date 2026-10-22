@@ -1984,7 +1984,8 @@ export function createStatements(db: Database) {
 			launch_parent_pid = COALESCE($launch_parent_pid, launch_parent_pid),
 			-- The start time belongs to the pid it was read for: a new pid brings its own, even none.
 			launch_parent_start_time = CASE WHEN $launch_parent_pid IS NULL THEN launch_parent_start_time ELSE $launch_parent_start_time END,
-			started_at = $now, updated_at = $now,
+			started_at = CASE WHEN launch_id IS NOT DISTINCT FROM $launch_id THEN started_at ELSE $now END,
+			updated_at = $now,
 			delivery = COALESCE($delivery, delivery, 'push'),
 			account = COALESCE($account, account),
 			provider = COALESCE($provider, provider)
@@ -2677,7 +2678,7 @@ export function createStatements(db: Database) {
     ),
 
     allSessions: db.prepare(
-      "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_sid, launch_id, launch_parent_pid, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery, provider FROM sessions",
+      "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_sid, launch_id, launch_parent_pid, launch_parent_start_time, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery, provider FROM sessions",
     ),
 
     messageHistory: db.prepare(`
@@ -3033,8 +3034,8 @@ export function createStatements(db: Database) {
     resetSessionDeliveryOffsets: db.prepare(`
       UPDATE sessions
       SET
-        last_delivered_ts = $ts,
-        last_delivered_seq = $seq,
+        last_delivered_ts = CASE WHEN delivery = 'push' THEN last_delivered_ts ELSE NULL END,
+        last_delivered_seq = CASE WHEN delivery = 'push' THEN last_delivered_seq ELSE 0 END,
         last_inbox_pull_seq = $seq,
         updated_at = $ts
       WHERE id = $id

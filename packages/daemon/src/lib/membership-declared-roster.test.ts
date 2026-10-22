@@ -302,7 +302,57 @@ describe("membership projection: declared-roster membership is a function of a p
       // as exited (not missing) by readSeatTransportFacts, so checkBridgeLost never pages it.
       const seats = readSeatTransportFacts(opCtx, opts)
       expect(seats.missing).toEqual([])
-      expect(seats.exited).toEqual(new Map([["@agent/stopped", "launch parent 30003 dead"]]))
+      expect(seats.exited).toEqual(
+        new Map([["@agent/stopped", "launch parent 30003 dead (pid-only: no recorded start time)"]]),
+      )
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it("2d. 30649 (@dev/luna6 specimen): recycled launch-parent pid (start time mismatch) or gone proc stat classifies as exited", () => {
+    let now = 30_260_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const ctx = addSession(db, stmts, "exp-luna6", "@dev/luna6", { id: "launch-luna6", parentPid: 266304 })
+      db.prepare("UPDATE sessions SET launch_parent_start_time = '10500000' WHERE id = 'exp-luna6'").run()
+      now += 1_000
+      logSessionLeft(ctx, {
+        memberId: "exp-luna6",
+        name: "@dev/luna6",
+        role: "member",
+        domains: [],
+        launchId: "launch-luna6",
+        launchParentPid: 266304,
+        reason: "transport-closed",
+      })
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+
+      // PID 266304 was reused by a newer process (start time 29800000 != recorded 10500000).
+      const recycled = readSeatTransportFacts(
+        opCtx,
+        baseOpts({
+          getExpectedMembers: () => roster([{ name: "@dev/luna6", expected: true }]),
+          isPidAlive: () => true,
+          readPidStartTime: () => "29800000",
+        }),
+      )
+      expect(recycled.missing).toEqual([])
+      expect(recycled.exited).toEqual(
+        new Map([["@dev/luna6", "launch parent 266304 recycled (start 29800000 != recorded 10500000)"]]),
+      )
+
+      // /proc/<pid>/stat gone (null) -> exited as dead.
+      const deadProc = readSeatTransportFacts(
+        opCtx,
+        baseOpts({
+          getExpectedMembers: () => roster([{ name: "@dev/luna6", expected: true }]),
+          isPidAlive: () => true,
+          readPidStartTime: () => null,
+        }),
+      )
+      expect(deadProc.missing).toEqual([])
+      expect(deadProc.exited).toEqual(new Map([["@dev/luna6", "launch parent 266304 dead"]]))
     } finally {
       nowSpy.mockRestore()
     }

@@ -896,4 +896,188 @@ describe("20876 Tribe health cadence", () => {
     expect(cadence.role_actionable_response?.role).toBe("@chief")
     expect(cadence.role_actionable_response?.target_ms).toBe(MINUTE)
   })
+
+  describe("30649 same-session channel-delivered non-ball exclusion (@cto 8b5de0ac)", () => {
+    it("excludes a push session's delivered non-ball row once that same session sends or starts a turn, while keeping open balls actionable", () => {
+      // Specimen: @cto (7775eb84 response att=1) and @cpo/update (334c2b59 verdict) on 2026-10-21.
+      db.prepare(`
+        INSERT INTO sessions (
+          id, name, role, domains, pid, launch_id, launch_parent_pid,
+          started_at, updated_at, last_delivered_seq, last_delivered_ts, delivery
+        ) VALUES (
+          'sess-cto-179', '@cto', 'cto', '[]', 2359553, 'bdc04ffa@179', 2359553,
+          $started_at, $now, 0, NULL, 'push'
+        )
+      `).run({ $started_at: now - 2 * HOUR, $now: now })
+
+      insertMessage(db, {
+        id: "7775eb84-response",
+        type: "response",
+        sender: "@agent/5",
+        recipient: "@cto",
+        ts: now - 40 * MINUTE,
+        attentionRequired: 1,
+      })
+      insertMessage(db, {
+        id: "334c2b59-verdict",
+        type: "verdict",
+        sender: "@chief",
+        recipient: "@cto",
+        ts: now - 35 * MINUTE,
+      })
+      const deliveredSeq = (
+        db.prepare("SELECT MAX(rowid) AS seq FROM messages WHERE recipient = '@cto'").get() as { seq: number }
+      ).seq
+      stmts.updateLastDelivered.run({ $id: "sess-cto-179", $ts: now - 35 * MINUTE, $seq: deliveredSeq })
+
+      // Before @cto acts after the delivered rows, both non-ball rows count in inbox_lag.
+      const beforeAction = projectHealthCadence(db, { now, connectedSessionNames: ["@cto"] }).inbox_lag.find(
+        (r) => r.session === "@cto",
+      )
+      expect(beforeAction).toMatchObject({
+        actionable_rows: 2,
+        waking_rows: 1,
+        oldest_actionable: { id: "7775eb84-response", type: "response" },
+      })
+
+      // Same session sends a message after m.ts -> both delivered non-ball rows are excluded in health-cadence,
+      // while selectAttention (the seat's own fetch) still sees them until drained.
+      db.prepare(`
+        INSERT INTO messages (
+          id, type, sender, recipient, kind, content, ts, delivery, session_id, summary
+        ) VALUES (
+          'cto-verdict-out', 'verdict', '@cto', '@agent/5', 'direct', 'GO', $ts, 'push', 'sess-cto-179', 'GO'
+        )
+      `).run({ $ts: now - 30 * MINUTE })
+
+      const afterSend = projectHealthCadence(db, { now, connectedSessionNames: ["@cto"] }).inbox_lag.find(
+        (r) => r.session === "@cto",
+      )
+      expect(afterSend).toMatchObject({
+        actionable_rows: 0,
+        waking_rows: 0,
+        oldest_actionable: null,
+      })
+
+      // An open ball (active pending_request) delivered to the same push session is NOT excluded by a later send.
+      insertMessage(db, {
+        id: "ball-req-1",
+        type: "request",
+        sender: "@agent/5",
+        recipient: "@cto",
+        ts: now - 25 * MINUTE,
+        request: "ball-req-1",
+      })
+      stmts.openPendingRequest.run({
+        $request_id: "ball-req-1",
+        $recipient: "@cto",
+        $sender: "@agent/5",
+        $opened_at: now - 25 * MINUTE,
+        $expires_at: null,
+        $message_id: "ball-req-1",
+        $fanout: "first",
+      })
+      const ballSeq = (db.prepare("SELECT rowid AS seq FROM messages WHERE id = 'ball-req-1'").get() as { seq: number })
+        .seq
+      stmts.updateLastDelivered.run({ $id: "sess-cto-179", $ts: now - 25 * MINUTE, $seq: ballSeq })
+      db.prepare(`
+        INSERT INTO messages (
+          id, type, sender, recipient, kind, content, ts, delivery, session_id, summary
+        ) VALUES (
+          'cto-unrelated-send', 'notify', '@cto', '*', 'broadcast', 'note', $ts, 'push', 'sess-cto-179', 'note'
+        )
+      `).run({ $ts: now - 20 * MINUTE })
+
+      const withOpenBall = projectHealthCadence(db, { now, connectedSessionNames: ["@cto"] }).inbox_lag.find(
+        (r) => r.session === "@cto",
+      )
+      expect(withOpenBall).toMatchObject({
+        actionable_rows: 1,
+        waking_rows: 1,
+        oldest_actionable: { id: "ball-req-1", type: "request" },
+      })
+    })
+
+    it("does not retire a pull session's row when the pull session later sends", () => {
+      db.prepare(`
+        INSERT INTO sessions (
+          id, name, role, domains, pid, launch_id, launch_parent_pid,
+          started_at, updated_at, last_delivered_seq, last_delivered_ts, delivery
+        ) VALUES (
+          'sess-cpo-pull', '@cpo', 'cpo', '[]', 4152636, '7a6fc706@2', 4152636,
+          $started_at, $now, 0, NULL, 'pull'
+        )
+      `).run({ $started_at: now - 2 * HOUR, $now: now })
+
+      insertMessage(db, {
+        id: "pull-verdict",
+        type: "verdict",
+        sender: "@chief",
+        recipient: "@cpo",
+        ts: now - 40 * MINUTE,
+      })
+      const verdictSeq = (
+        db.prepare("SELECT rowid AS seq FROM messages WHERE id = 'pull-verdict'").get() as { seq: number }
+      ).seq
+      // Even after resetSessionDeliveryOffsets at tailSeq, a pull session's last_delivered_seq stays 0
+      // and delivery = 'pull' is never eligible for push-channel retirement.
+      stmts.resetSessionDeliveryOffsets.run({ $id: "sess-cpo-pull", $ts: now - 35 * MINUTE, $seq: verdictSeq })
+      db.prepare(`
+        INSERT INTO messages (
+          id, type, sender, recipient, kind, content, ts, delivery, session_id, summary
+        ) VALUES (
+          'cpo-later-send', 'notify', '@cpo', '@chief', 'direct', 'status', $ts, 'push', 'sess-cpo-pull', 'status'
+        )
+      `).run({ $ts: now - 30 * MINUTE })
+
+      const row = projectHealthCadence(db, { now, connectedSessionNames: ["@cpo"] }).inbox_lag.find(
+        (r) => r.session === "@cpo",
+      )
+      expect(row).toMatchObject({
+        actionable_rows: 1,
+        waking_rows: 1,
+        oldest_actionable: { id: "pull-verdict", type: "verdict" },
+      })
+    })
+
+    it("does not let a restarted session inherit its predecessor's channel delivery", () => {
+      // Predecessor session @chief gen 100 receives a push-delivered verdict at T-50m and exits without acting.
+      insertMessage(db, {
+        id: "predecessor-verdict",
+        type: "verdict",
+        sender: "@cto",
+        recipient: "@chief-restart-test",
+        ts: now - 50 * MINUTE,
+      })
+      // Successor session @chief gen 101 starts at T-30m (after predecessor-verdict), receives a later push row,
+      // and sends a message at T-20m. Because predecessor-verdict predates gen 101's started_at, gen 101 never saw
+      // the frame and its later send must not retire predecessor-verdict.
+      db.prepare(`
+        INSERT INTO sessions (
+          id, name, role, domains, pid, launch_id, launch_parent_pid,
+          started_at, updated_at, last_delivered_seq, last_delivered_ts, delivery
+        ) VALUES (
+          'sess-chief-gen101', '@chief-restart-test', 'chief', '[]', 2507216, '37920dbf@101', 2507216,
+          $started_at, $now, 999999, $now, 'push'
+        )
+      `).run({ $started_at: now - 30 * MINUTE, $now: now })
+      db.prepare(`
+        INSERT INTO messages (
+          id, type, sender, recipient, kind, content, ts, delivery, session_id, summary
+        ) VALUES (
+          'gen101-send', 'notify', '@chief-restart-test', '*', 'broadcast', 'up', $ts, 'push', 'sess-chief-gen101', 'up'
+        )
+      `).run({ $ts: now - 20 * MINUTE })
+
+      const row = projectHealthCadence(db, {
+        now,
+        connectedSessionNames: ["@chief-restart-test"],
+      }).inbox_lag.find((r) => r.session === "@chief-restart-test")
+      expect(row).toMatchObject({
+        actionable_rows: 1,
+        waking_rows: 1,
+        oldest_actionable: { id: "predecessor-verdict", type: "verdict" },
+      })
+    })
+  })
 })

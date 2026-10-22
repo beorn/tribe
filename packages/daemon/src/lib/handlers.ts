@@ -75,6 +75,7 @@ import {
   projectSessionLiveness,
   projectSessionTransportEvidence,
   projectSessionTransportState,
+  readProcessStartTime,
   type ForeignIdentityTransport,
   type RegisterRefusal,
   type OwnerState,
@@ -291,6 +292,8 @@ export type HandlerOpts = {
   hasActiveTransport: (sessionId: string) => boolean
   /** Probe whether a process is still alive. Defaults to pidStillAlive (process.kill(pid, 0)). */
   isPidAlive?: (pid: number) => boolean
+  /** Probe a process's /proc/<pid>/stat start time (field 22). Defaults to readProcessStartTime. */
+  readPidStartTime?: (pid: number) => string | null | "unsupported"
   isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
   /**
    * 24284 — whether the caller can still receive the response this handler is
@@ -4121,6 +4124,7 @@ type HealthSessionRow = {
   identity_sid: string | null
   launch_id: string | null
   launch_parent_pid: number | null
+  launch_parent_start_time: string | null
   provider: string | null
 }
 
@@ -4156,6 +4160,33 @@ function projectHealthMembership(ctx: TribeContext, opts: HandlerOpts) {
   return { retiredNames, byId, rows, liveSessions, activeIds, disconnected, diagnosticDisconnected, discrepancy }
 }
 
+/**
+ * 30649 (@cto 8b5de0ac Part 3.1): judge whether a disconnected durable launch's parent PID
+ * has exited or been recycled by a newer OS process. Reuses `readProcessStartTime`
+ * (`session-transport-state.ts:129`); when `/proc` is unsupported or the row predates start
+ * times (`storedStartTime === null`), falls back to the bare-pid check and names that in the
+ * exit reason.
+ */
+function classifyLaunchParentExit(
+  pid: number,
+  storedStartTime: string | null,
+  isAlive: (pid: number) => boolean,
+  readStartTime: (pid: number) => string | null | "unsupported",
+): string | null {
+  if (storedStartTime === null) {
+    return isAlive(pid) ? null : `launch parent ${pid} dead (pid-only: no recorded start time)`
+  }
+  const currentStartTime = readStartTime(pid)
+  if (currentStartTime === "unsupported") {
+    return isAlive(pid) ? null : `launch parent ${pid} dead (pid-only: start time unsupported)`
+  }
+  if (currentStartTime === null) return `launch parent ${pid} dead`
+  if (currentStartTime !== storedStartTime) {
+    return `launch parent ${pid} recycled (start ${currentStartTime} != recorded ${storedStartTime})`
+  }
+  return isAlive(pid) ? null : `launch parent ${pid} dead`
+}
+
 /** Seats by transport for the bridge-lost check (25662): lost bridges, settled exits, and live names. */
 export function readSeatTransportFacts(
   ctx: TribeContext,
@@ -4175,6 +4206,7 @@ export function readSeatTransportFacts(
   const { liveSessions, discrepancy, rows } = projectHealthMembership(ctx, opts)
   const rowById = new Map(rows.map((row) => [row.id, row]))
   const isAlive = opts.isPidAlive ?? pidStillAlive
+  const readStartTime = opts.readPidStartTime ?? readProcessStartTime
   const roster = opts.getExpectedMembers?.()
   const expectedRecord = roster?.loadedAt
     ? `declared roster tribe-expected-members.json loaded ${new Date(roster.loadedAt).toISOString()}`
@@ -4194,12 +4226,16 @@ export function readSeatTransportFacts(
   for (const launch of discrepancy?.missing ?? []) {
     if (launch.state === "missing-transport") {
       const pid = launch.launch_parent_pid
-      if (pid !== null && pid > 0 && !isAlive(pid)) {
-        exited.set(launch.name, `launch parent ${pid} dead`)
+      const row = rowById.get(launch.member_id)
+      const exitReason =
+        pid === null || pid <= 0
+          ? null
+          : classifyLaunchParentExit(pid, row?.launch_parent_start_time ?? null, isAlive, readStartTime)
+      if (exitReason !== null) {
+        exited.set(launch.name, exitReason)
       } else {
         // updated_at is the presence heartbeat every authenticated call touches (19784): a pull seat that answers by
         // calls holds no transport, and its last call is what says its bridge is serving (#30614).
-        const row = rowById.get(launch.member_id)
         missing.push({
           name: launch.name,
           launchParentPid: pid,

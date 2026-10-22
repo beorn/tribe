@@ -440,6 +440,63 @@ function openBallProjection(db: Database, now: number): HealthCadenceProjection[
   }
 }
 
+/**
+ * 30649 (@cto 8b5de0ac): in the health projection only (never in `unretiredAttentionPredicateSql`, which
+ * also gates `selectAttention` and 21757 archive protection), exclude a non-ball row (no active
+ * `pending_request`) that was channel-delivered (`s.delivery = 'push'` and `s.last_delivered_seq >= seq`)
+ * to the SAME session (`m.ts >= s.started_at`, never MAX across sessions by name) when that same session
+ * subsequently acted after `m.ts` via a send (`sent_msg.session_id = s.id` or `s.launch_id`) or a
+ * `turn_start_receipts` row (`tr.launch_id = s.launch_id AND tr.launch_parent_pid = s.launch_parent_pid`).
+ * Consumers of this inbox-lag reading:
+ *   - `ag/packages/hab-core/src/fleet-watch.ts` (`readTribeAttention` -> `parkedSeat` / `busyNotDrainingSeat`)
+ *   - `ag/packages/hab-core/src/coordination-watch.ts` (`validateInboxLagRow` / `foldCoordinationWatch`,
+ *     which enforces `waking_rows <= actionable_rows` and `(actionable_rows === 0) <=> (oldest_actionable === null)`)
+ *   - `health-cadence.ts` (`CURSOR_WARNING_MS` warning text) and `handlers.ts` (`tribe.health` `cadence.inbox_lag`).
+ */
+export function sameSessionDeliveredNonBallHandledSql(alias: string, sequence: "rowid" | "seq"): string {
+  const row = `${alias}.`
+  return `\n      AND NOT (
+        (${row}request IS NULL OR ${row}request = '')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM pending_request AS pr
+          WHERE pr.message_id = ${row}id
+            AND pr.recipient = ${row}recipient
+            AND pr.request_kind != 'incident'
+        )
+        AND EXISTS (
+          SELECT 1
+          FROM sessions AS s
+          WHERE s.name = ${row}recipient
+            AND s.delivery = 'push'
+            AND s.last_delivered_seq >= ${row}${sequence}
+            AND ${row}ts >= s.started_at
+            AND (
+              EXISTS (
+                SELECT 1
+                FROM messages AS sent_msg
+                WHERE sent_msg.sender = ${row}recipient
+                  AND sent_msg.ts >= ${row}ts
+                  AND sent_msg.rowid > ${row}${sequence}
+                  AND (sent_msg.session_id = s.id OR (s.launch_id IS NOT NULL AND sent_msg.session_id = s.launch_id))
+              )
+              OR (
+                s.launch_id IS NOT NULL
+                AND s.launch_parent_pid IS NOT NULL
+                AND EXISTS (
+                  SELECT 1
+                  FROM turn_start_receipts AS tr
+                  WHERE tr.launch_id = s.launch_id
+                    AND tr.launch_parent_pid = s.launch_parent_pid
+                    AND tr.session = s.name
+                    AND tr.started_at >= ${row}ts
+                )
+              )
+            )
+        )
+      )`
+}
+
 function inboxLagProjection(
   db: Database,
   now: number,
@@ -515,11 +572,21 @@ function inboxLagProjection(
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence })}${extraPredicate}
   `
   }
+  const deliveredHandledMessages = sameSessionDeliveredNonBallHandledSql("m", "rowid")
+  const deliveredHandledArchive = sameSessionDeliveredNonBallHandledSql("m", "seq")
   const waking = `\n      AND ${wakePredicateSql("m")}`
-  const actionableLagQueryMessages = db.prepare(assertSingleStatement(attentionLagSql("messages", "")))
-  const actionableLagQueryArchive = db.prepare(assertSingleStatement(attentionLagSql("messages_archive", "")))
-  const wakingLagQueryMessages = db.prepare(assertSingleStatement(attentionLagSql("messages", waking)))
-  const wakingLagQueryArchive = db.prepare(assertSingleStatement(attentionLagSql("messages_archive", waking)))
+  const actionableLagQueryMessages = db.prepare(
+    assertSingleStatement(attentionLagSql("messages", deliveredHandledMessages)),
+  )
+  const actionableLagQueryArchive = db.prepare(
+    assertSingleStatement(attentionLagSql("messages_archive", deliveredHandledArchive)),
+  )
+  const wakingLagQueryMessages = db.prepare(
+    assertSingleStatement(attentionLagSql("messages", `${deliveredHandledMessages}${waking}`)),
+  )
+  const wakingLagQueryArchive = db.prepare(
+    assertSingleStatement(attentionLagSql("messages_archive", `${deliveredHandledArchive}${waking}`)),
+  )
   // Selects the shared seq/rowid position too (absent from the original
   // SELECT list, which only ever needed it in ORDER BY against the single
   // CTE) so olderCandidate() below can compare the two halves' candidates the
@@ -538,7 +605,7 @@ function inboxLagProjection(
       AND ${ATTENTION_PREDICATE_SQL}
       AND ${noOpenIncidentAttentionPredicateSql("m")}
       AND ${unsettledAttentionPredicateSql("m")}
-      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
+      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}${deliveredHandledMessages}
     ORDER BY m.rowid ASC
     LIMIT 1
   `),
@@ -557,7 +624,7 @@ function inboxLagProjection(
       AND ${ATTENTION_PREDICATE_SQL}
       AND ${noOpenIncidentAttentionPredicateSql("m")}
       AND ${unsettledAttentionPredicateSql("m")}
-      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
+      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}${deliveredHandledArchive}
     ORDER BY m.seq ASC
     LIMIT 1
   `),

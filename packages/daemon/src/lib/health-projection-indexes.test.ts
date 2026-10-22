@@ -43,6 +43,7 @@ import {
   unretiredAttentionPredicateSql,
   unsettledAttentionPredicateSql,
 } from "./database.ts"
+import { sameSessionDeliveredNonBallHandledSql } from "./health-cadence.ts"
 
 /** A seat with no mail is the shape that paid the whole-archive walk. */
 const SEAT = "@seat-with-no-mail"
@@ -325,7 +326,7 @@ describe("health projection reads the archive through an index", () => {
         AND ${ATTENTION_PREDICATE_SQL}
         AND ${noOpenIncidentAttentionPredicateSql("m")}
         AND ${unsettledAttentionPredicateSql("m")}
-        AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
+        AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}${sameSessionDeliveredNonBallHandledSql("m", "seq")}
       ORDER BY m.seq ASC
       LIMIT 1`
     const p = plan(db, sql, { $session: SEAT })
@@ -336,5 +337,11 @@ describe("health projection reads the archive through an index", () => {
     // when the planner chose it for them.
     expect(p).toContain("idx_messages_archive_reply_retire")
     expect(p).toContain("idx_messages_archive_status_ref_retire")
+    // 30649: the same-session channel-delivered non-ball exclusion uses index
+    // seeks on pending_request, sessions, messages(sender, ts DESC), and turn_start_receipts.
+    expect(p).toContain("idx_pending_message_id")
+    expect(p).toContain("sqlite_autoindex_sessions_2")
+    expect(p).toContain("idx_messages_sender_ts")
+    expect(p).toContain("sqlite_autoindex_turn_start_receipts_1")
   })
 })
