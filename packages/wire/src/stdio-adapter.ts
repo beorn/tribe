@@ -1278,7 +1278,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     if (daemonDegradedReason !== null && daemon === undefined) {
       await recoverDaemonIfDegraded()
     }
-    if (REGISTER_WITH_LAUNCH_NAME && requiredMcpTransportHealth.status !== "live") {
+    // 30082: when the daemon connection closes mid-session, onDisconnect sets
+    // requiredMcpTransportHealth to status="advertised" ("daemon connection closed;
+    // reconnecting"). A single-recipient send must still enter callTribeTool so the
+    // shared 28900 retry loop reuses one stable message_id across the reconnect (or
+    // throws unknown acceptance with that message_id past the deadline) instead of
+    // returning the pre-dispatch advertised notice without retrying.
+    const canRetryDisconnectedSend =
+      name === "send" &&
+      !Array.isArray(a.to) &&
+      daemon !== undefined &&
+      requiredMcpTransportHealth.status === "advertised"
+    if (REGISTER_WITH_LAUNCH_NAME && requiredMcpTransportHealth.status !== "live" && !canRetryDisconnectedSend) {
       return requiredMcpTransportFailureResult()
     }
     // Attach identity_token to join so the daemon can adopt prior

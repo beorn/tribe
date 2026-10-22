@@ -73,9 +73,11 @@ function spawnFakeDaemon(
         if (msg.method === "tribe.send" && opts.closeFirstSend) {
           if (++sendCount === 1) socket.destroy()
           else {
-            socket.write(makeResponse(msg.id, {
-              content: [{ type: "text", text: JSON.stringify({ sent: true, id: "accepted-send" }) }],
-            }))
+            socket.write(
+              makeResponse(msg.id, {
+                content: [{ type: "text", text: JSON.stringify({ sent: true, id: "accepted-send" }) }],
+              }),
+            )
           }
           return
         }
@@ -411,10 +413,9 @@ describe("stdio adapter delivery modes", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "tribe-wire-stdio-"))
   })
 
-  // @failure 30082: a reconnect notice without isError must never stand in for a send receipt.
-  // @level l2 @consumer real MCP tools/call send, beyond the shared retry helper's boundary.
-  // Diagnostic candidate: establish the reported result before changing production code.
-  it("30082: a real MCP send interrupted mid-flight delivers or returns an explicit error", async () => {
+  // @failure 30082: a reconnect notice without durable acceptance must never drop a send while reconnecting.
+  // @level l2 @consumer real MCP tools/call send across mid-flight disconnect and reconnect window.
+  it("30082: a real MCP send interrupted mid-flight and a send during reconnect both retry under stable message_ids", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath, { closeFirstSend: true })
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
@@ -431,20 +432,55 @@ describe("stdio adapter delivery modes", () => {
     await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
     await waitForCondition(() => daemon!.requests.some((row) => row.method === "tribe.members"), "registered adapter")
-    const reply = await writeJsonAndWaitForLine(
+
+    // First send cuts the daemon socket mid-flight; wait until the daemon has seen attempt 1 and destroyed the socket
+    // so the adapter's onDisconnect sets requiredMcpTransportHealth to status=advertised (daemon connection closed; reconnecting).
+    const firstReplyPromise = waitForLine(child, (line) => line.id === 2, { timeoutMs: 15_000 })
+    writeJson(
       child,
-      callToolPayload(2, "send", { to: "@recipient", type: "notify", summary: "disconnect specimen", message: "test" }),
-      (line) => line.id === 2,
-      { timeoutMs: 15_000 },
-    ) as { result?: { isError?: boolean; content?: Array<{ text?: string }> } }
-    const result = reply.result
-    const text = result?.content?.[0]?.text ?? ""
-    expect(daemon.requests.filter((row) => row.method === "tribe.send").length).toBeGreaterThan(0)
-    if (result?.isError === true) {
-      expect(text).toMatch(/closed|accepted|reconnect/)
-    } else {
-      expect(JSON.parse(text)).toMatchObject({ sent: true, id: "accepted-send" })
-    }
+      callToolPayload(2, "send", { to: "@cto", type: "notify", summary: "first receipt", message: "cut mid-send" }),
+    )
+    await waitForCondition(
+      () => daemon!.requests.filter((row) => row.method === "tribe.send").length >= 1,
+      "first send reached daemon and closed socket",
+    )
+    await new Promise((resolveTick) => setTimeout(resolveTick, 25))
+
+    // Second send arrives while the adapter is in the disconnected/reconnecting window (status=advertised).
+    const secondReplyPromise = waitForLine(child, (line) => line.id === 3, { timeoutMs: 15_000 })
+    writeJson(
+      child,
+      callToolPayload(3, "send", {
+        to: "@dev/review2",
+        type: "notify",
+        summary: "second receipt",
+        message: "sent during reconnect",
+      }),
+    )
+
+    type ToolReply = { result?: { isError?: boolean; content?: Array<{ text?: string }> } }
+    const [firstReply, secondReply] = (await Promise.all([firstReplyPromise, secondReplyPromise])) as [
+      ToolReply,
+      ToolReply,
+    ]
+
+    const firstText = firstReply.result?.content?.[0]?.text ?? ""
+    const secondText = secondReply.result?.content?.[0]?.text ?? ""
+    expect(firstReply.result?.isError).not.toBe(true)
+    expect(secondReply.result?.isError).not.toBe(true)
+    expect(JSON.parse(firstText)).toMatchObject({ sent: true, id: "accepted-send" })
+    expect(JSON.parse(secondText)).toMatchObject({ sent: true, id: "accepted-send" })
+
+    const sendRequests = daemon.requests.filter((row) => row.method === "tribe.send") as Array<{
+      params?: { to?: string; message_id?: string }
+    }>
+    const ctoSends = sendRequests.filter((row) => row.params?.to === "@cto")
+    const review2Sends = sendRequests.filter((row) => row.params?.to === "@dev/review2")
+    expect(ctoSends.length).toBeGreaterThanOrEqual(2)
+    expect(typeof ctoSends[0]?.params?.message_id).toBe("string")
+    expect(ctoSends[1]?.params?.message_id).toBe(ctoSends[0]?.params?.message_id)
+    expect(review2Sends.length).toBeGreaterThanOrEqual(1)
+    expect(typeof review2Sends[0]?.params?.message_id).toBe("string")
   })
 
   afterEach(async () => {
