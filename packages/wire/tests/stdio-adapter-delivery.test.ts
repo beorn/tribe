@@ -56,17 +56,29 @@ function spawnFakeDaemon(
     toolError?: { code: number; message: string; method?: string }
     /** 29162 — the `tribe.members` reply body, so a test can drive the startup banner headline. */
     membersReply?: Record<string, unknown>
+    /** 30082 diagnostic: cut the first actual send RPC, then acknowledge its retry. */
+    closeFirstSend?: boolean
   } = {},
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
   const requests: Record<string, unknown>[] = []
   let registerCount = 0
+  let sendCount = 0
   return new Promise((resolveServer) => {
     const server = createServer((socket) => {
       clients.push(socket)
       const parse = createLineParser((msg) => {
         if (!isRequest(msg)) return
         requests.push(msg as Record<string, unknown>)
+        if (msg.method === "tribe.send" && opts.closeFirstSend) {
+          if (++sendCount === 1) socket.destroy()
+          else {
+            socket.write(makeResponse(msg.id, {
+              content: [{ type: "text", text: JSON.stringify({ sent: true, id: "accepted-send" }) }],
+            }))
+          }
+          return
+        }
         if (msg.method === "register") {
           registerCount++
           if (
@@ -397,6 +409,42 @@ describe("stdio adapter delivery modes", () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "tribe-wire-stdio-"))
+  })
+
+  // @failure 30082: a reconnect notice without isError must never stand in for a send receipt.
+  // @level l2 @consumer real MCP tools/call send, beyond the shared retry helper's boundary.
+  // Diagnostic candidate: establish the reported result before changing production code.
+  it("30082: a real MCP send interrupted mid-flight delivers or returns an explicit error", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, { closeFirstSend: true })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        ...launchEnvironment(""),
+        TRIBE_DELIVERY: "pull",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await waitForCondition(() => daemon!.requests.some((row) => row.method === "tribe.members"), "registered adapter")
+    const reply = await writeJsonAndWaitForLine(
+      child,
+      callToolPayload(2, "send", { to: "@recipient", type: "notify", summary: "disconnect specimen", message: "test" }),
+      (line) => line.id === 2,
+      { timeoutMs: 15_000 },
+    ) as { result?: { isError?: boolean; content?: Array<{ text?: string }> } }
+    const result = reply.result
+    const text = result?.content?.[0]?.text ?? ""
+    expect(daemon.requests.filter((row) => row.method === "tribe.send").length).toBeGreaterThan(0)
+    if (result?.isError === true) {
+      expect(text).toMatch(/closed|accepted|reconnect/)
+    } else {
+      expect(JSON.parse(text)).toMatchObject({ sent: true, id: "accepted-send" })
+    }
   })
 
   afterEach(async () => {
