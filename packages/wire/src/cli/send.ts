@@ -571,7 +571,12 @@ function reportBallReference(
  * never-answered-at-all, which was the larger share of the ten overdue balls
  * on 2026-08-19. Latency and flag discipline are different failures.
  */
-async function warnUnreleasedBallToRecipient(sender: string, recipient: string, takingRef?: string): Promise<void> {
+async function warnUnreleasedBallToRecipient(
+  sender: string,
+  recipient: string,
+  takingRef?: string,
+  correlatedRef?: string,
+): Promise<void> {
   // A broadcast is not a targeted send; warning on every fan-out would fire
   // constantly once a seat is behind, which is when a warning is least welcome
   // and most likely to be tuned out.
@@ -591,8 +596,12 @@ async function warnUnreleasedBallToRecipient(sender: string, recipient: string, 
     return
   }
 
+  const refNote =
+    correlatedRef !== undefined
+      ? " (--ref correlates without closing; use --type status --ref <id> for a TAKING receipt, or --type response --reply <id> to close)"
+      : ""
   console.error(
-    `tribe-wire send: note — you hold ${owed.length} open ball(s) from ${recipient} and this message carries no --reply.`,
+    `tribe-wire send: note — you hold ${owed.length} open ball(s) from ${recipient} and this message carries no --reply${refNote}.`,
   )
   for (const row of owed) {
     const id = row.request_id ?? row.message_id
@@ -704,7 +713,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   // post-send sentence is rendered from the daemon's `ball` fact (30160).
   if (input.reply && caller) await warnPendingReplyOwner(caller.name, input.reply)
   else if (!input.reply && caller && !input.anonymous) {
-    await warnUnreleasedBallToRecipient(caller.name, input.to, type === "status" ? input.ref : undefined)
+    await warnUnreleasedBallToRecipient(caller.name, input.to, type === "status" ? input.ref : undefined, input.ref)
   }
 
   const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller, !input.anonymous)) as {
@@ -732,7 +741,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   }
   if (typeof result.error === "string" && result.error.length > 0) {
     console.error(result.error)
-    if (input.verbose && typeof result.detail === "string" && result.detail.length > 0) {
+    if (typeof result.detail === "string" && result.detail.length > 0) {
       console.error(`  detail: ${result.detail}`)
     }
     if (input.json) await writeJsonStdout({ error: result.error })
@@ -1118,6 +1127,15 @@ export function registerSendCommands(program: Command): void {
     .option(sendIncidentCleared.flags, sendIncidentCleared.description)
     .option(sendVerbose.flags, sendVerbose.description)
     .option(sendJson.flags, sendJson.description)
+    .configureOutput({
+      outputError: (str, write) => {
+        if (str.includes("unknown option '--to'")) {
+          write(`${str.trimEnd()} (recipient is positional: tribe send <to> "<message>")\n`)
+          return
+        }
+        write(str)
+      },
+    })
     .addHelpText(
       "after",
       "\nExit codes: 0 delivered; 1 not delivered; 2 identity or usage refused; 3 delivered, its ball close not " +

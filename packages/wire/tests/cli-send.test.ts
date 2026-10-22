@@ -1768,6 +1768,28 @@ describe("send warns when it should have been a reply (22990)", () => {
     expect(res.stderr).not.toContain("open ball(s) from")
   })
 
+  test("explains that --ref correlates without closing when used on a non-status send (#30712)", async () => {
+    const res = await runAgainstPending(OWED_TO_AGENT3, [
+      "send",
+      "@agent/3",
+      "progress note",
+      "--type",
+      "notify",
+      "--ref",
+      "req-owed",
+    ])
+
+    expect(res.code).toBe(0)
+    expect(res.stderr).toContain("--ref correlates without closing")
+    expect(res.stderr).toContain("use --type status --ref <id> for a TAKING receipt")
+  })
+
+  test("unknown --to option on send guides caller to positional recipient (#30712)", async () => {
+    const res = await runAgainstPending([], ["send", "--to", "@agent/3", "hello"])
+    expect(res.code).not.toBe(0)
+    expect(res.stderr).toContain('recipient is positional: tribe send <to> "<message>"')
+  })
+
   // POSITIVE CONTROLS. Without these the assertions above could pass while the
   // check fired indiscriminately, which would be a warning nobody reads.
   test("POSITIVE CONTROL: silent when the ball is owed to a DIFFERENT seat", async () => {

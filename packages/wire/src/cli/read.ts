@@ -2530,12 +2530,12 @@ export function formatInboxWaitTimeoutLine(result: InboxWaitResult, timeoutMs: n
   if (result.unread_count > 0) {
     const n = result.unread_count
     return (
-      `${result.session}: timed out after ${Math.round(result.waited_ms / 1000)}s; ${n} unread attention ` +
+      `${result.session}: timed out after ${Math.round(result.waited_ms / 1000)}s (exit 64: wait window expired normally); ${n} unread attention ` +
       `item${n === 1 ? "" : "s"} that do${n === 1 ? "es" : ""} not wake this wait ` +
       `(oldest ${result.oldest_unread_age_min}min) — read ${n === 1 ? "it" : "them"} with \`tribe inbox\`.`
     )
   }
-  return `${result.session}: no unanswered actionables within ${Math.round(timeoutMs / 1000)}s.`
+  return `${result.session}: no unanswered actionables within ${Math.round(timeoutMs / 1000)}s (exit 64: wait window expired normally).`
 }
 
 async function cmdInboxWait(opts: {

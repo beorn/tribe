@@ -307,13 +307,16 @@ describe("registerReadCommands", () => {
   test.each([
     [
       { unread_count: 1, waited_ms: 240_153, oldest_unread_age_min: 3 },
-      "reader: timed out after 240s; 1 unread attention item that does not wake this wait (oldest 3min) — read it with `tribe inbox`.",
+      "reader: timed out after 240s (exit 64: wait window expired normally); 1 unread attention item that does not wake this wait (oldest 3min) — read it with `tribe inbox`.",
     ],
     [
       { unread_count: 3, waited_ms: 30_000, oldest_unread_age_min: 12 },
-      "reader: timed out after 30s; 3 unread attention items that do not wake this wait (oldest 12min) — read them with `tribe inbox`.",
+      "reader: timed out after 30s (exit 64: wait window expired normally); 3 unread attention items that do not wake this wait (oldest 12min) — read them with `tribe inbox`.",
     ],
-    [{ unread_count: 0, waited_ms: 30_000, oldest_unread_age_min: 0 }, "reader: no unanswered actionables within 30s."],
+    [
+      { unread_count: 0, waited_ms: 30_000, oldest_unread_age_min: 0 },
+      "reader: no unanswered actionables within 30s (exit 64: wait window expired normally).",
+    ],
   ])("names the unread rows a timeout could not wake on: %j", (fields, expected) => {
     const result = {
       session: "reader",
