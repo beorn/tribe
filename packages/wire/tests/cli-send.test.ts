@@ -345,14 +345,18 @@ describe("registerSendCommands", () => {
           child.on("close", (code) => resolveProcess({ code, stdout, stderr }))
         })
 
-      // Default: one line only, no duplicate prefix, no long detail
+      // Default (#30712 Row 24): includes the short line plus detail, without duplicate prefix
       const defaultSend = await runSend([])
       expect(defaultSend.code).toBe(1)
       expect(defaultSend.stdout).toBe("")
-      expect(defaultSend.stderr).toBe("tribe.send: failed to deliver to @adhoc/1 - not online (last seen 4 mins ago)\n")
+      expect(defaultSend.stderr).toContain(
+        "tribe.send: failed to deliver to @adhoc/1 - not online (last seen 4 mins ago)",
+      )
+      expect(defaultSend.stderr).toContain(
+        'detail: resolved owner "@adhoc/1" for recipient "@adhoc/1" at admission snapshot',
+      )
+      expect(defaultSend.stderr).toContain("self-mailbox-authority-missing")
       expect(defaultSend.stderr).not.toContain("tribe-wire send:")
-      expect(defaultSend.stderr).not.toContain("mailbox_read_capability")
-      expect(defaultSend.stderr).not.toContain("24581")
 
       // --verbose: includes the short line plus detail
       const verboseSend = await runSend(["--verbose"])
