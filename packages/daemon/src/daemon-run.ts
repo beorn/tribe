@@ -95,11 +95,24 @@ if (process.argv[2] === "install" || process.argv[2] === "uninstall") {
   const { values: installArgs } = parseArgs({
     args: process.argv.slice(3),
     options: {
+      help: { type: "boolean", short: "h" },
       "dry-run": { type: "boolean", default: false },
       autostart: { type: "string" },
     },
     strict: false,
   })
+
+  if (sub === "install" && installArgs.help) {
+    console.log(
+      "Usage: tribe install [--dry-run] [--autostart <mode>] [--help|-h]\n\n" +
+        "Install Claude hooks, MCP registration and autostart configuration.\n" +
+        "  --dry-run           Show the plan without writing configuration.\n" +
+        "  --autostart <mode>  Set the daemon autostart mode.\n" +
+        "  -h, --help          Show this help.",
+    )
+    await drainOutput()
+    process.exit(0)
+  }
 
   const {
     defaultInstallEnv,

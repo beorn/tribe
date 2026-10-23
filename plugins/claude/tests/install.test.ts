@@ -1,16 +1,22 @@
 /**
  * Tests for `tribe install` / `tribe uninstall` / `tribe doctor`.
  *
- * These tests operate purely on plan objects — no real filesystem writes,
- * no daemon connections. Each test constructs an `InstallEnv` with fixture
- * paths and asserts on the structured plan.
+ * Plans and apply operations use fixture paths. CLI help tests run the real
+ * entry point with an isolated HOME and check configuration bytes directly.
+ *
+ * @failure Install help executes configuration writes instead of showing usage.
+ * @level l4 — actual install CLI process and temporary configuration files.
+ * @consumer Users inspecting installation before changing their configuration.
+ * @testonly none
+ * @reach fs-walk <fixture-only: snapshot the temporary CLI configuration tree>
  *
  * The canonical hook-paths in fixtures look like:
  *   `/bun /tmp/tribe/packages/daemon/src/daemon.ts hook <event>`
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 import {
@@ -54,6 +60,90 @@ function setupFixture(): string {
   writeFileSync(resolve(root, "tribe/plugins/claude/recall/server.ts"), "// stub")
   return root
 }
+
+describe("install CLI", () => {
+  let root: string
+  let home: string
+
+  beforeEach(() => {
+    root = mkdtempSync(resolve(tmpdir(), "tribe-install-cli-"))
+    home = resolve(root, "home")
+  })
+
+  afterEach(() => rmSync(root, { recursive: true, force: true }))
+
+  function install(...args: string[]) {
+    return spawnSync(
+      process.execPath,
+      [resolve(import.meta.dirname, "../../../packages/daemon/src/daemon.ts"), "install", ...args],
+      {
+        cwd: root,
+        env: {
+          ...process.env,
+          HOME: home,
+          XDG_CONFIG_HOME: resolve(root, "config"),
+          XDG_DATA_HOME: resolve(root, "data"),
+          XDG_STATE_HOME: resolve(root, "state"),
+          XDG_RUNTIME_DIR: resolve(root, "run"),
+          TRIBE_SOCKET: resolve(root, "absent.sock"),
+          TRIBE_NO_AUTOSTART: "1",
+          TRIBE_NO_DAEMON: "1",
+          INJECTION_DEBUG_LOG: resolve(root, "injection-debug.jsonl"),
+          TRIBE_RECALL_ENGINE_DIR: undefined,
+          DEBUG: undefined,
+          DEBUG_LOG: undefined,
+        },
+        encoding: "utf8",
+        timeout: 15_000,
+      },
+    )
+  }
+
+  function configuration() {
+    return readdirSync(root, { recursive: true, encoding: "utf8" })
+      .sort()
+      .map((path) => {
+        const absolute = resolve(root, path)
+        return [path, statSync(absolute).isDirectory() ? null : readFileSync(absolute).toString("base64")]
+      })
+  }
+
+  // Plan/apply tests bypass argv dispatch; help must never reach those writes.
+  test.each([
+    ["--help", false],
+    ["-h", false],
+    ["--help", true],
+    ["-h", true],
+  ])("%s preserves all configuration (existing: %s)", (flag, existing) => {
+    if (existing) {
+      writeJson(resolve(home, ".claude/settings.json"), {
+        hooks: { SessionStart: [{ hooks: [{ type: "command", command: "/user/hook" }] }] },
+        permissions: { allow: ["Bash"] },
+      })
+      writeJson(resolve(home, ".claude/tribe/config.json"), { autostart: "never" })
+      writeJson(resolve(root, ".mcp.json"), { mcpServers: { user: { command: "/user/mcp" } } })
+    }
+    const before = configuration()
+    const result = install(flag)
+    expect(result.error).toBeUndefined()
+    expect(result.status, result.stderr).toBe(0)
+    expect(configuration()).toEqual(before)
+    expect(result.stdout).toMatch(/\busage\b/i)
+  })
+
+  test("plain install still writes hooks and autostart configuration", () => {
+    const result = install()
+    expect(result.error).toBeUndefined()
+    expect(result.status, result.stderr).toBe(0)
+    const settings = JSON.parse(readFileSync(resolve(home, ".claude/settings.json"), "utf8")) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>
+    }
+    for (const { claudeName, tribeArg } of TRIBE_HOOK_EVENTS) {
+      expect(settings.hooks[claudeName]![0]!.hooks[0]!.command).toContain(`hook ${tribeArg}`)
+    }
+    expect(readTribeConfig(resolve(home, ".claude/tribe/config.json")).autostart).toBe("daemon")
+  })
+})
 
 describe("planInstall", () => {
   let root: string
