@@ -2209,7 +2209,7 @@ async function cmdInbox(opts: {
   const idToken = readIdentityTokenFromEnvironment(process.env)
   if (idToken === null) {
     throw new Error(
-      `${HAB_ID_TOKEN_ENV} is missing; tribe inbox consumes a managed launch's own mailbox. From a hand session, read ` +
+      `${HAB_ID_TOKEN_ENV} is missing; tribe inbox reads a managed launch's own mailbox. From a hand session, read ` +
         "with --session <name> (tribe inbox-status --session <name>) or send with --anonymous",
     )
   }

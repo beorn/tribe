@@ -987,6 +987,21 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   })
 
+  // 30793: flag tests supply authority; this distinct missing-resource path
+  // must fail before any RPC and must not describe inspection as consuming.
+  it("inbox inspection names missing identity without claiming consumption (30793)", async () => {
+    const { result, calls } = await runManagedPendingCliAgainst(
+      () => {
+        throw new Error("missing-authority inspection must not call the daemon")
+      },
+      { args: ["inbox", "--peek", "--json"], token: "" },
+    )
+    expect(result.code).not.toBe(0)
+    expect(calls).toEqual([])
+    expect(result.stderr).toContain("HAB_ID_TOKEN is missing")
+    expect(result.stderr).not.toContain("inbox consumes")
+  })
+
   // 30793: argv intent is a process boundary; daemon-only coverage cannot
   // detect an unsupported consume flag or a peek overridden by another flag.
   it.each([
