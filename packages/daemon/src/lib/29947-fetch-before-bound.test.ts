@@ -134,6 +134,48 @@ describe("tribe.fetch --before reaches the older end of a history (29947)", () =
     expect(rowidsOf(fetch({ since: b, before: e, limit: 10 }))).toEqual([c, d])
   })
 
+  // 30865: a full page cannot distinguish exhaustion from one more match.
+  // Existing before tests prove selection, but not a safe continuation.
+  it.each([0, 2, 3, 5])("reports exact continuation for %i retained rows in either direction", (count) => {
+    for (let n = 1; n <= count; n += 1) message(n)
+    const all = rowidsOf(fetch({ to: SEAT, limit: 10 }))
+    for (const forward of [false, true]) {
+      let bounds: Record<string, unknown> = forward ? { since: 0, before: 100 } : {}
+      const collected: number[] = []
+      for (let page = 0; page < 4; page += 1) {
+        const result = fetch({ to: SEAT, ...bounds, limit: 2 })
+        const rows = rowidsOf(result)
+        const remaining = all.filter((id) =>
+          forward ? id > Number(bounds.since) : bounds.before === undefined || id < Number(bounds.before),
+        )
+        expect(result.has_more).toBe(remaining.length > 2)
+        expect(rows).toEqual(forward ? remaining.slice(0, 2) : remaining.slice(-2))
+        if (forward) collected.push(...rows)
+        else collected.unshift(...rows)
+        if (remaining.length <= 2) {
+          expect(result.next).toBeNull()
+          break
+        }
+        expect(result.next).toEqual(forward ? { since: rows.at(-1) } : { before: rows[0] })
+        bounds = { ...bounds, ...(result.next as Record<string, number>) }
+      }
+      expect(collected).toEqual(all)
+    }
+    expect(stmts.getInboxCursor.get({ $id: ctx.sessionId })).toMatchObject({ last_inbox_pull_seq: 0 })
+  })
+
+  it("keeps metadata off IDs, default drains and advancing scans; empty IDs follows the selected branch", () => {
+    message(1)
+    message(2)
+    const id = "00000000-0000-4000-8000-000000000002"
+    for (const args of [{ ids: [id], since: 0, advance: true }, { since: 0, advance: true }, {}]) {
+      const result = fetch(args)
+      expect(result).not.toHaveProperty("has_more")
+      expect(result).not.toHaveProperty("next")
+    }
+    expect(fetch({ ids: [], to: SEAT, limit: 1 })).toMatchObject({ has_more: true })
+  })
+
   it("refuses a range that can hold no row id, by name", () => {
     for (let n = 1; n <= 4; n += 1) message(n)
 

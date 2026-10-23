@@ -5358,10 +5358,18 @@ export function readAttentionProjection(
   }
 }
 
-function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRow[] {
+function querySnapshotRows(
+  ctx: TribeContext,
+  filters: SnapshotFilters,
+  eligiblePage: boolean,
+): { rows: FetchRow[]; hasMore: boolean } {
+  // Advancing reads keep their original selection budget: excluded rows
+  // contribute cursor progress. Only history snapshots need eligible lookahead.
+  const scanMatches = eligiblePage || filters.topics.length > 0
+  const budget = filters.limit + (eligiblePage ? 1 : 0)
   const conditions = ["kind != 'event'"]
   const params: Record<string, number | string> = {
-    $limit: filters.topics.length > 0 ? TRIBE_FETCH_TOPICS_WINDOW : filters.limit,
+    $limit: scanMatches ? TRIBE_FETCH_TOPICS_WINDOW : filters.limit,
   }
 
   if (filters.since !== null) {
@@ -5375,7 +5383,7 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
   if (filters.before !== null) {
     conditions.push("rowid < $before")
     params.$before = filters.before
-  } else if (filters.since === null && filters.topics.length > 0) {
+  } else if (filters.since === null && scanMatches) {
     conditions.push("rowid < $before")
     params.$before = Number.MAX_SAFE_INTEGER
   }
@@ -5409,24 +5417,19 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
   // turn a retained topic into an empty result (28539).
   while (true) {
     const page = query.all(params) as FetchRow[]
+    const trusted = scanMatches ? filterRowsByTrust(ctx, page) : page
     rows.push(
-      ...(filters.topics.length > 0
-        ? filterRowsByTrust(ctx, page).filter((row) => matchesGlob(filters.topics, row.topic))
-        : page),
+      ...(filters.topics.length > 0 ? trusted.filter((row) => matchesGlob(filters.topics, row.topic)) : trusted),
     )
     const lastRow = page.at(-1)
-    if (
-      !lastRow ||
-      filters.topics.length === 0 ||
-      rows.length >= filters.limit ||
-      page.length < Number(params.$limit)
-    ) {
+    if (!lastRow || !scanMatches || rows.length >= budget || page.length < Number(params.$limit)) {
       break
     }
     params[filters.since !== null ? "$since" : "$before"] = lastRow.rowid
   }
+  // Remove lookahead before reversal and before the caller computes cursors.
   const selected = rows.slice(0, filters.limit)
-  return filters.since !== null ? selected : selected.reverse()
+  return { rows: filters.since !== null ? selected : selected.reverse(), hasMore: rows.length > filters.limit }
 }
 
 function rowMatchesSnapshotFilters(row: FetchRow, filters: Omit<SnapshotFilters, "limit">): boolean {
@@ -5520,6 +5523,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
   let attentionRows: FetchRow[] = []
   let attention: AttentionProjection | null = null
   let shouldAdvance = false
+  let historyPage: { has_more: boolean; next: { before: number } | { since: number } | null } | undefined
   let exhaustedTo: number | null = null
   let cursorBase = cursor?.last_inbox_pull_seq ?? 0
   const since = typeof a.since === "number" ? a.since : null
@@ -5644,8 +5648,21 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
     before !== null ||
     topicsAreSnapshot
   ) {
-    rows = querySnapshotRows(ctx, { ...snapshotFilters, limit })
     shouldAdvance = !topicsAreSnapshot && since !== null && a.advance === true
+    const page = querySnapshotRows(ctx, { ...snapshotFilters, limit }, !shouldAdvance)
+    rows = page.rows
+    if (!shouldAdvance) {
+      const boundary = since !== null ? rows.at(-1) : rows[0]
+      historyPage = {
+        has_more: page.hasMore,
+        next:
+          page.hasMore && boundary !== undefined
+            ? since !== null
+              ? { since: boundary.rowid }
+              : { before: boundary.rowid }
+            : null,
+      }
+    }
   } else {
     if (!topicsAreSnapshot) {
       // 27346 - the ambient session cursor is this caller's delivery record:
@@ -5769,7 +5786,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
         }
   return jsonResult(
     attention === null
-      ? { events, cursor: outputCursor, ...settlementBatch }
+      ? { events, cursor: outputCursor, ...settlementBatch, ...historyPage }
       : { attention, events, cursor: outputCursor, ...settlementBatch },
   )
 }

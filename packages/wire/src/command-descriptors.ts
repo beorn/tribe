@@ -710,10 +710,16 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "timeout",
           flags: "--timeout <duration>",
-          description: "Wait limit (e.g. 30s, 1m, 5m)",
+          description: "Wait limit: integer milliseconds or NNs|NNm|NNh (e.g. 480000, 30s, 5m)",
           default: "30s",
           mapsTo: "timeout_ms",
           transform: "duration-ms",
+        },
+        {
+          name: "timeout-ms",
+          flags: "--timeout-ms <milliseconds>",
+          description: "Wait limit in integer milliseconds; takes precedence over --timeout",
+          mapsTo: "timeout_ms",
         },
         {
           name: "wake-on-correlated-reply",
@@ -782,9 +788,33 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             items: { type: "object", additionalProperties: true },
           },
           cursor: { type: "number", description: "Highest rowid returned (unchanged when nothing matched)." },
+          has_more: {
+            type: "boolean",
+            description:
+              "Ordered non-ID, non-advancing history only: another eligible row exists. Omitted means unknown, not exhausted.",
+          },
+          next: {
+            description:
+              "History continuation when has_more is true; otherwise null. Retain original filters and opposite bound. Not a mailbox cursor or a frozen snapshot.",
+            anyOf: [
+              {
+                type: "object",
+                properties: { before: { type: "number" } },
+                required: ["before"],
+                additionalProperties: false,
+              },
+              {
+                type: "object",
+                properties: { since: { type: "number" } },
+                required: ["since"],
+                additionalProperties: false,
+              },
+              { type: "null" },
+            ],
+          },
           ...ERROR_SHAPE,
         },
-        "Default: { attention, events, cursor }; snapshot: { events, cursor }; { error } on validation failure.",
+        "Default: { attention, events, cursor }; ordered non-advancing history adds has_more/next; IDs and advancing scans omit them; { error } on validation failure.",
       ),
     },
     cli: available({

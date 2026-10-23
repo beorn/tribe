@@ -28,7 +28,6 @@ import { tmpdir } from "node:os"
 import { resolve, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
-import { TRIBE_FETCH_TOPICS_WINDOW } from "../src/lib/fetch-limits.ts"
 import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
 import { launchEnvironment, launchToken } from "./launch-token.ts"
 
@@ -715,15 +714,12 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
   // 27519 — `tribe fetch` is the MCP fetch handler over a one-shot CLI: the
   // token resolves the caller's session/cursor, and the printed JSON is the
   // same payload the MCP tool returns.
-  it("fetch drains the token-resolved session through the canonical handler and prints the MCP JSON", async () => {
+  it("fetch reads the token-resolved snapshot and preserves the MCP JSON", async () => {
     const payload = {
-      attention: {
-        actionable_unread: [],
-        pending_balls: [],
-        pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
-      },
       events: [{ id: "m1", type: "notify", from: "@chief", to: "@dev/2", content: "hi" }],
       cursor: 42,
+      has_more: false,
+      next: null,
     }
     const { result, calls } = await runManagedFetchCliAgainst(
       ["fetch", "--json", "--with", "@chief", "--limit", "10"],
@@ -757,10 +753,8 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       () => ({ result: { content: [{ type: "text", text: JSON.stringify(empty) }], structuredContent: empty } }),
     )
 
-    // 28909/S2 — a --topics read filters a fixed window, so it is never
-    // exhaustive and always says so, even when it returns no rows.
-    expect(result).toMatchObject({ code: 0 })
-    expect(result.stderr).toContain(`filters a ${TRIBE_FETCH_TOPICS_WINDOW}-row window`)
+    // IDs take precedence over ordered selectors and have no continuation.
+    expect(result).toMatchObject({ code: 0, stderr: "" })
     expect(calls).toEqual([
       {
         method: "cli_session_fetch_read_v1",
@@ -801,7 +795,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
   // to refuse: the daemon treats the read as a snapshot on the strength of the
   // effective sibling. The CLI still forwards exactly what the caller wrote.
   it("fetch forwards an empty field alongside an effective selector (#28402)", async () => {
-    const empty = { events: [], cursor: 0 }
+    const empty = { events: [], cursor: 0, has_more: false, next: null }
     const { result, calls } = await runManagedFetchCliAgainst(
       ["fetch", "--json", "--since", "0", "--topics", "", "--with", "", "--from", ""],
       () => ({ result: { content: [{ type: "text", text: JSON.stringify(empty) }], structuredContent: empty } }),
@@ -851,7 +845,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
   // 28909 — a bounded read must SAY SO when it returned its whole bound: the
   // rows past the bound are invisible otherwise. Measured before the fix:
   // `--limit 1000` returned exactly the 50 rows of `--limit 50` in silence.
-  it("fetch says so when --limit bounded the window and stays silent below it (28909)", async () => {
+  it("fetch reports missing continuation metadata even below the limit (30865)", async () => {
     const two = { events: [{ id: "m1" }, { id: "m2" }], cursor: 7 }
     const saturated = await runManagedFetchCliAgainst(["fetch", "--json", "--since", "0", "--limit", "2"], () => ({
       result: { content: [{ type: "text", text: JSON.stringify(two) }], structuredContent: two },
@@ -865,7 +859,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       result: { content: [{ type: "text", text: JSON.stringify(one) }], structuredContent: one },
     }))
     expect(below.result.code).toBe(0)
-    expect(below.result.stderr).toBe("")
+    expect(below.result.stderr).toContain("continuation unknown")
   })
 
   it("fetch refuses an out-of-range --limit before connecting, naming the range (28909)", async () => {
@@ -884,7 +878,12 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
   // 29947 — a bounded read must be able to reach the OLDER end of a history.
   it("fetch --before sends the older bound and counts as a selector (29947)", async () => {
-    const payload = { events: [{ id: "m1", rowid: 40, ts: "2026-10-17T04:12:33Z" }], cursor: 40 }
+    const payload = {
+      events: [{ id: "m1", rowid: 40, ts: "2026-10-17T04:12:33Z" }],
+      cursor: 40,
+      has_more: false,
+      next: null,
+    }
     const { result, calls } = await runManagedFetchCliAgainst(["fetch", "--json", "--before", "41"], () => ({
       result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
     }))
@@ -917,7 +916,12 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
   it("fetch --json-to-file writes the full JSON and prints one summary line (28909)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-json-to-file-"))
     const path = join(dir, "fetch.json")
-    const payload = { events: [{ id: "m1" }, { id: "m2" }], cursor: 42 }
+    const payload = {
+      events: [{ id: "m1", content: "large body ".repeat(10_000) }, { id: "m2" }],
+      cursor: 42,
+      has_more: false,
+      next: null,
+    }
     try {
       const { result } = await runManagedFetchCliAgainst(["fetch", "--json-to-file", path, "--since", "0"], () => ({
         result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
@@ -935,7 +939,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
   it("fetch --json-to-file still names the bound on stderr (28909/S1)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-json-to-file-"))
     const path = join(dir, "fetch-bound.json")
-    const payload = { events: [{ id: "m1" }, { id: "m2" }], cursor: 7 }
+    const payload = { events: [{ id: "m1" }, { id: "m2" }], cursor: 7, has_more: true, next: { since: 7 } }
     try {
       const { result } = await runManagedFetchCliAgainst(
         ["fetch", "--json-to-file", path, "--since", "0", "--limit", "2"],
@@ -944,21 +948,22 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
       expect(result.code).toBe(0)
       expect(result.stdout).toBe(`tribe fetch: 2 row(s), cursor 7, written to ${path}\n`)
-      expect(result.stderr).toContain("at the --limit 2 bound")
+      expect(result.stderr).toContain("more matching rows")
+      expect(result.stderr).toContain("newer rows: --since 7")
       expect(readFileSync(path, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  it("fetch names the --topics window instead of claiming an exhaustive read (28909/S2)", async () => {
+  it("fetch keeps an old daemon's topic continuation unknown (30865)", async () => {
     const payload = { events: [{ id: "m1" }], cursor: 0 }
     const { result } = await runManagedFetchCliAgainst(["fetch", "--json", "--topics", "github:*"], () => ({
       result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
     }))
 
     expect(result.code).toBe(0)
-    expect(result.stderr).toContain(`filters a ${TRIBE_FETCH_TOPICS_WINDOW}-row window`)
+    expect(result.stderr).toContain("continuation unknown")
   })
 
   it("pending --json-to-file writes the full JSON and prints one summary line (28909)", async () => {
@@ -2179,6 +2184,71 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // 30865: exercise actual argv -> RPC timeout_ms, not only help descriptors.
+  // Existing waits cover 0s but miss bare milliseconds and the new spelling.
+  it.each(["wait", "inbox-wait"])("%s delivers numeric forms, suffixes, defaults and precedence", async (verb) => {
+    const cases: Array<[string[], number]> = [
+      [[], verb === "wait" ? 300_000 : 30_000],
+      [["--timeout", "480000"], 480_000],
+      [["--timeout-ms", "480000"], 480_000],
+      [["--timeout", "0"], 0],
+      [["--timeout-ms", "0"], 0],
+      [["--timeout", "bad", "--timeout-ms", "7"], 7],
+      [["--timeout", "2s"], 2_000],
+      [["--timeout", "2m"], 120_000],
+      [["--timeout", "1h"], 1_800_000],
+    ]
+    for (const [flags, timeoutMs] of cases) {
+      const { result, calls } = await runManagedPendingCliAgainst(
+        (request) => ({
+          result:
+            request.method === "cli_protocol"
+              ? { protocol_version: TRIBE_PROTOCOL_VERSION }
+              : {
+                  status: "woken",
+                  session: "@chief",
+                  unread_count: 1,
+                  oldest_unread_age_min: 0,
+                  oldest_unread_ts: 1,
+                  waited_ms: 0,
+                  effective_timeout_ms: timeoutMs,
+                  timed_out: false,
+                  aborted: false,
+                  baseline_seq: 0,
+                  attention: {
+                    actionable_unread: [],
+                    pending_balls: [],
+                    pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
+                  },
+                },
+        }),
+        { args: [verb, "--session", "@chief", ...flags, "--json"] },
+      )
+      expect(result, `${verb} ${flags.join(" ")}: ${result.stderr}`).toMatchObject({ code: 0, stderr: "" })
+      // The reconnect loop sends at most 30s per RPC and subtracts elapsed
+      // time. Its public effective budget stays exact.
+      expect((JSON.parse(result.stdout) as { effective_timeout_ms: number }).effective_timeout_ms).toBe(timeoutMs)
+      const sentTimeout = calls.find((call) => call.method === "cli_inbox_wait")?.params?.timeout_ms as number
+      const chunkMs = Math.min(timeoutMs, 30_000)
+      expect(sentTimeout).toBeLessThanOrEqual(chunkMs)
+      expect(sentTimeout).toBeGreaterThanOrEqual(Math.max(0, chunkMs - 1_000))
+    }
+    for (const flags of [
+      ["--timeout", "1.5"],
+      ["--timeout", "-1"],
+      ["--timeout", "bad"],
+      ["--timeout-ms", "1s"],
+      ["--timeout-ms", "1.5"],
+      ["--timeout-ms", "-1"],
+      ["--timeout", "1s", "--timeout-ms", "bad"],
+      ["--timeout", "9".repeat(310)],
+    ]) {
+      const result = runCli([verb, "--session", "@chief", ...flags, "--json"])
+      expect(result.code).toBe(2)
+      expect(result.stderr).toContain(`bad ${flags.at(-2)}`)
     }
   })
 

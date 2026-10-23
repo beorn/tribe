@@ -83,8 +83,10 @@ launch controller, not the Tribe daemon.
 **A wait reports; it does not consume.** `inbox-wait` retires no row and never
 advances the mailbox cursor, so a row a wait returned stays fetch-visible and
 unread until the caller's own read acknowledges it — a default `fetch` (receipt
-on) or `tribe-wire inbox`. After any wait, woken or timed out, issue one default
-fetch before treating the inbox as read. A woken chunk also hands back a
+on) or `tribe-wire inbox --consume --json`. Plain `inbox` peeks.
+Before a new wait, read your mailbox with that command; history/IDs inspection
+does not acknowledge it. See `tribe-wire fetch --help` for small history pages,
+continuation metadata and complete file output. A woken chunk also hands back a
 baseline covering every row it delivered, so a resumed wait does not re-wake on
 rows already handed over (28911). The daemon test
 `inbox-wait.test.ts › does not retire the row it reports` pins both halves:

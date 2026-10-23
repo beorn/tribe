@@ -3880,13 +3880,18 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
         } | null
       )?.last_inbox_pull_seq ?? 0
     const cursorBefore = cursor()
-    const rowids = async (params: Record<string, unknown>): Promise<number[]> => {
+    const readPage = async (params: Record<string, unknown>) => {
       const reply = parseResult<{ content: Array<{ text: string }> }>(
         await harness.request("cli_session_fetch_read_v1", { authority: null, idToken: "token-dev7", ...params }),
       )
-      const payload = JSON.parse(reply.content[0]!.text) as { events?: Array<{ rowid: number }> }
-      return (payload.events ?? []).map((event) => event.rowid)
+      return JSON.parse(reply.content[0]!.text) as {
+        events: Array<{ rowid: number }>
+        has_more?: boolean
+        next?: { before: number } | { since: number } | null
+      }
     }
+    const rowids = async (params: Record<string, unknown>) =>
+      (await readPage(params)).events.map((event) => event.rowid)
 
     expect(seeded).toHaveLength(5)
     const [a, b, c, d, e] = seeded
@@ -3899,6 +3904,24 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
     expect(await rowids({ from: "@chief", limit: 10, before: c })).toEqual([a, b])
     expect(await rowids({ from: "@chief", limit: 2 })).toEqual([d, e])
     expect(await rowids({ from: "@chief", limit: 2, before: d })).toEqual([b, c])
+
+    // 30865: pin actual CLI-dispatcher/MCP parity. A canned CLI response
+    // cannot catch this adapter dropping canonical continuation metadata.
+    const params = { from: "@chief", limit: 2 }
+    const page = await readPage(params)
+    expect(page).toMatchObject({ has_more: true, next: { before: d } })
+    const mcp = parseResult<{ content: Array<{ text: string }> }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "mcp-history", method: "tribe.fetch", params },
+        "conn-fetch-before",
+      ),
+    )
+    expect(JSON.parse(mcp.content[0]!.text)).toEqual(page)
+    expect(await readPage({ from: "@chief", before: c, limit: 2 })).toMatchObject({ has_more: false, next: null })
+    expect(await readPage({ from: "@chief", since: a, before: e, limit: 1 })).toMatchObject({
+      has_more: true,
+      next: { since: b },
+    })
 
     // Still snapshot-only: no cursor moved.
     expect(cursor()).toBe(cursorBefore)

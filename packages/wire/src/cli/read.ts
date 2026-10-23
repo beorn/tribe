@@ -34,12 +34,7 @@ import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-
 import { readLaunchIdFromToken } from "../lib/identity-token.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { JSON_TO_FILE_RECOVERY, jsonDestinationProblem, writeJsonStdout, writeJsonToFile } from "./json-output.ts"
-import {
-  TRIBE_FETCH_DEFAULT_LIMIT,
-  TRIBE_FETCH_MAX_LIMIT,
-  TRIBE_FETCH_TOPICS_WINDOW,
-  fetchLimitOutOfRangeMessage,
-} from "../lib/fetch-limits.ts"
+import { TRIBE_FETCH_DEFAULT_LIMIT, TRIBE_FETCH_MAX_LIMIT, fetchLimitOutOfRangeMessage } from "../lib/fetch-limits.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
 import { parseEmitterIncidentSnapshot } from "../lib/incident.ts"
 import { warnIfSelfTransportDown } from "./self-transport-warning.ts"
@@ -481,34 +476,33 @@ function pendingRowCount(payload: { count?: number; pending?: unknown[]; owners?
  * invisible otherwise — the same hazard `tribeLogScope` names for `tribe log`
  * (27537). It goes to stderr so a script's stdout stays parseable JSON.
  *
- * Two shapes return a line. A `--topics` read ALWAYS does: the daemon filters a
- * fixed 500-row window after reading it (handlers.ts querySnapshotRows), so such
- * a read can return fewer than `limit` rows while more matches exist — it is
- * never exhaustive and must not read as if it were. Every other read returns a
- * line only when it reached its bound; below the bound it is exhaustive, and
- * returns null (silent).
+ * Ordered history uses the daemon's eligible-row lookahead. A missing field
+ * from an older daemon is unknown, even below the limit: exclusions may have
+ * happened after its result budget. IDs retain their existing bound warning.
  */
 export type FetchScopeBound = { rowid: number; ts: string | null }
 
 export function tribeFetchScope(
   returned: number,
   limit: number,
-  opts: { topicsWindow?: boolean; direction?: "older" | "newer"; boundary?: FetchScopeBound | null } = {},
+  opts: {
+    orderedHistory?: boolean
+    hasMore?: boolean
+    next?: { before: number } | { since: number } | null
+    direction?: "older" | "newer"
+    boundary?: FetchScopeBound | null
+  } = {},
 ): string | null {
-  if (opts.topicsWindow === true) {
-    return (
-      `tribe fetch: ${returned} row(s) — a --topics read filters a ${TRIBE_FETCH_TOPICS_WINDOW}-row window, ` +
-      `so more matching rows may exist (narrow with --since or a more specific glob).`
-    )
-  }
-  if (returned < limit) return null
+  if (opts.hasMore === false || (opts.orderedHistory === false && returned < limit)) return null
   // 29947 — at the maximum, "raise --limit" was advice that could not work, and
   // a caller had no way to name the rows it could not see. The line now names
   // the verb that does work and the exact boundary row, so the next read is a
   // command rather than a guess; `max` is still stated where a raise is still
   // possible.
-  const direction = opts.direction ?? "older"
-  const boundary = opts.boundary ?? null
+  const direction = opts.next ? ("before" in opts.next ? "older" : "newer") : (opts.direction ?? "older")
+  const boundary = opts.next
+    ? { rowid: "before" in opts.next ? opts.next.before : opts.next.since, ts: opts.boundary?.ts ?? null }
+    : (opts.boundary ?? null)
   const end = direction === "older" ? "oldest" : "newest"
   const stamp = boundary !== null && boundary.ts !== null ? `; ${end} returned ${boundary.ts}` : ""
   const advice =
@@ -520,7 +514,14 @@ export function tribeFetchScope(
         ? "newer rows: --since <rowid>"
         : `newer rows: --since ${boundary.rowid}`
   const room = limit < TRIBE_FETCH_MAX_LIMIT ? ` (or raise --limit, max ${TRIBE_FETCH_MAX_LIMIT})` : ""
-  return `tribe fetch: ${returned} row(s) — at the --limit ${limit} bound${stamp}; ${advice}${room}.`
+  const fact =
+    opts.hasMore === true
+      ? "more matching rows"
+      : opts.orderedHistory === false
+        ? `at the --limit ${limit} bound`
+        : `continuation unknown (daemon omitted paging metadata)${returned >= limit ? `; at the --limit ${limit} bound` : ""}`
+  const retain = opts.orderedHistory === false ? "" : " Retain original filters and the opposite bound."
+  return `tribe fetch: ${returned} row(s) — ${fact}${stamp}; ${advice}${room}.${retain}`
 }
 
 /**
@@ -644,7 +645,7 @@ async function cmdFetch(opts: {
   // goes: print it in file mode too, so a file write at the limit still says the
   // rows past it exist (stdout stays the single summary line).
   const rows = fetchRowCount(payload)
-  const topicsWindow = (parseCommaList(opts.topics)?.length ?? 0) > 0
+  const page = payload as { has_more?: boolean; next?: { before: number } | { since: number } | null }
   // 29947 — the boundary row the scope line names. A --since read walks
   // FORWARD, so the rows it cannot see are ABOVE its newest row; every other
   // snapshot read returns the newest N, so its blind rows are BELOW the oldest.
@@ -667,7 +668,9 @@ async function cmdFetch(opts: {
     await writeJsonStdout(payload)
   }
   const scope = tribeFetchScope(rows, opts.limit ?? TRIBE_FETCH_DEFAULT_LIMIT, {
-    topicsWindow,
+    orderedHistory: (ids?.length ?? 0) === 0,
+    hasMore: page.has_more,
+    next: page.next,
     direction: forward ? "newer" : "older",
     boundary,
   })
@@ -808,8 +811,9 @@ function parseStaleMs(spec: string): number | undefined {
   }
 }
 
-function parseDurationMs(spec: string): number | undefined {
-  return parseStaleMs(spec)
+function parseDurationMs(spec: string, millisecondsOnly = false): number | undefined {
+  const value = /^\d+$/.test(spec) ? Number(spec) : millisecondsOnly ? undefined : parseStaleMs(spec)
+  return value !== undefined && Number.isFinite(value) ? value : undefined
 }
 
 /**
@@ -2771,6 +2775,18 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
   program
     .command(FETCH_CLI.name)
     .description(FETCH_CLI.description)
+    .addHelpText(
+      "after",
+      "\nHistory pages:\n" +
+        "  Start small: fetch --from @alice --limit 10 --json\n" +
+        "  has_more reports another eligible row; next supplies --before or --since.\n" +
+        "  Retain original selectors and the opposite bound. cursor is not a page key.\n" +
+        "  Missing metadata from an older daemon means unknown, even below --limit.\n" +
+        "  For large bodies: fetch --from @alice --limit 10 --json-to-file history.json\n" +
+        "  Paging measures rows, not downstream output clipping; the file preserves the full payload.\n" +
+        "  IDs are snapshots; history does not acknowledge your inbox. Before a new wait,\n" +
+        "  read your mailbox with inbox --consume --json (or default MCP fetch, receipt on).\n",
+    )
     .option(fetchIds.flags, fetchIds.description)
     .option(fetchTopics.flags, fetchTopics.description)
     .option(fetchSince.flags, fetchSince.description)
@@ -2994,6 +3010,7 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
 
   const inboxWaitSession = cliOption(INBOX_WAIT_CLI, "session")
   const inboxWaitTimeout = cliOption(INBOX_WAIT_CLI, "timeout")
+  const inboxWaitTimeoutMs = cliOption(INBOX_WAIT_CLI, "timeout-ms")
   const inboxWaitWakeOnCorrelatedReply = cliOption(INBOX_WAIT_CLI, "wake-on-correlated-reply")
   const inboxWaitJson = cliOption(INBOX_WAIT_CLI, "json")
   program
@@ -3001,21 +3018,33 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     .description(INBOX_WAIT_CLI.description)
     .option(inboxWaitSession.flags, inboxWaitSession.description, inboxWaitSession.default)
     .option(inboxWaitTimeout.flags, inboxWaitTimeout.description, inboxWaitTimeout.default)
+    .option(inboxWaitTimeoutMs.flags, inboxWaitTimeoutMs.description)
     .option(inboxWaitWakeOnCorrelatedReply.flags, inboxWaitWakeOnCorrelatedReply.description)
     .option(inboxWaitJson.flags, inboxWaitJson.description)
-    .action(async (opts: { session?: string; timeout?: string; wakeOnCorrelatedReply?: boolean; json?: boolean }) => {
-      const timeoutMs = opts.timeout ? parseDurationMs(opts.timeout) : undefined
-      if (opts.timeout && timeoutMs === undefined) {
-        console.error(`tribe inbox-wait: bad --timeout '${opts.timeout}' (expected NNs|NNm|NNh)`)
-        process.exit(2)
-      }
-      await cmdInboxWait({
-        session: opts.session,
-        timeoutMs,
-        wakeOnCorrelatedReply: opts.wakeOnCorrelatedReply,
-        json: opts.json,
-      })
-    })
+    .action(
+      async (opts: {
+        session?: string
+        timeout?: string
+        timeoutMs?: string
+        wakeOnCorrelatedReply?: boolean
+        json?: boolean
+      }) => {
+        const selected = opts.timeoutMs ?? opts.timeout
+        const timeoutMs = selected === undefined ? undefined : parseDurationMs(selected, opts.timeoutMs !== undefined)
+        if (selected !== undefined && timeoutMs === undefined) {
+          console.error(
+            `tribe inbox-wait: bad ${opts.timeoutMs !== undefined ? "--timeout-ms" : "--timeout"} '${selected}' (expected integer milliseconds${opts.timeoutMs !== undefined ? "" : " or NNs|NNm|NNh"})`,
+          )
+          process.exit(2)
+        }
+        await cmdInboxWait({
+          session: opts.session,
+          timeoutMs,
+          wakeOnCorrelatedReply: opts.wakeOnCorrelatedReply,
+          json: opts.json,
+        })
+      },
+    )
 
   program
     .command("wait")
@@ -3024,28 +3053,41 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     )
     .option(inboxWaitSession.flags, inboxWaitSession.description, inboxWaitSession.default)
     .option(inboxWaitTimeout.flags, inboxWaitTimeout.description, "5m")
+    .option(inboxWaitTimeoutMs.flags, inboxWaitTimeoutMs.description)
     .option(inboxWaitWakeOnCorrelatedReply.flags, inboxWaitWakeOnCorrelatedReply.description)
     .option(
       "--no-wake-on-correlated-reply",
       "Do not wake on a validated reply settlement to one of this seat's tracked requests, or a direct status or response whose ref names an open ball this seat requested",
     )
     .option(inboxWaitJson.flags, inboxWaitJson.description)
-    .action(async (opts: { session?: string; timeout?: string; wakeOnCorrelatedReply?: boolean; json?: boolean }) => {
-      const timeoutMs = opts.timeout ? parseDurationMs(opts.timeout) : DEFAULT_WAIT_TIMEOUT_MS
-      if (opts.timeout && timeoutMs === undefined) {
-        console.error(`tribe wait: bad --timeout '${opts.timeout}' (expected NNs|NNm|NNh)`)
-        process.exit(2)
-      }
-      const json = opts.json ?? !process.stdout.isTTY
-      const wakeOnCorrelatedReply = opts.wakeOnCorrelatedReply ?? true
-      await cmdInboxWait({
-        session: opts.session,
-        timeoutMs,
-        wakeOnCorrelatedReply,
-        json,
-        verb: "wait",
-      })
-    })
+    .action(
+      async (opts: {
+        session?: string
+        timeout?: string
+        timeoutMs?: string
+        wakeOnCorrelatedReply?: boolean
+        json?: boolean
+      }) => {
+        const selected = opts.timeoutMs ?? opts.timeout
+        const timeoutMs =
+          selected === undefined ? DEFAULT_WAIT_TIMEOUT_MS : parseDurationMs(selected, opts.timeoutMs !== undefined)
+        if (selected !== undefined && timeoutMs === undefined) {
+          console.error(
+            `tribe wait: bad ${opts.timeoutMs !== undefined ? "--timeout-ms" : "--timeout"} '${selected}' (expected integer milliseconds${opts.timeoutMs !== undefined ? "" : " or NNs|NNm|NNh"})`,
+          )
+          process.exit(2)
+        }
+        const json = opts.json ?? !process.stdout.isTTY
+        const wakeOnCorrelatedReply = opts.wakeOnCorrelatedReply ?? true
+        await cmdInboxWait({
+          session: opts.session,
+          timeoutMs,
+          wakeOnCorrelatedReply,
+          json,
+          verb: "wait",
+        })
+      },
+    )
 
   const repairSession = cliOption(REPAIR_CLI, "session")
   const repairInboxCursor = cliOption(REPAIR_CLI, "inbox-cursor")

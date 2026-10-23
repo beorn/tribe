@@ -32,7 +32,6 @@ import {
   resolveWaitOptions,
   type InboxWaitResult,
 } from "../src/lib/inbox-wait-options.ts"
-import { TRIBE_FETCH_TOPICS_WINDOW } from "../src/lib/fetch-limits.ts"
 
 function buildProgram(): Command {
   const program = new Command("tribe-test")
@@ -337,19 +336,16 @@ describe("registerReadCommands", () => {
     }
   })
 
-  test("tribeFetchScope names the bound only when the read reached it (28909)", () => {
-    expect(tribeFetchScope(3, 50)).toBeNull()
-    expect(tribeFetchScope(49, 50)).toBeNull()
+  test("tribeFetchScope distinguishes exact exhaustion from missing metadata (30865)", () => {
+    expect(tribeFetchScope(3, 50)).toContain("continuation unknown")
+    expect(tribeFetchScope(49, 50)).toContain("continuation unknown")
+    expect(tribeFetchScope(50, 50, { hasMore: false, next: null })).toBeNull()
+    expect(tribeFetchScope(2, 2, { hasMore: true, next: { before: 7 } })).toContain("older rows: --before 7")
+    expect(tribeFetchScope(2, 2, { hasMore: true, next: { since: 9 } })).toContain("newer rows: --since 9")
     const saturated = tribeFetchScope(50, 50)
     expect(saturated).toContain("50 row(s)")
     expect(saturated).toContain("--limit 50")
     expect(saturated).toMatch(/max 500/)
-    // S2 — a --topics read filters a fixed window (one home: the shared
-    // constant), so it says so even when it returned fewer rows than its bound:
-    // it is never exhaustive.
-    expect(tribeFetchScope(3, 50, { topicsWindow: true })).toContain(
-      `filters a ${TRIBE_FETCH_TOPICS_WINDOW}-row window`,
-    )
   })
 
   // 29947 — the bound line must name the verb that actually works and the row

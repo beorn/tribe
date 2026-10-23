@@ -289,10 +289,73 @@ describe("stored subscription governs the pull drain", () => {
         handleToolCall(ctx, "tribe.fetch", { ...selector, topics: ["ops:reaper:*"], limit: 2 }, opts),
       ) as FetchJson
       expect(result.events?.map((event) => event.content)).toEqual(["first retained match", "second retained match"])
+      expect(result).toMatchObject({ has_more: false, next: null })
+      const firstPage = parse(
+        handleToolCall(ctx, "tribe.fetch", { ...selector, topics: ["ops:reaper:*"], limit: 1 }, opts),
+      )
+      expect(firstPage.has_more).toBe(true)
+      const nextPage = parse(
+        handleToolCall(
+          ctx,
+          "tribe.fetch",
+          {
+            ...selector,
+            topics: ["ops:reaper:*"],
+            limit: 1,
+            ...(firstPage.next as Record<string, number>),
+          },
+          opts,
+        ),
+      )
+      expect(nextPage).toMatchObject({ has_more: false, next: null })
+      expect((nextPage.events as Array<{ content: string }>)[0]?.content).toBe(
+        "since" in selector ? "second retained match" : "first retained match",
+      )
       const cursor = db.prepare("SELECT last_inbox_pull_seq AS seq FROM sessions WHERE id = ?").get(SESSION_ID) as {
         seq: number
       }
       expect(cursor.seq).toBe(0)
     },
   )
+
+  // 30865: trust-only exclusions used to happen after LIMIT; a wall could
+  // hide retained rows. Advancing scans must keep their existing progress.
+  it("budgets eligible history across untrusted rows without changing advancing cursor progress", () => {
+    const ctx = makeContext(db, stmts)
+    const opts = makeOpts()
+    registerSession(ctx, PROJECT_ID, () => true, null, 1234, "pull", "/repo", null, "codex")
+    const noise = () => insert(stmts, { content: "untrusted", topic: "health:cpu", recipient: NAME })
+    const firstExcluded = noise()
+    for (let i = 0; i < 501; i++) noise()
+    const first = insert(stmts, { content: "first", recipient: NAME })
+    for (let i = 0; i < 501; i++) noise()
+    const second = insert(stmts, { content: "second", recipient: NAME })
+    for (let i = 0; i < 501; i++) noise()
+    for (const selector of [{ since: 0 }, {}]) {
+      const result = parse(handleToolCall(ctx, "tribe.fetch", { ...selector, to: NAME, limit: 1 }, opts)) as FetchJson
+      const forward = "since" in selector
+      expect(result.events?.map((row) => row.rowid)).toEqual([forward ? first : second])
+      expect(result).toMatchObject({ has_more: true, next: forward ? { since: first } : { before: second } })
+      const last = parse(
+        handleToolCall(
+          ctx,
+          "tribe.fetch",
+          {
+            ...selector,
+            to: NAME,
+            limit: 1,
+            ...(result.next as Record<string, number>),
+          },
+          opts,
+        ),
+      ) as FetchJson
+      expect(last.events?.map((row) => row.rowid)).toEqual([forward ? second : first])
+      expect(last).toMatchObject({ has_more: false, next: null })
+    }
+    expect(stmts.getInboxCursor.get({ $id: SESSION_ID })).toMatchObject({ last_inbox_pull_seq: 0 })
+    const advancing = parse(handleToolCall(ctx, "tribe.fetch", { since: 0, to: NAME, limit: 1, advance: true }, opts))
+    expect(advancing).toMatchObject({ events: [], cursor: firstExcluded })
+    expect(advancing).not.toHaveProperty("has_more")
+    expect(stmts.getInboxCursor.get({ $id: SESSION_ID })).toMatchObject({ last_inbox_pull_seq: firstExcluded })
+  })
 })
