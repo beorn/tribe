@@ -278,9 +278,7 @@ describe("registerReadCommands", () => {
   test("inbox verb exposes no caller-selected mailbox target", () => {
     const cmd = findCmd(buildProgram(), "inbox")
     expect(cmd).toBeDefined()
-    // 28909 added --json-to-file (file output), never a mailbox target: the verb
-    // still cannot name a session or an owner.
-    expect(optionFlags(cmd!)).toEqual(["--limit", "--json", "--peek", "--json-to-file"])
+    // Output and read-intent options never grant a caller-selected mailbox.
     expect(optionFlags(cmd!).some((flag) => flag === "--session" || flag === "--owner")).toBe(false)
   })
 

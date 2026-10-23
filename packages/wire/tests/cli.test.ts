@@ -987,6 +987,25 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   })
 
+  // 30793: argv intent is a process boundary; daemon-only coverage cannot
+  // detect an unsupported consume flag or a peek overridden by another flag.
+  it.each([
+    { flags: ["--consume"], peek: false },
+    { flags: ["--peek", "--consume"], peek: true },
+    { flags: ["--consume", "--peek"], peek: true },
+  ])("inbox honors explicit read intent $flags (30793)", async ({ flags, peek }) => {
+    const payload = { attention: { actionable_unread: [], pending_balls: [] }, events: [], cursor: 7 }
+    const { result, calls } = await runManagedFetchCliAgainst(["inbox", "--json", ...flags], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+    }))
+    expect(result.code, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual(payload)
+    expect(calls).toEqual([
+      { method: "cli_self_inbox_v1", params: { idToken: MANAGED_PENDING_TOKEN, limit: 50, peek } },
+    ])
+    expect(result.stderr.includes("read was destructive")).toBe(!peek)
+  })
+
   it("inbox --json-to-file writes the full JSON and prints one summary line (28909)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-json-to-file-"))
     const path = join(dir, "inbox.json")
@@ -1000,7 +1019,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       cursor: 99,
     }
     try {
-      const { result } = await runManagedFetchCliAgainst(["inbox", "--json-to-file", path], () => ({
+      const { result } = await runManagedFetchCliAgainst(["inbox", "--consume", "--json-to-file", path], () => ({
         result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
       }))
 
@@ -1035,7 +1054,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
     }
     try {
-      const refused = await runManagedFetchCliAgainst(["inbox", "--json-to-file", path], () => outcome)
+      const refused = await runManagedFetchCliAgainst(["inbox", "--consume", "--json-to-file", path], () => outcome)
 
       expect(refused.result.code).not.toBe(0)
       // No daemon call at all: the mailbox was never consumed and the cursor never advanced.
@@ -1048,11 +1067,14 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
       // The rows are still readable afterwards: the same read at a writable path returns them.
       const retryPath = join(dir, "inbox.json")
-      const retried = await runManagedFetchCliAgainst(["inbox", "--json-to-file", retryPath], () => outcome)
+      const retried = await runManagedFetchCliAgainst(
+        ["inbox", "--consume", "--json-to-file", retryPath],
+        () => outcome,
+      )
       expect(retried.result.code).toBe(0)
       expect(readFileSync(retryPath, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
       expect(retried.calls).toEqual([
-        { method: "cli_self_inbox_v1", params: { idToken: MANAGED_PENDING_TOKEN, limit: 50 } },
+        { method: "cli_self_inbox_v1", params: { idToken: MANAGED_PENDING_TOKEN, limit: 50, peek: false } },
       ])
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -1092,9 +1114,12 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     chmodSync(readOnlyDir, 0o500)
     const payload = { attention: { actionable_unread: [], pending_balls: [] }, events: [], cursor: 11 }
     try {
-      const { result, calls } = await runManagedFetchCliAgainst(["inbox", "--json-to-file", target], () => ({
-        result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
-      }))
+      const { result, calls } = await runManagedFetchCliAgainst(
+        ["inbox", "--consume", "--json-to-file", target],
+        () => ({
+          result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+        }),
+      )
 
       expect(result.code).toBe(0)
       expect(calls).toHaveLength(1)

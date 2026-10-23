@@ -1854,6 +1854,72 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(status.unread_count).toBe(1)
   })
 
+  /** @failure 30793: CLI peek advances no cursor but still stamps the owner's
+   * attention-read time and deletes a prune notice nobody acknowledged.
+   * Existing advance:false coverage checks only actionable cursor recovery.
+   * @level l2
+   * @consumer authenticated CLI inbox inspection; no new production seam */
+  it("self inbox peek preserves every read fact until an owner consumes (30793)", async () => {
+    const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
+    cleanup = harness.dispose
+    const name = "@agent/reader"
+    const token = managedToken(name, "peek-read-facts")
+    const { connId } = harness.connectClient()
+    parseResult<RegisterResult>(
+      await harness.register(connId, {
+        name,
+        pid: liveHolderPid,
+        project: "/test",
+        launchParentPid: process.pid,
+        idToken: token,
+        launchId: "peek-read-facts",
+      }),
+    )
+    harness.sendAttentionResponse(name, "a verdict still owed to the owner")
+    harness.db
+      .prepare("INSERT INTO mailbox_prunes (recipient, pruned_count, pruned_before, recorded_at) VALUES (?, 3, 1, 2)")
+      .run(name)
+    const state = () => ({
+      ambient: harness.db.prepare("SELECT last_inbox_pull_seq FROM sessions WHERE name = ?").get(name),
+      actionable: harness.mailboxCursorSeq(name),
+      attentionRead: harness.mailboxAttentionReadAt(name),
+      prune: harness.db.prepare("SELECT pruned_count FROM mailbox_prunes WHERE recipient = ?").get(name),
+    })
+    const before = state()
+    const read = async (peek: boolean) =>
+      parseResult<{
+        structuredContent: {
+          attention: { actionable_unread: Array<{ content: string }>; pruned?: { count: number } }
+          events: Array<{ content: string }>
+        }
+      }>(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: "read-inbox",
+            method: "cli_self_inbox_v1",
+            params: { idToken: token, peek },
+          },
+          connId,
+        ),
+      ).structuredContent
+
+    const inspected = await read(true)
+    expect(inspected.attention.actionable_unread.map((row) => row.content)).toContain(
+      "a verdict still owed to the owner",
+    )
+    expect(inspected.attention.pruned?.count).toBe(3)
+    expect(state()).toEqual(before)
+
+    const consumed = await read(false)
+    expect(consumed.attention.actionable_unread).toEqual(inspected.attention.actionable_unread)
+    expect(consumed.events).toEqual(inspected.events)
+    expect(harness.mailboxCursorSeq(name)).toBeGreaterThan(before.actionable)
+    expect(harness.mailboxAttentionReadAt(name)).not.toBeNull()
+    expect(harness.db.prepare("SELECT pruned_count FROM mailbox_prunes WHERE recipient = ?").get(name)).toBeNull()
+    expect((await read(true)).attention.actionable_unread).toEqual([])
+  })
+
   it("counts attention-required responses through the canonical inbox projection", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose

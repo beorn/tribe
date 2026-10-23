@@ -851,7 +851,11 @@ export function withDispatcher<
             result: await handleToolCall(
               resolution.context,
               TRIBE_COORD_METHODS.fetch,
-              { limit: capability.limit, advance: capability.peek ? false : undefined },
+              {
+                limit: capability.limit,
+                advance: capability.peek ? false : undefined,
+                receipt: capability.peek ? false : undefined,
+              },
               { ...DAEMON_HANDLER_OPTS, callerDeliveryAlive: () => callerDeliveryAlive(callerSocket) },
               connId,
             ),

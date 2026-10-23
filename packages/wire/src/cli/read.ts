@@ -2196,7 +2196,16 @@ export function formatPendingBallLine(ball: {
   return `pending${kind} from ${ball.sender ?? "unknown"} [${ball.request_id ?? "unidentified"}]`
 }
 
-async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean; jsonToFile?: string }): Promise<void> {
+async function cmdInbox(opts: {
+  limit?: number
+  json?: boolean
+  peek?: boolean
+  consume?: boolean
+  jsonToFile?: string
+}): Promise<void> {
+  // 30793: retain the consuming default until owning-read instructions migrate.
+  // Peek always wins; one intent controls the RPC and every output/file path.
+  const consume = !opts.peek && (opts.consume ?? true)
   const idToken = readIdentityTokenFromEnvironment(process.env)
   if (idToken === null) {
     throw new Error(
@@ -2207,7 +2216,7 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean; 
   // 30270 — the daemon consumes the mailbox before this process can write a
   // byte, so a missing directory used to destroy the very rows the file was
   // meant to keep. Refuse first: nothing is consumed and the cursor never moves.
-  if (opts.jsonToFile !== undefined && !opts.peek) {
+  if (opts.jsonToFile !== undefined && consume) {
     const problem = await jsonDestinationProblem(opts.jsonToFile)
     if (problem !== null) {
       throw new Error(
@@ -2218,7 +2227,7 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean; 
       )
     }
   }
-  const raw = await callDaemon("cli_self_inbox_v1", { idToken, limit: opts.limit ?? 50, peek: opts.peek })
+  const raw = await callDaemon("cli_self_inbox_v1", { idToken, limit: opts.limit ?? 50, peek: !consume })
   const result = mcpJsonContent(raw) as SelfInboxResult
   if (opts.jsonToFile !== undefined) {
     // 28909 — the rows a mailbox read produced: the actionable directs plus the
@@ -2228,14 +2237,14 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean; 
       verb: "inbox",
       rows,
       cursor: result.cursor ?? null,
-      ...(opts.peek
+      ...(!consume
         ? {}
         : { recovery: `the mailbox read was consumed; recover those rows with: ${JSON_TO_FILE_RECOVERY}` }),
     })
     // NO SILENT ERRORS: the file mode consumes the mailbox exactly as --json
     // does, so it carries the same destructive warning (on stderr; stdout stays
     // the single summary line).
-    if (written && !opts.peek) {
+    if (written && consume) {
       console.error(
         `tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.`,
       )
@@ -2243,7 +2252,7 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean; 
     return
   }
   if (opts.json) {
-    if (!opts.peek) {
+    if (consume) {
       console.error(
         `tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.`,
       )
@@ -2260,7 +2269,7 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean; 
     // archive is fetchable by id or history.
     console.log(
       `PRUNED: ${pruned.count ?? "?"} unread actionable row(s) addressed to you were archived before ${pruned.before ?? "?"} while this seat was dormant (recorded ${pruned.recorded_at ?? "?"}). ` +
-        `They no longer appear in attention. Recover with: tribe log --json (history) or the MCP fetch with:<peer>. This notice is shown once.`,
+        `They no longer appear in attention. Recover with: tribe log --json (history) or the MCP fetch with:<peer>. ${consume ? "This notice was acknowledged by the consuming read." : "Inspection leaves this notice unacknowledged."}`,
     )
   }
   for (const event of actionable) printSelfInboxEvent(event)
@@ -2290,7 +2299,7 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean; 
     )
   }
 
-  if (opts.peek) {
+  if (!consume) {
     console.log(
       `inbox (PEEK): ${actionable.length} actionable unread; ${pendingTotal} pending ball(s); cursor ${result.cursor ?? 0}.`,
     )
@@ -2944,16 +2953,19 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     .option("--limit <n>", "Maximum events to return (max 500)", int, 50)
     .option("--json", "Emit the canonical machine-readable attention projection")
     .option("--peek", "Read the inbox without consuming messages or advancing the cursor")
+    .option("--consume", "Read and acknowledge the inbox (current default); --peek takes precedence")
     .option(JSON_TO_FILE_FLAG, JSON_TO_FILE_DESCRIPTION)
-    .action(async (opts: { limit?: number; json?: boolean; peek?: boolean; jsonToFile?: string }) => {
-      try {
-        await cmdInbox(opts)
-      } catch (error) {
-        if (opts.json) await writeInboxJsonFailure(error)
-        console.error(error instanceof Error ? error.message : String(error))
-        process.exitCode = 1
-      }
-    })
+    .action(
+      async (opts: { limit?: number; json?: boolean; peek?: boolean; consume?: boolean; jsonToFile?: string }) => {
+        try {
+          await cmdInbox(opts)
+        } catch (error) {
+          if (opts.json) await writeInboxJsonFailure(error)
+          console.error(error instanceof Error ? error.message : String(error))
+          process.exitCode = 1
+        }
+      },
+    )
 
   program
     .command("inbox-drain")
