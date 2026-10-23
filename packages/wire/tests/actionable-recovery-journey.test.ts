@@ -1002,7 +1002,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         acknowledgedIds.push(sent.structuredContent.id)
       }
       const read = await runCli(
-        ["inbox"],
+        ["inbox", "--consume"],
         {
           ...BASE_ENV,
           TRIBE_SOCKET: socketPath,
@@ -1120,7 +1120,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(absentAuthority.stderr).toContain("--session <name>")
     expect(absentAuthority.stderr).toContain("--anonymous")
 
-    const foreignRead = await runCli(["inbox", "--json"], cliEnv, {
+    const foreignRead = await runCli(["inbox", "--consume", "--json"], cliEnv, {
       idToken: foreignToken,
       throughParent: true,
     })
@@ -1144,7 +1144,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     })
     postForeignObserver.close()
 
-    const drainRun = await runCli(["inbox", "--json"], cliEnv, { throughParent: true })
+    const drainRun = await runCli(["inbox", "--consume", "--json"], cliEnv, { throughParent: true })
     expect(drainRun.exitCode, drainRun.stderr).toBe(0)
 
     const drained = JSON.parse(drainRun.stdout) as {
@@ -1174,7 +1174,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(successorRead.exitCode, successorRead.stderr).toBe(0)
     expect(JSON.parse(successorRead.stdout)).toMatchObject({ attention: { actionable_unread: [] }, events: [] })
 
-    const humanRead = await runCli(["inbox"], cliEnv, { throughParent: true })
+    const humanRead = await runCli(["inbox", "--consume"], cliEnv, { throughParent: true })
     expect(humanRead.exitCode, humanRead.stderr).toBe(0)
     expect(humanRead.stdout).toContain("inbox: 0 actionable unread; 0 pending ball(s)")
 
