@@ -102,12 +102,15 @@ if (process.argv[2] === "install" || process.argv[2] === "uninstall") {
     strict: false,
   })
 
-  if (sub === "install" && installArgs.help) {
+  if (installArgs.help) {
+    const installing = sub === "install"
     console.log(
-      "Usage: tribe install [--dry-run] [--autostart <mode>] [--help|-h]\n\n" +
-        "Install Claude hooks, MCP registration and autostart configuration.\n" +
+      `Usage: tribe ${sub} [--dry-run]${installing ? " [--autostart <mode>]" : ""} [--help|-h]\n\n` +
+        (installing
+          ? "Install Claude hooks, MCP registration and autostart configuration.\n"
+          : "Remove Tribe's Claude hooks and MCP registration.\n") +
         "  --dry-run           Show the plan without writing configuration.\n" +
-        "  --autostart <mode>  Set the daemon autostart mode.\n" +
+        (installing ? "  --autostart <mode>  Set the daemon autostart mode.\n" : "") +
         "  -h, --help          Show this help.",
     )
     await drainOutput()

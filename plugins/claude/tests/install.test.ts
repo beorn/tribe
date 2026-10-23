@@ -72,10 +72,10 @@ describe("install CLI", () => {
 
   afterEach(() => rmSync(root, { recursive: true, force: true }))
 
-  function install(...args: string[]) {
+  function runCli(verb: "install" | "uninstall", ...args: string[]) {
     return spawnSync(
       process.execPath,
-      [resolve(import.meta.dirname, "../../../packages/daemon/src/daemon.ts"), "install", ...args],
+      [resolve(import.meta.dirname, "../../../packages/daemon/src/daemon.ts"), verb, ...args],
       {
         cwd: root,
         env: {
@@ -83,33 +83,6 @@ describe("install CLI", () => {
           HOME: home,
           // Runtime cache files are not installer configuration; keep the full-tree check meaningful on cold CI.
           BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
-          XDG_CONFIG_HOME: resolve(root, "config"),
-          XDG_DATA_HOME: resolve(root, "data"),
-          XDG_STATE_HOME: resolve(root, "state"),
-          XDG_RUNTIME_DIR: resolve(root, "run"),
-          TRIBE_SOCKET: resolve(root, "absent.sock"),
-          TRIBE_NO_AUTOSTART: "1",
-          TRIBE_NO_DAEMON: "1",
-          INJECTION_DEBUG_LOG: resolve(root, "injection-debug.jsonl"),
-          TRIBE_RECALL_ENGINE_DIR: undefined,
-          DEBUG: undefined,
-          DEBUG_LOG: undefined,
-        },
-        encoding: "utf8",
-        timeout: 15_000,
-      },
-    )
-  }
-
-  function uninstall(...args: string[]) {
-    return spawnSync(
-      process.execPath,
-      [resolve(import.meta.dirname, "../../../packages/daemon/src/daemon.ts"), "uninstall", ...args],
-      {
-        cwd: root,
-        env: {
-          ...process.env,
-          HOME: home,
           XDG_CONFIG_HOME: resolve(root, "config"),
           XDG_DATA_HOME: resolve(root, "data"),
           XDG_STATE_HOME: resolve(root, "state"),
@@ -153,7 +126,7 @@ describe("install CLI", () => {
       writeJson(resolve(root, ".mcp.json"), { mcpServers: { user: { command: "/user/mcp" } } })
     }
     const before = configuration()
-    const result = install(flag)
+    const result = runCli("install", flag)
     expect(result.error).toBeUndefined()
     expect(result.status, result.stderr).toBe(0)
     expect(configuration()).toEqual(before)
@@ -169,19 +142,48 @@ describe("install CLI", () => {
     ["-h", true],
   ])("uninstall %s preserves all configuration (existing: %s)", (flag, existing) => {
     if (existing) {
-      const seeded = install()
+      const seeded = runCli("install")
       expect(seeded.status, seeded.stderr).toBe(0)
     }
     const before = configuration()
-    const result = uninstall(flag)
+    const result = runCli("uninstall", flag)
     expect(result.error).toBeUndefined()
     expect(result.status, result.stderr).toBe(0)
     expect(configuration(), "help must not remove or rewrite a single file").toEqual(before)
     expect(result.stdout).toMatch(/\busage\b/i)
   })
 
+  // AC2: planUninstall unit tests bypass dispatch/apply; this is the real removal control.
+  test("plain uninstall removes Tribe entries and preserves unrelated configuration", () => {
+    const installed = runCli("install")
+    expect(installed.status, installed.stderr).toBe(0)
+    const settingsPath = resolve(home, ".claude/settings.json")
+    const mcpPath = resolve(root, ".mcp.json")
+    const autostartPath = resolve(home, ".claude/tribe/config.json")
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8"))
+    const userHook = { hooks: [{ type: "command", command: "/user/hook" }] }
+    settings.hooks.SessionStart.push(userHook)
+    settings.permissions = { allow: ["Bash"] }
+    writeJson(settingsPath, settings)
+    // An existing managed registration is valid uninstall input even when install skips optional MCP setup.
+    const userMcp = { command: "/user/mcp" }
+    const mcp = { mcpServers: { tribe: { command: "/fixture/tribe" }, user: userMcp }, other: "preserved" }
+    writeJson(mcpPath, mcp)
+    const autostart = readFileSync(autostartPath, "utf8")
+
+    const result = runCli("uninstall")
+    expect(result.error).toBeUndefined()
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toEqual({
+      ...settings,
+      hooks: { SessionStart: [userHook] },
+    })
+    expect(JSON.parse(readFileSync(mcpPath, "utf8"))).toEqual({ ...mcp, mcpServers: { user: userMcp } })
+    expect(readFileSync(autostartPath, "utf8")).toBe(autostart)
+  })
+
   test("plain install still writes hooks and autostart configuration", () => {
-    const result = install()
+    const result = runCli("install")
     expect(result.error).toBeUndefined()
     expect(result.status, result.stderr).toBe(0)
     const settings = JSON.parse(readFileSync(resolve(home, ".claude/settings.json"), "utf8")) as {
