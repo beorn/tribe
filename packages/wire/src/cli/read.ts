@@ -2203,9 +2203,9 @@ async function cmdInbox(opts: {
   consume?: boolean
   jsonToFile?: string
 }): Promise<void> {
-  // 30793: retain the consuming default until owning-read instructions migrate.
+  // 30793: inspection is safe by default; owning reads opt into consumption.
   // Peek always wins; one intent controls the RPC and every output/file path.
-  const consume = !opts.peek && (opts.consume ?? true)
+  const consume = !opts.peek && (opts.consume ?? false)
   const idToken = readIdentityTokenFromEnvironment(process.env)
   if (idToken === null) {
     throw new Error(
@@ -2241,9 +2241,8 @@ async function cmdInbox(opts: {
         ? {}
         : { recovery: `the mailbox read was consumed; recover those rows with: ${JSON_TO_FILE_RECOVERY}` }),
     })
-    // NO SILENT ERRORS: the file mode consumes the mailbox exactly as --json
-    // does, so it carries the same destructive warning (on stderr; stdout stays
-    // the single summary line).
+    // Explicit consumption carries the same warning in file and stdout modes
+    // (on stderr; file mode keeps stdout to the single summary line).
     if (written && consume) {
       console.error(
         `tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.`,
@@ -2949,11 +2948,11 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
 
   program
     .command("inbox")
-    .description("Read and acknowledge this managed session's canonical mailbox")
+    .description("Inspect this managed session's canonical mailbox; use --consume to acknowledge it")
     .option("--limit <n>", "Maximum events to return (max 500)", int, 50)
     .option("--json", "Emit the canonical machine-readable attention projection")
     .option("--peek", "Read the inbox without consuming messages or advancing the cursor")
-    .option("--consume", "Read and acknowledge the inbox (current default); --peek takes precedence")
+    .option("--consume", "Read and acknowledge the inbox; --peek takes precedence")
     .option(JSON_TO_FILE_FLAG, JSON_TO_FILE_DESCRIPTION)
     .action(
       async (opts: { limit?: number; json?: boolean; peek?: boolean; consume?: boolean; jsonToFile?: string }) => {

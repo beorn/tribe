@@ -1876,6 +1876,8 @@ describe("dispatcher bounded mailbox drain", () => {
       }),
     )
     harness.sendAttentionResponse(name, "a verdict still owed to the owner")
+    const ambientBody = "an ambient row beyond the bounded stdout prefix"
+    harness.sendDaemonBroadcast("notify", ambientBody, "test-peek")
     harness.db
       .prepare("INSERT INTO mailbox_prunes (recipient, pruned_count, pruned_before, recorded_at) VALUES (?, 3, 1, 2)")
       .run(name)
@@ -1909,6 +1911,19 @@ describe("dispatcher bounded mailbox drain", () => {
       "a verdict still owed to the owner",
     )
     expect(inspected.attention.pruned?.count).toBe(3)
+    expect(state()).toEqual(before)
+
+    // 30793: either original lossy consumer can omit the only body. A later
+    // complete inspection must still recover it, with all four facts intact.
+    const body = "a verdict still owed to the owner"
+    expect(JSON.stringify(inspected.events)).not.toContain(body)
+    expect(inspected.events.map((row) => row.content)).toContain(ambientBody)
+    const json = JSON.stringify(inspected)
+    expect(Buffer.from(json).indexOf(ambientBody)).toBeGreaterThanOrEqual(300)
+    expect(Buffer.from(json).subarray(0, 300).toString()).not.toContain(ambientBody)
+    const recovered = await read(true)
+    expect(recovered.attention.actionable_unread).toEqual(inspected.attention.actionable_unread)
+    expect(recovered.events.map((row) => row.content)).toContain(ambientBody)
     expect(state()).toEqual(before)
 
     const consumed = await read(false)

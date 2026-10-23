@@ -1005,6 +1005,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
   // 30793: argv intent is a process boundary; daemon-only coverage cannot
   // detect an unsupported consume flag or a peek overridden by another flag.
   it.each([
+    { flags: [], peek: true },
     { flags: ["--consume"], peek: false },
     { flags: ["--peek", "--consume"], peek: true },
     { flags: ["--consume", "--peek"], peek: true },
@@ -1021,34 +1022,67 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(result.stderr.includes("read was destructive")).toBe(!peek)
   })
 
-  it("inbox --json-to-file writes the full JSON and prints one summary line (28909)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-json-to-file-"))
-    const path = join(dir, "inbox.json")
+  it.each([
+    { flags: [], peek: true },
+    { flags: ["--consume"], peek: false },
+  ])(
+    "inbox $flags --json-to-file preserves intent and writes the full JSON (28909, 30793)",
+    async ({ flags, peek }) => {
+      const dir = mkdtempSync(join(tmpdir(), "tribe-wire-json-to-file-"))
+      const path = join(dir, "inbox.json")
+      const payload = {
+        attention: {
+          actionable_unread: [{ id: "a1", from: "@chief", type: "request", content: "x" }],
+          pending_balls: [],
+          pending_balls_summary: { total: 0 },
+        },
+        events: [{ id: "e1", from: "@chief", type: "notify", content: "y" }],
+        cursor: 99,
+      }
+      try {
+        const { result, calls } = await runManagedFetchCliAgainst(["inbox", ...flags, "--json-to-file", path], () => ({
+          result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+        }))
+
+        expect(result.code).toBe(0)
+        expect(calls).toEqual([
+          { method: "cli_self_inbox_v1", params: { idToken: MANAGED_PENDING_TOKEN, limit: 50, peek } },
+        ])
+        // Only explicit consumption warns; stdout remains the file summary.
+        expect(result.stderr).toBe(
+          peek
+            ? ""
+            : "tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.\n",
+        )
+        expect(result.stdout).toBe(`tribe inbox: 2 row(s), cursor 99, written to ${path}\n`)
+        expect(readFileSync(path, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  it("ordinary human inbox inspection leaves the prune notice unacknowledged (30793)", async () => {
     const payload = {
       attention: {
-        actionable_unread: [{ id: "a1", from: "@chief", type: "request", content: "x" }],
+        actionable_unread: [{ id: "a1", from: "@chief", type: "verdict", content: "verdict body" }],
         pending_balls: [],
-        pending_balls_summary: { total: 0 },
+        pruned: { count: 3, before: 1, recorded_at: 2 },
       },
-      events: [{ id: "e1", from: "@chief", type: "notify", content: "y" }],
-      cursor: 99,
+      events: [],
+      cursor: 7,
     }
-    try {
-      const { result } = await runManagedFetchCliAgainst(["inbox", "--consume", "--json-to-file", path], () => ({
-        result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
-      }))
-
-      expect(result.code).toBe(0)
-      // NO SILENT ERRORS: file mode consumes the mailbox exactly as --json does,
-      // so it carries the same destructive warning — on stderr, stdout stays one line.
-      expect(result.stderr).toBe(
-        "tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.\n",
-      )
-      expect(result.stdout).toBe(`tribe inbox: 2 row(s), cursor 99, written to ${path}\n`)
-      expect(readFileSync(path, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
+    const { result, calls } = await runManagedFetchCliAgainst(["inbox"], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+    }))
+    expect(result.code, result.stderr).toBe(0)
+    expect(calls).toEqual([
+      { method: "cli_self_inbox_v1", params: { idToken: MANAGED_PENDING_TOKEN, limit: 50, peek: true } },
+    ])
+    expect(result.stdout).toContain("verdict body")
+    expect(result.stdout).toContain("Inspection leaves this notice unacknowledged.")
+    expect(result.stdout).not.toContain("[CONSUMED]")
+    expect(result.stderr).toBe("")
   })
 
   // 30270 — a consuming read must never advance the cursor before the file
@@ -1104,7 +1138,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     mkdirSync(path)
     const payload = { attention: { actionable_unread: [], pending_balls: [] }, events: [], cursor: 7 }
     try {
-      const refused = await runManagedFetchCliAgainst(["inbox", "--json-to-file", path], () => ({
+      const refused = await runManagedFetchCliAgainst(["inbox", "--consume", "--json-to-file", path], () => ({
         result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
       }))
 
