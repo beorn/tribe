@@ -144,6 +144,10 @@ describe("install CLI", () => {
     if (existing) {
       const seeded = runCli("install")
       expect(seeded.status, seeded.stderr).toBe(0)
+      // AC1 also covers existing MCP state, which optional install setup may not create.
+      writeJson(resolve(root, ".mcp.json"), {
+        mcpServers: { tribe: { command: "/fixture/tribe" }, user: { command: "/user/mcp" } },
+      })
     }
     const before = configuration()
     const result = runCli("uninstall", flag)
