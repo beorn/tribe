@@ -160,9 +160,12 @@ describe("install CLI", () => {
     const settingsPath = resolve(home, ".claude/settings.json")
     const mcpPath = resolve(root, ".mcp.json")
     const autostartPath = resolve(home, ".claude/tribe/config.json")
-    const settings = JSON.parse(readFileSync(settingsPath, "utf8"))
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+      hooks: Record<string, Array<{ hooks: Array<{ type: string; command: string }> }>>
+      permissions?: { allow: string[] }
+    }
     const userHook = { hooks: [{ type: "command", command: "/user/hook" }] }
-    settings.hooks.SessionStart.push(userHook)
+    settings.hooks.SessionStart!.push(userHook)
     settings.permissions = { allow: ["Bash"] }
     writeJson(settingsPath, settings)
     // An existing managed registration is valid uninstall input even when install skips optional MCP setup.
