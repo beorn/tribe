@@ -1115,7 +1115,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const absentAuthority = await runCli(["inbox", "--json"], cliEnv, { idToken: "", throughParent: true })
     expect(absentAuthority.exitCode).toBe(1)
     expect(absentAuthority.stderr).toContain(
-      "HAB_ID_TOKEN is missing; tribe inbox consumes a managed launch's own mailbox",
+      "HAB_ID_TOKEN is missing; tribe inbox reads a managed launch's own mailbox",
     )
     expect(absentAuthority.stderr).toContain("--session <name>")
     expect(absentAuthority.stderr).toContain("--anonymous")
