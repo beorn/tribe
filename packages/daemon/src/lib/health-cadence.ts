@@ -120,6 +120,8 @@ export type HealthCadenceProjection = ProjectionStamp & {
       /** Null until the seat receives a canonical fetch/inbox-wait attention projection. */
       last_attention_read_at_ms: number | null
       last_attention_read_age_ms: number | null
+      /** Latest current-table non-event send by this exact name; archive is excluded. Zero is observed. */
+      last_non_event_send_at_ms: number | null
       /** Bounded literal identity of the oldest unread actionable, never a log parse. */
       oldest_actionable: {
         id: string
@@ -460,6 +462,11 @@ function inboxLagProjection(
   const attentionReceiptQuery = db.prepare(
     "SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = $session",
   )
+  const lastNonEventSendQuery = db.prepare(`
+    SELECT ts FROM messages
+    WHERE sender = $session AND kind != 'event'
+    ORDER BY ts DESC LIMIT 1
+  `)
 
   // Below, three statements that used to run once each against
   // `WITH journal AS (messages UNION ALL messages_archive)` are split into a
@@ -601,6 +608,7 @@ function inboxLagProjection(
             ts: oldestCandidate.ts,
           }
     const lastAttentionReadAt = receipt?.last_attention_read_at ?? null
+    const lastNonEventSend = lastNonEventSendQuery.get({ $session: session }) as { ts: number } | null
     return [
       {
         as_of_ms: now,
@@ -621,6 +629,7 @@ function inboxLagProjection(
         tracking_since_ms: cursor?.started_at ?? now,
         last_attention_read_at_ms: lastAttentionReadAt,
         last_attention_read_age_ms: lastAttentionReadAt === null ? null : Math.max(0, now - lastAttentionReadAt),
+        last_non_event_send_at_ms: lastNonEventSend?.ts ?? null,
         oldest_actionable:
           oldestActionable === null
             ? null

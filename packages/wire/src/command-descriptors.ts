@@ -951,7 +951,17 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     mcp: {
       name: "health",
       description: "Diagnostic snapshot: silent members, transport wedges, pending balls, cadence, issues.",
-      inputSchema: { type: "object", properties: {} },
+      inputSchema: {
+        type: "object",
+        properties: {
+          sessions: {
+            type: "array",
+            items: { type: "string", minLength: 1 },
+            description:
+              "Additional exact session names to observe, including disconnected names; unknown names are reported separately. Connected sessions remain included.",
+          },
+        },
+      },
       outputSchema: OBJ(
         {
           members: {
@@ -983,7 +993,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           pending_balls: { type: "object", description: "Bounded active-ball summary.", additionalProperties: true },
           cadence: {
             type: "object",
-            description: "24h response latency, open balls, cursor lag and database growth, each with as_of_ms.",
+            description:
+              "24h response latency, open balls, cursor lag and database growth, each with as_of_ms. inbox_lag rows include last_non_event_send_at_ms (latest current messages-table send by exact name excluding events; null for absence, zero observed; archive excluded).",
             additionalProperties: true,
           },
           identity: {

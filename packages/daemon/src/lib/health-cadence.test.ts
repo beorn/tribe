@@ -45,19 +45,21 @@ function insertMessage(
     request?: string
     reply?: string
     attentionRequired?: number
+    kind?: "direct" | "broadcast" | "event"
   },
 ): void {
   db.prepare(`
     INSERT INTO messages (
       id, type, sender, recipient, kind, content, ts, delivery, request, reply, summary, attention_required
     ) VALUES (
-      $id, $type, $sender, $recipient, 'direct', $id, $ts, 'push', $request, $reply, $id, $attention_required
+      $id, $type, $sender, $recipient, $kind, $id, $ts, 'push', $request, $reply, $id, $attention_required
     )
   `).run({
     $id: message.id,
     $type: message.type,
     $sender: message.sender,
     $recipient: message.recipient,
+    $kind: message.kind ?? "direct",
     $ts: message.ts,
     $request: message.request ?? null,
     $reply: message.reply ?? null,
@@ -212,6 +214,51 @@ describe("20876 Tribe health cadence", () => {
     else process.env.TRIBE_SLA_SECONDS = savedSlaSeconds
   })
 
+  // @failure Public attention consumers confuse event/archive traffic or absence with a current non-event send.
+  // @level l2
+  // @consumer Hab attention and captured Wire health readers
+  // Existing lag/READ coverage never asserted this independent sender clock.
+  it("30319 exposes exact current-table non-event send clocks for connected and requested sessions", () => {
+    const expected = new Map<string, number | null>([
+      ["@clock/live", now - 10],
+      ["@clock/left", now - 20],
+      ["@clock/zero", 0],
+      ["@clock/event", null],
+      ["@clock/archive", null],
+      ["@clock/empty", null],
+    ])
+    for (const name of expected.keys()) insertSession(db, { id: name, name, role: "member", now })
+    for (const [id, sender, ts, kind] of [
+      ["live-old", "@clock/live", now - 100, "direct"],
+      ["live-new", "@clock/live", now - 10, "broadcast"],
+      ["live-event", "@clock/live", now, "event"],
+      ["prefix-other", "@clock/live-extra", now, "direct"],
+      ["left", "@clock/left", now - 20, "direct"],
+      ["zero", "@clock/zero", 0, "direct"],
+      ["only-event", "@clock/event", now, "event"],
+    ] as const) {
+      insertMessage(db, { id, type: "notify", sender, recipient: "*", ts, kind })
+    }
+    db.prepare(`INSERT INTO messages_archive
+      (seq, id, type, sender, recipient, kind, content, ts, delivery, archived_at)
+      VALUES (2000, 'clock-archive', 'notify', '@clock/archive', '*', 'direct', '{}', $now, 'pull', $now)`).run({
+      $now: now,
+    })
+    const projection = projectHealthCadence(db, {
+      now,
+      connectedSessionNames: ["@clock/live"],
+      requestedSessionNames: [...expected.keys(), "@clock/missing"],
+    })
+    expect(projection.inbox_lag.map((row) => row.session)).toEqual([...expected.keys()].sort())
+    for (const [session, timestamp] of expected) {
+      expect(projection.inbox_lag.find((row) => row.session === session)).toMatchObject({
+        last_non_event_send_at_ms: timestamp,
+        transport_state: session === "@clock/live" ? "connected" : "disconnected",
+      })
+    }
+    expect(projection.unknown_sessions).toEqual(["@clock/missing"])
+  })
+
   it("projects deterministic latency, lag, ball, and growth evidence from existing tables", () => {
     const options = {
       now,
@@ -265,6 +312,7 @@ describe("20876 Tribe health cadence", () => {
         tracking_since_ms: now,
         last_attention_read_at_ms: null,
         last_attention_read_age_ms: null,
+        last_non_event_send_at_ms: now - 10 * MINUTE,
         oldest_actionable: null,
         evidence: {
           source: "tribe-mailbox-cursors",
@@ -799,6 +847,9 @@ describe("20876 Tribe health cadence", () => {
     ) as { cadence: { unknown_sessions: string[]; inbox_lag: Array<{ session: string; transport_state: string }> } }
     expect(namedHealth.cadence.unknown_sessions).toEqual(["@missing"])
     expect(namedHealth.cadence.inbox_lag.find((row) => row.session === "@chief")?.transport_state).toBe("disconnected")
+    expect(namedHealth.cadence.inbox_lag.find((row) => row.session === "@agent/5")).toMatchObject({
+      last_non_event_send_at_ms: now - MINUTE,
+    })
     expect(health.cadence?.as_of_ms).toBeTypeOf("number")
     expect(health.pending_balls.requests.count).toBe(2)
     expect(health.pending_balls.requests.owners.find((row) => row.owner === "@chief")?.pending).toEqual([
