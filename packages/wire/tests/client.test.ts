@@ -195,6 +195,7 @@ describe("connectToDaemon", () => {
       let attempts = 0
       let client: DaemonClient | undefined
       let clock: ReturnType<typeof vi.spyOn> | undefined
+      let lateResponse: ReturnType<typeof setTimeout> | undefined
       const { server, clients } = await spawnFakeDaemon(sock, (request, socket) => {
         attempts++
         if (attempts === 1) {
@@ -205,8 +206,13 @@ describe("connectToDaemon", () => {
             }),
           )
           socket.write(makeNotification("refused"))
+        } else if (ending === "unanswered retry") {
+          // This success falls after the original700ms deadline but before a
+          // wrongly reset retry deadline (~950ms). Such a reset would resolve
+          // success instead of the required unknown-outcome timeout.
+          lateResponse = setTimeout(() => socket.write(makeResponse(request.id, { sent: true })), 550)
         }
-        // A retry deliberately receives no answer: it could already have mutated business state.
+        // At its original deadline the retry is unanswered and may have taken effect.
       })
       try {
         client = await connectToDaemon(sock)
@@ -239,6 +245,7 @@ describe("connectToDaemon", () => {
         }
         if (ending !== "unanswered retry") expect(attempts).toBe(1)
       } finally {
+        if (lateResponse !== undefined) clearTimeout(lateResponse)
         clock?.mockRestore()
         client?.close()
         for (const socket of clients) socket.destroy()

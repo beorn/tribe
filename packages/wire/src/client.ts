@@ -27,7 +27,7 @@ import {
   evaluateSpawnSourceForScript,
   socketOwnerForBinder,
 } from "./lib/spawn-pin-gate.ts"
-import { isNotification, isResponse, makeNotification, makeRequest } from "./rpc.ts"
+import { isNotification, isResponse, makeNotification, makeRequest, type JsonRpcRequest } from "./rpc.ts"
 import { sanitizeStandaloneDaemonEnvironment } from "./daemon-environment.ts"
 import { createTimers } from "./timers.ts"
 import { readIoReadBytes, readPeerPid, sampleConnectedDaemon, type StallSample } from "./stall-sample.ts"
@@ -219,7 +219,10 @@ function connectToDaemonOnce(
       reject: (error: Error) => void
       timer?: ReturnType<typeof globalThis.setTimeout>
       sampleTimer?: ReturnType<typeof globalThis.setTimeout>
+      retryTimer?: ReturnType<typeof globalThis.setTimeout>
       stallSample?: StallSample
+      waitingForRetry?: boolean
+      onIdentityUndecided?: (error: Error) => boolean
     }
     const pending = new Map<number | string, PendingCall>()
     const notificationHandlers: Array<(method: string, params?: Record<string, unknown>) => void> = []
@@ -256,6 +259,8 @@ function connectToDaemonOnce(
     function clearCallTimers(p: PendingCall): void {
       if (p.timer !== undefined) timers.clearTimeout(p.timer)
       if (p.sampleTimer !== undefined) timers.clearTimeout(p.sampleTimer)
+      if (p.retryTimer !== undefined) timers.clearTimeout(p.retryTimer)
+      p.timer = p.sampleTimer = p.retryTimer = undefined
     }
 
     function rejectPending(err: Error): void {
@@ -271,11 +276,30 @@ function connectToDaemonOnce(
       if (isResponse(msg)) {
         const p = pending.get(msg.id)
         if (p) {
+          // The refused RPC id remains indexed so close/error can still reject
+          // this logical call during its delay. Duplicate replies cannot replay it.
+          if (p.waitingForRetry) return
+          const error = msg.error
+            ? Object.assign(new Error(msg.error.message), { code: msg.error.code, data: msg.error.data })
+            : undefined
+          const data = msg.error?.data
+          if (
+            error &&
+            msg.error?.code === -32003 &&
+            data !== null &&
+            typeof data === "object" &&
+            "kind" in data &&
+            data.kind === "unauthenticated" &&
+            "reason" in data &&
+            data.reason === "identity-undecided" &&
+            p.onIdentityUndecided?.(error)
+          ) {
+            return
+          }
           pending.delete(msg.id)
           clearCallTimers(p)
-          if (msg.error) {
-            p.reject(Object.assign(new Error(msg.error.message), { code: msg.error.code, data: msg.error.data }))
-          } else p.resolve(msg.result)
+          if (error) p.reject(error)
+          else p.resolve(msg.result)
         }
       } else if (isNotification(msg)) {
         for (const h of notificationHandlers) h(msg.method, msg.params)
@@ -329,15 +353,66 @@ function connectToDaemonOnce(
           // Closure retires the managed timers, so a later call cannot arm its deadline (28504).
           if (ac.signal.aborted || socket.destroyed) return Promise.reject(new Error("Connection closed"))
           return new Promise((res, rej) => {
-            const id = nextId++
+            let id = nextId++
             const explicitTimeoutMs = callOpts?.timeoutMs
             const requestTimeoutMs =
               explicitTimeoutMs !== undefined && Number.isFinite(explicitTimeoutMs)
                 ? Math.max(0, explicitTimeoutMs)
                 : callTimeoutMs
+            const requestDeadlineAt = Date.now() + requestTimeoutMs
+            // Freeze JSON semantics before inserting pending state: caller mutation
+            // and custom toJSON must not change a retry's payload/message_id.
+            const request = makeRequest(id, method, params)
             const pendingCall: PendingCall = { resolve: res, reject: rej }
+            let retried = false
+            let lastIdentityRefusal: Error | undefined
+            const expire = () => {
+              if (!pending.delete(id)) return
+              clearCallTimers(pendingCall)
+              // Only an idle delay has a conclusive no-business-effect result.
+              // An unanswered active retry can already have taken effect.
+              if (pendingCall.waitingForRetry && lastIdentityRefusal) {
+                rej(lastIdentityRefusal)
+                return
+              }
+              const error = new DaemonCallTimeoutError(method, requestTimeoutMs, pendingCall.stallSample)
+              if (lastIdentityRefusal) Object.assign(error, { cause: lastIdentityRefusal })
+              rej(error)
+              // A caller-owned long-poll deadline is not daemon-health evidence.
+              if (explicitTimeoutMs === undefined && ++timeouts >= 3) {
+                log.warn?.(`${timeouts} consecutive timeouts, destroying connection`)
+                socket.destroy()
+              }
+            }
+            pendingCall.onIdentityUndecided = (error) => {
+              if (retried) return false
+              retried = true
+              lastIdentityRefusal = error
+              pendingCall.waitingForRetry = true
+              // One fixed delay, entirely inside the original call budget.
+              if (Date.now() + 250 < requestDeadlineAt) {
+                pendingCall.retryTimer = timers.setTimeout(() => {
+                  pendingCall.retryTimer = undefined
+                  if (pending.get(id) !== pendingCall) return
+                  if (Date.now() >= requestDeadlineAt) {
+                    expire()
+                    return
+                  }
+                  if (ac.signal.aborted || socket.destroyed) {
+                    rejectPending(new Error("Connection closed"))
+                    return
+                  }
+                  pending.delete(id)
+                  id = nextId++
+                  pendingCall.waitingForRetry = false
+                  pending.set(id, pendingCall)
+                  socket.write(`${JSON.stringify({ ...(JSON.parse(request) as JsonRpcRequest), id })}\n`)
+                }, 250)
+              }
+              return true
+            }
             pending.set(id, pendingCall)
-            socket.write(makeRequest(id, method, params))
+            socket.write(request)
             const ioBaseline = peerPid !== null ? readIoReadBytes(peerPid) : null
             // Generic 10 s CLI deadlines sample once at 5 s. Explicit long-polls
             // are supposed to wait; sampling them would fire on healthy holds.
@@ -356,17 +431,13 @@ function connectToDaemonOnce(
                 })()
               }, stallSampleAfterMs)
             }
-            pendingCall.timer = timers.setTimeout(() => {
-              if (!pending.delete(id)) return
-              if (pendingCall.sampleTimer !== undefined) timers.clearTimeout(pendingCall.sampleTimer)
-              rej(new DaemonCallTimeoutError(method, requestTimeoutMs, pendingCall.stallSample))
-              // A caller-owned long-poll deadline is an expected outcome, not
-              // evidence that the daemon connection is unhealthy.
-              if (explicitTimeoutMs === undefined && ++timeouts >= 3) {
-                log.warn?.(`${timeouts} consecutive timeouts, destroying connection`)
-                socket.destroy()
-              }
-            }, requestTimeoutMs)
+            pendingCall.timer = timers.setTimeout(
+              () => {
+                pendingCall.timer = undefined
+                expire()
+              },
+              Math.max(0, requestDeadlineAt - Date.now()),
+            )
           }).then((v) => {
             timeouts = 0
             return v
