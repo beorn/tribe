@@ -40,6 +40,8 @@ vi.mock("loggily", async (original) => {
 
 const SEAT = "@dev/brain"
 const SENDER = "@chief"
+const OTHER = "@dev/other"
+const REQ = "d9696732-2e5b-4f3b-9c11-0a5b8f1c4d2e"
 const TS = Date.UTC(2026, 9, 17, 3, 0, 0)
 
 type ToolJson = Record<string, unknown>
@@ -112,10 +114,10 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
   }
 
   /** A balled message whose ball is STILL OPEN for this seat. */
-  function openBall(id: string, recipient = SEAT): void {
-    message(id, id, recipient)
+  function openBall(id: string, recipient = SEAT, requestId = id): void {
+    message(id, requestId, recipient)
     stmts.openPendingRequest.run({
-      $request_id: id,
+      $request_id: requestId,
       $recipient: recipient,
       $sender: SENDER,
       $opened_at: TS,
@@ -127,18 +129,18 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
 
   /** A balled message whose ball has CLOSED: `closePendingRequest` DELETEs the
    *  tracker row, so the row's absence is the whole settlement authority. */
-  function closedBall(id: string, settledBy = SENDER): void {
-    message(id, id)
+  function closedBall(id: string, settledBy = SENDER, recipient = SEAT, requestId = id): void {
+    message(id, requestId, recipient)
     stmts.insertMessage.run({
       $id: `fact-${id}`,
       $type: "event.ball.settled",
       $sender: "daemon",
-      $recipient: SEAT,
+      $recipient: recipient,
       $kind: "event",
       $content: JSON.stringify({
         schema_version: 1,
-        request_id: id,
-        recipient: SEAT,
+        request_id: requestId,
+        recipient,
         sender: SENDER,
         opened_at: TS,
         expires_at: TS + 60_000,
@@ -150,7 +152,7 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
         settled_by: settledBy,
       }),
       $bead_id: null,
-      $ref: id,
+      $ref: requestId,
       $ts: TS + 90_000,
       $delivery: "pull",
       $topic: null,
@@ -161,8 +163,10 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     })
   }
 
-  function read(ids: string[]): ToolJson {
-    return parseToolJson(handleToolCall(ctx, "tribe.fetch", { ids }, makeOpts()))
+  function read(ids: string[], limit?: number): ToolJson {
+    return parseToolJson(
+      handleToolCall(ctx, "tribe.fetch", { ids, ...(limit === undefined ? {} : { limit }) }, makeOpts()),
+    )
   }
 
   /** One durable settlement fact for `recipient`'s row of `requestId`. The
@@ -265,7 +269,8 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
 
     const res = read([absent])
 
-    expect(res.settlement_unresolved).toEqual([absent])
+    expect(res.settlement_unknown_ids).toEqual([absent])
+    expect(res).not.toHaveProperty("settlement_unresolved")
     // The absence is not smuggled onto a row as a state.
     expect((res.events as Array<unknown>).length).toBe(0)
   })
@@ -502,5 +507,116 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
       owner: MINE,
       reason: "answered",
     })
+  })
+  it("control: the same rows resolve by their message ids", () => {
+    openBall("msg-30743-a", SEAT, REQ)
+    openBall("msg-30743-b", OTHER, REQ)
+
+    const rows = events(read(["msg-30743-a", "msg-30743-b"]))
+
+    expect(rows).toHaveLength(2)
+    expect(rows.every((row) => row.settlement === "open")).toBe(true)
+  })
+
+  it("resolves a request id to the same rows as its message ids", () => {
+    openBall("msg-30743-a", SEAT, REQ)
+    openBall("msg-30743-b", OTHER, REQ)
+
+    const byRequest = read([REQ])
+    const byMessages = read(["msg-30743-a", "msg-30743-b"])
+
+    expect(byRequest.settlement_unresolved ?? []).toEqual([])
+    expect(events(byRequest)).toHaveLength(2)
+    expect(events(byRequest)).toEqual(events(byMessages))
+  })
+
+  it("agrees with pending on the count for one tracked send", () => {
+    openBall("msg-30743-a", SEAT, REQ)
+    openBall("msg-30743-b", OTHER, REQ)
+
+    const res = read([REQ])
+    const pending = parseToolJson(handleToolCall(ctx, "tribe.pending", { owner: SEAT }, makeOpts()))
+    const open = events(res).filter((row) => row.settlement === "open")
+
+    expect(open).toHaveLength(2)
+    expect((pending.pending as Array<unknown>).length).toBe(1)
+  })
+
+  it("resolves a closed request id to its settled row, not to an owed ball", () => {
+    const closed = "aa11bb22-cc33-4d44-8e55-ff6600112233"
+    closedBall("msg-30743-closed", SENDER, SEAT, closed)
+
+    const res = read([closed])
+    const rows = events(res)
+
+    expect(res.settlement_unresolved ?? []).toEqual([])
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.settlement).toBe("settled")
+    expect(rows[0]?.settled_by).toBe(SENDER)
+    expect(rows[0]).not.toHaveProperty("owners")
+  })
+
+  it("keeps a closed and an open request apart under mixed owners, and names the unknown id", () => {
+    const open = "bb22cc33-dd44-4e55-9f66-aa7700223344"
+    const closed = "cc33dd44-ee55-4f66-a077-bb8800334455"
+    const absent = "0f0f0f0f-1111-4222-8333-444455556666"
+    openBall("msg-30743-open", SEAT, open)
+    closedBall("msg-30743-closed", SENDER, OTHER, closed)
+
+    const res = read([open, closed, absent])
+    const byId = new Map(events(res).map((row) => [String(row.id), row]))
+
+    expect(res.settlement_unknown_ids).toEqual([absent])
+    expect(res.settlement_unresolved ?? []).toEqual([])
+    expect([...byId.keys()].sort()).toEqual(["msg-30743-closed", "msg-30743-open"])
+    expect(byId.get("msg-30743-open")?.settlement).toBe("open")
+    expect(byId.get("msg-30743-open")?.owners).toEqual([SEAT])
+    expect(byId.get("msg-30743-closed")?.settlement).toBe("settled")
+    expect(byId.get("msg-30743-closed")?.settled_by).toBe(SENDER)
+  })
+  function events(result: ToolJson): Array<Record<string, unknown>> {
+    return [...(result.events as Array<Record<string, unknown>>)].sort((a, b) =>
+      String(a.id).localeCompare(String(b.id)),
+    )
+  }
+
+  // AC2: retained members must remain identifiable without reading archived bodies.
+  it.each(["open", "closed"] as const)(
+    "returns an archived %s member with state and an explicit body marker",
+    (state) => {
+      const id = "msg-30743-archived"
+      if (state === "open") openBall(id, SEAT, REQ)
+      else closedBall(id, SENDER, SEAT, REQ)
+      db.prepare(`INSERT INTO messages_archive (seq,id,type,sender,recipient,kind,content,ts,delivery,archived_at,request)
+      SELECT rowid,id,type,sender,recipient,kind,content,ts,delivery,?,request FROM messages WHERE id=?`).run(
+        TS + 100_000,
+        id,
+      )
+      db.prepare("DELETE FROM messages WHERE id=?").run(id)
+
+      const result = read([REQ])
+      const rows = events(result)
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({ id, settlement: state === "closed" ? "settled" : "open", body_archived: true })
+      expect(rows[0]).not.toHaveProperty("content")
+      expect(result.settlement_unknown_ids ?? []).not.toContain(REQ)
+    },
+  )
+
+  // AC2: a bounded request expansion says which request is incomplete, never unknown or complete.
+  it("deduplicates request/member inputs and reports bounded expansion as partial", () => {
+    for (const suffix of ["a", "b", "c"]) openBall(`msg-30743-${suffix}`, `@dev/${suffix}`, REQ)
+    const complete = read([REQ, "msg-30743-a", REQ], 3)
+    expect(events(complete).map((row) => row.id)).toEqual(["msg-30743-a", "msg-30743-b", "msg-30743-c"])
+    expect(complete.settlement_lookup).toBeUndefined()
+
+    const partial = read([REQ], 2)
+    expect(events(partial)).toHaveLength(2)
+    expect(events(partial).every((row) => row.settlement === "undecided")).toBe(true)
+    expect(partial.settlement_lookup).toMatchObject({ status: "partial", budget: 2 })
+    const detail = String((partial.settlement_lookup as { detail: string }).detail)
+    expect(detail).toContain(REQ)
+    expect(detail).toMatch(/1 .*member/)
+    expect(partial.settlement_unknown_ids ?? []).not.toContain(REQ)
   })
 })
