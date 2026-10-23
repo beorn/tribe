@@ -101,6 +101,33 @@ describe("install CLI", () => {
     )
   }
 
+  function uninstall(...args: string[]) {
+    return spawnSync(
+      process.execPath,
+      [resolve(import.meta.dirname, "../../../packages/daemon/src/daemon.ts"), "uninstall", ...args],
+      {
+        cwd: root,
+        env: {
+          ...process.env,
+          HOME: home,
+          XDG_CONFIG_HOME: resolve(root, "config"),
+          XDG_DATA_HOME: resolve(root, "data"),
+          XDG_STATE_HOME: resolve(root, "state"),
+          XDG_RUNTIME_DIR: resolve(root, "run"),
+          TRIBE_SOCKET: resolve(root, "absent.sock"),
+          TRIBE_NO_AUTOSTART: "1",
+          TRIBE_NO_DAEMON: "1",
+          INJECTION_DEBUG_LOG: resolve(root, "injection-debug.jsonl"),
+          TRIBE_RECALL_ENGINE_DIR: undefined,
+          DEBUG: undefined,
+          DEBUG_LOG: undefined,
+        },
+        encoding: "utf8",
+        timeout: 15_000,
+      },
+    )
+  }
+
   function configuration() {
     return readdirSync(root, { recursive: true, encoding: "utf8" })
       .sort()
@@ -130,6 +157,26 @@ describe("install CLI", () => {
     expect(result.error).toBeUndefined()
     expect(result.status, result.stderr).toBe(0)
     expect(configuration()).toEqual(before)
+    expect(result.stdout).toMatch(/\busage\b/i)
+  })
+
+  // Same dispatch fault one verb over: `uninstall --help` plans and applies a
+  // real uninstall today, so a caller asking what the command does loses hooks.
+  test.each([
+    ["--help", false],
+    ["-h", false],
+    ["--help", true],
+    ["-h", true],
+  ])("uninstall %s preserves all configuration (existing: %s)", (flag, existing) => {
+    if (existing) {
+      const seeded = install()
+      expect(seeded.status, seeded.stderr).toBe(0)
+    }
+    const before = configuration()
+    const result = uninstall(flag)
+    expect(result.error).toBeUndefined()
+    expect(result.status, result.stderr).toBe(0)
+    expect(configuration(), "help must not remove or rewrite a single file").toEqual(before)
     expect(result.stdout).toMatch(/\busage\b/i)
   })
 
