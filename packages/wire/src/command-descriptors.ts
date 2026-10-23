@@ -821,7 +821,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "fetch",
       description:
-        "Snapshot lookup over the MCP fetch handler: --ids returns exactly those rows, and --with/--from/--to/--since/--topics read history without moving the mailbox cursor. The live read is `tribe inbox` (or the MCP fetch tool); `log` is the daemon log. At least one selector is required — a selector-less call would be a second default read that acknowledges the mailbox.",
+        "Snapshot lookup over the MCP fetch handler: --ids resolves message IDs or full tracked request IDs to member rows and settlement state; --with/--from/--to/--since/--topics read history without moving the mailbox cursor. The live read is `tribe inbox` (or the MCP fetch tool); `log` is the daemon log. At least one selector is required — a selector-less call would be a second default read that acknowledges the mailbox.",
       lifetime: "one-shot",
       mapsToMcp: "fetch",
       options: [
@@ -829,7 +829,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           name: "ids",
           flags: "--ids <ids>",
           description:
-            "Comma-separated message IDs (a full id, or a unique prefix of at least 8 characters); returns exactly those rows without advancing the cursor",
+            "Comma-separated message IDs (full or unique 8+ character prefix), or full tracked request IDs expanded to member IDs and settlement state; no cursor move. Archived bodies are omitted and marked body_archived",
           transform: "csv-list",
         },
         {
