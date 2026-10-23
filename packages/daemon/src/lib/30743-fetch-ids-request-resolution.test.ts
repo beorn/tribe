@@ -108,6 +108,43 @@ describe("tribe.fetch ids — a request id and an unknown id (30743)", () => {
     })
   }
 
+  /** A balled message whose ball has CLOSED: closePendingRequest DELETEs the
+   *  tracker row, so the row's absence plus the settlement fact is the whole
+   *  authority. A request-id lookup must reach these rows without pending_request. */
+  function closedBall(requestId: string, messageId: string, recipient: string): void {
+    message(messageId, requestId, recipient)
+    stmts.insertMessage.run({
+      $id: `fact-${requestId}-${recipient}`,
+      $type: "event.ball.settled",
+      $sender: "daemon",
+      $recipient: recipient,
+      $kind: "event",
+      $content: JSON.stringify({
+        schema_version: 1,
+        request_id: requestId,
+        recipient,
+        sender: SENDER,
+        opened_at: TS,
+        expires_at: TS + 60_000,
+        message_id: messageId,
+        fanout: "all",
+        summary: null,
+        settlement: "answered",
+        settled_at: TS + 90_000,
+        settled_by: SENDER,
+      }),
+      $bead_id: null,
+      $ref: requestId,
+      $ts: TS + 90_000,
+      $delivery: "pull",
+      $topic: null,
+      $room_id: null,
+      $request: null,
+      $reply: null,
+      $summary: null,
+    })
+  }
+
   function read(ids: string[]): ToolJson {
     return parseToolJson(handleToolCall(ctx, "tribe.fetch", { ids }, makeOpts()))
   }
@@ -160,5 +197,38 @@ describe("tribe.fetch ids — a request id and an unknown id (30743)", () => {
 
     expect(open).toHaveLength(2)
     expect((pending.pending as Array<unknown>).length).toBe(1)
+  })
+
+  it("resolves a closed request id to its settled row, not to an owed ball", () => {
+    const closed = "aa11bb22-cc33-4d44-8e55-ff6600112233"
+    closedBall(closed, "msg-30743-closed", SEAT)
+
+    const res = read([closed])
+    const rows = events(res)
+
+    expect(res.settlement_unresolved ?? []).toEqual([])
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.settlement).toBe("settled")
+    expect(rows[0]?.settled_by).toBe(SENDER)
+    expect(rows[0]).not.toHaveProperty("owners")
+  })
+
+  it("keeps a closed and an open request apart under mixed owners, and names the unknown id", () => {
+    const open = "bb22cc33-dd44-4e55-9f66-aa7700223344"
+    const closed = "cc33dd44-ee55-4f66-a077-bb8800334455"
+    const absent = "0f0f0f0f-1111-4222-8333-444455556666"
+    openBall(open, "msg-30743-open", SEAT)
+    closedBall(closed, "msg-30743-closed", OTHER)
+
+    const res = read([open, closed, absent])
+    const byId = new Map(events(res).map((row) => [String(row.id), row]))
+
+    expect(res.settlement_unknown_ids).toEqual([absent])
+    expect(res.settlement_unresolved ?? []).toEqual([])
+    expect([...byId.keys()].sort()).toEqual(["msg-30743-closed", "msg-30743-open"])
+    expect(byId.get("msg-30743-open")?.settlement).toBe("open")
+    expect(byId.get("msg-30743-open")?.owners).toEqual([SEAT])
+    expect(byId.get("msg-30743-closed")?.settlement).toBe("settled")
+    expect(byId.get("msg-30743-closed")?.settled_by).toBe(SENDER)
   })
 })
