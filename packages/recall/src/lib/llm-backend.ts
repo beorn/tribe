@@ -353,6 +353,7 @@ export function resolveAvailableCheapModel(llm: LlmBackend | null): CheapModelRe
 
 let probe: Promise<LlmBackend | null> | undefined
 let warned = false
+let unavailableReason: string | undefined
 
 // Structural shape for @bearly/llm's public barrel. The import specifier is
 // runtime-variable (see the docstring above), so TS cannot infer it.
@@ -544,7 +545,7 @@ export async function requireLlm(feature: string): Promise<LlmBackend> {
   const llm = await loadLlm()
   if (!llm) {
     throw new Error(
-      `${feature} requires an LLM backend, but none is available. ` +
+      `${feature} requires an LLM backend, but none is available: ${unavailableReason ?? "backend supplied no load-failure diagnostic"}. ` +
         `Point TRIBE_LLM_DIR at @bearly/llm's src directory exposing its public index.ts barrel ` +
         `(queryModel, provider facts/store, selectModels, and describeDispatchFailure).`,
     )
@@ -553,6 +554,7 @@ export async function requireLlm(feature: string): Promise<LlmBackend> {
 }
 
 function warnOnce(reason: string): void {
+  unavailableReason = reason
   if (warned) return
   warned = true
   process.stderr.write(

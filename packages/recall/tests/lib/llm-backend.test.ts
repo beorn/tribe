@@ -293,7 +293,7 @@ describe("loadLlm shared provider-health surface", () => {
       expect(child.status, child.stderr).toBe(0)
       const result = JSON.parse(child.stdout)
       expect(result.loaded).toBe(false)
-      expect(result.summary).toContain("failed to load")
+      expect(result.summary).toMatch(/failed to load/iu)
       expect(result.summary).toContain(fixture)
       expect(result.summary).toContain("queryModel")
       expect(result.summary).not.toContain("TRIBE_LLM_DIR unset")
