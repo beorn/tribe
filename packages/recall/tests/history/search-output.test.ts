@@ -634,7 +634,7 @@ describe("recall search output", () => {
     // all) has no per-provider exclusions to list — there's nothing to
     // evaluate providers against — so the summary line carries the "why",
     // and it must say so, not silently print an empty report.
-    expect(output).toContain("No LLM backend configured")
+    expect(output).toContain("TRIBE_LLM_DIR is unset")
     expect(output).toContain("TRIBE_LLM_DIR")
     expect(output).toContain("--raw")
     expect(output).toContain("RECALL_LLM_DENY_PROVIDERS in the current environment")

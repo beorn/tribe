@@ -232,10 +232,12 @@ export async function synthesizeResults(
   timeoutMs: number,
   llmOverride?: LlmBackend,
 ): Promise<SynthesisResult> {
-  const llm = llmOverride ?? (await loadLlm())
-  if (!llm) {
+  let llm: LlmBackend
+  try {
+    llm = llmOverride ?? (await requireLlm("Recall synthesis"))
+  } catch (error) {
     log(`no LLM backend (TRIBE_LLM_DIR) — synthesis skipped`)
-    const summary = `No LLM backend configured (TRIBE_LLM_DIR unset). ${resultCountPhrase(results.length)}; rerun with --raw to see them without an LLM.`
+    const summary = `${error instanceof Error ? error.message : String(error)} ${resultCountPhrase(results.length)}; rerun with --raw to see them without an LLM.`
     throw new SynthesisFailure(summary, {
       summary,
       totalBudgetMs: timeoutMs,

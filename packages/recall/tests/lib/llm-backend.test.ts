@@ -265,13 +265,19 @@ describe("selectAvailableCheapModels", () => {
 
 describe("loadLlm shared provider-health surface", () => {
   test("rejects an incomplete public barrel with every missing capability named", () => {
+    // #30820 AC3: stderr alone cannot prove the user-facing synthesis summary
+    // distinguishes a configured but failed barrel from an unset variable.
     const fixture = mkdtempSync(join(tmpdir(), "recall-llm-incomplete-"))
     const backendModule = pathToFileURL(resolve(import.meta.dirname, "../../src/lib/llm-backend.ts")).href
     writeFileSync(join(fixture, "index.ts"), "export const getCheapModels = () => []\n")
     const childScript = `
       const { loadLlm } = await import(process.env.LLM_BACKEND_MODULE)
       const llm = await loadLlm()
-      console.log(JSON.stringify({ loaded: llm !== null }))
+      const { synthesizeResults } = await import(process.env.LLM_SYNTHESIS_MODULE)
+      let summary
+      try { await synthesizeResults("fixture", [], 1000) }
+      catch (error) { summary = error.diagnostics?.summary ?? error.message }
+      console.log(JSON.stringify({ loaded: llm !== null, summary }))
     `
 
     try {
@@ -280,11 +286,17 @@ describe("loadLlm shared provider-health surface", () => {
         env: {
           ...process.env,
           LLM_BACKEND_MODULE: backendModule,
+          LLM_SYNTHESIS_MODULE: pathToFileURL(resolve(import.meta.dirname, "../../src/history/synthesize.ts")).href,
           TRIBE_LLM_DIR: fixture,
         },
       })
       expect(child.status, child.stderr).toBe(0)
-      expect(JSON.parse(child.stdout)).toEqual({ loaded: false })
+      const result = JSON.parse(child.stdout) as { loaded: boolean; summary: string }
+      expect(result.loaded).toBe(false)
+      expect(result.summary).toMatch(/failed to load/iu)
+      expect(result.summary).toContain(fixture)
+      expect(result.summary).toContain("queryModel")
+      expect(result.summary).not.toContain("TRIBE_LLM_DIR unset")
       expect(child.stderr).toContain("public barrel is missing required function exports")
       expect(child.stderr).toContain("createProviderObservationStore")
       expect(child.stderr).toContain("selectModels")
