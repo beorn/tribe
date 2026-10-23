@@ -81,6 +81,8 @@ describe("install CLI", () => {
         env: {
           ...process.env,
           HOME: home,
+          // Runtime cache files are not installer configuration; keep the full-tree check meaningful on cold CI.
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
           XDG_CONFIG_HOME: resolve(root, "config"),
           XDG_DATA_HOME: resolve(root, "data"),
           XDG_STATE_HOME: resolve(root, "state"),
