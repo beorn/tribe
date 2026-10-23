@@ -603,20 +603,25 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     },
   )
 
-  // AC2: a bounded request expansion says which request is incomplete, never unknown or complete.
-  it("deduplicates request/member inputs and reports bounded expansion as partial", () => {
+  it("deduplicates request/member inputs without consuming the row budget twice", () => {
     for (const suffix of ["a", "b", "c"]) openBall(`msg-30743-${suffix}`, `@dev/${suffix}`, REQ)
     const complete = read([REQ, "msg-30743-a", REQ], 3)
     expect(events(complete).map((row) => row.id)).toEqual(["msg-30743-a", "msg-30743-b", "msg-30743-c"])
     expect(complete.settlement_lookup).toBeUndefined()
+  })
 
+  // AC2: expansion remains partial even when the separate settlement read also stops at its budget.
+  // Prior budget coverage asked only explicit message ids; it never expanded one request.
+  it.each([3, SETTLEMENT_LOOKUP_BUDGET + 1])("names omitted members of a %i-member request as partial", (count) => {
+    for (let index = 0; index < count; index++) openBall(`msg-30743-${index}`, `@dev/${index}`, REQ)
     const partial = read([REQ], 2)
     expect(events(partial)).toHaveLength(2)
     expect(events(partial).every((row) => row.settlement === "undecided")).toBe(true)
     expect(partial.settlement_lookup).toMatchObject({ status: "partial", budget: 2 })
     const detail = String((partial.settlement_lookup as { detail: string }).detail)
     expect(detail).toContain(REQ)
-    expect(detail).toMatch(/1 .*member/)
+    expect(detail).toContain(`${count - 2} of ${count} member`)
+    if (count > SETTLEMENT_LOOKUP_BUDGET) expect(detail).toContain("exceed the settlement lookup budget")
     expect(partial.settlement_unknown_ids ?? []).not.toContain(REQ)
   })
 })

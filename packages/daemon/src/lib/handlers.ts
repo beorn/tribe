@@ -4728,6 +4728,8 @@ export type FetchRow = {
    * never had a ball", which is why the settled label keys on it.
    */
   request?: string | null
+  /** IDs snapshots retain archived member metadata without reading its body. */
+  body_archived?: number
 }
 
 export type FetchEvent = {
@@ -5007,7 +5009,7 @@ export type MessageIdSettlementRead =
 export type MessageIdSettlementBatch = {
   verdicts: Map<string, MessageIdSettlementRead>
   unresolved: string[]
-  unavailable?: { status: "unavailable"; budget: number; detail: string }
+  unavailable?: SettlementBatch["unavailable"]
 }
 
 /**
@@ -5077,9 +5079,14 @@ function settlementReadInOneSnapshot(
         FROM messages
         WHERE id IN (${placeholders})
           AND kind != 'event'
+        UNION
+        SELECT id, request
+        FROM messages_archive
+        WHERE id IN (${placeholders})
+          AND kind != 'event'
       `),
       )
-      .all(...messageIds) as Array<{ id: string; request: string | null }>
+      .all(...messageIds, ...messageIds) as Array<{ id: string; request: string | null }>
     for (const row of rows) requests.set(row.id, row.request ?? "")
   } catch (error) {
     return undecidedEverywhere(`message-id read failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -5577,69 +5584,194 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
   }
 
   if (ids && ids.length > 0) {
-    const placeholders = ids.map(() => "?").join(", ")
-    // 27425 — requested-id EXISTENCE is decided over EVERY requested id, with no result
-    // window: the response `LIMIT` below must not make a persisted custom (non-uuid) id
-    // look like an abbreviation. The rows that come back keep their existing limit,
-    // filter and order — only this existence set is independent of them.
-    const persistedIds = new Set(
-      (
-        ctx.db
-          .prepare(
-            assertSingleStatement(`
+    const snapshot = ctx.db.transaction(() => {
+      const placeholders = ids.map(() => "?").join(", ")
+      // 27425 — requested-id EXISTENCE is decided over EVERY requested id, with no result
+      // window: the response `LIMIT` below must not make a persisted custom (non-uuid) id
+      // look like an abbreviation. The rows that come back keep their existing limit,
+      // filter and order — only this existence set is independent of them.
+      const persistedIds = new Set(
+        (
+          ctx.db
+            .prepare(
+              assertSingleStatement(`
             SELECT id
             FROM messages
             WHERE id IN (${placeholders})
               AND kind != 'event'
+            UNION
+            SELECT id FROM messages_archive
+            WHERE id IN (${placeholders}) AND kind != 'event'
           `),
-          )
-          .all(...ids) as Array<{ id: string }>
-      ).map((r) => r.id),
-    )
-    // 28909 — a requested id that is neither persisted nor a canonical uuid is
-    // a PREFIX, not a typo: resolve it when it names exactly one persisted id
-    // and refuse it BY NAME when it is too short, matches nothing, or matches
-    // several ids (listing the candidates). This preserves 27425 — an
-    // abbreviation is never answered as an empty list the caller reads as "no
-    // such message" (NO SILENT ERRORS). The exact-match set above runs FIRST, so
-    // a persisted id that is not a uuid (tribe.send accepts any non-empty client
-    // id) still resolves and is never treated as a prefix.
-    const lookupIds: string[] = []
-    const prefixRefusals: string[] = []
-    for (const id of ids) {
-      if (persistedIds.has(id) || isFullMessageId(id)) {
-        lookupIds.push(id)
-        continue
+            )
+            .all(...ids, ...ids) as Array<{ id: string }>
+        ).map((r) => r.id),
+      )
+      // Both retention tiers keep closed request membership; the tracker also
+      // carries correlations whose key differs from the original message's key.
+      const memberSql = `
+      SELECT id, request FROM messages
+      WHERE request IN (SELECT value FROM json_each($ids)) AND kind != 'event'
+      UNION
+      SELECT id, request FROM messages_archive
+      WHERE request IN (SELECT value FROM json_each($ids)) AND kind != 'event'
+      UNION
+      SELECT message_id AS id, request_id AS request FROM pending_request
+      WHERE request_id IN (SELECT value FROM json_each($ids))
+    `
+      const requestSizes = new Map(
+        (
+          ctx.db
+            .prepare(
+              assertSingleStatement(`
+        SELECT request, COUNT(*) AS total FROM (${memberSql}) GROUP BY request
+      `),
+            )
+            .all({ $ids: JSON.stringify(ids) }) as Array<{ request: string; total: number }>
+        ).map((row) => [row.request, row.total]),
+      )
+      // 28909 — a requested id that is neither persisted nor a canonical uuid is
+      // a PREFIX, not a typo: resolve it when it names exactly one persisted id
+      // and refuse it BY NAME when it is too short, matches nothing, or matches
+      // several ids (listing the candidates). This preserves 27425 — an
+      // abbreviation is never answered as an empty list the caller reads as "no
+      // such message" (NO SILENT ERRORS). The exact-match set above runs FIRST, so
+      // a persisted id that is not a uuid (tribe.send accepts any non-empty client
+      // id) still resolves and is never treated as a prefix.
+      const lookupIds: string[] = []
+      const prefixRefusals: string[] = []
+      for (const id of ids) {
+        if (persistedIds.has(id) || requestSizes.has(id) || isFullMessageId(id)) {
+          lookupIds.push(id)
+          continue
+        }
+        const outcome = resolveMessageIdPrefix(ctx, id)
+        if (outcome.kind === "resolved") lookupIds.push(outcome.id)
+        else prefixRefusals.push(outcome.message)
       }
-      const outcome = resolveMessageIdPrefix(ctx, id)
-      if (outcome.kind === "resolved") lookupIds.push(outcome.id)
-      else prefixRefusals.push(outcome.message)
-    }
-    if (prefixRefusals.length > 0) {
-      return jsonResult({ error: prefixRefusals.join(" ") }, { isError: true })
-    }
-    const lookupPlaceholders = lookupIds.map(() => "?").join(", ")
-    rows = ctx.db
-      .prepare(
-        assertSingleStatement(`
+      if (prefixRefusals.length > 0) {
+        return { error: prefixRefusals.join(" ") }
+      }
+      const expanded = new Map<string, number>()
+      const messageIds = new Set<string>()
+      const unknownIds = new Set<string>()
+      for (const id of lookupIds) {
+        const total = requestSizes.get(id)
+        if (persistedIds.has(id) || total === undefined) {
+          messageIds.add(id)
+          if (!persistedIds.has(id)) unknownIds.add(id)
+          continue
+        }
+        expanded.set(id, total)
+      }
+      if (expanded.size > 0) {
+        const members = ctx.db
+          .prepare(
+            assertSingleStatement(`
+        SELECT DISTINCT members.id, COALESCE(hot.rowid, archived.seq) AS sequence FROM (${memberSql}) AS members
+        LEFT JOIN messages AS hot ON hot.id = members.id
+        LEFT JOIN messages_archive AS archived ON archived.id = members.id
+        WHERE members.request IN (SELECT value FROM json_each($requests))
+        ORDER BY sequence, members.id
+        LIMIT $limit
+      `),
+          )
+          .all({ $ids: JSON.stringify(ids), $requests: JSON.stringify([...expanded.keys()]), $limit: limit }) as Array<{
+          id: string
+        }>
+        for (const member of members) messageIds.add(member.id)
+      }
+      const resolvedIds = [...messageIds]
+      if (resolvedIds.length === 0) {
+        return {
+          rows: [] as FetchRow[],
+          settlement: {
+            verdicts: new Map<string, MessageIdSettlementRead>(),
+            unresolved: [...unknownIds],
+          } as MessageIdSettlementBatch,
+        }
+      }
+      const lookupPlaceholders = resolvedIds.map(() => "?").join(", ")
+      const selected = ctx.db
+        .prepare(
+          assertSingleStatement(`
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-               attention_required, wakes_owner, is_incident, sender_authority, session_id
+               attention_required, wakes_owner, is_incident, sender_authority, session_id, request,
+               0 AS body_archived
         FROM messages
         WHERE id IN (${lookupPlaceholders})
           AND kind != 'event'
+        UNION ALL
+        SELECT id, seq AS rowid, type, sender, recipient, '' AS content, bead_id, ref, ts, delivery, topic, room_id, summary,
+               attention_required, 0 AS wakes_owner, is_incident, sender_authority, session_id, request,
+               1 AS body_archived
+        FROM messages_archive AS archived
+        WHERE id IN (${lookupPlaceholders}) AND kind != 'event'
+          AND NOT EXISTS (SELECT 1 FROM messages AS hot WHERE hot.id = archived.id AND hot.kind != 'event')
         ORDER BY rowid ASC
         LIMIT ?
       `),
+        )
+        .all(...resolvedIds, ...resolvedIds, limit) as FetchRow[]
+      const byId = new Map(selected.map((r) => [r.id, r]))
+      const selectedRows = resolvedIds
+        .map((id) => byId.get(id))
+        .filter((r): r is FetchRow => !!r)
+        .filter((r) => rowMatchesSnapshotFilters(r, snapshotFilters))
+      const settlement = settlementReadForMessageIds(ctx, currentName, resolvedIds)
+      settlement.unresolved = [...unknownIds].filter((id) => settlement.unresolved.includes(id))
+      const partial: string[] = []
+      const partialRequests: string[] = []
+      const returned = new Map(
+        (
+          ctx.db
+            .prepare(
+              assertSingleStatement(`
+          SELECT request, COUNT(*) AS total FROM (${memberSql})
+          WHERE id IN (SELECT value FROM json_each($returned)) GROUP BY request
+        `),
+            )
+            .all({ $ids: JSON.stringify(ids), $returned: JSON.stringify([...byId.keys()]) }) as Array<{
+            request: string
+            total: number
+          }>
+        ).map((row) => [row.request, row.total]),
       )
-      .all(...lookupIds, limit) as FetchRow[]
-    const byId = new Map(rows.map((r) => [r.id, r]))
-    rows = lookupIds
-      .map((id) => byId.get(id))
-      .filter((r): r is FetchRow => !!r)
-      .filter((r) => rowMatchesSnapshotFilters(r, snapshotFilters))
-    // Resolved ids, so an id that names no persisted message is REPORTED
-    // (`settlement_unresolved`) instead of being answered as untracked.
-    idsSettlement = settlementReadForMessageIds(ctx, currentName, lookupIds)
+      for (const [requestId, total] of expanded) {
+        const omitted = total - (returned.get(requestId) ?? 0)
+        if (omitted === 0) continue
+        partial.push(`request ${requestId}: ${omitted} of ${total} member(s) not returned at limit ${limit}`)
+        partialRequests.push(requestId)
+      }
+      if (partial.length > 0) {
+        const affected = ctx.db
+          .prepare(
+            assertSingleStatement(`
+          SELECT DISTINCT id FROM (${memberSql})
+          WHERE request IN (SELECT value FROM json_each($partial))
+            AND id IN (SELECT value FROM json_each($returned))
+        `),
+          )
+          .all({
+            $ids: JSON.stringify(ids),
+            $partial: JSON.stringify(partialRequests),
+            $returned: JSON.stringify([...byId.keys()]),
+          }) as Array<{ id: string }>
+        for (const row of affected) settlement.verdicts.set(row.id, { settlement: "undecided" })
+        const detail = partial.join("; ")
+        log.warn?.(`attention settlement request expansion is partial: ${detail}`)
+        const priorCause = settlement.unavailable?.detail
+        settlement.unavailable = {
+          status: "partial",
+          budget: limit,
+          detail: priorCause === undefined ? detail : `${detail}; ${priorCause}`,
+        }
+      }
+      return { rows: selectedRows, settlement }
+    })()
+    if (snapshot.error !== undefined) return jsonResult({ error: snapshot.error }, { isError: true })
+    rows = snapshot.rows
+    idsSettlement = snapshot.settlement
   } else if (
     withPeer !== null ||
     from !== null ||
@@ -5772,6 +5904,10 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
     .map((row) => {
       const event = fetchEvent(row)
       const ballState = idsSettlement?.verdicts.get(row.id)
+      if (row.body_archived === 1) {
+        const { content: _content, ...metadata } = event
+        return { ...metadata, body_archived: true, ...ballState }
+      }
       return ballState === undefined ? event : { ...event, ...ballState }
     })
   // 29327 — an ids read answers for the batch as well as for its rows: the
@@ -5782,7 +5918,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
       ? {}
       : {
           ...(idsSettlement.unavailable === undefined ? {} : { settlement_lookup: idsSettlement.unavailable }),
-          ...(idsSettlement.unresolved.length === 0 ? {} : { settlement_unresolved: idsSettlement.unresolved }),
+          ...(idsSettlement.unresolved.length === 0 ? {} : { settlement_unknown_ids: idsSettlement.unresolved }),
         }
   return jsonResult(
     attention === null

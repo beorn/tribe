@@ -750,7 +750,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           ids: {
             type: "array",
             items: { type: "string" },
-            description: "Message ids (full, or a unique prefix of at least 8 characters); snapshot, no cursor move.",
+            description:
+              "Message ids (full or unique 8+ character prefix), or full tracked request ids expanded to member ids and settlement state; snapshot, no cursor move. Archived bodies are omitted and marked body_archived.",
           },
           topics: {
             type: "array",
