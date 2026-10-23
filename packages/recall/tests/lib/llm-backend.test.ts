@@ -291,7 +291,7 @@ describe("loadLlm shared provider-health surface", () => {
         },
       })
       expect(child.status, child.stderr).toBe(0)
-      const result = JSON.parse(child.stdout)
+      const result = JSON.parse(child.stdout) as { loaded: boolean; summary: string }
       expect(result.loaded).toBe(false)
       expect(result.summary).toMatch(/failed to load/iu)
       expect(result.summary).toContain(fixture)
