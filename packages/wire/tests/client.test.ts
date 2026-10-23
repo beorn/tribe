@@ -13,7 +13,7 @@ import {
   waitForSocketAlive,
 } from "../src/client.ts"
 import { createLineParser } from "../src/parser.ts"
-import { isRequest, makeNotification, makeResponse } from "../src/rpc.ts"
+import { isRequest, makeError, makeNotification, makeResponse, type JsonRpcRequest } from "../src/rpc.ts"
 import { callTribeTool } from "../src/lib/tool-daemon-call.ts"
 import { withDaemonCall } from "../src/util.ts"
 
@@ -55,14 +55,19 @@ const FAKE_CLIENT = {
  * Spin up a tiny in-memory daemon that echoes calls and pushes notifications.
  * No file paths, no process spawn — just a Unix domain socket server.
  */
-function spawnFakeDaemon(socketPath: string): Promise<{ server: Server; clients: Socket[] }> {
+function spawnFakeDaemon(
+  socketPath: string,
+  handleRequest?: (request: JsonRpcRequest, socket: Socket) => void,
+): Promise<{ server: Server; clients: Socket[] }> {
   const clients: Socket[] = []
   return new Promise((resolveServer) => {
     const server = createServer((socket) => {
       clients.push(socket)
       const parse = createLineParser((msg) => {
         if (isRequest(msg)) {
-          if (msg.method === "echo") {
+          if (handleRequest) {
+            handleRequest(msg, socket)
+          } else if (msg.method === "echo") {
             socket.write(makeResponse(msg.id, { echoed: msg.params }))
           } else if (msg.method === "fragmented") {
             const response = Buffer.from(makeResponse(msg.id, { echoed: msg.params }))
@@ -105,6 +110,149 @@ describe("connectToDaemon", () => {
     connectDelayMs = 0
     rmSync(tmpDir, { recursive: true, force: true })
   })
+
+  /**
+   * @failure Temporary pre-business identity refusals either abandon a recoverable call or replay changed data.
+   * @level l2
+   * @consumer DaemonClient.call over its existing native socket
+   * Ordinary echo/reconnect tests never return the exact typed refusal or mutate params between attempts.
+   */
+  it.each(["verified", "undecided"])(
+    "retries identity-undecided once with frozen params and new RPC ids: %s",
+    async (verdict) => {
+      const sock = join(tmpDir, "d.sock")
+      const requests: JsonRpcRequest[] = []
+      const params = { message_id: "stable-message", nested: { content: "original" } }
+      const { server, clients } = await spawnFakeDaemon(sock, (request, socket) => {
+        requests.push(request)
+        if (requests.length === 1 || verdict === "undecided") {
+          socket.write(
+            makeError(request.id, -32003, "temporary identity refusal", {
+              kind: "unauthenticated",
+              reason: "identity-undecided",
+            }),
+          )
+          params.message_id = "changed-message"
+          params.nested.content = "changed"
+        } else socket.write(makeResponse(request.id, { sent: true }))
+      })
+      let client: DaemonClient | undefined
+      try {
+        client = await connectToDaemon(sock)
+        const result = client.call("send", params, { timeoutMs: 2_000 })
+        if (verdict === "verified") await expect(result).resolves.toEqual({ sent: true })
+        else await expect(result).rejects.toMatchObject({ code: -32003, data: { reason: "identity-undecided" } })
+        expect(requests).toHaveLength(2)
+        expect(clients).toHaveLength(1)
+        expect(requests[1]!.id).not.toBe(requests[0]!.id)
+        expect(requests.map(({ params }) => params)).toEqual([
+          { message_id: "stable-message", nested: { content: "original" } },
+          { message_id: "stable-message", nested: { content: "original" } },
+        ])
+      } finally {
+        client?.close()
+        for (const socket of clients) socket.destroy()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    },
+  )
+
+  /** @failure Generic authentication/registration errors are retried as if definitely pre-business.
+   * @level l2 @consumer DaemonClient.call; existing errors have no structured identity envelope. */
+  it.each([
+    { code: -32002, data: { kind: "unauthenticated", reason: "identity-undecided" } },
+    { code: -32003, data: { kind: "identity-undecided" } },
+    { code: -32003, data: { kind: "other", reason: "identity-undecided" } },
+    { code: -32003, data: { kind: "unauthenticated", reason: "identity-contradicted" } },
+  ])("keeps nonmatching identity errors terminal: $code $data", async ({ code, data }) => {
+    const sock = join(tmpDir, "d.sock")
+    let attempts = 0
+    const { server, clients } = await spawnFakeDaemon(sock, (request, socket) => {
+      attempts++
+      socket.write(makeError(request.id, code, "identity-undecided", data))
+    })
+    const client = await connectToDaemon(sock)
+    try {
+      await expect(client.call("register", {}, { timeoutMs: 1_000 })).rejects.toMatchObject({ code, data })
+      expect(attempts).toBe(1)
+    } finally {
+      client.close()
+      for (const socket of clients) socket.destroy()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  /**
+   * @failure Retrying loses close ownership, extends a deadline, or misreports an active unknown outcome as a refusal.
+   * @level l2
+   * @consumer DaemonClient.call
+   * Generic timeout tests never cross the refusal→delay→active-retry boundary.
+   */
+  it.each(["close", "short deadline", "late wake", "unanswered retry"])(
+    "preserves logical-call settlement during %s",
+    async (ending) => {
+      const sock = join(tmpDir, "d.sock")
+      let attempts = 0
+      let client: DaemonClient | undefined
+      let clock: ReturnType<typeof vi.spyOn> | undefined
+      let lateResponse: ReturnType<typeof setTimeout> | undefined
+      const { server, clients } = await spawnFakeDaemon(sock, (request, socket) => {
+        attempts++
+        if (attempts === 1) {
+          socket.write(
+            makeError(request.id, -32003, "temporary identity refusal", {
+              kind: "unauthenticated",
+              reason: "identity-undecided",
+            }),
+          )
+          socket.write(makeNotification("refused"))
+        } else if (ending === "unanswered retry") {
+          // This success falls after the original700ms deadline but before a
+          // wrongly reset retry deadline (~950ms). Such a reset would resolve
+          // success instead of the required unknown-outcome timeout.
+          lateResponse = setTimeout(() => socket.write(makeResponse(request.id, { sent: true })), 550)
+        }
+        // At its original deadline the retry is unanswered and may have taken effect.
+      })
+      try {
+        client = await connectToDaemon(sock)
+        const timeoutMs = ending === "short deadline" ? 100 : ending === "unanswered retry" ? 700 : 2_000
+        let settled = false
+        client.onNotification(() => {
+          if (ending === "close") client!.close()
+          if (ending === "late wake") clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 5_000)
+        })
+        const started = performance.now()
+        const outcome = await client.call("send", { message_id: "deadline-test" }, { timeoutMs }).then(
+          () => ({ error: null }),
+          (error: Error & { code?: unknown }) => {
+            settled = true
+            return { error }
+          },
+        )
+        expect(settled).toBe(true)
+        if (ending === "close") expect(outcome.error?.message).toBe("Connection closed")
+        else if (ending === "unanswered retry") {
+          expect(outcome.error).toMatchObject({
+            name: "DaemonCallTimeoutError",
+            code: "TRIBE_DAEMON_CALL_TIMEOUT",
+            timeoutMs,
+          })
+          expect(attempts).toBe(2)
+        } else {
+          expect(outcome.error).toMatchObject({ code: -32003, data: { reason: "identity-undecided" } })
+          if (ending === "short deadline") expect(performance.now() - started).toBeGreaterThanOrEqual(80)
+        }
+        if (ending !== "unanswered retry") expect(attempts).toBe(1)
+      } finally {
+        if (lateResponse !== undefined) clearTimeout(lateResponse)
+        clock?.mockRestore()
+        client?.close()
+        for (const socket of clients) socket.destroy()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    },
+  )
 
   it("connects, sends a request, and resolves with the response result", async () => {
     const sock = join(tmpDir, "d.sock")

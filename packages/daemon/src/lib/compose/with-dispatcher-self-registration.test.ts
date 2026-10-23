@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { createConnection, createServer, type Server, type Socket as NetSocket } from "node:net"
 import { addWriter, getLogLevel, setLogLevel, setSuppressConsole, type LogEvent } from "loggily"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { createScope, type InboxWaitResult } from "tribe-wire"
+import { connectToDaemon, createScope, type DaemonClient, type InboxWaitResult } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
 import type { TribeRole } from "tribe-wire/lib/config"
 import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-identity"
@@ -17,7 +17,7 @@ import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
 import { withClientRegistry } from "./with-client-registry.ts"
 import { createBaseTribe } from "./base.ts"
 import { withDispatcher } from "./with-dispatcher.ts"
-import type { LoadedIdentityVerifier } from "../identity-verifier.ts"
+import { boundedIdentityVerifier, type IdentityVerdict, type LoadedIdentityVerifier } from "../identity-verifier.ts"
 
 const managedToken = (name: string, sid: string) =>
   `e30.${Buffer.from(JSON.stringify({ sid, act: { sub: name } })).toString("base64url")}.sig`
@@ -936,6 +936,98 @@ describe("dispatcher operational logging", () => {
     expect(disconnected?.props).not.toHaveProperty("operations")
     expect(JSON.stringify(logs)).not.toContain(socketError.message)
   })
+
+  /** @failure One-shot clients discard an undecided refusal instead of consuming the late checked verdict;
+   *          a retry must still pass dispatcher authority before any business mutation.
+   * @level l2
+   * @consumer DaemonClient.call through the real dispatcher and message store (30030).
+   * Existing socket stubs cannot prove that the refused attempt wrote no business message.
+   */
+  it.each(["verified", "contradicted"] as const)(
+    "recovers a typed identity refusal over a real socket with a late %s verdict and the correct business effect",
+    async (result) => {
+      const token = managedToken("retry-service", "retry-service-sid")
+      const messageId = `identity-retry-${result}`
+      let completeProbe!: (verdict: IdentityVerdict) => void
+      const checked = new Promise<IdentityVerdict>((resolve) => {
+        completeProbe = resolve
+      })
+      const finalVerdict: IdentityVerdict =
+        result === "verified"
+          ? { result, actor: "retry-service", kind: "service", sid: "retry-service-sid", gen: 1 }
+          : { result, reason: "launch no longer live" }
+      let probes = 0
+      const bounded = boundedIdentityVerifier(
+        {
+          path: "/test/late-identity-verifier.ts",
+          suppliesGen: true,
+          verify: async () => {
+            probes++
+            return checked
+          },
+        },
+        { waitMs: 5 },
+      )
+      const verdicts: IdentityVerdict["result"][] = []
+      const harness = createDispatcherHarness({
+        identityVerifier: {
+          ...bounded,
+          async verify(candidate) {
+            const verdict = await bounded.verify(candidate)
+            verdicts.push(verdict.result)
+            // Release only after the production wrapper has conclusively refused its first caller.
+            if (verdict.result === "undecided") completeProbe(finalVerdict)
+            return verdict
+          },
+        },
+      })
+      cleanup = harness.dispose
+      const sockets: NetSocket[] = []
+      const server = createServer((socket) => {
+        sockets.push(socket)
+        harness.dispatcher.handleConnection(socket)
+      })
+      let client: DaemonClient | undefined
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.once("error", reject)
+          server.listen(harness.socketPath, resolve)
+        })
+        client = await connectToDaemon(harness.socketPath, { callTimeoutMs: 5_000 })
+        const outcome = await client
+          .call("tribe.send", {
+            to: "@chief",
+            message: "late checked identity business effect",
+            message_id: messageId,
+            type: "notify",
+            idToken: token,
+          })
+          .then(
+            (value) => ({ value }),
+            (error: unknown) => ({ error }),
+          )
+
+        expect(verdicts).toEqual(["undecided", result])
+        expect(probes, "the retry consumes the completed checked probe").toBe(1)
+        expect(sockets, "identity recovery stays on its original connection").toHaveLength(1)
+        if (result === "verified") {
+          expect(outcome).toMatchObject({ value: { structuredContent: { sent: true, id: messageId } } })
+        } else {
+          expect(outcome).toMatchObject({
+            error: { code: -32003, data: { kind: "unauthenticated", reason: "identity-contradicted" } },
+          })
+        }
+        expect(harness.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE id = ?").get(messageId)).toEqual({
+          n: result === "verified" ? 1 : 0,
+        })
+      } finally {
+        completeProbe(finalVerdict)
+        client?.close()
+        for (const socket of sockets) socket.destroy()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    },
+  )
 
   it("preserves the socket-error reason through a real Unix socket close", async () => {
     const logs = captureDispatcherLogs()
