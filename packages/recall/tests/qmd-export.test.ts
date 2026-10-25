@@ -1,5 +1,14 @@
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -73,6 +82,11 @@ describe("slugFromText", () => {
 
 describe("qmd export boundary", () => {
   test("ships qmd with a Node-loadable native SQLite module", () => {
+    // Write before each blocking child so a stalled CI run retains its last reached stage.
+    const observe = (stage: string, details: Record<string, unknown>) => {
+      writeSync(2, `${JSON.stringify({ test: "qmd packaging", stage, at: new Date().toISOString(), ...details })}\n`)
+    }
+    observe("dependencies", { phase: "start" })
     const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
       dependencies?: Record<string, string>
     }
@@ -82,9 +96,20 @@ describe("qmd export boundary", () => {
     const qmdNodeModules = dirname(dirname(qmdRoot))
     const betterSqliteRoot = realpathSync(join(qmdNodeModules, "better-sqlite3"))
     const betterSqliteEntry = join(betterSqliteRoot, "lib", "index.js")
+    const nodeBinary = realNodeBinary()
+    observe("dependencies", {
+      phase: "end",
+      declaredQmdVersion: manifest.dependencies?.["@tobilu/qmd"],
+      qmdRoot,
+      betterSqliteEntry,
+      nodeBinary,
+      nodeRealPath: realpathSync(nodeBinary),
+    })
 
+    const nativeStarted = performance.now()
+    observe("native-sqlite", { phase: "start" })
     const nativeProbe = spawnSync(
-      realNodeBinary(),
+      nodeBinary,
       [
         "--input-type=module",
         "-e",
@@ -93,12 +118,32 @@ describe("qmd export boundary", () => {
       ],
       { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     )
+    observe("native-sqlite", {
+      phase: "end",
+      elapsedMs: performance.now() - nativeStarted,
+      status: nativeProbe.status,
+      signal: nativeProbe.signal,
+      error: nativeProbe.error?.message,
+      stdout: nativeProbe.stdout,
+      stderr: nativeProbe.stderr,
+    })
     expect(nativeProbe.status, nativeProbe.stderr).toBe(0)
     expect(nativeProbe.stdout).toBe("1")
 
+    const versionStarted = performance.now()
+    observe("qmd-version", { phase: "start" })
     const versionProbe = spawnSync(join(qmdRoot, "bin", "qmd"), ["--version"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+    })
+    observe("qmd-version", {
+      phase: "end",
+      elapsedMs: performance.now() - versionStarted,
+      status: versionProbe.status,
+      signal: versionProbe.signal,
+      error: versionProbe.error?.message,
+      stdout: versionProbe.stdout,
+      stderr: versionProbe.stderr,
     })
     expect(versionProbe.status, versionProbe.stderr).toBe(0)
     expect(versionProbe.stdout.trim()).toMatch(/^qmd 2\.8\.3(?:\s|$)/)
