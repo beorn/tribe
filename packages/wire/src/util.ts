@@ -66,6 +66,7 @@ export async function withDaemonCall<T>(
     return await Promise.race([racePromise, timeout])
   } catch (err) {
     closeClient()
+    if (daemonClient.isDaemonCallTimeoutError(err)) return { kind: "timeout" }
     const code = (err as NodeJS.ErrnoException).code
     if (code === "ECONNREFUSED" || code === "ENOENT") return { kind: "no-daemon" }
     return { kind: "error", message: err instanceof Error ? err.message : String(err) }

@@ -692,6 +692,54 @@ describe("withDaemonCall", () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
+  /**
+   * @failure A client deadline becomes a generic error when it wins before the wrapper deadline.
+   * @level l1
+   * @consumer shared-main updater's bounded unavailable-roster reporting (24292)
+   */
+  it("reports timeout when the client's request deadline wins", async () => {
+    const sock = join(tmpDir, "inner-timeout.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    let clientFailure: unknown
+    try {
+      const outcome = await withDaemonCall(
+        { socketPath: sock, deadlineMs: 5_000, callTimeoutMs: 20 },
+        async (client) => {
+          try {
+            return await client.call("never")
+          } catch (error) {
+            clientFailure = error
+            throw error
+          }
+        },
+      )
+      expect(clientFailure).toMatchObject({ code: "TRIBE_DAEMON_CALL_TIMEOUT", method: "never", timeoutMs: 20 })
+      expect(outcome).toEqual({ kind: "timeout" })
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+    }
+  }, 10_000)
+
+  /**
+   * @failure Normalizing deadlines must not hide a real RPC failure as a timeout.
+   * @level l1
+   * @consumer withDaemonCall preserves non-timeout failures
+   */
+  it("preserves a real RPC error as an error", async () => {
+    const sock = join(tmpDir, "rpc-error.sock")
+    const { server } = await spawnFakeDaemon(sock, (request, socket) => {
+      socket.write(makeError(request.id, -32000, "fixture service failure"))
+    })
+    try {
+      const outcome = await withDaemonCall({ socketPath: sock, deadlineMs: 5_000 }, (client) =>
+        client.call("fixture_failure"),
+      )
+      expect(outcome).toEqual({ kind: "error", message: expect.stringContaining("fixture service failure") })
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+    }
+  }, 10_000)
+
   it("closes the daemon socket when the outer deadline wins before fn returns", async () => {
     const sock = join(tmpDir, "d.sock")
     const { server, clients } = await spawnFakeDaemon(sock)
