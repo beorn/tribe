@@ -211,6 +211,21 @@ describe("parseInjectedContext — the historical nested frame (28904 review)", 
     expect(item.session).toBe("abcd1234")
     expect(item.path).toBeUndefined()
   })
+
+  test("accepts both historical authority='reference' and modern authority-omitted envelopes plus ISO or zoned-local timestamps (31111)", () => {
+    const legacy = historical('<item type="message" date="2026-10-27T16:52:41.432Z" title="iso">body</item>')
+    const modern =
+      '<injected_context source="recall" mode="snippet" trust="untrusted-reference" sent_at="2026-10-27 09:52 PDT">\n' +
+      '<item type="message" date="2026-10-27 09:52 PDT" title="zoned">zoned body</item>\n' +
+      "</injected_context>"
+    const parsedLegacy = parseInjectedContext(legacy)[0]!
+    const parsedModern = parseInjectedContext(modern)[0]!
+    expect(parsedLegacy.attrs.authority).toBe("reference")
+    expect(parsedLegacy.items[0]!.date).toBe("2026-10-27T16:52:41.432Z")
+    expect(parsedModern.attrs.authority).toBeUndefined()
+    expect(parsedModern.attrs.sent_at).toBe("2026-10-27 09:52 PDT")
+    expect(parsedModern.items[0]!.date).toBe("2026-10-27 09:52 PDT")
+  })
 })
 
 describe("tag constants — the one home", () => {

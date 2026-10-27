@@ -215,7 +215,7 @@ describe("runInjectDelta — emit only when there's content to frame", () => {
     expect(result.additionalContext.endsWith(CONTEXT_PROTOCOL_FOOTER)).toBe(true)
   })
 
-  test("the chokepoint envelope carries typed directive attributes", async () => {
+  test("the chokepoint envelope carries typed directive attributes without authority", async () => {
     mockRecall([
       {
         sessionId: "sess-abcd1234",
@@ -226,7 +226,7 @@ describe("runInjectDelta — emit only when there's content to frame", () => {
     ])
     const result = await runInjectDelta("what did we decide about km-storage-sync layering?", createMemorySeenStore())
     if (result.skipped) throw new Error("expected non-skipped result")
-    expect(result.additionalContext).toContain('authority="reference"')
+    expect(result.additionalContext).not.toContain("authority=")
     expect(result.additionalContext).toContain('changes_goal="false"')
     expect(result.additionalContext).toContain('tool_trigger="forbidden"')
   })

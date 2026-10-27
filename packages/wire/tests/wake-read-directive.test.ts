@@ -19,6 +19,8 @@ import { describe, expect, it } from "vitest"
 import {
   composeForwardedRowContent,
   WAKE_READ_DIRECTIVE_MESSAGE_ID,
+  WAKE_READ_DIRECTIVE_PREFIX,
+  WAKE_READ_DIRECTIVE_SHAPE,
   wakeReadDirective,
 } from "../src/lib/wake-read-directive.ts"
 import { markedType } from "../src/lib/notification-only.ts"
@@ -27,13 +29,15 @@ import { directiveEnvelopeMeta, escapeEnvelopeMeta } from "../src/lib/replay-cap
 const ID = "1e058f4a-4721-40d6-af91-867a3ce7075f"
 
 describe("forwarded row content", () => {
-  it("a request forwards as a read directive naming its message, with no body", () => {
+  it("a request forwards as the lean read directive with one id in the envelope attribute only (31111)", () => {
     const row = composeForwardedRowContent({ id: ID, type: "request", content: "29327 PROBE SETTLED 8d42" })
-    expect(row).toEqual({ content: wakeReadDirective(ID), directive: true, unnameable: false })
-    expect(row.content).toBe(`read your tribe inbox now: ${ID}`)
+    expect(row).toEqual({ content: WAKE_READ_DIRECTIVE_PREFIX, directive: true, unnameable: false })
+    expect(row.content).toBe("read your tribe inbox now")
+    expect(row.content).not.toContain(ID)
     expect(row.content).not.toContain("PROBE")
-    // The line the wire forms is the line a pane accepts.
-    expect(WAKE_READ_DIRECTIVE_MESSAGE_ID.test(row.content)).toBe(true)
+    expect(WAKE_READ_DIRECTIVE_SHAPE.test(row.content)).toBe(true)
+    // Pane-typed wakes without an XML envelope still form the message-named line.
+    expect(WAKE_READ_DIRECTIVE_MESSAGE_ID.test(wakeReadDirective(ID))).toBe(true)
   })
 
   it("a row settled at drain keeps its notification-only marker", () => {
@@ -41,7 +45,7 @@ describe("forwarded row content", () => {
     expect(markedType("query", true)).toBe("notification-only:do-not-acknowledge-or-respond-to:query")
     // ...and still carries the directive, never the body it can no longer vouch for.
     expect(composeForwardedRowContent({ id: ID, type: "request", content: "owed body" }).content).toBe(
-      wakeReadDirective(ID),
+      WAKE_READ_DIRECTIVE_PREFIX,
     )
   })
 

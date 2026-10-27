@@ -1024,7 +1024,7 @@ describe("stdio adapter delivery modes", () => {
         (line) =>
           line.method === "notifications/claude/channel" &&
           (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
-          JSON.stringify(line).includes("**tribe**"),
+          !JSON.stringify(line).includes("unavailable — running solo"),
       )
     const membersProbes = () => daemon!.requests.filter((msg) => msg.method === "tribe.members").length
 
@@ -1081,7 +1081,7 @@ describe("stdio adapter delivery modes", () => {
         (line) =>
           line.method === "notifications/claude/channel" &&
           (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
-          JSON.stringify(line).includes("**tribe**"),
+          !JSON.stringify(line).includes("unavailable — running solo"),
       )
 
     await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
@@ -1098,14 +1098,17 @@ describe("stdio adapter delivery modes", () => {
     await waitForCondition(() => startupBanners().length === 2, "changed-mode reconnect banner", {
       timeoutMs: 10_000,
     })
-    expect(JSON.stringify(startupBanners()[1])).toContain("acknowledged transportDelivery=push")
+    const reconnectContent = (startupBanners()[1]?.params as { content?: string } | undefined)?.content ?? ""
+    expect(reconnectContent).toContain("tribe @agent/test push")
+    expect(reconnectContent).not.toContain("\n")
+    expect(reconnectContent.length).toBeLessThanOrEqual(100)
     expect(child.exitCode).toBeNull()
   })
 
-  // 29162 — the startup banner IS the headline a seat reads at startup. When
-  // durable launches have no transport it must name them (sessions lists only
-  // connected rows, so the banner would otherwise read as an all-clear).
-  it("29162: the startup banner names the missing seats from the members headline", async () => {
+  // 29162 + 31111 — the startup banner IS the one-line headline a seat reads at
+  // startup: `tribe <seat> <delivery> · <up> · missing <seats>`, with no peer
+  // roster or `chief:` line.
+  it("29162: the startup banner names the missing seats from the members headline on one line (31111)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath, {
       membersReply: {
@@ -1131,15 +1134,17 @@ describe("stdio adapter delivery modes", () => {
         (line) =>
           line.method === "notifications/claude/channel" &&
           (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
-          JSON.stringify(line).includes("**tribe**"),
+          !JSON.stringify(line).includes("unavailable — running solo"),
       )
 
     await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
     await waitForCondition(() => startupBanners().length === 1, "startup banner carrying the members headline")
-    const banner = JSON.stringify(startupBanners()[0])
-    expect(banner).toContain("8 MISSING (no transport)")
-    expect(banner).toContain("@chief, @dev/5")
+    const bannerContent = (startupBanners()[0]?.params as { content?: string } | undefined)?.content ?? ""
+    expect(bannerContent).toBe("tribe @agent/test pull · 19/23 up · missing @chief @dev/5")
+    expect(bannerContent.length).toBeLessThanOrEqual(100)
+    expect(bannerContent).not.toContain("peers")
+    expect(bannerContent).not.toContain("chief:")
     expect(child.exitCode).toBeNull()
   })
 
@@ -1169,7 +1174,7 @@ describe("stdio adapter delivery modes", () => {
         (line) =>
           line.method === "notifications/claude/channel" &&
           (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
-          JSON.stringify(line).includes("**tribe**"),
+          !JSON.stringify(line).includes("unavailable — running solo"),
       )
     const membersProbes = () => daemon!.requests.filter((msg) => msg.method === "tribe.members").length
 
@@ -1178,7 +1183,9 @@ describe("stdio adapter delivery modes", () => {
 
     // First connect: the pre-join pull banner.
     await waitForCondition(() => startupBanners().length === 1, "first-connect startup banner")
-    expect(JSON.stringify(startupBanners()[0])).toContain("delivery=pull")
+    expect((startupBanners()[0]?.params as { content?: string } | undefined)?.content).toContain(
+      "tribe @agent/test pull",
+    )
 
     // The model joins: push is acknowledged and the join emits its own banner.
     await writeJsonAndWaitForLine(
@@ -1188,7 +1195,9 @@ describe("stdio adapter delivery modes", () => {
       { timeoutMs: 10_000 },
     )
     await waitForCondition(() => startupBanners().length === 2, "join acknowledgement banner")
-    expect(JSON.stringify(startupBanners()[1])).toContain("acknowledged transportDelivery=push")
+    expect((startupBanners()[1]?.params as { content?: string } | undefined)?.content).toContain(
+      "tribe @agent/test push",
+    )
 
     daemon.clients.at(-1)?.destroy()
     await waitForCondition(
@@ -1232,7 +1241,7 @@ describe("stdio adapter delivery modes", () => {
         (line) =>
           line.method === "notifications/claude/channel" &&
           (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
-          JSON.stringify(line).includes("**tribe**"),
+          !JSON.stringify(line).includes("unavailable — running solo"),
       )
 
     await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
@@ -1271,14 +1280,16 @@ describe("stdio adapter delivery modes", () => {
         (line) =>
           line.method === "notifications/claude/channel" &&
           (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
-          JSON.stringify(line).includes("**tribe**"),
+          !JSON.stringify(line).includes("unavailable — running solo"),
       )
 
     await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
     await waitForCondition(() => startupBanners().length === 1, "changed-mode startup banner")
 
-    expect(JSON.stringify(startupBanners()[0])).toContain("acknowledged transportDelivery=push")
+    expect((startupBanners()[0]?.params as { content?: string } | undefined)?.content).toContain(
+      "tribe @agent/test push",
+    )
   })
 
   // @failure 28743: an unreadable seed must never suppress — it announces as on a
@@ -1306,7 +1317,7 @@ describe("stdio adapter delivery modes", () => {
         (line) =>
           line.method === "notifications/claude/channel" &&
           (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
-          JSON.stringify(line).includes("**tribe**"),
+          !JSON.stringify(line).includes("unavailable — running solo"),
       )
 
     await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)

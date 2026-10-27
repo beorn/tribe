@@ -145,7 +145,6 @@ export function wrapInjectedContext(opts: WrapOptions): string {
     `source="${source}"`,
     `mode="${mode}"`,
     `trust="${trust}"`,
-    `authority="reference"`,
     `actionable="false"`,
     `changes_goal="false"`,
     `tool_trigger="forbidden"`,

@@ -163,13 +163,13 @@ describe("wrapInjectedContext — snippet mode", () => {
     expect(out).toContain("</injected_context>")
   })
 
-  test("emits hardened directive attributes", () => {
+  test("emits hardened directive attributes without authority", () => {
     const out = wrapInjectedContext({
       source: "qmd",
       mode: "snippet",
       items: [{ title: "T", path: "/p/x.md", snippet: "some descriptive body content here." }],
     })
-    expect(out).toContain('authority="reference"')
+    expect(out).not.toContain("authority=")
     expect(out).toContain('changes_goal="false"')
     expect(out).toContain('tool_trigger="forbidden"')
     expect(out).toContain('trust="untrusted-reference"')

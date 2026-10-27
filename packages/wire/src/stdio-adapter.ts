@@ -69,10 +69,12 @@ import {
   decidePendingBallSummary,
   directiveEnvelopeMeta,
   escapeEnvelopeMeta,
+  formatStartupBanner,
   MAX_REPLAY_EVENTS,
   replayEnvelopeMeta,
   selectReplayEvents,
   settledEnvelopeMeta,
+  unverifiedEnvelopeMeta,
   type PendingBallSummaryState,
 } from "./lib/replay-cap.ts"
 import {
@@ -195,6 +197,12 @@ function deliveryAcknowledgementSummary(): string {
   return deliveryAcknowledgement.acknowledged
     ? `acknowledged transportDelivery=${deliveryAcknowledgement.transportDelivery}; session delivery=${deliveryAcknowledgement.delivery}`
     : `unacknowledged: ${deliveryAcknowledgement.cause}; delivery=pull`
+}
+
+function bannerDeliveryClause(): string {
+  return deliveryAcknowledgement.acknowledged
+    ? deliveryAcknowledgement.transportDelivery
+    : deliveryAcknowledgementSummary()
 }
 
 function acceptDeliveryAcknowledgement(reply: unknown, requested: "push" | "pull"): void {
@@ -1003,21 +1011,22 @@ function startDaemonConnection(): Promise<DaemonClient> {
           }>
           /** 29162 — present only when durable launches have no transport; names the count and names. */
           headline?: string
+          membership_discrepancy?: {
+            expected_count?: number
+            connected_expected_count?: number
+            connected_durable_launches: number
+            known_durable_launches: number
+            missing: Array<{ name: string }>
+          }
         }
         const sessions = (membersData.sessions ?? []).filter((session) => session.transport_state === "connected")
-        const chief = reg.chief || sessions.find((s: { role: string }) => s.role === "chief")?.name || "(none)"
-        const peers =
-          sessions
-            .filter((s: { name: string }) => s.name !== myName)
-            .map((s: { name: string; role: string }) => `${s.name} (${s.role})`)
-            .join(", ") || "(solo)"
-
-        // 29162 — the banner is the headline a seat actually reads at startup; when
-        // durable launches have no transport, name them here too (sessions lists
-        // only connected rows, so the banner would otherwise read as an all-clear).
-        const missingClause = membersData.headline === undefined ? "" : ` · ${membersData.headline}`
-        const shortSocket = SOCKET_PATH.replace(process.env.HOME ?? "", "~")
-        const banner = `**tribe** ${myName} (${myRole}) · chief: ${chief} · ${deliveryAcknowledgementSummary()} · peers: ${peers}${missingClause} · ${shortSocket}`
+        const banner = formatStartupBanner({
+          name: myName,
+          deliveryClause: bannerDeliveryClause(),
+          connectedCount: sessions.length,
+          headline: membersData.headline,
+          membershipDiscrepancy: membersData.membership_discrepancy,
+        })
         sendChannelDetached(banner, { from: "tribe-startup", type: "system" })
         reportAnnouncedDelivery()
       } catch {
@@ -1387,7 +1396,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       // The join acknowledgement is an announcement too: record it so a later
       // reconnect under this same mode is silent (28743).
       rememberAnnouncedDelivery()
-      sendChannelDetached(`**tribe** ${myName} · ${deliveryAcknowledgementSummary()}`, {
+      sendChannelDetached(`tribe ${myName} ${bannerDeliveryClause()}`, {
         from: "tribe-startup",
         type: "system",
       })
@@ -1572,9 +1581,9 @@ async function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]
     type,
     bead: event.bead ? String(event.bead) : undefined,
     message_id: rowId,
-    // 25074 3d-1a (@cto 2bfc1935 Q0): whether the sender is verified, a bearer, or only claims its name. A row from
-    // before the daemon recorded it, or one the daemon sent, carries none.
-    authority: event.from_authority ? String(event.from_authority) : undefined,
+    // 25074 3d-1a + 31111 (@cto 88bd9852 / f49f779d): omit authority when verified (absence = verified);
+    // carry unverified="<source>" only when unverified, rendered from the existing from_authority.
+    ...unverifiedEnvelopeMeta(event),
     // 27346 - a re-presented attention row names itself a replay and when it
     // was first sent, so a pane that drains hours later does not read it as a
     // fresh instruction.
