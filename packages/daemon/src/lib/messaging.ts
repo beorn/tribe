@@ -681,7 +681,17 @@ export function sendMessage(
   const persistedRequest = correlationRequest ?? requestId
   // The type carries disposition; a correlation field cannot turn progress into settlement.
   const settles = type === "response" || type === "verdict"
-  const replyId = settles ? (ballTracker.reply ?? null) : null
+  let replyId = settles ? (ballTracker.reply ?? null) : null
+  // A unique open-ball prefix is the id pending prints. Ambiguous stays unresolved
+  // so the close cause names the collision instead of guessing.
+  if (replyId !== null && replyId.length >= 8) {
+    const prefixMatches = ctx.stmts.selectOpenBallIdsByPrefix.all({
+      $name: sender,
+      $prefix: replyId,
+    }) as Array<{ request_id: string }>
+    const only = prefixMatches.length === 1 ? prefixMatches[0] : undefined
+    if (only !== undefined) replyId = only.request_id
+  }
   const correlationRef = ref ?? (!settles ? ballTracker.reply : undefined)
   const expiresInMs = ballTracker.expiresInMs ?? defaultBallTtlMs(type, requestId !== null)
   if (

@@ -417,7 +417,8 @@ describe("a closed: 0 ball result names its exact cause from the journal", () =>
       },
     ])
 
-    // The reply path reads the same cause, so the two refusals cannot drift.
+    // Reply resolves a unique prefix to the full id and closes that ball (27327).
+    // pending --close above still names the full id and does not guess.
     const reply = parseToolJson(
       handleToolCall(
         dev3,
@@ -427,12 +428,8 @@ describe("a closed: 0 ball result names its exact cause from the journal", () =>
       ),
     )
     const tracker = reply.tracker as TrackerJson
-    expect(tracker.closed).toBe(0)
-    expect(tracker.cause_fact).toEqual({ kind: "prefix-of-open", full_id: full })
-    expect(tracker.cause).toBe(
-      `closed 0 rows for req-prefix-8f3a: that is a prefix of the open ball ${full} — pass the full id ` +
-        "(tribe pending --owner @dev/3)",
-    )
+    expect(tracker.closed).toBe(1)
+    expect(tracker.request_id).toBe(full)
   })
 
   it("an id that is the prefix of two open balls names neither, because naming one would be a guess", () => {
