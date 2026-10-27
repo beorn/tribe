@@ -419,7 +419,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           name: "expires-in-ms",
           flags: "--expires-in-ms <milliseconds>",
           description:
-            "Override the tracked-ball escalation policy for this send (maximum 1d); with --type status --ref on an open ball you own, re-set that ball's due from now",
+            "Override the tracked-ball escalation policy for this send (maximum 30d); with --type status --ref on an open ball you own, re-set that ball's due from now, deadline passed or not (on an incident ball, its quiet-until)",
           mapsTo: "expires_in_ms",
         },
         {
@@ -507,7 +507,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           pending: {
             type: "array",
             description:
-              "Open requests, or derived expired outcomes (backing live|journal, superseded_count). Ordinary live owner/all rows include taking_receipt_at_ms (number|null), the latest matching reciprocal status/ref timestamp; zero is valid, null is observed absence, and owed (boolean): untaken or past its deadline, the same predicate as inbox-status owed_count. Includes incidents and overdue rows, independent of deadlines. Missing originals use sequence zero; health keeps its stricter original requirement. Emitter and expired/history shapes are unchanged. Each row carries the owner's transport snapshot; vocabulary: /tribe.",
+              "Open requests, or derived expired outcomes (backing live|journal, superseded_count). Ordinary live owner/all rows include taking_receipt_at_ms (number|null), the latest matching reciprocal status/ref timestamp; zero is valid, null is observed absence, and owed (boolean): untaken, past its deadline, or taken without an end, the same predicate as inbox-status owed_count. Includes incidents and overdue rows, independent of deadlines. Missing originals use sequence zero; health keeps its stricter original requirement. Emitter and expired/history shapes are unchanged. Each row carries the owner's transport snapshot; vocabulary: /tribe.",
             items: { type: "object", additionalProperties: true },
           },
           owners: {

@@ -2002,13 +2002,15 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
 
 /**
  * 31092 (@cto 618f9d5a): the one owed predicate - a ball is owed while it is untaken or its deadline has passed.
- * A request is taken by a TAKING receipt after its message (`requestTaken`, from the receipt match). An incident
- * repoints its message on every assertion, so its taking is the quiet-until a receipt set: the due its upsert keeps.
- * inbox-status, pending and health serve this; the Stop hook and skills read it and never recompute it.
+ * A take names an end, so a ball with no due (an assign, or an incident no receipt has quieted) is owed whatever
+ * receipts it has. Otherwise a request is taken by a TAKING receipt after its message (`requestTaken`, from the
+ * strict receipt match); an incident repoints its message on every assertion, so its taking is the quiet-until a
+ * receipt set, the due its upsert keeps. inbox-status, pending and health serve this; the Stop hook and skills read
+ * it and never recompute it.
  */
 function ballOwed(ball: PendingBall, requestTaken: boolean): boolean {
-  if (ball.status === "expired") return true
-  return ball.request_kind === "incident" ? ball.expires_at === null : !requestTaken
+  if (ball.status === "expired" || ball.expires_at === null) return true
+  return ball.request_kind === "request" && !requestTaken
 }
 
 function pendingBallWithContent(row: PendingBallRow, now: number): PendingBallWithContent {
@@ -2978,9 +2980,11 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
     ctx.db.transaction(() => {
       const rows = all ? allPendingBallsWithContent(ctx, now) : pendingBallsForOwnerWithContent(ctx, owner, now)
       const receipts = takingReceiptsForOpenBalls(ctx, ctx.stmts.selectTakingReceiptsForPendingBalls)
+      // `owed` reads the strict receipt match inbox-status and health read, never this zero fallback, so all three agree.
+      const strictReceipts = takingReceiptsForOpenBalls(ctx)
       return rows.map((row) => {
-        const takingReceiptAtMs = receipts.get(pendingFactKey(row)) ?? null
-        return { ...row, taking_receipt_at_ms: takingReceiptAtMs, owed: ballOwed(row, takingReceiptAtMs !== null) }
+        const key = pendingFactKey(row)
+        return { ...row, taking_receipt_at_ms: receipts.get(key) ?? null, owed: ballOwed(row, strictReceipts.has(key)) }
       })
     })()
 
@@ -4430,7 +4434,10 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
       `projection_incomplete: expected ${storedRequestCount} pending requests, projected ${projectedRequestCount}`,
     )
   }
-  const stalePending = pending.filter((ball) => ball.age_ms >= 2 * 60 * 60 * 1000)
+  // 31092: a taken ball whose end is still ahead is not stale, however old; staleness counts owed balls only.
+  const stalePending = pending.filter(
+    (ball) => ball.age_ms >= 2 * 60 * 60 * 1000 && ballOwed(ball, takingReceipts.has(pendingFactKey(ball))),
+  )
   const staleOwnerCount = new Set(stalePending.map((ball) => ball.recipient)).size
   const oldestStaleAgeMs = stalePending.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0)
   const pendingIssues =

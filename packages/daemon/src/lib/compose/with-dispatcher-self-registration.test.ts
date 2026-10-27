@@ -1595,6 +1595,9 @@ describe("dispatcher bounded mailbox drain", () => {
       .prepare("UPDATE pending_request SET expires_at = ? WHERE request_id = 'taken-request'")
       .run(Date.now() - 1)
     expect((await readOwed("taken-past-due")).owed_count).toBe(2)
+    // A ball with no due (an assign) is never taken by a receipt that names no end.
+    harness.db.prepare("UPDATE pending_request SET expires_at = NULL WHERE request_id = 'taken-request'").run()
+    expect((await readOwed("taken-no-end")).owed_count).toBe(2)
 
     // An incident's message repoints on every assertion, so its taking is the quiet-until a receipt set.
     harness.db

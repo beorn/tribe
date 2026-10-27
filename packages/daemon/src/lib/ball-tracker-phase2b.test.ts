@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { incidentKey } from "tribe-wire"
 import { MAX_BALL_TTL_MS } from "./messaging.ts"
 import { resolveRetentionConfig, runRetentionSweep } from "./retention.ts"
 import { registerSession } from "./session.ts"
@@ -1130,6 +1131,57 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       expect(retry).not.toHaveProperty("applied_due")
       expect(dueOf("redue-retry")).toBe(applied)
       expect(messageCount()).toBe(count)
+    })
+
+    it("31092: a take with no end leaves an assign owed; a receipt naming an end takes it until that end", () => {
+      parseToolJson(
+        handleToolCall(
+          chief,
+          "tribe.send",
+          { to: "@agent/1", message: "assigned work", type: "assign", request: "assign-owed" },
+          opts(),
+        ),
+      )
+      expect(dueOf("assign-owed")).toBeNull()
+      const owedOf = () =>
+        (
+          parseToolJson(handleToolCall(agent1, "tribe.pending", {}, opts())) as {
+            pending: Array<{ request_id: string; owed: boolean }>
+          }
+        ).pending.find((row) => row.request_id === "assign-owed")?.owed
+
+      expect(receipt(agent1, "assign-owed").error).toBeUndefined()
+      expect(owedOf()).toBe(true)
+      expect(receipt(agent1, "assign-owed", { expires_in_ms: 600_000 }).error).toBeUndefined()
+      expect(owedOf()).toBe(false)
+      const end = dueOf("assign-owed")!
+      vi.useFakeTimers({ toFake: ["Date"] })
+      try {
+        vi.setSystemTime(end + 1)
+        expect(owedOf()).toBe(true)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("31092: a legacy request row promoted to an incident drops its request deadline, so it is owed at once", () => {
+      const identity = { emitter: "watch", subject: "@agent/1", condition: "legacy-promoted" }
+      const incidentId = incidentKey(identity)
+      openBall(incidentId)
+      expect(dueOf(incidentId)).not.toBeNull()
+
+      parseToolJson(
+        handleToolCall(
+          chief,
+          "tribe.send",
+          { to: "@agent/1", type: "notify", message: "@agent/1 legacy-promoted", incident: identity },
+          opts(),
+        ),
+      )
+      const row = db
+        .prepare("SELECT request_kind, expires_at FROM pending_request WHERE request_id = ? AND recipient = ?")
+        .get(incidentId, "@agent/1") as { request_kind: string; expires_at: number | null }
+      expect(row).toEqual({ request_kind: "incident", expires_at: null })
     })
 
     it("31092: a re-due after expiry is accepted, and its new due alarms again when it passes", () => {
