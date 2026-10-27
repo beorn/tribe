@@ -869,20 +869,6 @@ export function sendMessage(
           request_id: incidentRequestId,
           closed: settlePendingRows(ctx, rows, "incident-cleared", sender, ts),
         }
-        // #30551: a clear that settles no ball still leaves a fact, so it ends an evidence close's suppression.
-        if (tracker.closed === 0) {
-          logEvent(
-            ctx,
-            "incident.cleared",
-            undefined,
-            { schema_version: 1, request_id: incidentRequestId, sender },
-            {
-              sender: "daemon",
-              ref: incidentRequestId,
-              ts,
-            },
-          )
-        }
       }
       // A daemon boundary settles expired rows before this send path runs.
       // An ordinary still-open request is closed by a final-type reply here.

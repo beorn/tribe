@@ -667,6 +667,13 @@ describe("one ball per incident (habwire stage 2(d))", () => {
       expect(cleared.incident).toEqual({ transition: "cleared", wakesOwner: false })
     })
 
+    it("clearing with no standing ball closes zero and creates no cleared event", () => {
+      const watcher = makeContext(db, stmts, "@fleet")
+      const result = call(watcher, { to: "@chief", message: "recovered", incident: { ...INCIDENT, active: false } })
+      expect(result.tracker).toMatchObject({ closed: 0 })
+      expect(db.prepare("SELECT id FROM messages WHERE type = 'event.incident.cleared'").all()).toEqual([])
+    })
+
     it("active:false over the wire closes the ball", () => {
       const watcher = makeContext(db, stmts, "@fleet")
       call(watcher, { to: "@chief", message: "wedged", incident: INCIDENT })
