@@ -320,32 +320,181 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
   })
 
   /**
-   * 24526: sender guidance must use the same transport snapshot as delivery.
-   * `connected-no-consumer` is an ordinary pull seat between reads, while a
-   * mailbox-read failure is unknown rather than proof that a seat is gone.
+   * 24526, 26522 (@cto 8a135bdb + 00:53 PDT correction): sender guidance must
+   * describe what the daemon will actually do with the row. A connected push seat in
+   * normal/ambient mode gets direct rows inline (`shouldDeliver === true`) and needs
+   * no note; a connected push seat in `focus` mode skips the push wakeup while the
+   * row stays in their inbox until they fetch; a connected seat with no live push
+   * client is not woken and reads the row on its next drain (even in focus mode).
    */
-  it("warns only for untracked named sends with no live recipient transport", () => {
+  it("warns on untracked named sends when the recipient has no live transport, filters to focus, or has no live push client (24526, 26522)", () => {
     SEATS.forEach((seat, index) => addSeat(seat, index + 2))
-    const send = (to: string, type = "notify", request?: true) =>
+    const send = (to: string, type = "notify", request?: true, ref?: string, fromCtx: TribeContext = sender) =>
       toolJson(
         handleToolCall(
-          sender,
+          fromCtx,
           "tribe.send",
-          { to, message: "please inspect", type, summary: "inspection", request },
+          { to, message: "please inspect", type, summary: "inspection", request, ...(ref ? { ref } : {}) },
           opts(),
         ),
       )
 
+    // 1. Push recipient in normal mode: handed inline by shouldDeliver -> no note.
     expect(send("@push/joined").warning).toBeUndefined()
-    expect(send("@pull/idle").warning).toBeUndefined()
-    expect(send("@pull/waiting").warning).toBeUndefined()
 
+    // 2. Push recipient in focus mode: push skips wakeup, row stays fetchable in inbox -> focus note.
+    db.prepare("UPDATE sessions SET filter_mode = 'focus' WHERE name = '@push/joined'").run()
+    const focusNote = send("@push/joined")
+    expect(String(focusNote.warning)).toContain(
+      "delivery note — @push/joined is in focus mode: no wakeup for this notify; it stays in their inbox until they fetch",
+    )
+    expect(String(focusNote.warning)).toContain("--ref <open-request-id>")
+    expect(String(send("@push/joined", "status").warning)).toContain(
+      "@push/joined is in focus mode: no wakeup for this status; it stays in their inbox until they fetch",
+    )
+    // Prove the focus-mode wording's claim against getInboxRows in focus mode (@cto 8a135bdb correction, B1).
+    const focusDrainedIds = (
+      stmts.getInboxRows.all({
+        $since: 0,
+        $name: "@push/joined",
+        $limit: 50,
+        $filter_mode: "focus",
+        $filter_mute: null,
+        $filter_until: null,
+        $now: NOW,
+      }) as Array<{ id: string }>
+    ).map((r) => r.id)
+    expect(focusDrainedIds).toContain(focusNote.id)
+    db.prepare("UPDATE sessions SET filter_mode = 'normal' WHERE name = '@push/joined'").run()
+
+    // 3. Connected pull seats (no live push-client consumer): wakes nothing, returned by next drain
+    // (checked before filter_mode so a pull seat in focus mode still gets the no-live-push-client note).
+    db.prepare("UPDATE sessions SET filter_mode = 'focus' WHERE name = '@pull/idle'").run()
+    const idleNote = send("@pull/idle")
+    expect(String(idleNote.warning)).toContain(
+      "delivery note — @pull/idle has no live push client: this notify wakes nothing and counts as no attention; it is returned by @pull/idle's next drain",
+    )
+    expect(String(idleNote.warning)).toContain("--ref <open-request-id>")
+    db.prepare("UPDATE sessions SET filter_mode = 'normal' WHERE name = '@pull/idle'").run()
+    const waitingNote = send("@pull/waiting")
+    expect(String(waitingNote.warning)).toContain(
+      "@pull/waiting has no live push client: this notify wakes nothing and counts as no attention; it is returned by @pull/waiting's next drain",
+    )
+    // Prove the wording's claim against getInboxRows in both normal and focus modes (@cto 8a135bdb binding 4 + B1).
+    for (const mode of ["normal", "focus"] as const) {
+      const drainedIds = (
+        stmts.getInboxRows.all({
+          $since: 0,
+          $name: "@pull/idle",
+          $limit: 50,
+          $filter_mode: mode,
+          $filter_mute: null,
+          $filter_until: null,
+          $now: NOW,
+        }) as Array<{ id: string }>
+      ).map((r) => r.id)
+      expect(drainedIds).toContain(idleNote.id)
+    }
+
+    // 4. Open-ball-ref rows (TAKING status+ref or notify+ref on an open ball): attention_required=1 -> no note.
+    const openReq = toolJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "@pull/idle", message: "take this", type: "request", request: "ball-26522", summary: "take this" },
+        opts(),
+      ),
+    )
+    expect(openReq.request_id).toBe("ball-26522")
+    const idleCtx = createTribeContext({
+      db,
+      stmts,
+      sessionId: "sess-2",
+      sessionRole: "member",
+      initialName: "@pull/idle",
+      domains: [],
+      claudeSessionId: null,
+      claudeSessionName: null,
+    })
+    expect(send("@sender", "status", undefined, "ball-26522", idleCtx).warning).toBeUndefined()
+    expect(send("@pull/idle", "notify", undefined, "ball-26522", sender).warning).toBeUndefined()
+
+    // 5. Silent cases (@cto 8a135bdb binding 6): watchers, anonymous pending-*, broadcasts, self-notify.
+    const watcherCtx = addSeat(
+      {
+        name: "wait-watch",
+        delivery: "pull",
+        connected: true,
+        readableMailbox: false,
+        ownerWaiting: false,
+        lastReadAgeMs: null,
+      },
+      20,
+    )
+    const anonCtx = addSeat(
+      {
+        name: "pending-anon",
+        delivery: "pull",
+        connected: true,
+        readableMailbox: false,
+        ownerWaiting: false,
+        lastReadAgeMs: null,
+      },
+      21,
+    )
+    expect(send("@pull/idle", "notify", undefined, undefined, watcherCtx).warning).toBeUndefined()
+    expect(send("@pull/idle", "notify", undefined, undefined, anonCtx).warning).toBeUndefined()
+    expect(send("*", "notify").warning).toBeUndefined()
+    expect(send("@sender", "notify").warning).toBeUndefined()
+
+    // 5b. S3/S4: 2 same-name active sessions for one seat (a waiting pull sibling at active[0]
+    // alongside a live push-client sibling at active[1]) union consumers across live siblings and
+    // evaluate filter_mode per live push-client session id (defaulting a row-less push sibling to
+    // 'normal' just as with-broadcast.ts:96 shouldDeliver does, never borrowing another sibling's row).
+    addSeat(
+      {
+        name: "@multi/seat",
+        delivery: "pull",
+        connected: true,
+        readableMailbox: true,
+        ownerWaiting: true,
+        lastReadAgeMs: null,
+      },
+      30,
+    )
+    addSeat(
+      {
+        name: "@multi/seat",
+        delivery: "push",
+        connected: true,
+        readableMailbox: true,
+        ownerWaiting: false,
+        lastReadAgeMs: null,
+      },
+      31,
+    )
+    db.prepare("UPDATE sessions SET filter_mode = 'normal', updated_at = ? WHERE id = 'sess-31'").run(NOW)
+    expect(send("@multi/seat").warning).toBeUndefined()
+    db.prepare("UPDATE sessions SET filter_mode = 'focus' WHERE id = 'sess-31'").run()
+    expect(String(send("@multi/seat").warning)).toContain(
+      "@multi/seat is in focus mode: no wakeup for this notify; it stays in their inbox until they fetch",
+    )
+    // S4: When the single remaining DB row for @multi/seat belongs to the pull sibling (sess-30) in
+    // focus mode and live push sibling sess-31 has no DB row, push delivery default-allows
+    // (getSessionFilter('sess-31') === undefined -> shouldDeliver returns true), so no focus note fires.
+    db.prepare(
+      "UPDATE sessions SET id = 'sess-30', filter_mode = 'focus', updated_at = ? WHERE name = '@multi/seat'",
+    ).run(NOW + 1_000)
+    expect(send("@multi/seat").warning).toBeUndefined()
+
+    // 6. Disconnected / deaf recipients retain transport/mailbox diagnostics (including on open-ball refs, S2).
     stmts.touchMailboxAttentionRead.run({ $recipient: "@pull/gone", $now: NOW - 42_000 })
     const gone = send("@pull/gone")
     expect(gone.sent).toBe(true)
     expect(String(gone.warning)).toContain("@pull/gone")
     expect(String(gone.warning)).toContain("opens no obligation")
     expect(String(gone.warning)).toContain("type=request")
+    expect(String(gone.warning)).toContain("--ref <open-request-id>")
     expect(String(gone.warning)).toContain("transport=disconnected")
     expect(String(gone.warning)).toContain("canonical mailbox READ=observed age 42000ms")
     expect(String(gone.warning)).not.toContain("not answer-capable")
@@ -353,6 +502,17 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
       count: 0,
     })
     expect(String(send("@pull/gone", "status").warning)).toContain("this status opens no obligation")
+    stmts.openPendingRequest.run({
+      $request_id: "ball-gone",
+      $recipient: "@pull/gone",
+      $sender: "@sender",
+      $opened_at: NOW,
+      $expires_at: NOW + 60_000,
+      $message_id: "ball-gone",
+      $fanout: "first",
+    })
+    expect(String(send("@pull/gone", "notify", undefined, "ball-gone").warning)).toContain("transport=disconnected")
+    stmts.closePendingRequest.run({ $request_id: "ball-gone", $recipient: "@pull/gone" })
 
     const unknown = send("@pull/deaf", "status")
     expect(unknown.sent).toBe(true)
@@ -360,17 +520,17 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     expect(String(unknown.warning)).toContain("@pull/deaf")
     expect(String(unknown.warning)).not.toContain("not answer-capable")
 
-    expect(send("*", "notify").warning).toBeUndefined()
     const multi = toolJson(
       handleToolCall(
         sender,
         "tribe.send",
-        { to: ["@push/joined", "@pull/gone"], message: "fleet note", type: "notify", summary: "note" },
+        { to: ["@push/joined", "@pull/idle", "@pull/gone"], message: "fleet note", type: "notify", summary: "note" },
         opts(),
       ),
     )
     expect(multi.sent).toBe(true)
-    expect(String(multi.warning)).toContain("@pull/gone")
+    expect(String(multi.warning)).toContain("@pull/idle has no live push client")
+    expect(String(multi.warning)).toContain("@pull/gone: transport=disconnected")
     expect(String(multi.warning)).not.toContain("@push/joined")
     const tracked = send("@pull/gone", "status", true)
     expect(tracked.sent).toBe(true)

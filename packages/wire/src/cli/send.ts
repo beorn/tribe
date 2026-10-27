@@ -779,6 +779,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
           ? result.delivery.recipient
           : input.to,
       ...(result.applied_due === undefined ? {} : { applied_due: result.applied_due }),
+      ...(result.warning === undefined ? {} : { warning: result.warning }),
     })
   } else {
     if (result.id !== undefined) console.log(`Message ${result.id}`)

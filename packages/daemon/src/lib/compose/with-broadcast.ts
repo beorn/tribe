@@ -103,15 +103,9 @@ export function shouldDeliver(
     // seat opened: that is its own answer arriving, not traffic, and without it
     // an asker slept through the answer (G9 self-inbox P0).
     //
-    // This used to say focus was "an opt-in push diet, not a durability filter:
-    // every row stays fetchable". That is no longer true, and saying so was the
-    // bug: 62 of 63 sessions are delivery=pull, so a filter that only quieted
-    // the wakeup quieted nothing. The same policy now also governs what a drain
-    // RETURNS, as a predicate in getInboxRows. Rows are still durable and still
-    // reachable through an explicit history read; they are not delivered.
-    //
-    // The two copies must agree — delivery-policy-parity.test.ts is what keeps
-    // them honest.
+    // Focus mode suppresses push wakeups for ambient rows while keeping direct
+    // rows fetchable on the recipient's next inbox drain (database.ts:3074-3081,
+    // pinned at delivery-policy-parity.test.ts:158).
     return ACTIONABLE_TYPES_SET.has(info.type) || info.settlesOwnRequest
   }
   if (info.kind === "direct") return true

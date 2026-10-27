@@ -23,6 +23,7 @@ import {
 import type { TribeContext } from "./context.ts"
 import type { MailboxReadCapability, MemberObservation } from "tribe-wire/records"
 import type { TribeRole } from "tribe-wire/lib/config"
+import { isExplicitTribePersonaName } from "tribe-wire/lib/persona-name"
 import { TRIBE_PROTOCOL_VERSION } from "tribe-wire/lib/socket"
 import {
   TRIBE_FETCH_DEFAULT_LIMIT,
@@ -76,6 +77,7 @@ import {
   projectSessionTransportEvidence,
   projectSessionTransportState,
   type ForeignIdentityTransport,
+  type MailboxConsumer,
   type RegisterRefusal,
   type OwnerState,
   type SessionTransportEvidence,
@@ -437,16 +439,21 @@ function ownerTransportObservationProjector(
   opts: Pick<HandlerOpts, "getActiveSessionInfo" | "inboxWait">,
   observedAt: number,
 ) {
-  const sessionRows = ctx.db.prepare("SELECT id, name, identity_sid, updated_at FROM sessions").all() as Array<{
+  const sessionRows = ctx.db
+    .prepare("SELECT id, name, identity_sid, updated_at, filter_mode FROM sessions")
+    .all() as Array<{
     id: string
     name: string
     identity_sid: string | null
     updated_at: number
+    filter_mode: string | null
   }>
   const knownNames = new Set(sessionRows.map((row) => row.name))
   const lastSeenByName = new Map(sessionRows.map((row) => [row.name, row.updated_at]))
   const latestSessionByName = new Map<string, (typeof sessionRows)[number]>()
+  const sessionFilterById = new Map<string, string>()
   for (const row of sessionRows) {
+    sessionFilterById.set(row.id, row.filter_mode || "normal")
     const previous = latestSessionByName.get(row.name)
     if (previous === undefined || row.updated_at > previous.updated_at) latestSessionByName.set(row.name, row)
   }
@@ -487,7 +494,15 @@ function ownerTransportObservationProjector(
     activeByName.set(info.name, siblings)
   }
   const observedAtIso = new Date(observedAt).toISOString()
-  const cache = new Map<string, { observation: OwnerTransportObservation; liveTransport: boolean }>()
+  const cache = new Map<
+    string,
+    {
+      observation: OwnerTransportObservation
+      liveTransport: boolean
+      consumers: readonly MailboxConsumer[]
+      filterMode: string
+    }
+  >()
 
   const project = (name: string) => {
     const cached = cache.get(name)
@@ -498,33 +513,49 @@ function ownerTransportObservationProjector(
       lastMailboxReadAt: readLastMailboxReadAt(ctx.stmts, name),
       now: observedAt,
     }
-    const ownerWaiting = opts.inboxWait?.hasLiveWaiter(name) === true
-    const evidence = active.map((info) =>
-      projectSessionTransportEvidence({
-        transportConnected: true,
-        transportPids: info.transportPids,
-        agentPid: info.launchParentPid ?? info.pid,
-        consumers: observeMailboxConsumers({
-          pushTransportPids: info.pushTransportPids,
-          ownerWaiting,
-        }),
-        ...mailbox,
-      }),
-    )
-    const selected =
-      evidence.find((row) => row.answer_capability === "observed") ??
-      evidence.find((row) => row.transport_alive && row.agent_alive) ??
-      evidence.find((row) => row.owner_state === "dead") ??
-      evidence[0] ??
-      projectSessionTransportEvidence({
-        transportConnected: false,
-        transportPids: [],
-        agentPid: null,
-        consumers: [],
-        ...mailbox,
-      })
-    const liveTransport = selected.transport_alive && selected.agent_alive
     const registration = latestSessionByName.get(name)
+    const ownerWaiting = opts.inboxWait?.hasLiveWaiter(name) === true
+    const evidenceWithConsumers = active.map((info) => {
+      const consumers = observeMailboxConsumers({
+        pushTransportPids: info.pushTransportPids,
+        ownerWaiting,
+      })
+      return {
+        evidence: projectSessionTransportEvidence({
+          transportConnected: true,
+          transportPids: info.transportPids,
+          agentPid: info.launchParentPid ?? info.pid,
+          consumers,
+          ...mailbox,
+        }),
+        consumers,
+        filterMode: sessionFilterById.get(info.id) || "normal",
+      }
+    })
+    const selectedPair = evidenceWithConsumers.find((row) => row.evidence.answer_capability === "observed") ??
+      evidenceWithConsumers.find((row) => row.evidence.transport_alive && row.evidence.agent_alive) ??
+      evidenceWithConsumers.find((row) => row.evidence.owner_state === "dead") ??
+      evidenceWithConsumers[0] ?? {
+        evidence: projectSessionTransportEvidence({
+          transportConnected: false,
+          transportPids: [],
+          agentPid: null,
+          consumers: [],
+          ...mailbox,
+        }),
+        consumers: [] as readonly MailboxConsumer[],
+        filterMode: registration?.filter_mode || "normal",
+      }
+    const selected = selectedPair.evidence
+    const liveTransport = selected.transport_alive && selected.agent_alive
+    const liveSiblings = evidenceWithConsumers.filter((row) => row.evidence.transport_alive && row.evidence.agent_alive)
+    const pushSiblings = liveSiblings.filter((row) => row.consumers.includes("push-client"))
+    const unionConsumers: readonly MailboxConsumer[] =
+      liveSiblings.length > 0 ? [...new Set(liveSiblings.flatMap((row) => row.consumers))] : selectedPair.consumers
+    const effectiveFilterMode =
+      pushSiblings.length > 0
+        ? (pushSiblings.find((row) => row.filterMode !== "focus")?.filterMode ?? "focus")
+        : selectedPair.filterMode
     const departure = !liveTransport && registration !== undefined ? readSessionLeftFact(ctx, registration) : null
     const offlineSince =
       departure !== null && registration !== undefined && departure.ts >= registration.updated_at
@@ -544,6 +575,8 @@ function ownerTransportObservationProjector(
         owner_transport_offline_since: offlineSince,
       } satisfies OwnerTransportObservation,
       liveTransport,
+      consumers: unionConsumers,
+      filterMode: effectiveFilterMode,
     }
     cache.set(name, projected)
     return projected
@@ -551,6 +584,10 @@ function ownerTransportObservationProjector(
 
   return {
     observe: (name: string): OwnerTransportObservation => project(name).observation,
+    deliveryTarget: (name: string): { consumers: readonly MailboxConsumer[]; filterMode: string } => {
+      const p = project(name)
+      return { consumers: p.consumers, filterMode: p.filterMode }
+    },
     mailboxRecipientNames,
     mailboxDeafNames,
     mailboxDeafReasons,
@@ -1183,7 +1220,13 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     maybeTruncationWarning(truncation),
     maybeProgressReplyNote(ctx, sender, msgType, replyId, a.ref as string | undefined),
     replyReport.warning,
-    maybeUntrackedDeliveryNote(msgType, recipients, willTrack, transport),
+    maybeUntrackedDeliveryNote(
+      msgType,
+      sender,
+      [{ name: recipients, attentionRequired: result.attentionRequired === true }],
+      willTrack,
+      transport,
+    ),
   )
   return jsonResult({
     sent: true,
@@ -1382,7 +1425,13 @@ function handleMultiSend(input: {
     maybeTruncationWarning(input.truncation),
     maybeProgressReplyNote(input.ctx, input.sender, input.msgType, input.replyId, input.args.ref as string | undefined),
     replyReport.warning,
-    maybeUntrackedDeliveryNote(input.msgType, input.recipients, input.willTrack, input.transport),
+    maybeUntrackedDeliveryNote(
+      input.msgType,
+      input.sender,
+      results.map((r) => ({ name: r.recipient, attentionRequired: r.attentionRequired === true })),
+      input.willTrack,
+      input.transport,
+    ),
   )
   const deliveries = deliveryReport(results, input.transport)
   logEvent(input.ctx, `message.sent.${input.msgType}`, input.args.bead as string | undefined, {
@@ -1661,23 +1710,32 @@ function maybeTruncationWarning(truncation: SanitizedMessage): string | undefine
   return `message truncated to ${MESSAGE_MAX_LENGTH} chars — ${dropped} of ${truncation.originalLength} were dropped and the recipient did NOT receive them; resend the remainder or link the full text.`
 }
 
-/** 24526: describe a named untracked send using the existing admission snapshot. */
+/** 24526, 26522 (@cto 8a135bdb): describe a named untracked send using the existing admission snapshot and classifier verdict. */
 function maybeUntrackedDeliveryNote(
   msgType: string,
-  recipients: string | readonly string[],
+  sender: string,
+  recipients: readonly { name: string; attentionRequired: boolean }[],
   willTrack: boolean,
   transport: OwnerTransportProjector,
 ): string | undefined {
   if (willTrack || (msgType !== "notify" && msgType !== "status")) return undefined
-  const names = typeof recipients === "string" ? [recipients] : recipients
   const facts: string[] = []
-  for (const name of names) {
-    if (name === "*") continue
+  for (const { name, attentionRequired } of recipients) {
+    if (name === "*" || name === sender) continue
     const observation = transport.observe(name)
     if (
       observation.owner_transport_reason === "connected-pid-live-transport" ||
       observation.owner_transport_reason === "connected-no-consumer"
     ) {
+      if (attentionRequired || !isExplicitTribePersonaName(sender) || !isExplicitTribePersonaName(name)) continue
+      const { consumers, filterMode } = transport.deliveryTarget(name)
+      if (!consumers.includes("push-client")) {
+        facts.push(
+          `${name} has no live push client: this ${msgType} wakes nothing and counts as no attention; it is returned by ${name}'s next drain`,
+        )
+      } else if (filterMode === "focus") {
+        facts.push(`${name} is in focus mode: no wakeup for this ${msgType}; it stays in their inbox until they fetch`)
+      }
       continue
     }
     const authority = transport.mailboxDeafNames.has(name)
@@ -1707,7 +1765,7 @@ function maybeUntrackedDeliveryNote(
     facts.join("; ") +
     "; this " +
     msgType +
-    " opens no obligation and pages nobody. Send type=request if you need a reply; it opens a tracked ball for a known readable mailbox. Sending anyway."
+    " opens no obligation and pages nobody. Send type=request if you need a reply; it opens a tracked ball for a known readable mailbox, or pass --ref <open-request-id> to attach it to an open ball. Sending anyway."
   )
 }
 
