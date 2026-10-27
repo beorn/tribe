@@ -888,6 +888,18 @@ process.exit(await child.exited)
     await waitFor(() => existsSync(socketPath), "adapter-crash daemon socket")
     const generation = await connectToGeneration(socketPath)
     daemonPids.add(generation.pid)
+    // Six jittered crash backoffs can outlast the daemon's 60 s pending-connection grace.
+    // Register the observer so its lease lasts through the journey it is measuring (31101).
+    await generation.client.call("register", {
+      name: "adapter-crash-observer",
+      role: "watch",
+      domains: ["test"],
+      project: tmpDir,
+      projectName: "test",
+      protocolVersion: TRIBE_PROTOCOL_VERSION,
+      pid: process.pid,
+      delivery: "pull",
+    })
 
     const plugin = spawnTestPlugin({
       dbPath,
