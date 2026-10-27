@@ -240,6 +240,26 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
       expect(sent.error).toBe("tribe.send: invalid expires_in_ms - must be a positive integer no greater than 86400000")
     })
 
+    it.each([true, false, "yes", null])("rejects removed incident muting field %s before storing anything", (value) => {
+      const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
+      const sent = parseToolJson(
+        handleToolCall(
+          sender,
+          "tribe.send",
+          {
+            to: "@chief",
+            message: "incident",
+            summary: "incident",
+            incident: { emitter: "test", subject: "test", condition: "test", suppress_after_evidence: value },
+          },
+          makeOpts(),
+        ),
+      )
+      expect(sent.error).toBe("tribe.send: invalid incident.suppress_after_evidence - field has been removed")
+      expect((db.query("SELECT COUNT(*) AS n FROM messages").get() as { n: number }).n).toBe(0)
+      expect((db.query("SELECT COUNT(*) AS n FROM pending_request").get() as { n: number }).n).toBe(0)
+    })
+
     it("pins invalid incident shape", () => {
       const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
       const sent = parseToolJson(
