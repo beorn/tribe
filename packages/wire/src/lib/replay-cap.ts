@@ -12,6 +12,8 @@
 // The caller still DRAINS every fetched row (the cursor advances regardless), so
 // events not surfaced here never re-arrive — they are simply not replayed.
 
+import { TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV } from "./session-identity-env.ts"
+
 /** Max events surfaced as <channel> envelopes per drain pass. */
 export const MAX_REPLAY_EVENTS = 100
 
@@ -458,6 +460,100 @@ export function decidePendingBallSummary(
  * daemon marked `replay`) additionally names itself a replay. A row with no
  * timestamp carries no age claim.
  */
+const SENT_AT_TIME_ZONE = "America/Los_Angeles"
+const SENT_AT_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: SENT_AT_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+  timeZoneName: "short",
+})
+
+/**
+ * 31111 (@cto 88bd9852) — render `sent_at` in zoned local time (`YYYY-MM-DD HH:MM PDT`)
+ * so the model never has to mentally convert UTC to local time when comparing against
+ * zoned deadlines in the body. Fails open on an unparseable timestamp.
+ */
+export function formatZonedSentAt(ts: string): string {
+  const parsed = new Date(ts)
+  if (Number.isNaN(parsed.getTime())) return ts
+  const parts = SENT_AT_FORMATTER.formatToParts(parsed)
+  const part = (type: Intl.DateTimeFormatPartTypes): string => parts.find((p) => p.type === type)?.value ?? ""
+  const date = `${part("year")}-${part("month")}-${part("day")}`
+  const time = `${part("hour")}:${part("minute")}`
+  const zone = part("timeZoneName")
+  return zone ? `${date} ${time} ${zone}` : `${date} ${time}`
+}
+
+/**
+ * 31111 (@cto 88bd9852 / 481a6af2 / f49f779d) — omit `authority` when verified
+ * (absence = verified). Present `unverified="TRIBE_NAME|TRIBE_SESSION_NAME|bearer|unknown"`
+ * only when the sender's name is unverified, rendered from the existing `from_authority`
+ * with no new stored field.
+ */
+export function unverifiedEnvelopeMeta(event: { from_authority?: string | null }): {
+  unverified?: typeof TRIBE_NAME_ENV | typeof TRIBE_SESSION_NAME_ENV | "bearer" | "unknown"
+} {
+  const auth = event.from_authority
+  if (!auth || auth === "verified") return {}
+  if (auth === "bearer" || auth === TRIBE_NAME_ENV || auth === TRIBE_SESSION_NAME_ENV) {
+    return { unverified: auth }
+  }
+  return { unverified: "unknown" }
+}
+
+/**
+ * 31111 (@cto 88bd9852) — one-line startup banner:
+ * `tribe <seat> <delivery> · <up> [· missing <seats>]`
+ * The prefix is capped at 100 characters; the missing list stays complete even past 100 chars.
+ */
+export function formatStartupBanner(input: {
+  name: string
+  deliveryClause: string
+  connectedCount: number
+  headline?: string
+  membershipDiscrepancy?: {
+    expected_count?: number
+    connected_expected_count?: number
+    connected_durable_launches: number
+    known_durable_launches: number
+    missing: ReadonlyArray<{ name: string }>
+  }
+}): string {
+  let upClause = `${input.connectedCount} up`
+  let missingClause = ""
+  if (input.membershipDiscrepancy !== undefined) {
+    const d = input.membershipDiscrepancy
+    upClause =
+      d.expected_count !== undefined
+        ? `${d.connected_expected_count ?? d.connected_durable_launches}/${d.expected_count} up`
+        : `${d.connected_durable_launches}/${d.known_durable_launches} up`
+    if (d.missing.length > 0) {
+      missingClause = ` · missing ${d.missing.map((r) => r.name).join(" ")}`
+    }
+  } else if (typeof input.headline === "string" && input.headline.length > 0) {
+    const match = /—\s*(\d+\/\d+)\s+[^;]+(?:;\s*missing:\s*(.+))?$/u.exec(input.headline)
+    if (match !== null) {
+      upClause = `${match[1]} up`
+      const names = match[2]
+        ?.split(/,\s*/u)
+        .map((n) => n.trim())
+        .filter(Boolean)
+      if (names && names.length > 0) {
+        missingClause = ` · missing ${names.join(" ")}`
+      }
+    } else {
+      missingClause = ` · ${input.headline}`
+    }
+  }
+  const rawHead = `tribe ${input.name} ${input.deliveryClause} · ${upClause}`
+  const cappedHead = rawHead.length > 100 ? `${rawHead.slice(0, 99)}…` : rawHead
+  return `${cappedHead}${missingClause}`
+}
+
 export function replayEnvelopeMeta(event: { ts?: string; replay?: boolean }): {
   replay?: string
   sent_at?: string
@@ -470,7 +566,7 @@ export function replayEnvelopeMeta(event: { ts?: string; replay?: boolean }): {
   // (fail open — a malformed row is never hidden).
   return {
     ...(event.replay === true ? { replay: "true" } : {}),
-    ...(event.ts ? { sent_at: String(event.ts) } : {}),
+    ...(event.ts ? { sent_at: formatZonedSentAt(String(event.ts)) } : {}),
   }
 }
 

@@ -70,5 +70,5 @@ export function composeForwardedRowContent(row: { id?: string; type?: string; co
   if (!isWakeReadDirectiveId(rowId)) {
     return { content: String(row.content ?? ""), directive: false, unnameable: true }
   }
-  return { content: wakeReadDirective(rowId), directive: true, unnameable: false }
+  return { content: WAKE_READ_DIRECTIVE_PREFIX, directive: true, unnameable: false }
 }

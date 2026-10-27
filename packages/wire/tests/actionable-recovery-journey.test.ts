@@ -1868,16 +1868,18 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(payloads.some((p) => p.includes("joined (member)"))).toBe(false)
     expect(payloads.some((p) => p.includes("log-redacted"))).toBe(false)
     expect(forwarded).toHaveLength(2)
-    // 25074 3d-1a (@cto 2bfc1935 Q0): the <channel> envelope names the sender's authority, so a claimed sender's
-    // message never reads like a verified seat's.
-    const authorityOf = (content: string) =>
+    // 25074 3d-1a + 31111 (@cto 88bd9852 / f49f779d): verified rows omit authority/unverified (absence = verified);
+    // unverified rows carry unverified="<source>" so a claimed sender's message never reads like a verified seat's.
+    const metaOf = (content: string) =>
       (
         forwarded.find((line) => JSON.stringify(line).includes(content)) as
           | { params?: { meta?: Record<string, unknown> } }
           | undefined
-      )?.params?.meta?.authority
-    expect(authorityOf("please pick up the wrapper-r4 assembly")).toBe("verified")
-    expect(authorityOf("use the durable attention seam")).toBe("claimed")
+      )?.params?.meta
+    expect(metaOf("please pick up the wrapper-r4 assembly")?.authority).toBeUndefined()
+    expect(metaOf("please pick up the wrapper-r4 assembly")?.unverified).toBeUndefined()
+    expect(metaOf("use the durable attention seam")?.authority).toBeUndefined()
+    expect(metaOf("use the durable attention seam")?.unverified).toBe("unknown")
 
     // --- Second adapter (fresh process = reconnect/reclaim). 21757: the first
     // adapter's drain forwarded fire-and-forget and was not a model read, so

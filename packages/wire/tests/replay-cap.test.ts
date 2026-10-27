@@ -10,11 +10,14 @@ import {
   createDeliveryCounter,
   createForwardedAttentionTracker,
   decidePendingBallSummary,
+  formatStartupBanner,
+  formatZonedSentAt,
   MAX_REPLAY_AGE_MS,
   MAX_REPLAY_EVENTS,
   replayEnvelopeMeta,
   selectReplayEvents,
   settledEnvelopeMeta,
+  unverifiedEnvelopeMeta,
 } from "../src/lib/replay-cap.ts"
 
 // Fixed clock — no Date.now() so the test is deterministic.
@@ -93,27 +96,79 @@ describe("selectReplayEvents (km 19442 connection-time replay cap)", () => {
 // itself a replay. The FIRST (fresh) envelope carries the same first-sent time:
 // it is built once and cannot be revised when the ball later settles, so an
 // envelope already queued in the host must still be readable as old.
-describe("replayEnvelopeMeta (27346 re-presented attention row)", () => {
-  it("names a re-presented row a replay and carries its original send time", () => {
+describe("replayEnvelopeMeta (27346 re-presented attention row, 31111 zoned-local sent_at)", () => {
+  it("names a re-presented row a replay and carries its original send time in zoned local format", () => {
     expect(replayEnvelopeMeta({ replay: true, ts: "2026-10-04T06:00:00.000Z" })).toEqual({
       replay: "true",
-      sent_at: "2026-10-04T06:00:00.000Z",
+      sent_at: "2026-10-03 23:00 PDT",
     })
   })
 
-  it("carries the first-sent time on a fresh row too, so a queued envelope is never read as new", () => {
+  it("carries the first-sent time in zoned local format on a fresh row too, so a queued envelope is never read as new", () => {
     expect(replayEnvelopeMeta({ replay: false, ts: "2026-10-04T06:00:00.000Z" })).toEqual({
-      sent_at: "2026-10-04T06:00:00.000Z",
+      sent_at: "2026-10-03 23:00 PDT",
     })
-    expect(replayEnvelopeMeta({ ts: "2026-10-04T06:00:00.000Z" })).toEqual({
-      sent_at: "2026-10-04T06:00:00.000Z",
+    expect(replayEnvelopeMeta({ ts: "2026-10-27T16:52:41.432Z" })).toEqual({
+      sent_at: "2026-10-27 09:52 PDT",
     })
+    expect(formatZonedSentAt("not-a-date")).toBe("not-a-date")
     // Fail open on a missing timestamp: a row we cannot age carries no claim.
     expect(replayEnvelopeMeta({ replay: false })).toEqual({})
   })
 
   it("still names the replay when the row carries no timestamp", () => {
     expect(replayEnvelopeMeta({ replay: true })).toEqual({ replay: "true" })
+  })
+})
+
+describe("unverifiedEnvelopeMeta (31111 @cto f49f779d exception attribute)", () => {
+  it("omits unverified when from_authority is verified or absent", () => {
+    expect(unverifiedEnvelopeMeta({ from_authority: "verified" })).toEqual({})
+    expect(unverifiedEnvelopeMeta({ from_authority: null })).toEqual({})
+    expect(unverifiedEnvelopeMeta({})).toEqual({})
+  })
+
+  it("renders unverified=<source> only when unverified", () => {
+    expect(unverifiedEnvelopeMeta({ from_authority: "claimed" })).toEqual({ unverified: "unknown" })
+    expect(unverifiedEnvelopeMeta({ from_authority: "unrecorded" })).toEqual({ unverified: "unknown" })
+    expect(unverifiedEnvelopeMeta({ from_authority: "bearer" })).toEqual({ unverified: "bearer" })
+    expect(unverifiedEnvelopeMeta({ from_authority: "TRIBE_NAME" })).toEqual({ unverified: "TRIBE_NAME" })
+    expect(unverifiedEnvelopeMeta({ from_authority: "TRIBE_SESSION_NAME" })).toEqual({
+      unverified: "TRIBE_SESSION_NAME",
+    })
+  })
+})
+
+describe("formatStartupBanner (31111 @cto 88bd9852 one-line banner)", () => {
+  it("renders the measured reconnect specimen on one line under 100 chars without peer roster or chief", () => {
+    const banner = formatStartupBanner({
+      name: "@cpo",
+      deliveryClause: "push",
+      connectedCount: 24,
+      headline:
+        "tribe members: 4 MISSING (no transport) — 17/21 expected seats connected; missing: @dev/2, @dev/3, @dev/6, @dev/review2",
+    })
+    expect(banner).toBe("tribe @cpo push · 17/21 up · missing @dev/2 @dev/3 @dev/6 @dev/review2")
+    expect(banner.length).toBeLessThanOrEqual(100)
+  })
+
+  it("keeps the missing list complete even when it pushes the line past 100 chars, while capping the non-missing prefix", () => {
+    const missing = Array.from({ length: 15 }, (_, i) => ({ name: `@dev/seat-${i + 1}` }))
+    const banner = formatStartupBanner({
+      name: "@cpo",
+      deliveryClause: "unacknowledged: a very long registration refusal explanation from the daemon; delivery=pull",
+      connectedCount: 6,
+      membershipDiscrepancy: {
+        expected_count: 21,
+        connected_expected_count: 6,
+        connected_durable_launches: 6,
+        known_durable_launches: 21,
+        missing,
+      },
+    })
+    const [head, missingTail] = banner.split(" · missing ")
+    expect(head!.length).toBeLessThanOrEqual(100)
+    expect(missingTail).toBe(missing.map((m) => m.name).join(" "))
   })
 })
 

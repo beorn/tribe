@@ -1236,7 +1236,7 @@ process.exit(await child.exited)
         (line) =>
           line.method === "notifications/claude/channel" &&
           (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
-          JSON.stringify(line).includes("**tribe**"),
+          !JSON.stringify(line).includes("unavailable — running solo"),
       )
     const connectedAdapter = async (label: string, replacedPid?: number): Promise<number> => {
       let found: number | undefined
