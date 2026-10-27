@@ -1090,6 +1090,16 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         $reply: null,
         $summary: null,
       })
+      // A production request opens a ball; an untracked request is settled and must not wake a fresh wait.
+      fixtureStatements.openPendingRequest.run({
+        $request_id: id,
+        $recipient: recipient,
+        $sender: "@chief",
+        $opened_at: now,
+        $expires_at: null,
+        $message_id: id,
+        $fanout: "first",
+      })
     }
     fixtureDb.close()
 
@@ -1119,6 +1129,17 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     )
     expect(absentAuthority.stderr).toContain("--session <name>")
     expect(absentAuthority.stderr).toContain("--anonymous")
+
+    // End the wake fixture's obligations before testing one-time drain and transport replacement.
+    const settledDb = openDatabase(dbPath)
+    const settledStatements = createStatements(settledDb)
+    for (const [id, recipient] of [
+      ["managed-cli-own-request", runtimeName],
+      ["managed-cli-foreign-request", foreignName],
+    ] as const) {
+      settledStatements.closePendingRequest.run({ $request_id: id, $recipient: recipient })
+    }
+    settledDb.close()
 
     const foreignRead = await runCli(["inbox", "--consume", "--json"], cliEnv, {
       idToken: foreignToken,
