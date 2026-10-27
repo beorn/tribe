@@ -8,9 +8,51 @@
  * asserts a launch: the tuple is the daemon's own.
  */
 import { mcpJsonContent } from "./cli/mcp-json-content.ts"
+import {
+  MANAGED_INBOX_TOKEN_REQUIRED,
+  readIdentityTokenFromEnvironment,
+  readLaunchIdFromToken,
+} from "./lib/identity-token.ts"
+import { TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV } from "./lib/session-identity-env.ts"
 import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "./lib/socket.ts"
 
 export type DaemonCall = (method: string, params: Record<string, unknown>) => Promise<unknown>
+
+export type LaunchInboxTarget =
+  | { readonly ok: true; readonly launchId: string; readonly idToken: string; readonly persona: string | undefined }
+  | { readonly ok: false; readonly kind: "missing-token" | "malformed-token"; readonly reason: string }
+
+/**
+ * Extract the launch inbox target (`launchId`, `idToken`, and optional `persona` from
+ * `TRIBE_SESSION_NAME` / `TRIBE_NAME`) from `env`. Shared by `cliInboxTargetParams`
+ * (`read.ts`) and `resolveLaunchSeatFromEnvironment` (`service-send.ts`) so the CLI
+ * and programmatic callers never drift (#26523).
+ */
+export function readLaunchInboxTargetFromEnvironment(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): LaunchInboxTarget {
+  let launchId: string | null
+  let idToken: string | null
+  try {
+    launchId = readLaunchIdFromToken(env)
+    idToken = readIdentityTokenFromEnvironment(env)
+  } catch (error) {
+    return {
+      ok: false,
+      kind: "malformed-token",
+      reason: error instanceof Error ? error.message : String(error),
+    }
+  }
+  const persona = env[TRIBE_SESSION_NAME_ENV]?.trim() || env[TRIBE_NAME_ENV]?.trim() || undefined
+  if (launchId !== null && idToken !== null) {
+    return { ok: true, launchId, idToken, persona }
+  }
+  return {
+    ok: false,
+    kind: "missing-token",
+    reason: MANAGED_INBOX_TOKEN_REQUIRED,
+  }
+}
 
 /**
  * The daemon's typed refusal for a launch whose every stored session lost its owner transport (25074, @cto P4): a

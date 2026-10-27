@@ -31,7 +31,6 @@ import {
 import { watchActivity } from "../lib/activity-watch.ts"
 import { describeDaemonStderrLog } from "../lib/daemon-stderr-log.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
-import { readLaunchIdFromToken } from "../lib/identity-token.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { JSON_TO_FILE_RECOVERY, jsonDestinationProblem, writeJsonStdout, writeJsonToFile } from "./json-output.ts"
 import { TRIBE_FETCH_DEFAULT_LIMIT, TRIBE_FETCH_MAX_LIMIT, fetchLimitOutOfRangeMessage } from "../lib/fetch-limits.ts"
@@ -46,14 +45,10 @@ import {
   type PinDirection,
 } from "../lib/code-identity.ts"
 import { describeSettlementConflict, type BallSettlementReason } from "../lib/ball-outcome.ts"
-import {
-  HAB_ID_TOKEN_ENV,
-  MANAGED_INBOX_TOKEN_REQUIRED,
-  readIdentityTokenFromEnvironment,
-} from "../lib/identity-token.ts"
+import { HAB_ID_TOKEN_ENV, readIdentityTokenFromEnvironment } from "../lib/identity-token.ts"
 import { HAB_SERVICE_NAME_ENV } from "../lib/hab-session-env.ts"
 import { describeDaemonOutcome, tribeDaemonCalls } from "../service-send.ts"
-import { TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV } from "../launch-environment.ts"
+import { readLaunchInboxTargetFromEnvironment } from "../launch-seat.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const MEMBERS_CLI = visibleCliProjectionForMcp("members")
@@ -142,23 +137,17 @@ async function callDaemon(
 
 function cliInboxTargetParams(verb: string, session: string | undefined): Record<string, unknown> {
   if (session !== undefined) return { session }
-  let launchId: string | null
-  try {
-    launchId = readLaunchIdFromToken(process.env)
-  } catch (error) {
-    return refuseManagedInbox(verb, error instanceof Error ? error.message : String(error))
+  const target = readLaunchInboxTargetFromEnvironment(process.env)
+  if (!target.ok) {
+    // 25074 3d-1: the launch is the identity token's sid. A process without HAB_ID_TOKEN is not a hab launch, whatever
+    // TRIBE_LAUNCH_ID or TRIBE_NAME it inherited, so it is refused rather than resolved to that seat's inbox.
+    return refuseManagedInbox(verb, target.reason)
   }
-  const persona = process.env[TRIBE_SESSION_NAME_ENV]?.trim() || process.env[TRIBE_NAME_ENV]?.trim()
-  if (launchId) {
-    return {
-      launch_id: launchId,
-      id_token: readIdentityTokenFromEnvironment(process.env),
-      ...(persona === undefined ? {} : { persona }),
-    }
+  return {
+    launch_id: target.launchId,
+    id_token: target.idToken,
+    ...(target.persona === undefined ? {} : { persona: target.persona }),
   }
-  // 25074 3d-1: the launch is the identity token's sid. A process without HAB_ID_TOKEN is not a hab launch, whatever
-  // TRIBE_LAUNCH_ID or TRIBE_NAME it inherited, so it is refused rather than resolved to that seat's inbox.
-  return refuseManagedInbox(verb, MANAGED_INBOX_TOKEN_REQUIRED)
 }
 
 /** A managed inbox request this process cannot make: one line before any daemon call, exit 1 as the uncaught error was. */

@@ -16,7 +16,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterEach, describe, expect, it } from "vitest"
-import { describeDaemonOutcome, launchSender, tribeDaemonCalls } from "../src/service-send.ts"
+import {
+  describeDaemonOutcome,
+  launchSender,
+  resolveLaunchSeatFromEnvironment,
+  tribeDaemonCalls,
+} from "../src/service-send.ts"
 import { launchToken } from "./launch-token.ts"
 
 const SEAT = "@dev/2"
@@ -283,6 +288,49 @@ describe("the one sender registers as what its launch's token names (25074 3d-1c
     })
 
     expect(outcome.kind === "error" ? outcome.message : "").toMatch(/^quota-wall: HAB_ID_TOKEN is malformed: /)
+    expect(calls).toEqual([])
+  })
+
+  it("resolveLaunchSeatFromEnvironment resolves the seat tuple without receipt:true and honors TRIBE_SESSION_NAME / TRIBE_NAME", async () => {
+    const { socketPath, calls } = await fakeDaemon()
+    const token = launchToken(SEAT_SID, SEAT)
+
+    const outcome = await resolveLaunchSeatFromEnvironment({
+      socketPath,
+      env: { HAB_ID_TOKEN: token, TRIBE_SESSION_NAME: SEAT },
+    })
+
+    expect(outcome).toMatchObject({
+      kind: "ok",
+      value: {
+        session: SEAT,
+        launchId: SEAT_TUPLE.launch_id,
+        launchParentPid: SEAT_TUPLE.launch_parent_pid,
+      },
+    })
+    expect(calls).toEqual([
+      {
+        method: "cli_inbox_status_by_launch_v1",
+        params: { launch_id: SEAT_SID, id_token: token, persona: SEAT },
+      },
+    ])
+    expect("receipt" in (calls[0]?.params ?? {})).toBe(false)
+  })
+
+  it("resolveLaunchSeatFromEnvironment refuses a missing or malformed token before any daemon call", async () => {
+    const { socketPath, calls } = await fakeDaemon()
+
+    const missing = await resolveLaunchSeatFromEnvironment({ socketPath, env: {} })
+    expect(missing.kind).toBe("error")
+    expect(missing.kind === "error" ? missing.message : "").toMatch(/HAB_ID_TOKEN/)
+    expect(calls).toEqual([])
+
+    const malformed = await resolveLaunchSeatFromEnvironment({
+      socketPath,
+      env: { HAB_ID_TOKEN: "not-a-jwt" },
+    })
+    expect(malformed.kind).toBe("error")
+    expect(malformed.kind === "error" ? malformed.message : "").toMatch(/not a three-part JWT/)
     expect(calls).toEqual([])
   })
 })

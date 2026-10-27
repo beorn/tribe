@@ -213,6 +213,7 @@ export {
 } from "./lib/persona-launch-identity.ts"
 
 export { connectTribeLaunch } from "./barrels/client.ts"
+// sub-barrels.test.ts:64 requires every ./service-send export to be in the root barrel.
 export {
   describeDaemonOutcome,
   launchSender,

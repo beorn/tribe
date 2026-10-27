@@ -4032,8 +4032,9 @@ describe("26523 — cli_inbox_status_by_launch_v1 attention-read receipt and del
         identitySid: "sid-chief-26523",
       })
 
-      // Ambient-only mailbox: a broadcast notify and a direct untracked notify are not in
-      // readAttentionProjection.actionableCount (the same count 21626 health:inbox-stale reads).
+      // Ambient-only mailbox: a broadcast notify and a direct untracked notify are neither in
+      // readAttentionProjection.actionableCount nor in attentionLagSql actionable_rows (the count
+      // 21626 health:inbox-stale and the receipt check read).
       for (const to of ["*", "@dev/pull"]) {
         await harness.dispatcher.handleRequest(
           {
@@ -4313,12 +4314,31 @@ describe("26523 — cli_inbox_status_by_launch_v1 attention-read receipt and del
       )
       expect(statusWithUntakenBall.unread_count).toBe(1)
       expect(readActionableLagRows(harness.db, "@dev/pull")).toBe(0)
-      expect(harness.mailboxAttentionReadAt("@dev/pull")).toBe(pollAfterRead)
+      expect.soft(harness.mailboxAttentionReadAt("@dev/pull")).toBe(pollAfterRead)
+
+      // Settle the request from (a) first so selectAttention's tracked-ball count returns to 0
+      // before testing Divergence (b); otherwise unread_count would stay 1 from (a).
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "settle-req-from-a",
+          method: "tribe.send",
+          params: {
+            to: "@chief",
+            type: "response",
+            reply: "req-read-not-taken",
+            message: "investigated and settled",
+            summary: "investigated and settled",
+          },
+        },
+        pullClient.connId,
+      )
 
       // Divergence (b): an unacknowledged untracked actionable row archived into
-      // messages_archive (seq > last_actionable_seq) is not returned by
-      // readAttentionProjection, but IS counted by attentionLagSql actionable_rows (1),
-      // so the receipt follows the alarm's one count and is withheld.
+      // messages_archive (seq > last_actionable_seq) leaves status.unread_count at 0
+      // (readAttentionProjection queries only live messages), but IS counted by
+      // attentionLagSql actionable_rows (1), so the receipt follows the alarm's one
+      // count and is withheld.
       const cursorSeq = harness.mailboxCursorSeq("@dev/pull")
       harness.db
         .prepare(
@@ -4334,15 +4354,18 @@ describe("26523 — cli_inbox_status_by_launch_v1 attention-read receipt and del
 
       const pollWithArchivedRow = baseNow + 10 * 60_000
       nowSpy.mockReturnValue(pollWithArchivedRow)
-      await harness.dispatcher.handleRequest(
-        {
-          jsonrpc: "2.0",
-          id: "poll-archived-untracked",
-          method: "cli_inbox_status_by_launch_v1",
-          params: { launch_id: "sid-pull-26523", id_token: token, persona: "@dev/pull", receipt: true },
-        },
-        pullClient.connId,
+      const statusWithArchivedRow = parseResult<{ unread_count: number }>(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: "poll-archived-untracked",
+            method: "cli_inbox_status_by_launch_v1",
+            params: { launch_id: "sid-pull-26523", id_token: token, persona: "@dev/pull", receipt: true },
+          },
+          pullClient.connId,
+        ),
       )
+      expect(statusWithArchivedRow.unread_count).toBe(0)
       expect(readActionableLagRows(harness.db, "@dev/pull")).toBe(1)
       expect(harness.mailboxAttentionReadAt("@dev/pull")).toBe(pollAfterRead)
     } finally {

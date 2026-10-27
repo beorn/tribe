@@ -245,6 +245,26 @@ export function attentionLagSql(table: "messages" | "messages_archive", extraPre
   `
 }
 
+const preparedActionableLagQueries = new WeakMap<
+  Database,
+  { messages: ReturnType<Database["prepare"]>; archive: ReturnType<Database["prepare"]> }
+>()
+
+function readActionableLag(db: Database, session: string): LagRow {
+  let queries = preparedActionableLagQueries.get(db)
+  if (queries === undefined) {
+    queries = {
+      messages: db.prepare(assertSingleStatement(attentionLagSql("messages", ""))),
+      archive: db.prepare(assertSingleStatement(attentionLagSql("messages_archive", ""))),
+    }
+    preparedActionableLagQueries.set(db, queries)
+  }
+  return combineJournalCount(
+    queries.messages.get({ $session: session }) as LagRow,
+    queries.archive.get({ $session: session }) as LagRow,
+  )
+}
+
 /**
  * 26523 (@cto 55a8b9fc binding 1, 6ebb2ba3): the `inbox_lag.actionable_rows` count
  * that `health:inbox-stale` reads (`attentionLagSql` across `messages` and
@@ -253,13 +273,7 @@ export function attentionLagSql(table: "messages" | "messages_archive", extraPre
  * the alarm never disagree on one mailbox.
  */
 export function readActionableLagRows(db: Database, session: string): number {
-  const messagesHalf = db
-    .prepare(assertSingleStatement(attentionLagSql("messages", "")))
-    .get({ $session: session }) as LagRow
-  const archiveHalf = db
-    .prepare(assertSingleStatement(attentionLagSql("messages_archive", "")))
-    .get({ $session: session }) as LagRow
-  return combineJournalCount(messagesHalf, archiveHalf).rows
+  return readActionableLag(db, session).rows
 }
 
 type OldestActionableCandidate = {
@@ -550,8 +564,6 @@ function inboxLagProjection(
   `),
   )
   const waking = `\n      AND ${wakePredicateSql("m")}`
-  const actionableLagQueryMessages = db.prepare(assertSingleStatement(attentionLagSql("messages", "")))
-  const actionableLagQueryArchive = db.prepare(assertSingleStatement(attentionLagSql("messages_archive", "")))
   const wakingLagQueryMessages = db.prepare(assertSingleStatement(attentionLagSql("messages", waking)))
   const wakingLagQueryArchive = db.prepare(assertSingleStatement(attentionLagSql("messages_archive", waking)))
   // Selects the shared seq/rowid position too (absent from the original
@@ -612,10 +624,7 @@ function inboxLagProjection(
     }
     const lagParams = { $cursor: cursor?.last_inbox_pull_seq ?? 0, $session: session }
     const lag = combineJournalCount(lagQueryMessages.get(lagParams) as LagRow, lagQueryArchive.get(lagParams) as LagRow)
-    const actionableLag = combineJournalCount(
-      actionableLagQueryMessages.get({ $session: session }) as LagRow,
-      actionableLagQueryArchive.get({ $session: session }) as LagRow,
-    )
+    const actionableLag = readActionableLag(db, session)
     const wakingLag = combineJournalCount(
       wakingLagQueryMessages.get({ $session: session }) as LagRow,
       wakingLagQueryArchive.get({ $session: session }) as LagRow,
