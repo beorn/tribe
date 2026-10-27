@@ -2836,6 +2836,15 @@ export function createStatements(db: Database) {
         AND (m.wakes_owner = 1 OR ${noOpenIncidentAttentionPredicateSql("m")})
         AND ${unretiredAttentionPredicateSql("m")}
         AND (
+          $unacknowledged_only = 0
+          OR m.request IS NULL
+          OR m.is_incident = 1
+          OR EXISTS (
+            SELECT 1 FROM pending_request AS p
+            WHERE p.request_id = m.request AND p.recipient = m.recipient
+          )
+        )
+        AND (
           ${wakePredicateSql("m")}
           OR (
             $include_correlated_replies = 1

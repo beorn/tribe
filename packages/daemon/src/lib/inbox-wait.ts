@@ -177,10 +177,11 @@ export function createInboxWaitManager(
     return delivered
   }
 
-  /** The newest actionable attention row past `pastSeq`, or 0 when none is. */
+  /** The newest unsettled actionable attention row past `pastSeq`, or 0 when none is. */
   function newestAttentionSeq(snapshot: InboxWaitSnapshot, pastSeq: number): number {
     let newest = 0
     for (const row of snapshot.attention.actionable_unread) {
+      if ((row as { settled?: boolean }).settled === true) continue
       if (typeof row.rowid === "number" && row.rowid > pastSeq && row.rowid > newest) newest = row.rowid
     }
     return newest
