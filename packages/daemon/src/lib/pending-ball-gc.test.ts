@@ -1689,44 +1689,6 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
    * an incident replaces the oldest ordinary request (27735).
    * @level l0 @consumer tribe.health pending_balls owner summaries (27440/27735)
    */
-  it("31092 counts a taken ball as stale only once the end its receipt named has passed", () => {
-    const { db, stmts } = setup()
-    try {
-      const ctx = createTribeContext({
-        db,
-        stmts,
-        sessionId: "sess-chief",
-        sessionRole: "member",
-        initialName: "@chief",
-        domains: [],
-        claudeSessionId: null,
-        claudeSessionName: null,
-      })
-      const now = Date.now()
-      const openedAt = now - 3 * 60 * 60_000
-      insertBallMessage(stmts, { id: "taken-old", openedAt })
-      openBall(stmts, { id: "taken-old", recipient: "@agent/9", openedAt, expiresAt: now + 60 * 60_000 })
-      insertTaking(stmts, {
-        id: "taking-old",
-        ballId: "taken-old",
-        owner: "@agent/9",
-        requester: "@chief",
-        ts: now - 60_000,
-      })
-      type StaleHealth = { issues?: string[]; pending_balls?: { stale: { count: number } } }
-
-      const taken = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as StaleHealth
-      expect(taken.pending_balls?.stale.count).toBe(0)
-      expect((taken.issues ?? []).some((issue) => /stale pending/.test(issue))).toBe(false)
-
-      db.prepare("UPDATE pending_request SET expires_at = ? WHERE request_id = 'taken-old'").run(now - 1)
-      const passed = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as StaleHealth
-      expect(passed.pending_balls?.stale.count).toBe(1)
-    } finally {
-      db.close()
-    }
-  })
-
   it("27440 binds the owner summary deadline and TAKING receipt to the OLDEST owned ball", () => {
     const { db, stmts } = setup()
     try {
@@ -1943,6 +1905,49 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         owners: [{ owner: "@agent/9", count: 1 }],
       })
       expect(incidentOnly.pending_balls.requests).toEqual({ count: 0, owner_count: 0, oldest_age_ms: 0, owners: [] })
+    } finally {
+      db.close()
+    }
+  })
+
+  /**
+   * @failure Health counts a taken ball as stale because it is old while the end its
+   * receipt named is still ahead, or misses it once that end has passed (31092).
+   * @level l0 @consumer tribe.health stale pending warning (31092)
+   */
+  it("31092 counts a taken ball as stale only once the end its receipt named has passed", () => {
+    const { db, stmts } = setup()
+    try {
+      const ctx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+      const now = Date.now()
+      const openedAt = now - 3 * 60 * 60_000
+      insertBallMessage(stmts, { id: "taken-old", openedAt })
+      openBall(stmts, { id: "taken-old", recipient: "@agent/9", openedAt, expiresAt: now + 60 * 60_000 })
+      insertTaking(stmts, {
+        id: "taking-old",
+        ballId: "taken-old",
+        owner: "@agent/9",
+        requester: "@chief",
+        ts: now - 60_000,
+      })
+      type StaleHealth = { issues?: string[]; pending_balls?: { stale: { count: number } } }
+
+      const taken = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as StaleHealth
+      expect(taken.pending_balls?.stale.count).toBe(0)
+      expect((taken.issues ?? []).some((issue) => /stale pending/.test(issue))).toBe(false)
+
+      db.prepare("UPDATE pending_request SET expires_at = ? WHERE request_id = 'taken-old'").run(now - 1)
+      const passed = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as StaleHealth
+      expect(passed.pending_balls?.stale.count).toBe(1)
     } finally {
       db.close()
     }

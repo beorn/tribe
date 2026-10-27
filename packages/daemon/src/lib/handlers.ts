@@ -2001,7 +2001,7 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
 }
 
 /**
- * 31092 (@cto 618f9d5a): the one owed predicate - a ball is owed while it is untaken or its deadline has passed.
+ * 31092 (@cto 618f9d5a): the one owed predicate - owed while untaken, past its deadline, or taken without an end.
  * A take names an end, so a ball with no due (an assign, or an incident no receipt has quieted) is owed whatever
  * receipts it has. Otherwise a request is taken by a TAKING receipt after its message (`requestTaken`, from the
  * strict receipt match); an incident repoints its message on every assertion, so its taking is the quiet-until a
