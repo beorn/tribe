@@ -51,7 +51,7 @@ const SEATS: readonly Seat[] = [
     readableMailbox: true,
     ownerWaiting: false,
     lastReadAgeMs: 4 * MINUTE,
-    expected: { capability: "not-observed", reason: "connected-no-consumer", state: "offline" },
+    expected: { capability: "not-observed", reason: "connected-no-consumer", state: "online" },
   },
   {
     name: "@pull/waiting",
@@ -294,7 +294,7 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     )
     expect(sent).toMatchObject({ sent: true, request_id: "req-ci" })
     expect(sent.delivery).toEqual({
-      state: "offline",
+      state: "online",
       recipient: "@ci",
       reason: "connected-no-consumer",
       last_mailbox_read_age_ms: 2 * MINUTE,
@@ -418,5 +418,47 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     })
     expect(String(sent.warning)).toContain("@ci")
     expect(String(sent.warning)).not.toContain("@chief")
+  })
+
+  it("26523: deliveryReport reports connected-no-consumer online at or below the 10-minute ceiling, offline above or null, and omits note", () => {
+    const pullSeat = { delivery: "pull", connected: true, readableMailbox: true, ownerWaiting: false } as const
+    const cases = [
+      { name: "@pull/at-ceiling", lastReadAgeMs: 10 * MINUTE, expectedState: "online" as const },
+      { name: "@pull/over-ceiling", lastReadAgeMs: 10 * MINUTE + 1, expectedState: "offline" as const },
+      { name: "@pull/never-read", lastReadAgeMs: null, expectedState: "offline" as const },
+    ]
+    cases.forEach((entry, idx) =>
+      addSeat({ ...pullSeat, name: entry.name, lastReadAgeMs: entry.lastReadAgeMs }, idx + 2),
+    )
+
+    for (const entry of cases) {
+      const sent = toolJson(
+        handleToolCall(
+          sender,
+          "tribe.send",
+          { to: entry.name, message: `check ${entry.name}`, type: "request", request: `req-${entry.name}` },
+          opts(),
+        ),
+      )
+      expect(sent.delivery, entry.name).toEqual({
+        state: entry.expectedState,
+        recipient: entry.name,
+        reason: "connected-no-consumer",
+        last_mailbox_read_age_ms: entry.lastReadAgeMs,
+      })
+      expect("note" in (sent.delivery as Record<string, unknown>), `${entry.name} delivery note key`).toBe(false)
+    }
+
+    const pending = toolJson(handleToolCall(sender, "tribe.pending", { all: true }, opts())) as {
+      pending: Array<Record<string, unknown>>
+    }
+    const pendingByOwner = new Map(pending.pending.map((row) => [row.recipient, row]))
+    for (const entry of cases) {
+      expect(pendingByOwner.get(entry.name), `pending ${entry.name}`).toMatchObject({
+        owner_answer_capability: "not-observed",
+        owner_transport_reason: "connected-no-consumer",
+        owner_last_mailbox_read_age_ms: entry.lastReadAgeMs,
+      })
+    }
   })
 })

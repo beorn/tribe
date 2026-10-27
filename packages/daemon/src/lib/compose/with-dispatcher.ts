@@ -3361,8 +3361,25 @@ export function withDispatcher<
             // name. Explicit-mode (`cli_inbox_status`) carries no launch
             // identity, so these stay absent there. Mirrors
             // cli_inbox_delivery_by_launch_v1's response shape.
+            const status = readInboxStatus(target.sessionName)
+            // 26523 (@cto 55a8b9fc): the /do mid-turn rescan (`tribe inbox-status`) is
+            // the seat's attention read when no actionable rows remain to consume.
+            // `status.unread_count` is `readAttentionProjection(...).actionableCount` —
+            // the same unacknowledged-attention count that 21626 (`health:inbox-stale`
+            // `actionable_rows`) reads, excluding ambient broadcasts/notifies — so
+            // unread bodies still require `tribe inbox --consume` while an empty or
+            // ambient-only mailbox advances `last_attention_read_at`.
+            const actionableUnreadCount = status.unread_count
+            if (
+              method === "cli_inbox_status_by_launch_v1" &&
+              p.receipt === true &&
+              actionableUnreadCount === 0 &&
+              callerDeliveryAlive(callerSocket)
+            ) {
+              stmts.touchMailboxAttentionRead.run({ $recipient: target.sessionName, $now: Date.now() })
+            }
             return makeResponse(id, {
-              ...readInboxStatus(target.sessionName),
+              ...status,
               ...(stmts.getOpenRequestStatus.get({ $name: target.sessionName }) as {
                 open_request_status_count: number | null
                 /** Latest retained status for current open requests; not a cursor.

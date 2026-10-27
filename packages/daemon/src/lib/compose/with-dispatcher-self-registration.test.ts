@@ -9,6 +9,7 @@ import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/sock
 import type { TribeRole } from "tribe-wire/lib/config"
 import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-identity"
 import { readUnverifiedTokenClaims } from "tribe-wire/lib/identity-token"
+import { resolveLaunchSeat } from "../../../../wire/src/launch-seat.ts"
 import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
 import { sendMessage } from "../messaging.ts"
@@ -3987,5 +3988,222 @@ describe("24284 — a transport that closes while the read is in flight must not
 
     expect(harness.mailboxCursorSeq("@dev/7")).toBeGreaterThan(0)
     expect(harness.mailboxAttentionReadAt("@dev/7")).not.toBeNull()
+  })
+})
+
+describe("26523 — cli_inbox_status_by_launch_v1 attention-read receipt and deliveryReport online window", () => {
+  const token = managedToken("@dev/pull", "sid-pull-26523")
+  const senderToken = managedToken("@chief", "sid-chief-26523")
+  const identityVerifier: LoadedIdentityVerifier = {
+    path: "/stub/identity-verifier-26523.ts",
+    suppliesGen: true,
+    verify: async (candidate) => {
+      if (candidate === token) return { result: "verified", actor: "@dev/pull", sid: "sid-pull-26523", gen: 1 }
+      if (candidate === senderToken) return { result: "verified", actor: "@chief", sid: "sid-chief-26523", gen: 1 }
+      return { result: "unreadable", reason: "malformed token" }
+    },
+  }
+
+  it("stamps last_attention_read_at on launch inbox-status with receipt:true and zero actionable unread (including ambient-only mailbox) and keeps delivery online across 30m of 5m polls", async () => {
+    const baseNow = 1_800_000_000_000
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(baseNow)
+    try {
+      const harness = createDispatcherHarness({ identityVerifier })
+      cleanup = harness.dispose
+      const pullClient = harness.connectClient()
+      await harness.register(pullClient.connId, {
+        name: "@dev/pull",
+        pid: liveHolderPid,
+        project: "/tmp/p",
+        launchId: "sid-pull-26523",
+        launchParentPid: process.pid,
+        idToken: token,
+        identitySid: "sid-pull-26523",
+      })
+      const senderClient = harness.connectClient()
+      await harness.register(senderClient.connId, {
+        name: "@chief",
+        pid: liveHolderPid,
+        project: "/tmp/p",
+        launchId: "sid-chief-26523",
+        launchParentPid: process.pid,
+        idToken: senderToken,
+        identitySid: "sid-chief-26523",
+      })
+
+      // Ambient-only mailbox: a broadcast notify and a direct untracked notify are not in
+      // readAttentionProjection.actionableCount (the same count 21626 health:inbox-stale reads).
+      for (const to of ["*", "@dev/pull"]) {
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: `ambient-${to}`,
+            method: "tribe.send",
+            params: { to, type: "notify", message: `ambient ${to}`, summary: `ambient ${to}` },
+          },
+          senderClient.connId,
+        )
+      }
+      expect(harness.mailboxAttentionReadAt("@dev/pull")).toBeNull()
+
+      // Simulate /do step 1 polling every 5 minutes for 30 minutes with receipt: true.
+      for (let step = 1; step <= 6; step++) {
+        const tickNow = baseNow + step * 5 * 60_000
+        nowSpy.mockReturnValue(tickNow)
+        const status = parseResult<{ unread_count: number }>(
+          await harness.dispatcher.handleRequest(
+            {
+              jsonrpc: "2.0",
+              id: `poll-${step}`,
+              method: "cli_inbox_status_by_launch_v1",
+              params: { launch_id: "sid-pull-26523", id_token: token, persona: "@dev/pull", receipt: true },
+            },
+            pullClient.connId,
+          ),
+        )
+        expect(status.unread_count).toBe(0)
+        expect(harness.mailboxAttentionReadAt("@dev/pull")).toBe(tickNow)
+      }
+
+      // 4 minutes after the 30m poll, @chief sends a tracked request to @dev/pull.
+      nowSpy.mockReturnValue(baseNow + 34 * 60_000)
+      const sent = parseResult<{
+        structuredContent: SendResult & {
+          delivery: {
+            state: string
+            recipient: string
+            reason: string
+            last_mailbox_read_age_ms: number | null
+            note?: unknown
+          }
+        }
+      }>(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: "send-after-polls",
+            method: "tribe.send",
+            params: {
+              to: "@dev/pull",
+              type: "request",
+              request: "req-after-polls",
+              message: "take next item",
+              summary: "take next item",
+            },
+          },
+          senderClient.connId,
+        ),
+      ).structuredContent
+      expect(sent.delivery).toEqual({
+        state: "online",
+        recipient: "@dev/pull",
+        reason: "connected-no-consumer",
+        last_mailbox_read_age_ms: 4 * 60_000,
+      })
+      expect("note" in sent.delivery).toBe(false)
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it("withholds the attention-read receipt when unread_count > 0, when receipt is omitted (resolveLaunchSeat), on explicit cli_inbox_status, or when the caller socket closes in flight", async () => {
+    let pauseVerify = false
+    const releases: Array<() => void> = []
+    const gatedVerifier: LoadedIdentityVerifier = {
+      path: "/stub/gated-verifier-26523.ts",
+      suppliesGen: true,
+      verify: async (candidate) => {
+        if (pauseVerify) {
+          await new Promise<void>((resolve) => {
+            releases.push(resolve)
+          })
+        }
+        return identityVerifier.verify(candidate)
+      },
+    }
+    const harness = createDispatcherHarness({ identityVerifier: gatedVerifier })
+    cleanup = harness.dispose
+    const pullClient = harness.connectClient()
+    await harness.register(pullClient.connId, {
+      name: "@dev/pull",
+      pid: liveHolderPid,
+      project: "/tmp/p",
+      launchId: "sid-pull-26523",
+      launchParentPid: process.pid,
+      idToken: token,
+      identitySid: "sid-pull-26523",
+    })
+
+    // 1. resolveLaunchSeat tuple resolution (no receipt: true) leaves last_attention_read_at untouched.
+    const tupleRead = await resolveLaunchSeat(
+      async (method, params) => {
+        const result = parseResult<Record<string, unknown>>(
+          await harness.dispatcher.handleRequest(
+            {
+              jsonrpc: "2.0",
+              id: "tuple-only",
+              method,
+              params,
+            },
+            pullClient.connId,
+          ),
+        )
+        return { content: [{ type: "text", text: JSON.stringify(result) }] }
+      },
+      { launchId: "sid-pull-26523", idToken: token, persona: "@dev/pull" },
+    )
+    expect(tupleRead.session).toBe("@dev/pull")
+    expect(tupleRead.launchId).toBe("sid-pull-26523@1")
+    expect(harness.mailboxAttentionReadAt("@dev/pull")).toBeNull()
+
+    // 2. Explicit --session observer read (cli_inbox_status) leaves last_attention_read_at untouched even with receipt: true.
+    const observerRead = parseResult<{ unread_count: number }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "explicit-observer",
+          method: "cli_inbox_status",
+          params: { session: "@dev/pull", receipt: true },
+        },
+        pullClient.connId,
+      ),
+    )
+    expect(observerRead.unread_count).toBe(0)
+    expect(harness.mailboxAttentionReadAt("@dev/pull")).toBeNull()
+
+    // 3. Closed caller socket in flight (24284) leaves last_attention_read_at untouched.
+    const transientClient = harness.connectClient()
+    pauseVerify = true
+    const inFlight = harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "closed-in-flight",
+        method: "cli_inbox_status_by_launch_v1",
+        params: { launch_id: "sid-pull-26523", id_token: token, persona: "@dev/pull", receipt: true },
+      },
+      transientClient.connId,
+    )
+    transientClient.socket.markDestroyed()
+    transientClient.socket.emitClose()
+    pauseVerify = false
+    for (const release of releases.splice(0)) release()
+    await inFlight
+    expect(harness.mailboxAttentionReadAt("@dev/pull")).toBeNull()
+
+    // 4. Unread actionable message (unread_count > 0) withholds the receipt until bodies are consumed.
+    harness.sendActionable("@dev/pull", "please review", "req-unread-guard")
+    const unreadStatus = parseResult<{ unread_count: number }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "unread-present",
+          method: "cli_inbox_status_by_launch_v1",
+          params: { launch_id: "sid-pull-26523", id_token: token, persona: "@dev/pull", receipt: true },
+        },
+        pullClient.connId,
+      ),
+    )
+    expect(unreadStatus.unread_count).toBe(1)
+    expect(harness.mailboxAttentionReadAt("@dev/pull")).toBeNull()
   })
 })

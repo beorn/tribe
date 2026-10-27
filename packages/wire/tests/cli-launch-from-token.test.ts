@@ -86,7 +86,10 @@ describe("the CLI's managed inbox reads its launch from the identity token (2507
     })
     expect(run, run.stderr).toMatchObject({ code: 0 })
     expect(byLaunchCalls()).toEqual([
-      { method: "cli_inbox_status_by_launch_v1", params: { launch_id: TOKEN_SID, id_token: token, persona: SEAT } },
+      {
+        method: "cli_inbox_status_by_launch_v1",
+        params: { launch_id: TOKEN_SID, id_token: token, persona: SEAT, receipt: true },
+      },
     ])
   })
 

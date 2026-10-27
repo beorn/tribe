@@ -16,6 +16,13 @@ const DAY = 24 * HOUR
 const RESPONSE_WARNING_MS = 30 * MINUTE
 /** Exported for retention.ts, whose live window must not undercut it (21757). */
 export const CURSOR_WARNING_MS = 30 * MINUTE
+/**
+ * 26523 (@cto 55a8b9fc): a connected pull seat (`connected-no-consumer`) whose
+ * last attention read is within the fleet's 10-minute in-progress ceiling
+ * (AGENTS.md: a request older than ten minutes is broken) reports `online` in
+ * `deliveryReport`; `null` or above the ceiling reports `offline`.
+ */
+export const CONNECTED_PULL_READ_CEILING_MS = 10 * MINUTE
 const DEFAULT_SLA_TARGET_MS = MINUTE
 
 // ---------------------------------------------------------------------------

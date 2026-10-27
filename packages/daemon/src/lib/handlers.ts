@@ -66,7 +66,7 @@ import {
 } from "./session.ts"
 import { incidentConditionSummary, incidentKey, parseIncidentKey, type IncidentIdentity } from "tribe-wire"
 import { gatherCodePin } from "./code-pin.ts"
-import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
+import { CONNECTED_PULL_READ_CEILING_MS, parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { registeredTrustTierForTopic, senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
 import {
@@ -1579,10 +1579,12 @@ function persistDeadLetter(
 
 /**
  * The sender's per-recipient report. Routing chose the mailbox from the live
- * transport; the reported state reads the owner's answer capability (24664).
- * A live seat that nothing is consuming reports `offline`, and every mailbox
- * row carries the reason and the read age, so a sender can tell a seat that
- * reads at its next tick from an unreachable one. A broadcast names no mailbox.
+ * transport; the reported state reads the owner's answer capability (24664) and,
+ * for a connected pull seat (`connected-no-consumer`), whether its last
+ * attention read is within `CONNECTED_PULL_READ_CEILING_MS` (26523, @cto
+ * 55a8b9fc). Every mailbox row carries the reason and the read age, so a sender
+ * can tell a seat that reads at its next tick from an unreachable or stale one.
+ * A broadcast names no mailbox.
  */
 function deliveryReport(
   rows: readonly ResolvedDirectRecipient[],
@@ -1612,11 +1614,18 @@ function deliveryReport(
     }
     if (recipient === "*") return { state: resolution.state, recipient }
     const owner = transport.observe(recipient)
+    const readAge = owner.owner_last_mailbox_read_age_ms
+    const activePullReader =
+      owner.owner_transport_live === true &&
+      owner.owner_transport_reason === "connected-no-consumer" &&
+      readAge !== null &&
+      readAge <= CONNECTED_PULL_READ_CEILING_MS
     return {
-      state: resolution.state === "online" && ownerCannotAnswer(owner) ? "offline" : resolution.state,
+      state:
+        resolution.state === "online" && ownerCannotAnswer(owner) && !activePullReader ? "offline" : resolution.state,
       recipient,
       reason: owner.owner_transport_reason,
-      last_mailbox_read_age_ms: owner.owner_last_mailbox_read_age_ms,
+      last_mailbox_read_age_ms: readAge,
     }
   })
 }

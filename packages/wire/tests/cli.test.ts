@@ -2372,6 +2372,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
             launch_id: "managed-stale-daemon-launch",
             id_token: launchToken("managed-stale-daemon-launch"),
             persona: "@dev/2",
+            receipt: true,
           },
         },
         { method: "cli_protocol", params: undefined },

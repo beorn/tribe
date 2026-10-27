@@ -2084,10 +2084,10 @@ export function formatInboxStatus(result: InboxStatusSummary): string {
 }
 
 async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promise<void> {
-  const result = (await callDaemon(
-    cliInboxMethod("status", opts.session),
-    cliInboxTargetParams("inbox-status", opts.session),
-  )) as InboxStatusSummary
+  const result = (await callDaemon(cliInboxMethod("status", opts.session), {
+    ...cliInboxTargetParams("inbox-status", opts.session),
+    ...(opts.session === undefined ? { receipt: true } : {}),
+  })) as InboxStatusSummary
   warnIfSelfTransportDown("inbox-status", result)
   if (opts.json) {
     await writeJsonStdout(result)
