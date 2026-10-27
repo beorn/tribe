@@ -439,6 +439,26 @@ describe("registerSendCommands", () => {
       expect(sent.stderr).toContain("delivery note — @ci is not answer-capable")
       expect(sent.stderr).toContain("type=request")
       expect(sent.stderr).not.toContain("no `summary` provided")
+
+      // 26522 (@cto 8a135bdb binding 5): --json forwards warning under the daemon's existing key.
+      const sentJson = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProcess) => {
+        const child = spawn(BUN_BIN, [CLI, "send", "@ci", "note", "--type", "notify", "--summary", "note", "--json"], {
+          env: { ...process.env, TRIBE_SOCKET: socketPath, ...launchEnvironment("launch-dev12") },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProcess({ code, stdout, stderr }))
+      })
+      expect(sentJson.code).toBe(0)
+      expect(JSON.parse(sentJson.stdout)).toMatchObject({
+        sent: true,
+        id: "msg-1",
+        to: "@ci",
+        warning: expect.stringContaining("delivery note — @ci is not answer-capable"),
+      })
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })

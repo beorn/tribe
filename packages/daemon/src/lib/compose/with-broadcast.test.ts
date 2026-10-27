@@ -28,6 +28,7 @@ function createHarness() {
     },
     // The daemon's own context has no session row, so its rows carry no sender authority (25074 3d-1a).
     selectSessionAuthority: { get: () => null },
+    selectMessageById: { get: () => ({ rowid, ts: 0, attention_required: 0 }) },
   }
   const db = {
     transaction<T>(fn: () => T): () => T {

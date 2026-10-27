@@ -632,6 +632,7 @@ export function sendMessage(
   id: string
   ts: number
   rowid: number
+  attentionRequired: boolean
   tracker?: { request_id: string; closed: number }
   deduplicated?: boolean
   incident?: {
@@ -725,11 +726,16 @@ export function sendMessage(
     if (expectedHoldings !== undefined && incidentRequestId !== null) {
       // Authorization has already run at dispatch. Accepted UUID retries win before comparing an old snapshot,
       // including when retention has moved their observation into the archive.
-      const accepted = ctx.stmts.selectMessageById.get({ $id: id }) as { rowid: number; ts: number } | null
+      const accepted = ctx.stmts.selectMessageById.get({ $id: id }) as {
+        rowid: number
+        ts: number
+        attention_required: number
+      } | null
       if (accepted !== null) {
         return {
           rowid: accepted.rowid,
           ts: accepted.ts,
+          attentionRequired: accepted.attention_required === 1,
           openedOwners,
           deduplicated: true as const,
           tracker: undefined,
@@ -808,11 +814,14 @@ export function sendMessage(
       $sender_authority: senderAuthorityOf(ctx, sender),
     })
     if (result.changes === 0) {
-      const existing = ctx.stmts.selectMessageById.get({ $id: id }) as { rowid: number; ts: number } | undefined
+      const existing = ctx.stmts.selectMessageById.get({ $id: id }) as
+        | { rowid: number; ts: number; attention_required: number }
+        | undefined
       if (existing === undefined) throw new Error(`message idempotency row disappeared for ${id}`)
       return {
         rowid: existing.rowid,
         ts: existing.ts,
+        attentionRequired: existing.attention_required === 1,
         openedOwners,
         deduplicated: true as const,
         tracker: undefined,
@@ -823,6 +832,11 @@ export function sendMessage(
       }
     }
     const rowid = Number(result.lastInsertRowid)
+    const insertedRow = ctx.stmts.selectMessageById.get({ $id: id }) as
+      | { rowid: number; ts: number; attention_required: number }
+      | undefined
+    if (insertedRow === undefined) throw new Error(`inserted message row disappeared for ${id}`)
+    const attentionRequired = insertedRow.attention_required === 1
     // 29541: the other way a row can answer a request — a progress status whose
     // ref names the requester's still-open ball. Resolved from the SAME row
     // match the SQL wake arm uses (refBoundOpenRequestMatchSql), so the
@@ -942,6 +956,7 @@ export function sendMessage(
     return {
       rowid,
       ts,
+      attentionRequired,
       tracker,
       correlatedReply,
       refBoundOpenRequest,
@@ -954,6 +969,7 @@ export function sendMessage(
   const {
     rowid,
     ts: persistedTs,
+    attentionRequired,
     tracker,
     correlatedReply,
     refBoundOpenRequest,
@@ -967,6 +983,7 @@ export function sendMessage(
       id,
       ts: persistedTs,
       rowid,
+      attentionRequired,
       deduplicated: true,
       ...(incidentOutcome === undefined ? {} : { incident: incidentOutcome }),
     }
@@ -995,6 +1012,7 @@ export function sendMessage(
     id,
     ts: persistedTs,
     rowid,
+    attentionRequired,
     ...(tracker ? { tracker } : {}),
     ...(incidentOutcome === undefined ? {} : { incident: incidentOutcome }),
   }
