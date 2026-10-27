@@ -294,6 +294,51 @@ async function resolveCallerNameHint(): Promise<string | null> {
  * 4. Message history via tribe.fetch by ID
  * 5. Recent message log via cli_log
  */
+/** A unique id the verbs can send, or a refusal that already names the candidates. */
+export type ResolvedRequest = { sender: string; id: string } | { error: string }
+
+/**
+ * Same lookups as {@link resolveRequestSender}, plus the full id when fetch
+ * resolved a unique prefix. `tribe reply` and `tribe taking` must send that
+ * full id; the daemon close still matches request ids exactly.
+ */
+export async function resolveRequestAddress(
+  requestId: string,
+  callerName?: string | null,
+): Promise<ResolvedRequest | null> {
+  const normalizedId = requestId.trim()
+  if (normalizedId.length === 0) return null
+  const sender = await resolveRequestSender(requestId, callerName)
+  if (sender) return { sender, id: normalizedId }
+
+  try {
+    const res = mcpJsonContent(await callDaemon("tribe.fetch", { ids: [normalizedId], receipt: false })) as {
+      events?: Array<{ id?: string; from?: string; sender?: string }>
+      error?: string
+    }
+    if (typeof res.error === "string" && res.error.length > 0) return { error: res.error }
+    const events = res.events ?? []
+    if (normalizedId.length < 8) return null
+    const prefixed = events.filter((event) => typeof event.id === "string" && event.id.startsWith(normalizedId))
+    if (prefixed.length > 1) {
+      const ids = prefixed.map((event) => event.id).filter((id): id is string => typeof id === "string")
+      return {
+        error:
+          `request id prefix '${normalizedId}' is ambiguous — it names ${ids.length} messages: ${ids.join(", ")}. ` +
+          `Pass a full id.`,
+      }
+    }
+    const chosen = prefixed[0]
+    const fromPrefix = chosen?.from ?? chosen?.sender
+    if (chosen?.id && fromPrefix && fromPrefix.trim().length > 0) {
+      return { sender: fromPrefix.trim(), id: chosen.id }
+    }
+  } catch {
+    // silent-fallback-allow: message history fetch failure falls through to the not-found refusal
+  }
+  return null
+}
+
 export async function resolveRequestSender(requestId: string, callerName?: string | null): Promise<string | null> {
   const normalizedId = requestId.trim()
   if (normalizedId.length === 0) return null
@@ -994,8 +1039,8 @@ async function cmdReply(
     process.exit(2)
   }
   const caller = await resolveCallerNameHint()
-  const recipient = await resolveRequestSender(requestId, caller)
-  if (!recipient) {
+  const resolved = await resolveRequestAddress(requestId, caller)
+  if (!resolved) {
     console.error(
       `tribe.reply: cannot resolve sender for request '${requestId}' — request not found in pending tracker or message history.`,
     )
@@ -1003,12 +1048,16 @@ async function cmdReply(
     console.error(`  tribe send <recipient> --type response --reply ${requestId} <message>`)
     process.exit(1)
   }
+  if ("error" in resolved) {
+    console.error(`tribe.reply: ${resolved.error}`)
+    process.exit(1)
+  }
   const summary = opts.summary ?? deriveFirstLineSummary(message)
   await cmdSend({
-    to: recipient,
+    to: resolved.sender,
     message,
     type: "response",
-    reply: requestId,
+    reply: resolved.id,
     summary: summary.length > 0 ? summary : undefined,
     verbose: opts.verbose,
   })
@@ -1021,8 +1070,8 @@ async function cmdTaking(
 ): Promise<void> {
   const message = messageWords && messageWords.length > 0 ? messageWords.join(" ") : "TAKING"
   const caller = await resolveCallerNameHint()
-  const recipient = await resolveRequestSender(requestId, caller)
-  if (!recipient) {
+  const resolved = await resolveRequestAddress(requestId, caller)
+  if (!resolved) {
     console.error(
       `tribe.taking: cannot resolve sender for request '${requestId}' — request not found in pending tracker or message history.`,
     )
@@ -1030,12 +1079,16 @@ async function cmdTaking(
     console.error(`  tribe send <recipient> --type status --ref ${requestId} [message]`)
     process.exit(1)
   }
+  if ("error" in resolved) {
+    console.error(`tribe.taking: ${resolved.error}`)
+    process.exit(1)
+  }
   const summary = opts.summary ?? deriveFirstLineSummary(message, "TAKING")
   await cmdSend({
-    to: recipient,
+    to: resolved.sender,
     message,
     type: "status",
-    ref: requestId,
+    ref: resolved.id,
     summary: summary.length > 0 ? summary : "TAKING",
     verbose: opts.verbose,
   })

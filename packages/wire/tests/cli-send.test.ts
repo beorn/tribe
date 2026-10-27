@@ -2265,6 +2265,59 @@ describe("reply and taking convenience commands (25028)", () => {
     expect(res.stderr).toContain("tribe send <recipient> --type response --reply req-unknown")
   })
 
+  /**
+   * @failure tribe reply and taking refuse a unique 8-character prefix that fetch already resolved.
+   * @level l1
+   * @consumer seats pasting the short id tribe pending prints.
+   */
+  test("tribe reply sends the full id when fetch resolved a unique prefix", async () => {
+    const full = "24e260e0-1ca2-43ae-8bd9-d56a8e8f97bd"
+    const res = await runMockDaemon(["reply", "24e260e0", "answer the prefix"], {
+      pendingRows: [],
+      fetchEvents: [{ id: full, from: "@mock-requester" }],
+    })
+    expect(res.code).toBe(0)
+    expect(res.sent).toEqual([
+      expect.objectContaining({
+        to: "@mock-requester",
+        type: "response",
+        reply: full,
+        message: "answer the prefix",
+      }),
+    ])
+  })
+
+  test("tribe taking sends the full id when fetch resolved a unique prefix", async () => {
+    const full = "24e260e0-1ca2-43ae-8bd9-d56a8e8f97bd"
+    const res = await runMockDaemon(["taking", "24e260e0", "on it"], {
+      pendingRows: [],
+      fetchEvents: [{ id: full, from: "@mock-requester" }],
+    })
+    expect(res.code).toBe(0)
+    expect(res.sent).toEqual([
+      expect.objectContaining({
+        to: "@mock-requester",
+        type: "status",
+        ref: full,
+      }),
+    ])
+  })
+
+  test("tribe reply names every candidate when a prefix matches more than one message", async () => {
+    const res = await runMockDaemon(["reply", "24e260e0", "which one"], {
+      pendingRows: [],
+      fetchEvents: [
+        { id: "24e260e0-1ca2-43ae-8bd9-d56a8e8f97bd", from: "@one" },
+        { id: "24e260e0-aaaa-4f49-905c-900ebc1702a0", from: "@two" },
+      ],
+    })
+    expect(res.code).toBe(1)
+    expect(res.sent).toEqual([])
+    expect(res.stderr).toContain("ambiguous")
+    expect(res.stderr).toContain("24e260e0-1ca2-43ae-8bd9-d56a8e8f97bd")
+    expect(res.stderr).toContain("24e260e0-aaaa-4f49-905c-900ebc1702a0")
+  })
+
   test("tribe taking sends a TAKING status receipt with default message when text is omitted", async () => {
     const res = await runMockDaemon(["taking", "req-ball-2"], {
       pendingRows: [
