@@ -25,6 +25,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { createHash } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -266,6 +267,97 @@ describe("one ball per incident (habwire stage 2(d))", () => {
     }
 
     const INCIDENT = { emitter: WATCHER, subject: "@dev/5", condition: "transport-wedged" }
+
+    // Former callers need the same unflagged lifecycle after an owner settles a still-live condition.
+    const testId = "packages/example.test.ts > fails"
+    const redSubject = `red-${createHash("sha256").update(testId, "utf8").digest("hex").slice(0, 32)}`
+    it.each([
+      {
+        owner: "@chief",
+        emitter: "wait-watch",
+        subject: "seat @dev/5",
+        condition: "parked",
+        summary: "parked: seat @dev/5 · oldest ball-1",
+      },
+      {
+        owner: "@chief",
+        emitter: "wait-watch",
+        subject: "seat @dev/5",
+        condition: "busy-not-draining",
+        summary: "busy-not-draining: seat @dev/5 · oldest ball-1",
+      },
+      {
+        owner: "@dev/fixer",
+        emitter: "component-ci-reader",
+        subject: "ag",
+        condition: "ci-red-at-pin",
+        summary: "ag CI red at abc123: test failed",
+      },
+      {
+        owner: "@dev/fixer",
+        emitter: "post-merge-tests",
+        subject: redSubject,
+        condition: "new-red",
+        summary: `guard 2: NEW red on main: ${testId} (1 candidate merge)`,
+      },
+      {
+        owner: "@dev/fixer",
+        emitter: "post-merge-tests",
+        subject: redSubject,
+        condition: "new-red",
+        summary: `guard 2 deadline: NEW red on main still open: ${testId} (owner @dev/fixer)`,
+      },
+    ])("reopens $emitter $condition after an evidence close", ({ owner, emitter, subject, condition, summary }) => {
+      const watcher = makeContext(db, stmts, emitter)
+      const recipient = makeContext(db, stmts, owner)
+      const identity = { emitter, subject, condition }
+      const key = incidentKey(identity)
+      const args = {
+        to: owner,
+        message: summary,
+        summary,
+        incident: emitter === "wait-watch" ? { ...identity, active: true } : identity,
+      }
+      const read = () => {
+        const result = handleToolCall(
+          watcher,
+          "tribe.pending",
+          { emitter },
+          {
+            ...makeOpts(),
+            incidentAuthorization: { emitter, operation: "read" },
+          },
+        ) as { content: Array<{ text: string }> }
+        return JSON.parse(result.content[0]!.text) as { pending: Array<{ request_id: string; message_id: string }> }
+      }
+
+      const first = call(watcher, args)
+      expect(first.incident).toEqual({ transition: "opened", wakesOwner: true })
+      expect(openKeys(owner)).toEqual([key])
+      const repeated = call(watcher, args)
+      expect(repeated.incident).toEqual({ transition: "repeated", wakesOwner: false })
+      expect(openKeys(owner)).toEqual([key])
+      const previousMessage = read().pending[0]!.message_id
+      const closed = handleToolCall(
+        recipient,
+        "tribe.pending",
+        {
+          owner,
+          close: key,
+          close_evidence: "Reviewed the reported condition",
+        },
+        makeOpts(),
+      ) as { content: Array<{ text: string }> }
+      expect(JSON.parse(closed.content[0]!.text)).toMatchObject({ closed: 1 })
+      expect(openKeys(owner)).toEqual([])
+      expect(read().pending).toEqual([])
+
+      const reopened = call(watcher, args)
+      expect(reopened.incident).toEqual({ transition: "opened", wakesOwner: true })
+      expect(openKeys(owner)).toEqual([key])
+      expect(read().pending[0]).toMatchObject({ request_id: key, message_id: reopened.id })
+      expect(reopened.id).not.toBe(previousMessage)
+    })
 
     // 28044 AC3: existing upsert/clear tests have no stale snapshot or whole-recipient comparison.
     it("conflicts without mutation on stale raise/clear and requires every recipient before clearing", () => {
