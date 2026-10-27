@@ -3212,17 +3212,15 @@ export function createStatements(db: Database) {
     `),
     ),
 
-    /** 29969 - the id a close or reply was handed is not a full id, but it is an
-     *  unambiguous prefix of ONE ball this owner still owes. `substr` keeps `%`
-     *  and `_` literal. LIMIT 2 answers "unique or ambiguous" without reading the
-     *  rest, so an owner with thousands of balls pays the same two rows.
-     *  `sendMessage` resolves the unique row to that full id (27327). A manual
-     *  pending close still uses the two rows only to name the ball. */
+    /** 29969 / 27327 - prefix of balls this owner still owes. `substr` keeps `%`
+     *  and `_` literal. LIMIT 9: one row is unique and `sendMessage` resolves it;
+     *  2 to 8 rows are the named candidates; 9 means the list is truncated. */
     selectOpenBallIdsByPrefix: db.prepare(
       assertSingleStatement(`
       SELECT request_id FROM pending_request
       WHERE recipient = $name AND substr(request_id, 1, length($prefix)) = $prefix
-      LIMIT 2
+      ORDER BY request_id
+      LIMIT 9
     `),
     ),
 

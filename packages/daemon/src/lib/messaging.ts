@@ -371,8 +371,8 @@ export function settlePendingRows(
  *     refusing, because no path resolves prefixes; it just names the full id
  *     instead of claiming no ball was ever opened for an id the owner can see.
  *   - `prefix-ambiguous`       — the id is the prefix of MORE than one ball this
- *     owner owes; naming any one of them would be a guess, so it names none
- *     (29969).
+ *     owner owes. The ids we read are named. `truncated` means the read stopped
+ *     at the limit, so the list is not complete (27327).
  */
 export type PendingCloseCause =
   | {
@@ -399,7 +399,7 @@ export type PendingCloseCause =
       fanout: "first" | "all"
     }
   | { kind: "prefix-of-open"; full_id: string }
-  | { kind: "prefix-ambiguous" }
+  | { kind: "prefix-ambiguous"; ids: readonly string[]; truncated: boolean }
   | { kind: "never-tracked" }
 
 /** Fold the journal for one request id, across both retention tiers, into the
@@ -418,7 +418,9 @@ export function pendingCloseCause(ctx: TribeContext, requestId: string, owner: s
     const first = matches.at(0)
     if (first !== undefined) {
       if (matches.length === 1) return { kind: "prefix-of-open", full_id: first.request_id }
-      return { kind: "prefix-ambiguous" }
+      const truncated = matches.length === 9
+      const ids = (truncated ? matches.slice(0, 8) : matches).map((row) => row.request_id)
+      return { kind: "prefix-ambiguous", ids, truncated }
     }
     return { kind: "never-tracked" }
   }
@@ -496,7 +498,12 @@ export function settlementCauseVerb(cause: { settlement: BallSettlementReason; s
 export function formatPendingCloseCause(cause: PendingCloseCause, requestId: string, owner: string): string {
   const lead = `closed 0 rows for ${requestId}: `
   if (cause.kind === "prefix-ambiguous") {
-    return `${lead}that is a prefix of more than one open ball — pass the full id ` + `(tribe pending --owner ${owner})`
+    const count = cause.truncated ? `at least ${cause.ids.length}` : String(cause.ids.length)
+    const more = cause.truncated ? ", and more" : ""
+    return (
+      `${lead}that is a prefix of ${count} open balls: ${cause.ids.join(", ")}${more}. ` +
+      `Pass a full id (tribe pending --owner ${owner})`
+    )
   }
   if (cause.kind === "prefix-of-open") {
     return (

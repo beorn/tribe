@@ -456,8 +456,8 @@ describe("a closed: 0 ball result names its exact cause from the journal", () =>
         request_id: "req-amb-91c4",
         closed: 0,
         reason:
-          "closed 0 rows for req-amb-91c4: that is a prefix of more than one open ball — pass the full id " +
-          "(tribe pending --owner @dev/3)",
+          "closed 0 rows for req-amb-91c4: that is a prefix of 2 open balls: req-amb-91c4aaaa, req-amb-91c4bbbb. " +
+          "Pass a full id (tribe pending --owner @dev/3)",
       },
     ])
   })
