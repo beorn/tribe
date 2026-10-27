@@ -16,14 +16,20 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import { assertSingleStatement } from "@bearly/sqlite"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { shouldDeliver } from "./compose/with-broadcast.ts"
 import { settlesRequestOpenedBy, type MessageInsertedInfo } from "./context.ts"
-import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
+import {
+  createStatements,
+  openDatabase,
+  SELECT_CORRELATED_REQUEST_FOR_RESPONSE_SQL,
+  type TribeStatements,
+} from "./database.ts"
 import { readAttentionProjection, type HandlerOpts } from "./handlers.ts"
-import { createInboxWaitManager, type InboxStatus } from "./inbox-wait.ts"
+import { createInboxWaitManager, readInboxWaitWokenBy, type InboxStatus } from "./inbox-wait.ts"
 import { sendMessage } from "./messaging.ts"
 
 const REQUESTER = "@requester"
@@ -364,5 +370,195 @@ describe("29535 a ref-bound status wakes only its requester, and only under the 
     expect(tailSeq(f.stmts, REQUESTER, true)).not.toBe(rowidOf(f, row.id))
     expect(f.inserted.find((i) => i.id === row.id)?.refBoundOpenRequest ?? null).toBeNull()
     expect((await parked).status).toBe("timeout")
+  })
+
+  // 31171 (@adhoc/8 51m wedge): @requester opens a request ball; @responder first
+  // sends a TAKING receipt as `type: "response"` with `reply: BALL` (which closes
+  // and deletes the `pending_request` row), and later sends the actual final
+  // `type: "response"` correlated to `BALL` via `ref: BALL` (or `reply: BALL`).
+  // Drain SQL (`selectAttention` and focus-mode `getInboxRows`) classifies the
+  // follow-up response as `attention_required = 1`, so it must also wake focus-mode
+  // push (`settlesRequestOpenedBy` -> `shouldDeliver`) and `inbox-wait` under
+  // `wakeOnCorrelatedReply: true`.
+  it.each(["ref", "reply"] as const)(
+    "31171 wakes focus-mode push and opt-in inbox-wait on a follow-up response (%s) after an earlier TAKING response settled the ball",
+    async (correlationField) => {
+      const f = fixture()
+      sendMessage(
+        f.requester,
+        PEER,
+        "review landing 2",
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { request: BALL },
+      )
+
+      const taking = sendMessage(
+        f.peer,
+        REQUESTER,
+        "TAKING req-29535 · ETA 10m",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { reply: BALL },
+      )
+      expect(taking.tracker).toEqual({ request_id: BALL, closed: 1 })
+      const takingRowid = rowidOf(f, taking.id)
+
+      // @requester drains the TAKING response and parks waiting for the real verdict/response.
+      f.stmts.advanceMailboxCursor.run({ $recipient: REQUESTER, $seq: takingRowid, $now: Date.now() })
+      const parked = f.manager.wait(REQUESTER, `conn-31171-${correlationField}`, 1_000, {
+        wakeOnCorrelatedReply: true,
+        afterSeq: takingRowid,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      const finalResponse =
+        correlationField === "ref"
+          ? sendMessage(f.peer, REQUESTER, "landing 2 GO", "response", undefined, BALL)
+          : sendMessage(
+              f.peer,
+              REQUESTER,
+              "landing 2 GO",
+              "response",
+              undefined,
+              undefined,
+              "direct",
+              {},
+              { reply: BALL },
+            )
+      const finalRowid = rowidOf(f, finalResponse.id)
+
+      // 1. Drain SQL: both attention projection (`selectAttention`) and focus-mode
+      //    `getInboxRows` include the follow-up response as unread attention.
+      const attention = readAttentionProjection(f.requester, REQUESTER, Date.now(), 0, makeOpts()).attention
+      expect(attention.actionable_unread.map((r) => r.id)).toContain(finalResponse.id)
+      const drainRows = f.stmts.getInboxRows.all({
+        $since: takingRowid,
+        $name: REQUESTER,
+        $filter_mode: "focus",
+        $filter_until: null,
+        $filter_mute: null,
+        $now: Date.now(),
+        $limit: 50,
+      }) as Array<{ id: string; attention_required: number }>
+      expect(drainRows.map((r) => r.id)).toContain(finalResponse.id)
+
+      // 2. Push predicate: focus-mode `shouldDeliver` must deliver the wakeup.
+      const finalInfo = f.inserted.find((i) => i.id === finalResponse.id)
+      expect(finalInfo).toBeDefined()
+      expect(settlesRequestOpenedBy(finalInfo as MessageInsertedInfo, REQUESTER)).toBe(true)
+      const focus = { filter_mode: "focus", filter_mute: null, filter_until: null }
+      expect(
+        shouldDeliver(
+          {
+            kind: "direct",
+            type: (finalInfo as MessageInsertedInfo).type,
+            replyHint: "no",
+            topic: null,
+            settlesOwnRequest: settlesRequestOpenedBy(finalInfo as MessageInsertedInfo, REQUESTER),
+          },
+          focus,
+        ),
+      ).toBe(true)
+
+      // 3. Opt-in inbox-wait SQL tail and live insert-driven wake must both fire immediately.
+      expect(tailSeq(f.stmts, REQUESTER, true)).toBe(finalRowid)
+      const woken = await parked
+      expect(woken.status).toBe("woken")
+      expect(woken.waited_ms).toBeLessThan(500)
+      expect(woken.attention.actionable_unread.map((r) => r.id)).toContain(finalResponse.id)
+
+      // C3: readInboxWaitWokenBy populates settles_request_id = reply ?? ref for settles-type rows.
+      const wokenBy = readInboxWaitWokenBy(f.stmts, REQUESTER, finalRowid, true)
+      expect(wokenBy).toMatchObject({
+        kind: "message",
+        seq: finalRowid,
+        message_id: finalResponse.id,
+        type: "response",
+        settles_request_id: BALL,
+      })
+    },
+  )
+
+  it("31171 C1/C2/C3: ref-only response leaves pending_request untouched, foreign ref stays quiet, status keeps settles_request_id null, and selectCorrelatedRequestForResponse uses only existing indexes", () => {
+    const f = fixture()
+    const OTHER_BALL = "req-31171-other"
+    const FOREIGN_BALL = "req-31171-foreign"
+
+    // Open two balls from @requester to @responder, plus one foreign ball from @responder to relay.
+    sendMessage(f.requester, PEER, "first request", "request", undefined, undefined, "direct", {}, { request: BALL })
+    sendMessage(
+      f.requester,
+      PEER,
+      "unrelated open request",
+      "request",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { request: OTHER_BALL },
+    )
+    sendMessage(
+      f.peer,
+      "relay",
+      "foreign request not opened by @requester",
+      "request",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { request: FOREIGN_BALL },
+    )
+
+    // C2(i): a ref-only response wakes @requester without mutating pending_request
+    // (tracker is undefined / closed stays 0, and both open balls of @requester stay open).
+    const refOnlyResponse = sendMessage(f.peer, REQUESTER, "progress/answer with ref only", "response", undefined, BALL)
+    expect(refOnlyResponse.tracker).toBeUndefined()
+    const openForPeer = f.stmts.selectPendingForRecipient.all({ $recipient: PEER }) as Array<{ request_id: string }>
+    expect(openForPeer.map((r) => r.request_id).sort()).toEqual([BALL, OTHER_BALL].sort())
+    const refOnlyInfo = f.inserted.find((i) => i.id === refOnlyResponse.id)
+    expect(refOnlyInfo?.correlatedReply).toEqual({ requestId: BALL, requester: REQUESTER })
+    expect(settlesRequestOpenedBy(refOnlyInfo as MessageInsertedInfo, REQUESTER)).toBe(true)
+
+    // C2(ii): a direct response whose ref names a request the recipient (@requester) did NOT open
+    // stays correlatedReply = null and does not wake focus-mode push or opt-in inbox-wait.
+    const foreignRefResponse = sendMessage(
+      f.peer,
+      REQUESTER,
+      "response referencing someone else's request",
+      "response",
+      undefined,
+      FOREIGN_BALL,
+    )
+    const foreignInfo = f.inserted.find((i) => i.id === foreignRefResponse.id)
+    expect(foreignInfo?.correlatedReply).toBeNull()
+    expect(settlesRequestOpenedBy(foreignInfo as MessageInsertedInfo, REQUESTER)).toBe(false)
+    expect(tailSeq(f.stmts, REQUESTER, true)).not.toBe(rowidOf(f, foreignRefResponse.id))
+
+    // C3: readInboxWaitWokenBy never sets settles_request_id on a status row, even when its ref names BALL.
+    const statusRow = sendMessage(f.peer, REQUESTER, "status on open ball", "status", undefined, BALL)
+    const statusWokenBy = readInboxWaitWokenBy(f.stmts, REQUESTER, rowidOf(f, statusRow.id), true)
+    expect(statusWokenBy).toMatchObject({
+      kind: "message",
+      type: "status",
+      settles_request_id: null,
+    })
+
+    // C1: EXPLAIN QUERY PLAN for selectCorrelatedRequestForResponse's own SQL uses only SEARCH ... USING INDEX, never SCAN.
+    const planRows = f.db
+      .prepare(assertSingleStatement(`EXPLAIN QUERY PLAN ${SELECT_CORRELATED_REQUEST_FOR_RESPONSE_SQL}`))
+      .all({ $target_id: BALL, $responder: PEER, $requester: REQUESTER }) as Array<{ detail: string }>
+    const searchDetails = planRows.map((r) => r.detail).filter((d) => d.startsWith("SEARCH ") || d.startsWith("SCAN "))
+    expect(searchDetails.length).toBe(6)
+    for (const detail of searchDetails) {
+      expect(detail).toMatch(/^SEARCH /)
+      expect(detail).not.toMatch(/^SCAN /)
+    }
   })
 })

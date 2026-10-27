@@ -752,7 +752,7 @@ describe("createInboxWaitManager", () => {
     }
   })
 
-  it("AC2 (30414): a response whose ref names an already-closed ball settles the deadline woken under the opt-in", async () => {
+  it("AC2 (30414, superseded by 31171): a response whose ref names a closed ball opened by the requester live-wakes; status/notify on a closed ball and a response to a foreign closed ball do not live-wake", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-closed-ref-"))
     const db = openDatabase(join(tmpDir, "tribe.db"))
     const stmts = createStatements(db)
@@ -765,9 +765,10 @@ describe("createInboxWaitManager", () => {
     )
     const requester = makeContext(db, stmts, "requester", "@requester", manager.onMessageInserted)
     const responder = makeContext(db, stmts, "responder", "@responder", manager.onMessageInserted)
+    const other = makeContext(db, stmts, "other", "@other", manager.onMessageInserted)
 
     try {
-      // The ball opens and is settled before the wait: the specimen's 47e67b5f, answered eight minutes earlier.
+      // 1. Requester-opened ball is settled by an earlier response (e.g. TAKING response+reply).
       sendMessage(
         requester,
         "@responder",
@@ -795,16 +796,16 @@ describe("createInboxWaitManager", () => {
         },
       )
       expect(db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get("req-settled")).toBeNull()
-      // The requester read the answer (its own fetch advanced the mailbox cursor), as @dev/10 had.
       stmts.advanceMailboxCursor.run({ $recipient: "@requester", $seq: answer.rowid, $now: Date.now() })
 
-      const wait = manager.wait("@requester", "conn-closed-ref", 40, { wakeOnCorrelatedReply: true })
+      const wait = manager.wait("@requester", "conn-closed-ref", 400, { wakeOnCorrelatedReply: true })
       let result: Awaited<typeof wait> | undefined
       void wait.then((value) => {
         result = value
       })
 
-      // The follow-up: a direct response whose ref names the closed ball (no reply, no open ref-bound ball).
+      // 31171 (superseding 30414 AC2): a follow-up direct response whose ref names the
+      // closed ball that @requester opened live-wakes immediately with settles_request_id = ref.
       const followUp = sendMessage(
         responder,
         "@requester",
@@ -815,15 +816,12 @@ describe("createInboxWaitManager", () => {
         "direct",
       )
       await Promise.resolve()
-      // By design it is not a live wake: the opt-in wakes only on a settlement or an OPEN ref-bound ball.
-      expect(result).toBeUndefined()
+      expect(result).toBeDefined()
 
       await expect(wait).resolves.toMatchObject({
         status: "woken",
         timed_out: false,
         aborted: false,
-        // The acknowledged answer is gone from attention; the follow-up is the one retained row, and it arrived
-        // during the window.
         unread_count: 1,
         woken_by: {
           kind: "message",
@@ -831,11 +829,91 @@ describe("createInboxWaitManager", () => {
           message_id: followUp.id,
           type: "response",
           sender: "@responder",
-          settles_request_id: null,
+          settles_request_id: "req-settled",
           replay: false,
         },
       })
       expect(result?.attention.actionable_unread.map((row) => row.id)).toContain(followUp.id)
+      stmts.advanceMailboxCursor.run({ $recipient: "@requester", $seq: followUp.rowid, $now: Date.now() })
+
+      // 2. Sibling quiet case (a): status and notify with ref to a closed ball stay quiet (no live wake, no attention).
+      const quietStatusWait = manager.wait("@requester", "conn-closed-status", 40, { wakeOnCorrelatedReply: true })
+      let quietStatusResult: Awaited<typeof quietStatusWait> | undefined
+      void quietStatusWait.then((value) => {
+        quietStatusResult = value
+      })
+      sendMessage(responder, "@requester", "status on closed ball", "status", undefined, "req-settled", "direct")
+      sendMessage(responder, "@requester", "notify on closed ball", "notify", undefined, "req-settled", "direct")
+      await Promise.resolve()
+      expect(quietStatusResult).toBeUndefined()
+      await expect(quietStatusWait).resolves.toMatchObject({
+        status: "timeout",
+        timed_out: true,
+        aborted: false,
+        unread_count: 0,
+      })
+
+      // 3. Sibling quiet case (b): a direct response whose ref names a closed ball NOT opened by @requester
+      //    does not live-wake, and settles woken at the deadline on retained attention (30414).
+      sendMessage(
+        other,
+        "@responder",
+        "foreign request",
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        {
+          request: "req-foreign-settled",
+        },
+      )
+      sendMessage(
+        responder,
+        "@other",
+        "foreign answer",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        {
+          reply: "req-foreign-settled",
+        },
+      )
+      expect(db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get("req-foreign-settled")).toBeNull()
+
+      const foreignWait = manager.wait("@requester", "conn-foreign-closed-ref", 40, { wakeOnCorrelatedReply: true })
+      let foreignResult: Awaited<typeof foreignWait> | undefined
+      void foreignWait.then((value) => {
+        foreignResult = value
+      })
+      const foreignFollowUp = sendMessage(
+        responder,
+        "@requester",
+        "response referencing a foreign closed ball",
+        "response",
+        undefined,
+        "req-foreign-settled",
+        "direct",
+      )
+      await Promise.resolve()
+      expect(foreignResult).toBeUndefined()
+      await expect(foreignWait).resolves.toMatchObject({
+        status: "woken",
+        timed_out: false,
+        aborted: false,
+        unread_count: 1,
+        woken_by: {
+          kind: "message",
+          seq: foreignFollowUp.rowid,
+          message_id: foreignFollowUp.id,
+          type: "response",
+          sender: "@responder",
+          settles_request_id: null,
+          replay: false,
+        },
+      })
     } finally {
       db.close()
       rmSync(tmpDir, { recursive: true, force: true })

@@ -4,6 +4,7 @@ import type { InboxWaitResult as WireInboxWaitResult, InboxWaitWokenBy } from "t
 import {
   ACTIONABLE_TYPES_SET as ACTIONABLE_TYPES,
   CORRELATED_REPLY_TYPES_SET,
+  SETTLES_REQUEST_TYPES_SET,
   type TribeStatements,
 } from "./database.ts"
 
@@ -25,11 +26,12 @@ export function readInboxWaitWokenBy(
     ts: number
     request: string | null
     reply: string | null
+    ref: string | null
     correlated_reply_requester: string | null
   } | null
   if (row === null) return { kind: "row-retired", seq }
   const settles =
-    wakeOnCorrelatedReply && CORRELATED_REPLY_TYPES_SET.has(row.type) && row.correlated_reply_requester === session
+    wakeOnCorrelatedReply && SETTLES_REQUEST_TYPES_SET.has(row.type) && row.correlated_reply_requester === session
   // 27407 - a wake must not read like a fresh instruction. The tracker keeps an
   // untaken ball actionable past the mailbox cursor (22203), so the wake is not
   // suppressed; it names the row's ORIGINAL send time and says it is a replay
@@ -44,7 +46,7 @@ export function readInboxWaitWokenBy(
     sender: row.sender,
     summary: row.summary,
     request_id: row.request,
-    settles_request_id: settles ? row.reply : null,
+    settles_request_id: settles ? (row.reply ?? row.ref) : null,
     sent_at: new Date(row.ts).toISOString(),
     replay,
   }

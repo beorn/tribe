@@ -3,7 +3,7 @@
  */
 
 import type { Database } from "bun:sqlite"
-import { CORRELATED_REPLY_TYPES_SET, type TribeStatements } from "./database.ts"
+import { SETTLES_REQUEST_TYPES_SET, type TribeStatements } from "./database.ts"
 import type { TribeRole } from "tribe-wire/lib/config"
 import type { Delivery, MessageKind } from "./messaging.ts"
 
@@ -72,7 +72,7 @@ export function settlesRequestOpenedBy(
   info: Pick<MessageInsertedInfo, "type" | "correlatedReply">,
   session: string,
 ): boolean {
-  return CORRELATED_REPLY_TYPES_SET.has(info.type) && info.correlatedReply?.requester === session
+  return SETTLES_REQUEST_TYPES_SET.has(info.type) && info.correlatedReply?.requester === session
 }
 
 export type TribeContext = {

@@ -1566,6 +1566,12 @@ export const ACTIONABLE_TYPES = TRIBE_ACTIONABLE_TYPES
 export const ACTIONABLE_TYPES_SET: ReadonlySet<string> = new Set(ACTIONABLE_TYPES)
 export const CORRELATED_REPLY_TYPES = ["response", "status"] as const
 export const CORRELATED_REPLY_TYPES_SET: ReadonlySet<string> = new Set(CORRELATED_REPLY_TYPES)
+/** 31171 — direct types that settle a request (`settlesRequestOpenedBy`,
+ *  `readInboxWaitWokenBy`, and `sendMessage`). Defined once so focus-mode push
+ *  and inbox-wait agree on which types carry `correlatedReply` /
+ *  `settles_request_id` (`status` never settles). */
+export const SETTLES_REQUEST_TYPES = ["response", "verdict"] as const
+export const SETTLES_REQUEST_TYPES_SET: ReadonlySet<string> = new Set(SETTLES_REQUEST_TYPES)
 /** Direct types that implicitly open a semantic response ball. Verdict remains
  * wakeable/actionable but does not manufacture a second obligation unless the
  * sender explicitly supplies `request`. */
@@ -1963,6 +1969,58 @@ const MESSAGE_ARCHIVE_COLUMNS_ALIASED = MESSAGE_ARCHIVE_COLUMNS.split(", ")
   .map((column) => `a.${column}`)
   .join(", ")
 
+/** 31171 — SQL for {@link TribeStatements.selectCorrelatedRequestForResponse},
+ *  exported so the query-plan guard test plans the statement's own SQL rather
+ *  than a hand-copied string. */
+export const SELECT_CORRELATED_REQUEST_FOR_RESPONSE_SQL = `
+	SELECT request_id, sender AS requester
+	FROM pending_request
+	WHERE request_id = $target_id
+		AND recipient = $responder
+		AND sender = $requester
+		AND request_kind = 'request'
+	UNION ALL
+	SELECT request_id, sender AS requester
+	FROM pending_request
+	WHERE message_id = $target_id
+		AND recipient = $responder
+		AND sender = $requester
+		AND request_kind = 'request'
+	UNION ALL
+	SELECT request AS request_id, sender AS requester
+	FROM messages
+	WHERE id = $target_id
+		AND request IS NOT NULL
+		AND is_incident = 0
+		AND sender = $requester
+		AND ((kind = 'direct' AND recipient = $responder) OR kind = 'broadcast')
+	UNION ALL
+	SELECT request AS request_id, sender AS requester
+	FROM messages
+	WHERE request = $target_id
+		AND request IS NOT NULL
+		AND is_incident = 0
+		AND sender = $requester
+		AND ((kind = 'direct' AND recipient = $responder) OR kind = 'broadcast')
+	UNION ALL
+	SELECT request AS request_id, sender AS requester
+	FROM messages_archive
+	WHERE id = $target_id
+		AND request IS NOT NULL
+		AND is_incident = 0
+		AND sender = $requester
+		AND ((kind = 'direct' AND recipient = $responder) OR kind = 'broadcast')
+	UNION ALL
+	SELECT request AS request_id, sender AS requester
+	FROM messages_archive
+	WHERE request = $target_id
+		AND request IS NOT NULL
+		AND is_incident = 0
+		AND sender = $requester
+		AND ((kind = 'direct' AND recipient = $responder) OR kind = 'broadcast')
+	LIMIT 1
+`
+
 export type TribeStatements = ReturnType<typeof createStatements>
 
 export function createStatements(db: Database) {
@@ -2233,6 +2291,12 @@ export function createStatements(db: Database) {
 			ORDER BY CASE WHEN request_id = $reply_id THEN 0 ELSE 1 END
 			LIMIT 1
 		`),
+
+    /** 31171 — resolves `{ request_id, requester }` for a direct settles-type
+     *  (`response` / `verdict`) row whose `reply` or `ref` names an ordinary
+     *  request that `$requester` opened with `$responder`, even after an earlier
+     *  TAKING response settled and deleted the `pending_request` row. */
+    selectCorrelatedRequestForResponse: db.prepare(assertSingleStatement(SELECT_CORRELATED_REQUEST_FOR_RESPONSE_SQL)),
 
     /** 27735 B: an owner's TAKING receipt re-sets its own ball's due; the guard keeps it the due that was checked. */
     updatePendingDue: db.prepare(`
@@ -2908,12 +2972,12 @@ export function createStatements(db: Database) {
     /** 25662 row 17 — the row an inbox wait woke on, by the sequence its wake read. A tracked broadcast's sequence can
      *  name an archived row (TRACKED_ATTENTION_SEQUENCE_SQL), so the archive is read second. */
     selectInboxWaitWakeRow: db.prepare(`
-      SELECT id, type, sender, summary, ts, request, reply, correlated_reply_requester
+      SELECT id, type, sender, summary, ts, request, reply, ref, correlated_reply_requester
       FROM (
-        SELECT 0 AS source, id, type, sender, summary, ts, request, reply, correlated_reply_requester
+        SELECT 0 AS source, id, type, sender, summary, ts, request, reply, ref, correlated_reply_requester
         FROM messages WHERE rowid = $seq
         UNION ALL
-        SELECT 1 AS source, id, type, sender, summary, ts, request, reply, correlated_reply_requester
+        SELECT 1 AS source, id, type, sender, summary, ts, request, reply, ref, correlated_reply_requester
         FROM messages_archive WHERE seq = $seq
       )
       ORDER BY source

@@ -4,7 +4,7 @@
 
 import { randomUUID } from "node:crypto"
 import type { TribeContext } from "./context.ts"
-import { AUTO_TRACK_TYPES_SET, type TribeStatements } from "./database.ts"
+import { AUTO_TRACK_TYPES_SET, SETTLES_REQUEST_TYPES_SET, type TribeStatements } from "./database.ts"
 import { sessionAuthority, type SessionAuthority } from "./identity-verifier.ts"
 import {
   describeSettlementConflict,
@@ -579,6 +579,83 @@ export function deriveReplyHint(opts: { kind: MessageKind; recipient: string; se
   return "yes"
 }
 
+type PendingReplyRow = {
+  request_id: string
+  fanout: string
+  expires_at: number | null
+  sender: string
+  request_kind: "request" | "incident"
+}
+
+function resolveReplyState(
+  ctx: TribeContext,
+  opts: {
+    settles: boolean
+    resolvedKind: MessageKind
+    sender: string
+    recipient: string
+    replyId: string | null
+    correlationRef: string | undefined
+  },
+): {
+  pendingReply: PendingReplyRow | null
+  canonicalReplyId: string | null
+  correlatedReply: { requestId: string; requester: string } | null
+  tracker: { request_id: string; closed: number } | undefined
+} {
+  const pendingReply =
+    opts.replyId && opts.resolvedKind === "direct"
+      ? (ctx.stmts.selectPendingForReplyRecipient.get({
+          $reply_id: opts.replyId,
+          $recipient: opts.sender,
+        }) as PendingReplyRow | null)
+      : null
+  const canonicalReplyId = pendingReply?.request_id ?? opts.replyId
+  const correlationTargetId =
+    opts.settles && opts.resolvedKind === "direct" ? (canonicalReplyId ?? opts.correlationRef ?? null) : null
+  const correlatedRequest =
+    pendingReply !== null
+      ? { request_id: pendingReply.request_id, requester: pendingReply.sender }
+      : correlationTargetId !== null
+        ? (ctx.stmts.selectCorrelatedRequestForResponse.get({
+            $target_id: correlationTargetId,
+            $responder: opts.sender,
+            $requester: opts.recipient,
+          }) as { request_id: string; requester: string } | null)
+        : null
+  const correlatedReply = correlatedRequest
+    ? { requestId: correlatedRequest.request_id, requester: correlatedRequest.requester }
+    : null
+  const tracker = canonicalReplyId ? { request_id: canonicalReplyId, closed: 0 } : undefined
+  return { pendingReply, canonicalReplyId, correlatedReply, tracker }
+}
+
+function settleDirectReply(
+  ctx: TribeContext,
+  canonicalReplyId: string,
+  pendingReply: PendingReplyRow | null,
+  sender: string,
+  ts: number,
+): { request_id: string; closed: number } {
+  if (pendingReply?.fanout === "first") {
+    const rows = ctx.stmts.selectPendingSettlementsForRequest.all({
+      $request_id: canonicalReplyId,
+    }) as PendingSettlementRow[]
+    return {
+      request_id: canonicalReplyId,
+      closed: settlePendingRows(ctx, rows, "answered", sender, ts),
+    }
+  }
+  const row = ctx.stmts.selectPendingSettlementForRecipient.get({
+    $request_id: canonicalReplyId,
+    $recipient: sender,
+  }) as PendingSettlementRow | null
+  return {
+    request_id: canonicalReplyId,
+    closed: settlePendingRows(ctx, row === null ? [] : [row], "answered", sender, ts),
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
@@ -687,7 +764,7 @@ export function sendMessage(
   }
   const persistedRequest = correlationRequest ?? requestId
   // The type carries disposition; a correlation field cannot turn progress into settlement.
-  const settles = type === "response" || type === "verdict"
+  const settles = SETTLES_REQUEST_TYPES_SET.has(type)
   let replyId = settles ? (ballTracker.reply ?? null) : null
   // A unique open-ball prefix is the id pending prints. Ambiguous stays unresolved
   // so the close cause names the collision instead of guessing.
@@ -745,22 +822,20 @@ export function sendMessage(
         throw new IncidentCurrentConflict(incidentRequestId, expectedHoldings, current)
       }
     }
-    const pendingReply =
-      replyId && resolvedKind === "direct"
-        ? (ctx.stmts.selectPendingForReplyRecipient.get({
-            $reply_id: replyId,
-            $recipient: sender,
-          }) as {
-            request_id: string
-            fanout: string
-            expires_at: number | null
-            sender: string
-            request_kind: "request" | "incident"
-          } | null)
-        : null
-    const canonicalReplyId = pendingReply?.request_id ?? replyId
-    const correlatedReply = pendingReply ? { requestId: pendingReply.request_id, requester: pendingReply.sender } : null
-    let tracker = canonicalReplyId ? { request_id: canonicalReplyId, closed: 0 } : undefined
+    const {
+      pendingReply,
+      canonicalReplyId,
+      correlatedReply,
+      tracker: initialTracker,
+    } = resolveReplyState(ctx, {
+      settles,
+      resolvedKind,
+      sender,
+      recipient,
+      replyId,
+      correlationRef,
+    })
+    let tracker = initialTracker
     // 25662 P3 3: an incident send that opens its ball, or changes its condition (the summary), is an edge that wakes
     // the owner's inbox-wait. Decided here, in the same transaction as the upsert below, so a concurrent repeat
     // cannot read a half-written row. A repeat of the same condition and the clear never wake.
@@ -894,24 +969,7 @@ export function sendMessage(
       // Incident-keyed rows stay until the emitter's --incident-cleared edge
       // (pending --close already refuses the same kind).
       if (canonicalReplyId && pendingReply?.request_kind !== "incident") {
-        if (pendingReply?.fanout === "first") {
-          const rows = ctx.stmts.selectPendingSettlementsForRequest.all({
-            $request_id: canonicalReplyId,
-          }) as PendingSettlementRow[]
-          tracker = {
-            request_id: canonicalReplyId,
-            closed: settlePendingRows(ctx, rows, "answered", sender, ts),
-          }
-        } else {
-          const row = ctx.stmts.selectPendingSettlementForRecipient.get({
-            $request_id: canonicalReplyId,
-            $recipient: sender,
-          }) as PendingSettlementRow | null
-          tracker = {
-            request_id: canonicalReplyId,
-            closed: settlePendingRows(ctx, row === null ? [] : [row], "answered", sender, ts),
-          }
-        }
+        tracker = settleDirectReply(ctx, canonicalReplyId, pendingReply, sender, ts)
       }
     }
     if (resolvedKind === "broadcast" && requestId) {
