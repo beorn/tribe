@@ -1155,8 +1155,9 @@ describe("stdio adapter delivery modes", () => {
       env: {
         ...process.env,
         TRIBE_DELIVERY: "push",
-        // Require an explicit join (the production default) so the first connect
-        // registers pull and the join afterwards announces push.
+        // Pin an unjoined fixture even when the caller auto-joins or resumes joined.
+        TRIBE_REQUIRE_JOIN: "1",
+        TRIBE_PLUGIN_RESUME_JOINED: "0",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },

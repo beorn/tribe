@@ -74,7 +74,15 @@ describe("stdio adapter — daemon-unavailable degrade", () => {
   it("no daemon + no daemon script: initialize works, tool calls error cleanly, adapter survives", async () => {
     const socketPath = join(tmpDir, "absent.sock")
     const logPath = join(tmpDir, "adapter.log")
-    const env = { ...process.env, TRIBE_DELIVERY: "pull", DEBUG_LOG: logPath, LOG_LEVEL: "warn" }
+    const env = {
+      ...process.env,
+      TRIBE_DELIVERY: "pull",
+      // This bare-name fixture is unjoined, regardless of the caller's launcher settings.
+      TRIBE_REQUIRE_JOIN: "1",
+      TRIBE_PLUGIN_RESUME_JOINED: "0",
+      DEBUG_LOG: logPath,
+      LOG_LEVEL: "warn",
+    }
     delete (env as Record<string, string | undefined>).TRIBE_DAEMON_SCRIPT
     delete (env as Record<string, string | undefined>).TRIBE_SOCKET
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "degrade-test"], {
