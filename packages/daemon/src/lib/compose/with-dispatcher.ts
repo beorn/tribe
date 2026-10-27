@@ -379,11 +379,12 @@ export function withDispatcher<
       latest_actionable_seq: number | null
       latest_message_id: string | null
       latest_type: string | null
-      /** Total open balls owned by `session` from the complete owned set. */
+      /** Balls `session` owes from the complete owned set: untaken, or past their deadline (31092). A taken ball
+       * stays open and is owed again once the due its TAKING receipt set passes. */
       owed_count: number
-      /** Total alarm (incident) balls owned by `session` from the complete owned set. */
+      /** Owed alarm (incident) balls from the complete owned set; a quiet incident is not owed. */
       owed_alarm_count: number
-      /** Oldest open ball owned by `session` from the complete owned set. */
+      /** Oldest owed ball from the complete owned set. */
       oldest_owed: {
         id: string
         sender: string
@@ -391,7 +392,7 @@ export function withDispatcher<
         summary: string | null
         alarm: boolean
       } | null
-      /** Oldest-first preview (at most 10 rows) of open balls owned by `session`;
+      /** Oldest-first preview (at most 10 rows) of balls `session` owes;
        * the full owned set belongs in `tribe pending`. */
       owed_balls: Array<{
         id: string
@@ -401,7 +402,7 @@ export function withDispatcher<
         alarm: boolean
       }>
     } {
-      const { attentionRows, pendingBalls, untakenPendingBalls, actionableCount } = readAttentionProjection(
+      const { attentionRows, untakenPendingBalls, owedPendingBalls, actionableCount } = readAttentionProjection(
         daemonCtx,
         sessionName,
         Date.now(),
@@ -418,7 +419,7 @@ export function withDispatcher<
       const oldestTs = Math.min(oldest?.ts ?? Number.POSITIVE_INFINITY, oldestTrackedTs)
       const oldest_unread_ts = Number.isFinite(oldestTs) ? oldestTs : 0
       const oldest_unread_age_min = oldest_unread_ts > 0 ? Math.floor((Date.now() - oldest_unread_ts) / 60_000) : 0
-      const all_owed_balls = pendingBalls
+      const all_owed_balls = owedPendingBalls
         .toSorted((left, right) => right.age_ms - left.age_ms || left.request_id.localeCompare(right.request_id))
         .map((ball) => ({
           id: ball.request_id,

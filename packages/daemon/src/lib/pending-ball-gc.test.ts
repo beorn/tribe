@@ -1576,6 +1576,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           oldest_age_ms: expect.any(Number),
           oldest_deadline_at_ms: null,
           oldest_taking_receipt_at_ms: null,
+          owed_count: 201,
         },
         {
           owner: "@ci",
@@ -1583,6 +1584,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           oldest_age_ms: expect.any(Number),
           oldest_deadline_at_ms: null,
           oldest_taking_receipt_at_ms: null,
+          owed_count: 1,
         },
       ])
       expect(health.pending_balls?.owners.every((owner) => owner.pending === undefined)).toBe(true)
@@ -1738,6 +1740,8 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           oldest_age_ms: expect.any(Number),
           oldest_deadline_at_ms: olderDeadline,
           oldest_taking_receipt_at_ms: null,
+          // 31092: the taken younger ball's due is ahead, so only the untaken older one is owed.
+          owed_count: 1,
         },
       ])
 
@@ -1770,6 +1774,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         oldest_age_ms: number
         oldest_deadline_at_ms: number | null
         oldest_taking_receipt_at_ms: number | null
+        owed_count: number
       }
       type HealthSummary = {
         pending_balls: {
@@ -1784,12 +1789,26 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       expect(mixed.pending_balls).toMatchObject({
         count: 3,
         owner_count: 1,
-        owners: [{ owner: "@agent/9", count: 3, oldest_deadline_at_ms: null, oldest_taking_receipt_at_ms: null }],
+        owners: [
+          {
+            owner: "@agent/9",
+            count: 3,
+            oldest_deadline_at_ms: null,
+            oldest_taking_receipt_at_ms: null,
+            owed_count: 2,
+          },
+        ],
         requests: {
           count: 2,
           owner_count: 1,
           owners: [
-            { owner: "@agent/9", count: 2, oldest_deadline_at_ms: olderDeadline, oldest_taking_receipt_at_ms: null },
+            {
+              owner: "@agent/9",
+              count: 2,
+              oldest_deadline_at_ms: olderDeadline,
+              oldest_taking_receipt_at_ms: null,
+              owed_count: 1,
+            },
           ],
         },
       })
@@ -1809,11 +1828,14 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       expect(receipted.pending_balls.requests.owners[0]).toMatchObject({
         oldest_deadline_at_ms: olderDeadline,
         oldest_taking_receipt_at_ms: now - 20_000,
+        owed_count: 0,
       })
+      // The untaken incident is the one ball still owed.
       expect(receipted.pending_balls.owners[0]).toMatchObject({
         count: 3,
         oldest_deadline_at_ms: null,
         oldest_taking_receipt_at_ms: null,
+        owed_count: 1,
       })
 
       // @failure One fanout-all recipient's TAKING hides another recipient's offline obligation (#22798).

@@ -2048,7 +2048,10 @@ export function createStatements(db: Database) {
 
     /** Incident insert: the typed discriminator, not the request-id spelling,
      *  owns emitter-only settlement. Reassertion promotes a legacy row after
-     *  migration and removes the request deadline. `opened_at` is DELIBERATELY
+     *  migration and removes its request deadline; on a row that is already an
+     *  incident it keeps `expires_at`, the quiet-until its owner's TAKING receipt
+     *  set (31092, @cto 618f9d5a), so a monitor tick never wipes the owner's
+     *  promise. `opened_at` is DELIBERATELY
      *  preserved across reassertion — it is the demand instant the rung-5
      *  escalation fold measures standing duration against (@hab/core
      *  wait-watch.ts: "the daemon upserts never touch it"); resetting it on
@@ -2086,8 +2089,8 @@ export function createStatements(db: Database) {
 		)
 		VALUES ($request_id, $recipient, $sender, $opened_at, NULL, $message_id, $fanout, 'incident')
 		ON CONFLICT(request_id, recipient) DO UPDATE SET
+			expires_at = CASE WHEN pending_request.request_kind = 'incident' THEN pending_request.expires_at END,
 			request_kind = 'incident',
-			expires_at = NULL,
 			message_id = excluded.message_id
 	`),
 
@@ -2123,7 +2126,10 @@ export function createStatements(db: Database) {
     /** Daemon-owned expiry-observation input. Deadline passage changes the
      *  row's read projection, never its active ownership. Exclude obligations
      *  whose durable edge is already present in either retention tier so an
-     *  arbitrary number of later daemon operations cannot duplicate it. */
+     *  arbitrary number of later daemon operations cannot duplicate it. One edge
+     *  per deadline (31092): a receipt that re-takes a passed ball sets a new due
+     *  that alarms again, and an incident repoints its message on every tick, so
+     *  the edge is keyed by the deadline, never by the message. */
     selectExpiredPendingRequests: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
 			COALESCE(m.summary, a.summary) AS summary
@@ -2142,7 +2148,7 @@ export function createStatements(db: Database) {
 				) expiry
 				WHERE expiry.ref = p.request_id
 					AND json_extract(expiry.content, '$.recipient') = p.recipient
-					AND json_extract(expiry.content, '$.message_id') = p.message_id
+					AND json_extract(expiry.content, '$.expires_at') = p.expires_at
 			)
 		ORDER BY p.opened_at, p.request_id, p.recipient
 	`),

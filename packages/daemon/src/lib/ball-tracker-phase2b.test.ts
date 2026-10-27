@@ -570,7 +570,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       { to: "@agent/1", request: "   " },
       { to: "@agent/1", request: "req-zero-ttl", expires_in_ms: 0 },
       { to: "@agent/1", request: "req-string-ttl", expires_in_ms: "60000" },
-      { to: "@agent/1", request: "req-too-long-ttl", expires_in_ms: 24 * 60 * 60 * 1_000 + 1 },
+      { to: "@agent/1", request: "req-too-long-ttl", expires_in_ms: MAX_BALL_TTL_MS + 1 },
       { to: "@chief", expires_in_ms: 60_000 },
     ]) {
       const res = parseToolJson(
@@ -1074,28 +1074,47 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       })
     })
 
-    it("an incident ball is refused, so only its emitter's clear ever settles it", () => {
-      const opened = parseToolJson(
-        handleToolCall(
-          chief,
-          "tribe.send",
-          {
-            to: "@agent/1",
-            type: "notify",
-            message: "@agent/1 transport-wedged",
-            incident: { emitter: "watch", subject: "@agent/1", condition: "transport-wedged" },
-          },
-          opts(),
-        ),
-      ) as { request_id?: string }
-      const incidentId = opened.request_id!
+    it("31092: an incident ball takes the receipt; a repeat keeps that quiet-until and past it the owner is re-alarmed once", () => {
+      const raise = () =>
+        parseToolJson(
+          handleToolCall(
+            chief,
+            "tribe.send",
+            {
+              to: "@agent/1",
+              type: "notify",
+              message: "@agent/1 transport-wedged",
+              incident: { emitter: "watch", subject: "@agent/1", condition: "transport-wedged" },
+            },
+            opts(),
+          ),
+        ) as { request_id?: string; incident?: { transition: string } }
+      const incidentId = raise().request_id!
       expect(dueOf(incidentId)).toBeNull()
-      const count = messageCount()
 
+      const before = Date.now()
       const res = receipt(agent1, incidentId, { expires_in_ms: 600_000 })
-      expect(res.error).toMatch(/incident ball/)
-      expect(dueOf(incidentId)).toBeNull()
-      expect(messageCount()).toBe(count)
+      expect(res.error).toBeUndefined()
+      const quietUntil = dueOf(incidentId)!
+      expect(quietUntil).toBeGreaterThanOrEqual(before + 600_000)
+      expect(res.applied_due).toEqual({ request_id: incidentId, previous_expires_at: null, expires_at: quietUntil })
+
+      // The monitor keeps asserting while the owner works: the repeat neither wipes the quiet-until nor pages.
+      expect(raise().incident?.transition).toBe("repeated")
+      expect(dueOf(incidentId)).toBe(quietUntil)
+
+      vi.useFakeTimers({ toFake: ["Date"] })
+      try {
+        vi.setSystemTime(quietUntil + 1)
+        parseToolJson(handleToolCall(agent1, "tribe.pending", {}, opts()))
+        expect(expiredEvents()).toBe(1)
+        // Every repeat repoints the ball's message; the quiet-until that passed is one alarm, not one per tick.
+        raise()
+        parseToolJson(handleToolCall(agent1, "tribe.pending", {}, opts()))
+        expect(expiredEvents()).toBe(1)
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it("a deduplicated retry of a re-due receipt writes nothing and echoes no applied due", () => {
@@ -1113,16 +1132,28 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       expect(messageCount()).toBe(count)
     })
 
-    it("a re-due after expiry is refused and the expired ball keeps its due", () => {
+    it("31092: a re-due after expiry is accepted, and its new due alarms again when it passes", () => {
       openBall("redue-expired")
-      db.prepare("UPDATE pending_request SET expires_at = 0 WHERE request_id = ?").run("redue-expired")
-      const count = messageCount()
+      db.prepare("UPDATE pending_request SET expires_at = ? WHERE request_id = ?").run(
+        Date.now() - 1_000,
+        "redue-expired",
+      )
+      parseToolJson(handleToolCall(agent1, "tribe.pending", {}, opts()))
+      expect(expiredEvents()).toBe(1)
 
       const res = receipt(agent1, "redue-expired", { expires_in_ms: 600_000 })
-      expect(res.error).toMatch(/deadline passed/)
-      expect(res.error).toMatch(/response \+ reply/)
-      expect(dueOf("redue-expired")).toBe(0)
-      expect(messageCount()).toBe(count + expiredEvents())
+      expect(res.error).toBeUndefined()
+      const newDue = dueOf("redue-expired")!
+      expect(newDue).toBeGreaterThan(Date.now())
+
+      vi.useFakeTimers({ toFake: ["Date"] })
+      try {
+        vi.setSystemTime(newDue + 1)
+        parseToolJson(handleToolCall(agent1, "tribe.pending", {}, opts()))
+        expect(expiredEvents()).toBe(2)
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it("a re-due from a non-owner is refused", () => {
@@ -1136,17 +1167,23 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       expect(messageCount()).toBe(count)
     })
 
-    it("a re-due beyond opened_at plus the one-day ceiling is refused, never clamped", () => {
+    it("31092: the ceiling is measured from the receipt, 30 days at most, so a ball opened a day ago still takes one", () => {
+      expect(MAX_BALL_TTL_MS).toBe(30 * 24 * 60 * 60_000)
       openBall("redue-ceiling")
-      const openedAt = Date.now() - (MAX_BALL_TTL_MS - 30 * 60_000)
-      db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = ?").run(openedAt, "redue-ceiling")
-      const original = dueOf("redue-ceiling")
+      db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = ?").run(
+        Date.now() - (24 * 60 * 60_000 + 30 * 60_000),
+        "redue-ceiling",
+      )
+      const hour = receipt(agent1, "redue-ceiling", { expires_in_ms: 60 * 60_000 })
+      expect(hour.error).toBeUndefined()
+      const month = receipt(agent1, "redue-ceiling", { expires_in_ms: MAX_BALL_TTL_MS })
+      expect(month.error).toBeUndefined()
+      const applied = dueOf("redue-ceiling")
       const count = messageCount()
 
-      const res = receipt(agent1, "redue-ceiling", { expires_in_ms: 60 * 60_000 })
-      expect(res.error).toMatch(/one-day ceiling/)
-      expect(res.error).toMatch(/settle it with response \+ reply/)
-      expect(dueOf("redue-ceiling")).toBe(original)
+      const past = receipt(agent1, "redue-ceiling", { expires_in_ms: MAX_BALL_TTL_MS + 1 })
+      expect(past.error).toMatch(/no greater than/)
+      expect(dueOf("redue-ceiling")).toBe(applied)
       expect(messageCount()).toBe(count)
     })
 

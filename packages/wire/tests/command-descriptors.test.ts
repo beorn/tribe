@@ -91,7 +91,7 @@ describe("Tribe command descriptors", () => {
     expect(sendDescriptor.mcp.inputSchema.properties?.expires_in_ms).toMatchObject({
       type: "integer",
       minimum: 1,
-      maximum: 86_400_000,
+      maximum: 2_592_000_000,
     })
     const join = visibleCliProjection(commandDescriptorByMcpName("join")!)
     expect(join.arguments?.map((arg) => arg.name)).toEqual(["name"])

@@ -1293,7 +1293,9 @@ function namedBallReference(
 /**
  * 27735 B (@cto bd599f15): the ball a TAKING receipt may re-due, matched the way the TAKING receipt query matches
  * (owner = receipt sender, requester = receipt recipient, ref = the ball's request or message id), or why not. The
- * new due is receipt time plus `expiresInMs`, earlier or later, within the ball's one-day ceiling; never clamped.
+ * new due is receipt time plus `expiresInMs`, earlier or later; `expiresInMs` is already bounded by MAX_BALL_TTL_MS.
+ * 31092 (@cto 618f9d5a): a passed deadline is exactly what makes a ball owed again, so it re-takes; an incident ball
+ * takes the receipt too, and its due is the quiet-until that re-alarms the owner when it passes.
  */
 function receiptRedue(
   ctx: TribeContext,
@@ -1303,8 +1305,6 @@ function receiptRedue(
     request_id: string
     expires_at: number | null
     sender: string
-    request_kind: "request" | "incident"
-    opened_at: number
   } | null
   if (ball === null || ball.sender !== input.requester) {
     return {
@@ -1313,26 +1313,7 @@ function receiptRedue(
         "a receipt re-sets only the due of a ball its sender owns",
     }
   }
-  if (ball.request_kind !== "request") {
-    return { error: `${ball.request_id} is an incident ball; it has no due, and only its emitter clears it` }
-  }
-  const now = Date.now()
-  if (ball.expires_at !== null && ball.expires_at <= now) {
-    return {
-      error:
-        `ball ${ball.request_id} deadline passed at ${new Date(ball.expires_at).toISOString()}; ` +
-        "settle it with response + reply instead",
-    }
-  }
-  const expiresAt = now + input.expiresInMs
-  const ceiling = ball.opened_at + MAX_BALL_TTL_MS
-  if (expiresAt > ceiling) {
-    return {
-      error:
-        `the new due ${new Date(expiresAt).toISOString()} is past ${ball.request_id}'s one-day ceiling ` +
-        `(${new Date(ceiling).toISOString()}); settle it with response + reply and track the work in a todo or an issue`,
-    }
-  }
+  const expiresAt = Date.now() + input.expiresInMs
   return { requestId: ball.request_id, recipient: input.owner, previousExpiresAt: ball.expires_at, expiresAt }
 }
 
@@ -2019,6 +2000,17 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
   }
 }
 
+/**
+ * 31092 (@cto 618f9d5a): the one owed predicate - a ball is owed while it is untaken or its deadline has passed.
+ * A request is taken by a TAKING receipt after its message (`requestTaken`, from the receipt match). An incident
+ * repoints its message on every assertion, so its taking is the quiet-until a receipt set: the due its upsert keeps.
+ * inbox-status, pending and health serve this; the Stop hook and skills read it and never recompute it.
+ */
+function ballOwed(ball: PendingBall, requestTaken: boolean): boolean {
+  if (ball.status === "expired") return true
+  return ball.request_kind === "incident" ? ball.expires_at === null : !requestTaken
+}
+
 function pendingBallWithContent(row: PendingBallRow, now: number): PendingBallWithContent {
   return { ...pendingBall(row, now), content: row.content ?? null }
 }
@@ -2684,6 +2676,7 @@ function pendingOwnerGroups<T extends PendingBall>(
         // group must never stand in for it.
         oldest_deadline_at_ms: oldest.expires_at === null ? null : Date.parse(oldest.expires_at),
         oldest_taking_receipt_at_ms: takingReceipts.get(pendingFactKey(oldest)) ?? null,
+        owed_count: oldestFirst.filter((row) => ballOwed(row, takingReceipts.has(pendingFactKey(row)))).length,
         pending: oldestFirst,
       }
     })
@@ -2985,7 +2978,10 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
     ctx.db.transaction(() => {
       const rows = all ? allPendingBallsWithContent(ctx, now) : pendingBallsForOwnerWithContent(ctx, owner, now)
       const receipts = takingReceiptsForOpenBalls(ctx, ctx.stmts.selectTakingReceiptsForPendingBalls)
-      return rows.map((row) => ({ ...row, taking_receipt_at_ms: receipts.get(pendingFactKey(row)) ?? null }))
+      return rows.map((row) => {
+        const takingReceiptAtMs = receipts.get(pendingFactKey(row)) ?? null
+        return { ...row, taking_receipt_at_ms: takingReceiptAtMs, owed: ballOwed(row, takingReceiptAtMs !== null) }
+      })
     })()
 
   if (all) {
@@ -5307,6 +5303,7 @@ export function readAttentionProjection(
   attentionRows: FetchRow[]
   pendingBalls: PendingBall[]
   untakenPendingBalls: PendingBall[]
+  owedPendingBalls: PendingBall[]
   actionableCount: number
   attention: AttentionProjection
 } {
@@ -5352,6 +5349,7 @@ export function readAttentionProjection(
   const sentPreview = sentOfflineBalls.slice(0, ATTENTION_PENDING_BALL_LIMIT)
   const untakenRequestIds = untakenPendingRequestIds(ctx, owner)
   const untakenPendingBalls = pendingBalls.filter((ball) => untakenRequestIds.has(ball.request_id))
+  const owedPendingBalls = pendingBalls.filter((ball) => ballOwed(ball, !untakenRequestIds.has(ball.request_id)))
   const actionableCount = attentionRows.length
   const prioritizedPendingBalls = pendingBalls.toSorted((left, right) => {
     const leftRank = left.request_kind === "incident" ? 1 : 0
@@ -5399,6 +5397,7 @@ export function readAttentionProjection(
     attentionRows,
     pendingBalls,
     untakenPendingBalls,
+    owedPendingBalls,
     actionableCount,
     attention: {
       ...pruned,

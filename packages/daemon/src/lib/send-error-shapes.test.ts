@@ -237,7 +237,9 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
       const sent = parseToolJson(
         handleToolCall(sender, "tribe.send", { to: "@chief", message: "hi", expires_in_ms: -50 }, makeOpts()),
       )
-      expect(sent.error).toBe("tribe.send: invalid expires_in_ms - must be a positive integer no greater than 86400000")
+      expect(sent.error).toBe(
+        "tribe.send: invalid expires_in_ms - must be a positive integer no greater than 2592000000",
+      )
     })
 
     it.each([true, false, "yes", null])("rejects removed incident muting field %s before storing anything", (value) => {

@@ -1574,6 +1574,45 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(await read("owner")).toMatchObject({ open_request_status_count: 0, latest_open_request_status_seq: null })
   })
 
+  it("31092: owed counts a ball until it is taken, and again once its due passes", async () => {
+    const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
+    cleanup = harness.dispose
+    const readOwed = async (id: string) =>
+      parseResult<{ owed_count: number; owed_alarm_count: number; owed_balls: Array<{ id: string; alarm: boolean }> }>(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id, method: "cli_inbox_status", params: { session: "@chief" } },
+          "conn-owed",
+        ),
+      )
+    harness.sendActionable("@chief", "taken work", "taken-request")
+    harness.sendActionable("@chief", "untaken work", "untaken-request")
+    harness.sendTakingStatus("@chief", "taken-request")
+    const oneTaken = await readOwed("one-taken")
+    expect(oneTaken.owed_count).toBe(1)
+    expect(oneTaken.owed_balls.map((ball) => ball.id)).toEqual(["untaken-request"])
+
+    harness.db
+      .prepare("UPDATE pending_request SET expires_at = ? WHERE request_id = 'taken-request'")
+      .run(Date.now() - 1)
+    expect((await readOwed("taken-past-due")).owed_count).toBe(2)
+
+    // An incident's message repoints on every assertion, so its taking is the quiet-until a receipt set.
+    harness.db
+      .prepare(
+        "UPDATE pending_request SET request_kind = 'incident', expires_at = NULL WHERE request_id = 'untaken-request'",
+      )
+      .run()
+    expect(await readOwed("incident-untaken")).toMatchObject({ owed_count: 2, owed_alarm_count: 1 })
+    harness.db
+      .prepare("UPDATE pending_request SET expires_at = ? WHERE request_id = 'untaken-request'")
+      .run(Date.now() + 600_000)
+    expect(await readOwed("incident-quiet")).toMatchObject({ owed_count: 1, owed_alarm_count: 0 })
+    harness.db
+      .prepare("UPDATE pending_request SET expires_at = ? WHERE request_id = 'untaken-request'")
+      .run(Date.now() - 1)
+    expect(await readOwed("incident-quiet-passed")).toMatchObject({ owed_count: 2, owed_alarm_count: 1 })
+  })
+
   it("keeps taken obligations open without counting them as idle attention", async () => {
     const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
     cleanup = harness.dispose
@@ -1678,6 +1717,8 @@ describe("dispatcher bounded mailbox drain", () => {
     harness.sendTakingStatus("@chief", "third-request")
     harness.sendTakingStatus("@chief", fourthRequest.id)
     harness.db.prepare("UPDATE pending_request SET request_kind = 'incident' WHERE request_id = 'fourth-request'").run()
+    // 31092: a taken ball is owed again once its due passes; these four are past due, so all four are owed.
+    harness.db.prepare("UPDATE pending_request SET expires_at = 1 WHERE recipient = '@chief'").run()
     const statusAfterDrain = await readStatus("status-after-drain")
     expect(statusAfterDrain).toMatchObject({
       unread_count: 0,
@@ -1745,7 +1786,9 @@ describe("dispatcher bounded mailbox drain", () => {
       harness.sendActionable("@chief", `bulk request ${index}`, reqId)
       harness.sendTakingStatus("@chief", reqId)
       harness.db
-        .prepare("UPDATE pending_request SET request_kind = 'request', opened_at = ? WHERE request_id = ?")
+        .prepare(
+          "UPDATE pending_request SET request_kind = 'request', opened_at = ?, expires_at = 1 WHERE request_id = ?",
+        )
         .run(index * 1000, reqId)
     }
     const statusWith12 = await readStatus("status-12-with-older-alarm")

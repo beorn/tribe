@@ -162,7 +162,7 @@ export type BallTracker = {
   expiresInMs?: number
   /**
    * 27735 B (@cto bd599f15): this untracked status receipt re-sets its owner's open ball's due. `handleSend` has
-   * checked ownership, the current due and the one-day ceiling; the one UPDATE lands in the receipt's transaction.
+   * checked ownership and the current due; the one UPDATE lands in the receipt's transaction.
    */
   redue?: { requestId: string; recipient: string; previousExpiresAt: number | null; expiresAt: number }
   /**
@@ -282,7 +282,9 @@ export const DEFAULT_BALL_TTL_MS_BY_CLASS = {
   query: 20 * 60_000,
 } as const
 
-export const MAX_BALL_TTL_MS = 24 * 60 * 60_000
+/** 31092 (@cto 618f9d5a): a sanity bound only, measured from the send or receipt that sets the due. A park
+ * longer than this re-takes monthly, which is its hold review. */
+export const MAX_BALL_TTL_MS = 30 * 24 * 60 * 60_000
 
 export type PendingSettlementRow = {
   request_id: string
