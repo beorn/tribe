@@ -2850,7 +2850,21 @@ export function createStatements(db: Database) {
             $include_correlated_replies = 1
             AND type IN (${CORRELATED_REPLY_TYPES_SQL})
             AND (
-              correlated_reply_requester = $name
+              (
+                correlated_reply_requester = $name
+                AND (
+                  $unacknowledged_only = 0
+                  OR m.request IS NOT NULL
+                  OR NOT EXISTS (
+                    SELECT 1
+                    FROM messages AS r INDEXED BY idx_messages_recipient_kind
+                    WHERE r.recipient = m.sender
+                      AND r.kind = 'direct'
+                      AND r.rowid > m.rowid
+                      AND r.sender = $name
+                  )
+                )
+              )
               OR (
                 ${ATTENTION_PREDICATE_SQL}
                 AND ${refBoundOpenRequestPredicateSql("m.ref", "$name", "requester")}
