@@ -25,6 +25,17 @@ describe("Claude plugin adapter restart budget", () => {
     expect(env.TRIBE_PLUGIN_PROVIDER_PARENT_PID).toBe("4321")
   })
 
+  // 28743 — the supervisor is the only process whose memory spans adapter
+  // replacements, so only its own seed passes through to a child; an inherited
+  // value is cleared rather than reused as an unearned suppress.
+  it("hands a respawned adapter the announced delivery seed and clears an inherited one", () => {
+    const respawned = buildPluginAdapterEnvironment({}, 4321, undefined, null, "push/push")
+    expect(respawned.TRIBE_PLUGIN_ANNOUNCED_DELIVERY).toBe("push/push")
+
+    const firstSpawn = buildPluginAdapterEnvironment({ TRIBE_PLUGIN_ANNOUNCED_DELIVERY: "push/push" }, 4321)
+    expect(firstSpawn.TRIBE_PLUGIN_ANNOUNCED_DELIVERY).toBeUndefined()
+  })
+
   it("allows a second quick re-exec when two legitimate daemon generations arrive in one restart burst", () => {
     expect(evaluateAdapterRestart(1, 250, 10_000, Number.POSITIVE_INFINITY, () => 0.5)).toEqual({
       consecutiveReexecs: 2,

@@ -55,14 +55,21 @@ const REMEDY =
 /** The same socket the adapter child resolves: this argv's `--socket`, else TRIBE_SOCKET, else the XDG default. */
 const DAEMON_SOCKET_PATH = resolveSocketPath(parseTribeArgs().socket)
 
-function supervisedIdentity(message: unknown): { name: string; joined: boolean } | undefined {
+function supervisedIdentity(
+  message: unknown,
+): { name: string; joined: boolean; announcedDelivery?: string } | undefined {
   if (typeof message !== "object" || message === null || !("tribePluginIdentity" in message)) return undefined
   const identity = (message as { tribePluginIdentity?: unknown }).tribePluginIdentity
   if (typeof identity !== "object" || identity === null) return undefined
-  const { name, joined } = identity as { name?: unknown; joined?: unknown }
-  return typeof name === "string" && isTribeNameShape(name) && typeof joined === "boolean"
-    ? { name, joined }
-    : undefined
+  const { name, joined, announcedDelivery } = identity as {
+    name?: unknown
+    joined?: unknown
+    announcedDelivery?: unknown
+  }
+  if (typeof name !== "string" || !isTribeNameShape(name) || typeof joined !== "boolean") return undefined
+  return typeof announcedDelivery === "string" && announcedDelivery.length > 0
+    ? { name, joined, announcedDelivery }
+    : { name, joined }
 }
 
 function waitForExit(
@@ -160,6 +167,11 @@ async function superviseAdapter(): Promise<void> {
   let firstSpawn = true
   let resumeJoined = false
   let reportedJoined = false
+  // 28743 — this supervisor lives for one provider session, so it is the process
+  // that remembers an announcement the replaced adapter child had made. The child
+  // reports the signature after it writes the banner; every later spawn is seeded
+  // with it and announces only when the acknowledged mode differs.
+  let announcedDelivery: string | undefined
   let claimWatch: SupervisorClaimWatch | null = null
   const exitRecord = resolveAdapterExitRecord(process.env)
   // 29567: a provider run inside this seat inherits the seat's launch declaration. Its supervisor must neither claim
@@ -267,6 +279,7 @@ async function superviseAdapter(): Promise<void> {
         providerParent.pid,
         canResumeJoined && resumeName !== undefined ? { name: resumeName } : undefined,
         exitRecord.path,
+        announcedDelivery,
       ),
     })
     firstSpawn = false
@@ -275,6 +288,7 @@ async function superviseAdapter(): Promise<void> {
       if (identity !== undefined) {
         resumeName = identity.name
         reportedJoined = identity.joined
+        if (identity.announcedDelivery !== undefined) announcedDelivery = identity.announcedDelivery
       }
     })
     const adapterPid = active.pid

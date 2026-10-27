@@ -1194,6 +1194,74 @@ process.exit(await child.exited)
     generation.client.close()
   }, 30_000)
 
+  // @failure 28743: a wire restart replaces the adapter child inside ONE provider
+  //          session. The replacement is a new process, so it re-sent the startup
+  //          banner and every idle Claude seat answered it as a user turn.
+  // @level l2 @consumer the supervisor boundary and native MCP delivery
+  it("28743: a replaced adapter child under one supervisor announces the banner once", async () => {
+    const dbPath = join(tmpDir, "tribe-announce-seed.db")
+    spawnTestDaemon(dbPath, join(tmpDir, "daemon-announce-seed.log"))
+    await waitFor(() => existsSync(socketPath), "announce-seed daemon socket")
+    const generation = await connectToGeneration(socketPath)
+    daemonPids.add(generation.pid)
+
+    const plugin = spawnTestPlugin({
+      dbPath,
+      logPath: join(tmpDir, "adapter-announce-seed.log"),
+      name: PERSONA,
+      launchId: "announce-seed-launch",
+      providerParentPid: String(process.ppid),
+      delivery: "push",
+      requireJoin: false,
+    })
+    const stdout = collectJsonLines(plugin)
+    writeJson(plugin, initializePayload(60))
+    await waitFor(() => stdout.some((line) => line.id === 60), "announce-seed plugin initialization")
+    writeJson(plugin, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+
+    const startupBanners = () =>
+      stdout.filter(
+        (line) =>
+          line.method === "notifications/claude/channel" &&
+          (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
+          JSON.stringify(line).includes("**tribe**"),
+      )
+    const connectedAdapter = async (label: string, replacedPid?: number): Promise<number> => {
+      let found: number | undefined
+      await waitFor(async () => {
+        const roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+        const candidate = roster.sessions?.find(
+          (session) => session.name === PERSONA && session.transport_state === "connected",
+        )
+        const pid = candidate?.transport_pids?.[0]
+        if (typeof pid === "number" && pid !== replacedPid) found = pid
+        return found !== undefined
+      }, label)
+      adapterPids.add(found!)
+      return found!
+    }
+
+    const firstAdapter = await connectedAdapter("announce-seed first adapter")
+    await waitFor(() => startupBanners().length === 1, "first adapter startup banner")
+
+    // The wire restart's shape: the child is gone, the supervisor lives, and a
+    // real second adapter process takes over inside the same provider session.
+    process.kill(firstAdapter, "SIGTERM")
+    const secondAdapter = await connectedAdapter("announce-seed replacement adapter", firstAdapter)
+    expect(secondAdapter).not.toBe(firstAdapter)
+    writeJson(plugin, callToolPayload(61, "members", { all: true }))
+    await waitFor(() => stdout.some((line) => line.id === 61), "replacement adapter MCP tool call")
+    await new Promise((resolveTick) => setTimeout(resolveTick, 300))
+
+    // One announcement for the provider session, not one per adapter process.
+    expect(startupBanners()).toHaveLength(1)
+    expect(plugin.exitCode).toBeNull()
+
+    plugin.stdin.end()
+    await waitFor(() => plugin.exitCode !== null, "wrapper exit after the host closed its pipe")
+    generation.client.close()
+  }, 40_000)
+
   it.each([
     ["a launch state directory that does not exist", "missing-launch-state"],
     ["no launch state directory", undefined],

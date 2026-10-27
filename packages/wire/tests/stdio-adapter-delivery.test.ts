@@ -1205,6 +1205,121 @@ describe("stdio adapter delivery modes", () => {
     expect(membersProbes()).toBe(1)
   })
 
+  // @failure 28743: a wire restart replaces the adapter child inside ONE provider
+  //          session. A fresh process is "first connect" by construction, so the
+  //          banner fired again and woke every idle Claude seat as a user turn.
+  // @level l2 @consumer native MCP delivery capability and startup confirmation
+  it("28743: a replaced adapter seeded with the announced mode emits no startup banner", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_REQUIRE_JOIN: "0",
+        TRIBE_NO_AUTOSTART: "1",
+        // The supervisor's memory of what this provider session already heard.
+        TRIBE_PLUGIN_ANNOUNCED_DELIVERY: "push/push",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const startupBanners = () =>
+      stdout.filter(
+        (line) =>
+          line.method === "notifications/claude/channel" &&
+          (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
+          JSON.stringify(line).includes("**tribe**"),
+      )
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    // A tool round trip proves onConnect finished, so the banner decision was made.
+    await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2, { timeoutMs: 10_000 })
+    await new Promise((resolveTick) => setTimeout(resolveTick, 200))
+
+    expect(child.exitCode).toBeNull()
+    expect(startupBanners()).toHaveLength(0)
+    // The seed suppresses the banner path itself, so it never probes members.
+    expect(daemon.requests.filter((msg) => msg.method === "tribe.members")).toHaveLength(0)
+  })
+
+  // @failure 28743: the seed is a memory of the last ANNOUNCED mode, never a
+  //          suppress flag — a changed mode must still reach the seat.
+  // @level l2 @consumer native MCP delivery capability and startup confirmation
+  it("28743: a replaced adapter seeded with a different mode still emits the startup banner", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_REQUIRE_JOIN: "0",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_PLUGIN_ANNOUNCED_DELIVERY: "pull/pull",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const startupBanners = () =>
+      stdout.filter(
+        (line) =>
+          line.method === "notifications/claude/channel" &&
+          (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
+          JSON.stringify(line).includes("**tribe**"),
+      )
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await waitForCondition(() => startupBanners().length === 1, "changed-mode startup banner")
+
+    expect(JSON.stringify(startupBanners()[0])).toContain("acknowledged transportDelivery=push")
+  })
+
+  // @failure 28743: an unreadable seed must never suppress — it announces as on a
+  //          first launch and names the discard once, so the failure is visible.
+  // @level l2 @consumer native MCP delivery capability and startup confirmation
+  it("28743: an unparseable seed announces the banner and logs why it was ignored", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const debugLog = join(tmpDir, "adapter.log")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_REQUIRE_JOIN: "0",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_PLUGIN_ANNOUNCED_DELIVERY: "sometimes",
+        DEBUG_LOG: debugLog,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const startupBanners = () =>
+      stdout.filter(
+        (line) =>
+          line.method === "notifications/claude/channel" &&
+          (line.params as { meta?: { from?: string } })?.meta?.from === "tribe-startup" &&
+          JSON.stringify(line).includes("**tribe**"),
+      )
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await waitForCondition(() => startupBanners().length === 1, "unparseable-seed startup banner")
+
+    await waitForCondition(
+      () =>
+        existsSync(debugLog) && readFileSync(debugLog, "utf8").includes("unparseable TRIBE_PLUGIN_ANNOUNCED_DELIVERY"),
+      "unparseable seed log line",
+      { timeoutMs: 5_000 },
+    )
+  })
+
   // @failure 26564: a disconnected push adapter must withdraw its acknowledged push capability.
   // @level l2 @consumer tools/list through the native adapter during reconnect and recovery
   it("21049: repeated legacy reconnect conflicts keep native MCP alive, withdraw push, and recover", async () => {

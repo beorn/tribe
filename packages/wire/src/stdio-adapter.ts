@@ -95,6 +95,7 @@ import { adapterLaunchIdentity } from "./lib/adapter-launch-identity.ts"
 import {
   TRIBE_PLUGIN_ADAPTER_CHILD_ENV,
   TRIBE_PLUGIN_ADAPTER_EXIT_RECORD_ENV,
+  TRIBE_PLUGIN_ANNOUNCED_DELIVERY_ENV,
   TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV,
   TRIBE_PLUGIN_REEXEC_EXIT_CODE_ENV,
   TRIBE_PLUGIN_RESUME_JOINED_ENV,
@@ -218,7 +219,28 @@ function bannerDeliverySignature(): string {
     : "unacknowledged"
 }
 
-let lastBannerDeliverySignature: string | null = null
+/**
+ * A signature is mode fields only, never rendered text — 31111's wording change alters none of them.
+ * Mirrors TribeDelivery (lib/delivery.ts:1): if that union grows, this must too, or a valid seed is
+ * rejected as unparseable (loudly, and the banner returns on every restart).
+ */
+const BANNER_SIGNATURE_RE = /^(?:unacknowledged|(?:push|pull)\/(?:push|pull))$/
+
+/**
+ * 28743 — the seed the plugin supervisor hands a REPLACED adapter child: the
+ * signature this provider session already announced. Absent on a first launch.
+ * An unparseable seed is never a reason to suppress — it announces as before and
+ * says so once, because a silent suppress would hide a real mode change.
+ */
+function seededAnnouncedDelivery(): string | null {
+  const raw = process.env[TRIBE_PLUGIN_ANNOUNCED_DELIVERY_ENV]?.trim()
+  if (raw === undefined || raw.length === 0) return null
+  if (BANNER_SIGNATURE_RE.test(raw)) return raw
+  log.warn?.(`ignoring unparseable ${TRIBE_PLUGIN_ANNOUNCED_DELIVERY_ENV} seed; announcing as on a first launch`)
+  return null
+}
+
+let lastBannerDeliverySignature: string | null = seededAnnouncedDelivery()
 
 /**
  * 28743 — remember the delivery state this session has already ANNOUNCED to the
@@ -231,8 +253,22 @@ function rememberAnnouncedDelivery(): void {
   lastBannerDeliverySignature = bannerDeliverySignature()
 }
 
+/**
+ * 28743 — tell the supervisor what this adapter announced, after the banner is
+ * written to the provider stream. The supervisor lives for the provider session
+ * and seeds this process's replacement with it; it is a memory, never a switch.
+ */
+function reportAnnouncedDelivery(): void {
+  if (!PLUGIN_ADAPTER_CHILD) return
+  process.send?.({ tribePluginIdentity: { name: myName, joined, announcedDelivery: bannerDeliverySignature() } })
+}
+
 function shouldEmitStartupBanner(isFirstConnect: boolean): boolean {
-  if (!isFirstConnect && bannerDeliverySignature() === lastBannerDeliverySignature) return false
+  // 28743 — "first" means this PROVIDER SESSION has announced nothing yet, not
+  // that this process just started: an adapter replaced by a wire restart arrives
+  // seeded, so its first connect is not a first announcement.
+  const firstForProviderSession = isFirstConnect && lastBannerDeliverySignature === null
+  if (!firstForProviderSession && bannerDeliverySignature() === lastBannerDeliverySignature) return false
   rememberAnnouncedDelivery()
   return true
 }
@@ -983,6 +1019,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
         const shortSocket = SOCKET_PATH.replace(process.env.HOME ?? "", "~")
         const banner = `**tribe** ${myName} (${myRole}) · chief: ${chief} · ${deliveryAcknowledgementSummary()} · peers: ${peers}${missingClause} · ${shortSocket}`
         sendChannelDetached(banner, { from: "tribe-startup", type: "system" })
+        reportAnnouncedDelivery()
       } catch {
         // Non-fatal — banner is diagnostic, don't block startup
         log.debug?.("Startup banner failed (non-fatal)")
@@ -1354,6 +1391,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         from: "tribe-startup",
         type: "system",
       })
+      reportAnnouncedDelivery()
       if (joined && currentDeliveryCapability().channel) drainDaemonInbox()
     }
     if ((name === "join" && joined) || name === "rename") {
