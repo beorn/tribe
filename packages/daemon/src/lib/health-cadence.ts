@@ -222,6 +222,46 @@ function combineJournalCount(messagesHalf: LagRow, archiveHalf: LagRow): LagRow 
   }
 }
 
+/**
+ * One attention-lag shape, two readings (27735): every unacknowledged direct attention row, and the subset
+ * that wakes the seat's inbox-wait. `wakePredicateSql` is the one home for "waking"; nothing here lists types.
+ */
+export function attentionLagSql(table: "messages" | "messages_archive", extraPredicate: string): string {
+  const sequence = table === "messages" ? "rowid" : "seq"
+  return `
+    SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
+    FROM ${table} AS m
+    WHERE m.${sequence} > COALESCE(
+      (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
+      0
+    )
+      AND m.recipient = $session
+      AND m.kind = 'direct'
+      AND m.sender != $session
+      AND ${ATTENTION_PREDICATE_SQL}
+      AND ${noOpenIncidentAttentionPredicateSql("m")}
+      AND ${unsettledAttentionPredicateSql("m")}
+      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence })}${extraPredicate}
+  `
+}
+
+/**
+ * 26523 (@cto 55a8b9fc binding 1, 6ebb2ba3): the `inbox_lag.actionable_rows` count
+ * that `health:inbox-stale` reads (`attentionLagSql` across `messages` and
+ * `messages_archive`). Shared by `inboxLagProjection` and the
+ * `cli_inbox_status_by_launch_v1` zero-unread attention receipt so the receipt and
+ * the alarm never disagree on one mailbox.
+ */
+export function readActionableLagRows(db: Database, session: string): number {
+  const messagesHalf = db
+    .prepare(assertSingleStatement(attentionLagSql("messages", "")))
+    .get({ $session: session }) as LagRow
+  const archiveHalf = db
+    .prepare(assertSingleStatement(attentionLagSql("messages_archive", "")))
+    .get({ $session: session }) as LagRow
+  return combineJournalCount(messagesHalf, archiveHalf).rows
+}
+
 type OldestActionableCandidate = {
   id: string
   type: string
@@ -509,26 +549,6 @@ function inboxLagProjection(
       AND ${lagPredicate}
   `),
   )
-  // One attention-lag shape, two readings (27735): every unacknowledged direct attention row, and the subset
-  // that wakes the seat's inbox-wait. `wakePredicateSql` is the one home for "waking"; nothing here lists types.
-  const attentionLagSql = (table: "messages" | "messages_archive", extraPredicate: string): string => {
-    const sequence = table === "messages" ? "rowid" : "seq"
-    return `
-    SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
-    FROM ${table} AS m
-    WHERE m.${sequence} > COALESCE(
-      (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
-      0
-    )
-      AND m.recipient = $session
-      AND m.kind = 'direct'
-      AND m.sender != $session
-      AND ${ATTENTION_PREDICATE_SQL}
-      AND ${noOpenIncidentAttentionPredicateSql("m")}
-      AND ${unsettledAttentionPredicateSql("m")}
-      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence })}${extraPredicate}
-  `
-  }
   const waking = `\n      AND ${wakePredicateSql("m")}`
   const actionableLagQueryMessages = db.prepare(assertSingleStatement(attentionLagSql("messages", "")))
   const actionableLagQueryArchive = db.prepare(assertSingleStatement(attentionLagSql("messages_archive", "")))

@@ -80,6 +80,7 @@ import {
   type HandlerOpts,
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
+import { readActionableLagRows } from "../health-cadence.ts"
 import { emptyFetchReadSelectorRefusal, hasEffectiveFetchReadSelector } from "../fetch-read-selector.ts"
 import type { TribePluginHandle } from "../plugin-api.ts"
 import { createInboxWaitManager, readInboxWaitWokenBy } from "../inbox-wait.ts"
@@ -3362,19 +3363,17 @@ export function withDispatcher<
             // identity, so these stay absent there. Mirrors
             // cli_inbox_delivery_by_launch_v1's response shape.
             const status = readInboxStatus(target.sessionName)
-            // 26523 (@cto 55a8b9fc): the /do mid-turn rescan (`tribe inbox-status`) is
-            // the seat's attention read when no actionable rows remain to consume.
-            // `status.unread_count` is `readAttentionProjection(...).actionableCount` —
-            // the same unacknowledged-attention count that 21626 (`health:inbox-stale`
-            // `actionable_rows`) reads, excluding ambient broadcasts/notifies — so
-            // unread bodies still require `tribe inbox --consume` while an empty or
-            // ambient-only mailbox advances `last_attention_read_at`.
-            const actionableUnreadCount = status.unread_count
+            // 26523 (@cto 55a8b9fc binding 1, 6ebb2ba3): the /do mid-turn rescan
+            // (`tribe inbox-status`) is the seat's attention read when the
+            // `health:inbox-stale` alarm's `attentionLagSql` `actionable_rows` count
+            // (`readActionableLagRows`) is zero — a receipt is about READING (the
+            // alarm's meaning), not settling (the ball's), so a seat that read a
+            // request and has not yet sent TAKING still gets its receipt.
             if (
               method === "cli_inbox_status_by_launch_v1" &&
               p.receipt === true &&
-              actionableUnreadCount === 0 &&
-              callerDeliveryAlive(callerSocket)
+              callerDeliveryAlive(callerSocket) &&
+              readActionableLagRows(db, target.sessionName) === 0
             ) {
               stmts.touchMailboxAttentionRead.run({ $recipient: target.sessionName, $now: Date.now() })
             }

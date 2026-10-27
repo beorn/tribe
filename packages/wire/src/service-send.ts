@@ -5,14 +5,27 @@
  * producer has one answer to "who am I on the wire" (25689 moved the client here from hab-cli so both CLIs share it).
  */
 import { connectTribeLaunch } from "./launch-registration.ts"
-import { oneShotRegisterParams, resolveLaunchSeat } from "./launch-seat.ts"
+import { oneShotRegisterParams, resolveLaunchSeat, type LaunchSeat } from "./launch-seat.ts"
 import { mcpJsonContent } from "./cli/mcp-json-content.ts"
-import { HAB_ID_TOKEN_ENV, readIdentityTokenFromEnvironment, readUnverifiedTokenClaims } from "./lib/identity-token.ts"
+import {
+  HAB_ID_TOKEN_ENV,
+  readIdentityTokenFromEnvironment,
+  readLaunchIdFromToken,
+  readUnverifiedTokenClaims,
+} from "./lib/identity-token.ts"
+import { TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV } from "./lib/session-identity-env.ts"
 import { resolveSocketPath } from "./paths.ts"
 import { withDaemonCall, type DaemonCallOutcome } from "./util.ts"
 import type { DaemonClient } from "./client.ts"
 
-export { LAUNCH_UNROUTABLE, LAUNCH_UNROUTABLE_EXIT_CODE, isLaunchUnroutable } from "./launch-seat.ts"
+export {
+  LAUNCH_UNROUTABLE,
+  LAUNCH_UNROUTABLE_EXIT_CODE,
+  isLaunchUnroutable,
+  resolveLaunchSeat,
+  type DaemonCall,
+  type LaunchSeat,
+} from "./launch-seat.ts"
 
 /** Whole connect+call budget per daemon operation; tribe.health took ~5s under load. */
 export const TRIBE_DAEMON_DEADLINE_MS = 10_000
@@ -200,4 +213,46 @@ export function describeDaemonOutcome(outcome: SendOutcome): string {
     case "refused":
       return `refused by the daemon: ${outcome.refusal}`
   }
+}
+
+/**
+ * Resolve the daemon-authenticated seat and `(launch_id, launch_parent_pid)` tuple for this
+ * process's `HAB_ID_TOKEN` via `resolveLaunchSeat` (`cli_inbox_status_by_launch_v1` without
+ * `receipt: true`), so seat-name/tuple callers never record a false attention-read receipt
+ * (#26523, @cto 55a8b9fc / 6ebb2ba3).
+ */
+export async function resolveLaunchSeatFromEnvironment(
+  opts: {
+    socketPath?: string
+    deadlineMs?: number
+    env?: Readonly<NodeJS.ProcessEnv>
+  } = {},
+): Promise<DaemonCallOutcome<LaunchSeat>> {
+  const env = opts.env ?? process.env
+  const socketPath = opts.socketPath ?? resolveSocketPath()
+  const deadlineMs = opts.deadlineMs ?? TRIBE_DAEMON_DEADLINE_MS
+  let launchId: string
+  let idToken: string
+  try {
+    const token = readIdentityTokenFromEnvironment(env)
+    const resolvedLaunchId = readLaunchIdFromToken(env)
+    if (token === null || resolvedLaunchId === null) {
+      return {
+        kind: "error",
+        message: `${HAB_ID_TOKEN_ENV} is unset: launch seat resolution requires a Hab identity token`,
+      }
+    }
+    idToken = token
+    launchId = resolvedLaunchId
+  } catch (error) {
+    return { kind: "error", message: error instanceof Error ? error.message : String(error) }
+  }
+  const persona = env[TRIBE_SESSION_NAME_ENV]?.trim() || env[TRIBE_NAME_ENV]?.trim() || null
+  return withDaemonCall({ socketPath, deadlineMs, callTimeoutMs: deadlineMs }, (client) =>
+    resolveLaunchSeat((method, params) => client.call(method, params), {
+      launchId,
+      idToken,
+      persona,
+    }),
+  )
 }

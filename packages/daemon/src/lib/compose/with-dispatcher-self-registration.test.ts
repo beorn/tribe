@@ -10,6 +10,7 @@ import type { TribeRole } from "tribe-wire/lib/config"
 import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-identity"
 import { readUnverifiedTokenClaims } from "tribe-wire/lib/identity-token"
 import { resolveLaunchSeat } from "../../../../wire/src/launch-seat.ts"
+import { readActionableLagRows } from "../health-cadence.ts"
 import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
 import { sendMessage } from "../messaging.ts"
@@ -4171,7 +4172,8 @@ describe("26523 — cli_inbox_status_by_launch_v1 attention-read receipt and del
     expect(observerRead.unread_count).toBe(0)
     expect(harness.mailboxAttentionReadAt("@dev/pull")).toBeNull()
 
-    // 3. Closed caller socket in flight (24284) leaves last_attention_read_at untouched.
+    // 3. Closed caller socket in flight (24284) leaves last_attention_read_at untouched,
+    // while the same in-flight read resuming on a live socket stamps the receipt.
     const transientClient = harness.connectClient()
     pauseVerify = true
     const inFlight = harness.dispatcher.handleRequest(
@@ -4187,10 +4189,12 @@ describe("26523 — cli_inbox_status_by_launch_v1 attention-read receipt and del
     transientClient.socket.emitClose()
     pauseVerify = false
     for (const release of releases.splice(0)) release()
-    await inFlight
+    const rawClosed = await inFlight
+    expect((JSON.parse(rawClosed) as JsonRpcResponse<unknown>).error).toBeUndefined()
+    expect(transientClient.socket.writes.length, "the dispatcher must not write to a closed socket").toBe(0)
     expect(harness.mailboxAttentionReadAt("@dev/pull")).toBeNull()
 
-    // 4. Unread actionable message (unread_count > 0) withholds the receipt until bodies are consumed.
+    // 4. Unread actionable message (actionable_rows > 0) withholds the receipt until bodies are consumed.
     harness.sendActionable("@dev/pull", "please review", "req-unread-guard")
     const unreadStatus = parseResult<{ unread_count: number }>(
       await harness.dispatcher.handleRequest(
@@ -4204,6 +4208,145 @@ describe("26523 — cli_inbox_status_by_launch_v1 attention-read receipt and del
       ),
     )
     expect(unreadStatus.unread_count).toBe(1)
+    expect(readActionableLagRows(harness.db, "@dev/pull")).toBe(1)
     expect(harness.mailboxAttentionReadAt("@dev/pull")).toBeNull()
+
+    // Live-socket control for (3): once the unread body is consumed, the same in-flight
+    // read resuming on a live socket stamps last_attention_read_at.
+    await harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "consume-before-live-control",
+        method: "cli_self_inbox_v1",
+        params: { authority: null, idToken: token, limit: 10 },
+      },
+      pullClient.connId,
+    )
+    harness.db.prepare("UPDATE mailbox_cursors SET last_attention_read_at = NULL WHERE recipient = '@dev/pull'").run()
+    const liveOneShot = harness.connectClient()
+    pauseVerify = true
+    const liveInFlight = harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "live-in-flight",
+        method: "cli_inbox_status_by_launch_v1",
+        params: { launch_id: "sid-pull-26523", id_token: token, persona: "@dev/pull", receipt: true },
+      },
+      liveOneShot.connId,
+    )
+    pauseVerify = false
+    for (const release of releases.splice(0)) release()
+    const rawLive = await liveInFlight
+    expect((JSON.parse(rawLive) as JsonRpcResponse<unknown>).error).toBeUndefined()
+    expect(harness.mailboxAttentionReadAt("@dev/pull")).not.toBeNull()
+  })
+
+  it("uses the health:inbox-stale attentionLagSql actionable_rows count for the receipt zero test on both divergences (@cto 6ebb2ba3)", async () => {
+    const baseNow = 1_800_100_000_000
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(baseNow)
+    try {
+      const harness = createDispatcherHarness({ identityVerifier })
+      cleanup = harness.dispose
+      const pullClient = harness.connectClient()
+      await harness.register(pullClient.connId, {
+        name: "@dev/pull",
+        pid: liveHolderPid,
+        project: "/tmp/p",
+        launchId: "sid-pull-26523",
+        launchParentPid: process.pid,
+        idToken: token,
+        identitySid: "sid-pull-26523",
+      })
+      const senderClient = harness.connectClient()
+      await harness.register(senderClient.connId, {
+        name: "@chief",
+        pid: liveHolderPid,
+        project: "/tmp/p",
+        launchId: "sid-chief-26523",
+        launchParentPid: process.pid,
+        idToken: senderToken,
+        identitySid: "sid-chief-26523",
+      })
+
+      // Divergence (a): a seat that has READ a request (last_actionable_seq advanced past the
+      // row) but has not yet sent TAKING still has status.unread_count = 1 (the untaken ball),
+      // while the health:inbox-stale alarm's attentionLagSql actionable_rows is 0 — so a
+      // launch-scoped inbox-status with receipt:true MUST stamp last_attention_read_at.
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "send-untaken-req",
+          method: "tribe.send",
+          params: {
+            to: "@dev/pull",
+            type: "request",
+            request: "req-read-not-taken",
+            message: "please investigate",
+            summary: "please investigate",
+          },
+        },
+        senderClient.connId,
+      )
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "consume-untaken-req",
+          method: "cli_self_inbox_v1",
+          params: { authority: null, idToken: token, limit: 10 },
+        },
+        pullClient.connId,
+      )
+      expect(harness.mailboxAttentionReadAt("@dev/pull")).toBe(baseNow)
+
+      const pollAfterRead = baseNow + 5 * 60_000
+      nowSpy.mockReturnValue(pollAfterRead)
+      const statusWithUntakenBall = parseResult<{ unread_count: number }>(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: "poll-read-not-taken",
+            method: "cli_inbox_status_by_launch_v1",
+            params: { launch_id: "sid-pull-26523", id_token: token, persona: "@dev/pull", receipt: true },
+          },
+          pullClient.connId,
+        ),
+      )
+      expect(statusWithUntakenBall.unread_count).toBe(1)
+      expect(readActionableLagRows(harness.db, "@dev/pull")).toBe(0)
+      expect(harness.mailboxAttentionReadAt("@dev/pull")).toBe(pollAfterRead)
+
+      // Divergence (b): an unacknowledged untracked actionable row archived into
+      // messages_archive (seq > last_actionable_seq) is not returned by
+      // readAttentionProjection, but IS counted by attentionLagSql actionable_rows (1),
+      // so the receipt follows the alarm's one count and is withheld.
+      const cursorSeq = harness.mailboxCursorSeq("@dev/pull")
+      harness.db
+        .prepare(
+          `INSERT INTO messages_archive (
+             seq, id, type, sender, session_id, recipient, kind, content, ts, delivery,
+             attention_required, wakes_owner, is_incident, sender_authority, archived_at
+           ) VALUES (
+             $seq, 'archived-untracked-response', 'response', '@chief', 'sid-chief-26523@1', '@dev/pull',
+             'direct', 'archived response body', $ts, 'pull', 1, 0, 0, 'verified', $ts
+           )`,
+        )
+        .run({ $seq: cursorSeq + 100, $ts: baseNow - 8 * 24 * 60 * 60_000 })
+
+      const pollWithArchivedRow = baseNow + 10 * 60_000
+      nowSpy.mockReturnValue(pollWithArchivedRow)
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "poll-archived-untracked",
+          method: "cli_inbox_status_by_launch_v1",
+          params: { launch_id: "sid-pull-26523", id_token: token, persona: "@dev/pull", receipt: true },
+        },
+        pullClient.connId,
+      )
+      expect(readActionableLagRows(harness.db, "@dev/pull")).toBe(1)
+      expect(harness.mailboxAttentionReadAt("@dev/pull")).toBe(pollAfterRead)
+    } finally {
+      nowSpy.mockRestore()
+    }
   })
 })

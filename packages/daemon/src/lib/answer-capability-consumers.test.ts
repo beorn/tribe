@@ -6,7 +6,9 @@
  * can tell "reads at its next tick" from "unreachable".
  *
  * members, pending and the tracked-send delivery report all spread one
- * projection, so one fixture read those three ways must agree for every case.
+ * projection; for a connected pull seat (`connected-no-consumer`), members
+ * and pending report `not-observed` while the delivery report applies the
+ * 10-minute attention-read ceiling (`CONNECTED_PULL_READ_CEILING_MS`, 26523).
  * The flip changes what is REPORTED, never where mail goes or whether a send
  * is admitted: refusal stays keyed on mailbox readability and on a connected,
  * PID-live transport.
