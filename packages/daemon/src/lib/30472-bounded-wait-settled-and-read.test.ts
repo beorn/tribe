@@ -83,7 +83,11 @@ function fixture(): Fixture {
 
   const reader = makeCtx("sess-reader", "@reader")
 
-  const latestDirectWakeSeq = (session: string, wakeOnCorrelatedReply: boolean, unacknowledgedOnly: boolean): number => {
+  const latestDirectWakeSeq = (
+    session: string,
+    wakeOnCorrelatedReply: boolean,
+    unacknowledgedOnly: boolean,
+  ): number => {
     const row = stmts.getLatestInboxWaitMessage.get({
       $name: session,
       $include_correlated_replies: wakeOnCorrelatedReply ? 1 : 0,
@@ -177,9 +181,7 @@ describe("30472 bounded wait does not wake on settled requests or receipted open
 
     // #29327: the unread row remains visible in actionable_unread with settled: true.
     const projection = readAttentionProjection(recipient, RECIPIENT, Date.now(), 0, handlerOpts()).attention
-    expect(projection.actionable_unread).toMatchObject([
-      { id: sent.id, settled: true, settled_by: SENDER },
-    ])
+    expect(projection.actionable_unread).toMatchObject([{ id: sent.id, settled: true, settled_by: SENDER }])
 
     // AC2: neither the tracked query nor the fresh ($unacknowledged_only = 1) direct wake query may qualify it.
     expect(latestTrackedWakeSeq(RECIPIENT)).toBe(0)
@@ -259,7 +261,14 @@ describe("30472 bounded wait does not wake on settled requests or receipted open
     })
 
     // AC3: recipient receipts the open ball with a TAKING status (--type status --ref <id>).
-    sendMessage(recipient, CHIEF, `TAKING ${req.id} · owner ${RECIPIENT} · ETA 15:00 PDT · todo #30472`, "status", undefined, req.id)
+    sendMessage(
+      recipient,
+      CHIEF,
+      `TAKING ${req.id} · owner ${RECIPIENT} · ETA 15:00 PDT · todo #30472`,
+      "status",
+      undefined,
+      req.id,
+    )
 
     // The ball stays open in pending_balls until settled or due, but no longer wakes a fresh wait.
     const projection = readAttentionProjection(recipient, RECIPIENT, Date.now(), 0, handlerOpts()).attention
@@ -333,5 +342,39 @@ describe("30472 bounded wait does not wake on settled requests or receipted open
     expect(quietWait.status).toBe("timeout")
     expect(quietWait.timed_out).toBe(true)
     expect(quietWait.woken_by).toBeUndefined()
+  })
+
+  it("31132: a correlated-reply settlement answered by the requester with a later direct CLI message does not re-wake a fresh wait", async () => {
+    const { recipient, chief, manager, latestDirectWakeSeq } = fixture()
+
+    // Specimen 92c2d6d8 (tent-await-live8.log -> tent-await-live9.log) and b02fab12:
+    // requester opens a request; @chief settles it with a response (request = null);
+    // requester answers @chief directly via CLI send without running tribe inbox --consume.
+    const openedReq = sendMessage(recipient, CHIEF, "need ruling on 31101", "request")
+    const settlementReply = sendMessage(
+      chief,
+      RECIPIENT,
+      "approved — ship it",
+      "response",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { reply: openedReq.id },
+    )
+    expect(latestDirectWakeSeq(RECIPIENT, true, true)).toBe(settlementReply.rowid)
+
+    // Requester sends a later direct message back to @chief (without --reply, since settlementReply opened no ball).
+    sendMessage(recipient, CHIEF, "shipped on task/31101", "response")
+
+    expect(latestDirectWakeSeq(RECIPIENT, true, true)).toBe(0)
+
+    const waitAfterAnswer = await manager.wait(RECIPIENT, "conn-31132-after-cli-answer", QUIET_MS, {
+      consumesMailbox: true,
+      wakeOnCorrelatedReply: true,
+    })
+    expect(waitAfterAnswer.status).toBe("timeout")
+    expect(waitAfterAnswer.timed_out).toBe(true)
+    expect(waitAfterAnswer.woken_by).toBeUndefined()
   })
 })
