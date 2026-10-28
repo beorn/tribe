@@ -536,6 +536,32 @@ async function warnPendingReplyOwner(owner: string, reply: string): Promise<bool
  */
 type SendBallFact = { request_id: string; open: boolean; due_at?: number; cause?: string }
 
+type SendCloseCauseFact = {
+  kind?: string
+  settlement?: string
+  settled_by?: string
+  settled_at?: number
+  recipient?: string
+  by_another_owner?: boolean
+}
+
+function alreadySettledByOwner(owner: string, causeFact?: SendCloseCauseFact, cause?: string): boolean {
+  if (
+    causeFact?.kind === "settled" &&
+    causeFact.by_another_owner === false &&
+    (causeFact.settlement === "answered" || causeFact.settlement === "manual-close")
+  ) {
+    return true
+  }
+  if (typeof cause === "string" && cause.length > 0) {
+    return (
+      (cause.includes(`answered by ${owner} at `) && !cause.includes("fanout first:")) ||
+      cause.includes(`${owner} closed it manually (manual-close) at `)
+    )
+  }
+  return false
+}
+
 /**
  * One sentence per send that NAMED a tracked ball with `--reply`, rendered from
  * the daemon's `ball` fact (@ag/tribe/30160, @cto GO; revised: `--ref` alone
@@ -545,13 +571,14 @@ type SendBallFact = { request_id: string; open: boolean; due_at?: number; cause?
  * advises a settling send ONLY for a ball the daemon reports open; a ball that
  * is gone names the daemon's cause and points at `tribe pending` instead.
  * stderr only; stdout and exit codes are unchanged (a response/verdict that
- * closed 0 rows still exits 3).
+ * closed 0 rows still exits 3, except #31416's follow-up response on a ball
+ * already settled by this owner).
  */
 function reportBallReference(
   owner: string,
   input: { type?: string; reply?: string; json?: boolean },
   result: {
-    tracker?: { request_id?: string; closed?: number; cause?: string }
+    tracker?: { request_id?: string; closed?: number; cause?: string; cause_fact?: SendCloseCauseFact }
     ball?: SendBallFact
   },
 ): void {
@@ -566,6 +593,16 @@ function reportBallReference(
     if (closed === 0) {
       const id = result.ball?.request_id ?? result.tracker?.request_id ?? (input.reply as string)
       const cause = result.ball?.cause ?? result.tracker?.cause
+      if (alreadySettledByOwner(owner, result.tracker?.cause_fact, cause)) {
+        const detail =
+          cause !== undefined && cause.length > 0
+            ? cause.replace(/^closed 0 rows for [^:]+:\s*/u, "")
+            : `already settled by ${owner}`
+        console.error(
+          `${type} DELIVERED; ball ${id} was already settled (${detail}; use --ref ${id} on follow-up responses after settling)`,
+        )
+        return
+      }
       const detail =
         cause !== undefined && cause.length > 0
           ? `did not settle ball ${id}: ${cause}`
@@ -772,7 +809,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     warning?: string
     truncated?: boolean
     original_length?: number
-    tracker?: { request_id?: string; closed?: number; cause?: string }
+    tracker?: { request_id?: string; closed?: number; cause?: string; cause_fact?: SendCloseCauseFact }
     // @ag/tribe/30160 (@cto GO): the daemon's single fact set for a send that
     // named a tracked ball. The CLI renders it and classifies nothing itself.
     ball?: { request_id: string; open: boolean; due_at?: number; cause?: string }
@@ -844,6 +881,12 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   // The daemon appends this delivery note last in its existing warning field.
   // Other warning classes have their own CLI output below.
   const deliveryWarning = result.warning
+  const refOpenBallMatch = deliveryWarning?.match(
+    /((?:response|verdict) with --ref [^\s]+ does not settle your open ball [^\s;]+; it stays open \(settle it with --type (?:response|verdict) --reply [^\s)]+\))/u,
+  )
+  if (refOpenBallMatch?.[1] !== undefined) {
+    console.error(`tribe-wire send: ${refOpenBallMatch[1]}`)
+  }
   const deliveryNoteAt = deliveryWarning?.indexOf("delivery note — ") ?? -1
   if (deliveryWarning !== undefined && deliveryNoteAt >= 0) {
     console.error(`tribe-wire send: ${deliveryWarning.slice(deliveryNoteAt)}`)

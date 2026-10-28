@@ -1218,6 +1218,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     maybeDerivedSummaryWarning(summaryDerived),
     maybeTruncationWarning(truncation),
     maybeProgressReplyNote(ctx, sender, msgType, replyId, a.ref as string | undefined),
+    maybeRefIsOwnOpenBallNote(ctx, sender, msgType, replyId, a.ref as string | undefined),
     replyReport.warning,
     maybeUntrackedDeliveryNote(
       msgType,
@@ -1404,6 +1405,13 @@ function handleMultiSend(input: {
     maybeDerivedSummaryWarning(input.summaryDerived),
     maybeTruncationWarning(input.truncation),
     maybeProgressReplyNote(input.ctx, input.sender, input.msgType, input.replyId, input.args.ref as string | undefined),
+    maybeRefIsOwnOpenBallNote(
+      input.ctx,
+      input.sender,
+      input.msgType,
+      input.replyId,
+      input.args.ref as string | undefined,
+    ),
     replyReport.warning,
     maybeUntrackedDeliveryNote(
       input.msgType,
@@ -1777,6 +1785,45 @@ function maybeProgressReplyNote(
     )
   }
   return `${type} settles nothing: ${formatPendingCloseCause(cause, reply, owner)}${tail}`
+}
+
+/**
+ * #31416: a `response` or `verdict` carrying `--ref <own open ball>` with no
+ * `--reply` leaves that ball owed while returning `sent: true` with no
+ * `tracker` or `ball` field. Name the open ball and the settling `--reply`
+ * form in `warning`. Already-settled balls in history are not in
+ * `pending_request`, so historical correlation refs stay silent; incident
+ * balls do not settle via `response + reply` (#27123) and stay silent here too.
+ */
+function maybeRefIsOwnOpenBallNote(
+  ctx: TribeContext,
+  owner: string,
+  type: string,
+  reply: string | null,
+  ref?: string,
+): string | undefined {
+  if (reply !== null || (type !== "response" && type !== "verdict") || typeof ref !== "string" || ref.length === 0) {
+    return undefined
+  }
+  let open = ctx.stmts.selectPendingForReplyRecipient.get({
+    $reply_id: ref,
+    $recipient: owner,
+  }) as { request_id: string; request_kind: "request" | "incident" } | null
+  if (open === null && ref.length >= 8) {
+    const prefixMatches = ctx.stmts.selectOpenBallIdsByPrefix.all({
+      $name: owner,
+      $prefix: ref,
+    }) as Array<{ request_id: string }>
+    const only = prefixMatches.length === 1 ? prefixMatches[0] : undefined
+    if (only !== undefined) {
+      open = ctx.stmts.selectPendingForReplyRecipient.get({
+        $reply_id: only.request_id,
+        $recipient: owner,
+      }) as { request_id: string; request_kind: "request" | "incident" } | null
+    }
+  }
+  if (open === null || open.request_kind === "incident") return undefined
+  return `${type} with --ref ${ref} does not settle your open ball ${open.request_id}; it stays open (settle it with --type ${type} --reply ${open.request_id})`
 }
 
 type Tracker = {

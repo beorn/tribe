@@ -1012,8 +1012,9 @@ describe("registerSendCommands", () => {
             // (22990 keeps a TAKING receipt silent).
             const named = request.params?.reply as string | undefined
             const namedId = named === undefined ? undefined : named === "msg-123" ? "req-123" : named
+            const refArg = request.params?.ref as string | undefined
             const closedNow =
-              namedId === "req-withdrawn"
+              namedId === "req-withdrawn" || namedId === "req-already-settled"
                 ? 0
                 : message === "done" || message === "by-message"
                   ? 1
@@ -1025,6 +1026,8 @@ describe("registerSendCommands", () => {
               (progress
                 ? pendingListed.some((row) => row.request_id === namedId || row.message_id === namedId)
                 : closedNow > 0)
+            const alreadySettledCause =
+              "closed 0 rows for req-already-settled: answered by @chief at 2026-10-28T14:36:43.059Z"
             const ball =
               namedId === undefined
                 ? {}
@@ -1039,17 +1042,46 @@ describe("registerSendCommands", () => {
                             cause:
                               namedId === "req-withdrawn"
                                 ? "sender-withdrawn: the ball's sender withdrew it before this reply arrived"
-                                : `no open ball of @chief's currently matches ${namedId}`,
+                                : namedId === "req-already-settled"
+                                  ? alreadySettledCause
+                                  : `no open ball of @chief's currently matches ${namedId}`,
                           }),
                     },
                   }
+            const refOpenWarning =
+              !progress &&
+              namedId === undefined &&
+              refArg !== undefined &&
+              pendingListed.some((row) => row.request_id === refArg || row.message_id === refArg)
+                ? {
+                    warning: `${String(request.params?.type)} with --ref ${refArg} does not settle your open ball ${refArg}; it stays open (settle it with --type ${String(request.params?.type)} --reply ${refArg})`,
+                  }
+                : {}
             result =
               message === "missing" || progress
                 ? { sent: true, ...ball }
                 : {
                     sent: true,
                     ...ball,
-                    tracker: { request_id: "req-123", closed: closedNow },
+                    ...refOpenWarning,
+                    tracker: {
+                      request_id: namedId ?? "req-123",
+                      closed: closedNow,
+                      ...(namedId === "req-already-settled"
+                        ? {
+                            cause: alreadySettledCause,
+                            cause_fact: {
+                              kind: "settled",
+                              settlement: "answered",
+                              settled_by: "@chief",
+                              settled_at: 1793207803059,
+                              recipient: "@chief",
+                              fanout: "first",
+                              by_another_owner: false,
+                            },
+                          }
+                        : {}),
+                    },
                   }
           } else {
             result = { error: `unexpected call ${request.method}` }
@@ -1165,6 +1197,37 @@ describe("registerSendCommands", () => {
       expect(withdrawn.stderr).not.toContain("settle it with --type response or verdict")
       expect(withdrawn.stderr).toContain("verify: tribe pending --owner @chief")
 
+      // #31416 (Part 1): a response carrying --ref <own open ball> with no --reply
+      // surfaces the daemon's open-ball warning on stderr while still delivering (exit 0).
+      pendingListed = [{ request_id: "req-123", message_id: "msg-123" }]
+      const refInsteadOfReply = await runCli(
+        ["send", "@agent/3", "answered with ref", "--type", "response", "--ref", "req-123"],
+        launchToken("sid-chief", "@chief"),
+      )
+      expect(refInsteadOfReply).toMatchObject({ code: 0 })
+      expect(refInsteadOfReply.stdout).toContain("Sent message to @agent/3")
+      expect(refInsteadOfReply.stderr).toContain(
+        "tribe-wire send: response with --ref req-123 does not settle your open ball req-123; it stays open (settle it with --type response --reply req-123)",
+      )
+
+      // #31416 (Part 2 / retro F03): a follow-up response carrying --reply on a ball
+      // already settled by this owner exits 0 (not 3), prints the normal stdout
+      // receipt, and notes on stderr that the ball was already settled.
+      const alreadySettled = await runCli([
+        "send",
+        "@agent/3",
+        "final answer after taking",
+        "--type",
+        "response",
+        "--reply",
+        "req-already-settled",
+      ])
+      expect(alreadySettled).toMatchObject({ code: 0 })
+      expect(alreadySettled.stdout).toContain("Sent message to @agent/3")
+      expect(alreadySettled.stderr).toContain(
+        "response DELIVERED; ball req-already-settled was already settled (answered by @chief at 2026-10-28T14:36:43.059Z; use --ref req-already-settled on follow-up responses after settling)",
+      )
+
       pendingOpen = true
       const byMessage = await runReply("by-message", "msg-123")
       expect(byMessage).toMatchObject({ code: 0, stderr: "" })
@@ -1242,8 +1305,9 @@ describe("registerSendCommands", () => {
       ])
       // 12 through the reply scenarios plus the three 30160 sends above (the
       // status --ref receipt, the correlated notify --ref, and the verdict to a
-      // withdrawn ball).
-      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(15)
+      // withdrawn ball) plus the two #31416 sends (response --ref on open ball
+      // and response --reply on already-settled ball).
+      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(17)
     } finally {
       server.close()
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })

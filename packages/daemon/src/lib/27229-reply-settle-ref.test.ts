@@ -271,4 +271,111 @@ describe("#27229 a reply to a referenced request settles its listed ball", () =>
     }
     expect(byIds.events).toEqual([expect.objectContaining({ id: replyId, reply: REQUEST_ID })])
   })
+
+  it("F: response or verdict carrying ref to sender's own open ball (without reply) warns; settled ref and status+ref stay silent (#31416)", () => {
+    handleToolCall(
+      chief,
+      "tribe.send",
+      {
+        to: "@agent/1",
+        message: "please answer this ball",
+        type: "request",
+        request: REQUEST_ID,
+        summary: "please answer this ball",
+      },
+      opts(),
+    )
+
+    // 1. TAKING receipt (status + ref) stays silent regarding open-ball settlement warning
+    const taking = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        {
+          to: "@chief",
+          message: "TAKING: working on it",
+          type: "status",
+          ref: REQUEST_ID,
+          summary: "TAKING: working on it",
+        },
+        opts(),
+      ),
+    )
+    expect(taking.warning).toBeUndefined()
+
+    // 2. response with ref=<own open ball> (full id) and no reply warns naming the ball and --reply
+    const refOnlyFull = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        {
+          to: "@chief",
+          message: "DONE: answered with ref instead of reply",
+          type: "response",
+          ref: REQUEST_ID,
+          summary: "DONE: answered with ref",
+        },
+        opts(),
+      ),
+    )
+    expect(refOnlyFull.warning).toContain(
+      `response with --ref ${REQUEST_ID} does not settle your open ball ${REQUEST_ID}; it stays open (settle it with --type response --reply ${REQUEST_ID})`,
+    )
+
+    // 3. verdict with ref=<8-char prefix of own open ball> and no reply warns on both single and multi-send
+    const prefix = REQUEST_ID.slice(0, 8)
+    const refOnlyPrefixMulti = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        {
+          to: ["@chief"],
+          message: "GO with prefix ref",
+          type: "verdict",
+          ref: prefix,
+          summary: "GO with prefix ref",
+        },
+        opts(),
+      ),
+    )
+    expect(refOnlyPrefixMulti.warning).toContain(
+      `verdict with --ref ${prefix} does not settle your open ball ${REQUEST_ID}; it stays open (settle it with --type verdict --reply ${REQUEST_ID})`,
+    )
+
+    // 4. Settling with reply closes the ball without the ref-only warning
+    const settled = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        {
+          to: "@chief",
+          message: "DONE: settled properly",
+          type: "response",
+          reply: REQUEST_ID,
+          ref: REQUEST_ID,
+          summary: "DONE: settled properly",
+        },
+        opts(),
+      ),
+    )
+    expect(settled.tracker).toMatchObject({ closed: 1 })
+    expect(settled.warning).toBeUndefined()
+
+    // 5. After settlement, a follow-up response carrying ref=<already settled ball> stays silent (194 historical refs/day)
+    const followUp = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        {
+          to: "@chief",
+          message: "follow-up note on settled ball",
+          type: "response",
+          ref: REQUEST_ID,
+          summary: "follow-up note on settled ball",
+        },
+        opts(),
+      ),
+    )
+    expect(followUp.warning).toBeUndefined()
+  })
 })
