@@ -38,6 +38,7 @@ function createTestInboxWaitManager(readStatus: (session: string) => InboxStatus
         content: "actionable test fixture",
         bead: null,
         ref: null,
+        reply: null,
         ts: new Date(0).toISOString(),
         delivery: "pull",
         topic: null,

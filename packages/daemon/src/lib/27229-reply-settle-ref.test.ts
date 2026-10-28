@@ -203,4 +203,52 @@ describe("#27229 a reply to a referenced request settles its listed ball", () =>
     expect(typeof (reply.tracker as { cause?: string }).cause).toBe("string")
     expect(reply.reply_close_failed).toBe(true)
   })
+
+  it("E: tribe.fetch projects reply on response rows across attention, snapshot events, and ids (#31104)", () => {
+    handleToolCall(
+      chief,
+      "tribe.send",
+      {
+        to: "@agent/1",
+        message: "27178: full final scoped guard receipt needed",
+        type: "request",
+        request: REQUEST_ID,
+        ref: REF,
+        summary: "27178: full final scoped guard receipt needed",
+      },
+      opts(),
+    )
+    const reply = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        {
+          to: "@chief",
+          message: "CUSTODY DELIVERED",
+          type: "response",
+          reply: REQUEST_ID,
+          summary: "CUSTODY DELIVERED",
+        },
+        opts(),
+      ),
+    )
+    const replyId = reply.id as string
+    const fetched = parseToolJson(handleToolCall(chief, "tribe.fetch", {}, opts())) as {
+      attention: { actionable_unread: Array<{ id: string; reply: string | null; ref: string | null }> }
+      events: Array<{ id: string; reply: string | null; ref: string | null }>
+    }
+    expect(fetched.attention.actionable_unread).toEqual([
+      expect.objectContaining({ id: replyId, reply: REQUEST_ID, ref: null }),
+    ])
+
+    const snapshot = parseToolJson(handleToolCall(chief, "tribe.fetch", { from: "@agent/1" }, opts())) as {
+      events: Array<{ id: string; reply: string | null }>
+    }
+    expect(snapshot.events).toEqual([expect.objectContaining({ id: replyId, reply: REQUEST_ID })])
+
+    const byIds = parseToolJson(handleToolCall(chief, "tribe.fetch", { ids: [replyId] }, opts())) as {
+      events: Array<{ id: string; reply: string | null }>
+    }
+    expect(byIds.events).toEqual([expect.objectContaining({ id: replyId, reply: REQUEST_ID })])
+  })
 })

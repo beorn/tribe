@@ -1765,6 +1765,7 @@ const TRACKED_ATTENTION_FETCH_COLUMNS_SQL = `COALESCE(m.id, a.id) AS id,
   COALESCE(m.content, a.content) AS content,
   COALESCE(m.bead_id, a.bead_id) AS bead_id,
   COALESCE(m.ref, a.ref) AS ref,
+  COALESCE(m.reply, a.reply) AS reply,
   COALESCE(m.ts, a.ts) AS ts,
   COALESCE(m.delivery, a.delivery) AS delivery,
   COALESCE(m.topic, a.topic) AS topic,
@@ -3135,7 +3136,7 @@ export function createStatements(db: Database) {
      *  per-call `topics` snapshot — that one filters rows the seat IS owed. */
     getInboxRows: db.prepare(
       assertSingleStatement(`
-		SELECT m.id, m.rowid, m.type, m.sender, m.recipient, m.content, m.bead_id, m.ref, m.ts,
+		SELECT m.id, m.rowid, m.type, m.sender, m.recipient, m.content, m.bead_id, m.ref, m.reply, m.ts,
 			m.delivery, m.topic, m.room_id, m.summary, m.attention_required, m.wakes_owner, m.is_incident,
 			m.sender_authority, m.session_id
 		FROM messages AS m
@@ -3265,7 +3266,7 @@ export function createStatements(db: Database) {
      */
     selectUnackedAttention: db.prepare(
       assertSingleStatement(`
-      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, reply, ts, delivery, topic, room_id, summary,
              attention_required, wakes_owner, is_incident, sender_authority, session_id
       FROM messages AS m
       WHERE m.recipient = $name
@@ -3368,10 +3369,10 @@ export function createStatements(db: Database) {
      */
     selectAttention: db.prepare(
       assertSingleStatement(`
-      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, reply, ts, delivery, topic, room_id, summary,
              attention_required, is_incident, sender_authority, session_id, request
       FROM (
-        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, m.reply AS reply, ts, delivery, topic, room_id, summary,
                attention_required, is_incident, sender_authority, session_id, m.request AS request
         FROM messages AS m
         WHERE m.recipient = $name

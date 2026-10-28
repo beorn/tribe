@@ -4776,6 +4776,7 @@ export type FetchRow = {
   content: string
   bead_id: string | null
   ref: string | null
+  reply?: string | null
   ts: number
   delivery: string
   topic: string | null
@@ -4810,6 +4811,7 @@ export type FetchEvent = {
   content: string
   bead: string | null
   ref: string | null
+  reply: string | null
   ts: string
   delivery: string
   topic: string | null
@@ -4891,6 +4893,7 @@ export function fetchEvent(row: FetchRow, replay?: boolean, settlement?: Attenti
     content: row.content,
     bead: row.bead_id,
     ref: row.ref,
+    reply: row.reply ?? null,
     ts: new Date(row.ts).toISOString(),
     delivery: row.delivery,
     topic: row.topic,
@@ -5483,7 +5486,7 @@ function querySnapshotRows(
   const order = filters.since !== null ? "ASC" : "DESC"
   const query = ctx.db.prepare(
     assertSingleStatement(`
-      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, reply, ts, delivery, topic, room_id, summary,
              attention_required, wakes_owner, is_incident, sender_authority, session_id
       FROM messages
       WHERE ${conditions.join("\n        AND ")}
@@ -5767,14 +5770,14 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
       const selected = ctx.db
         .prepare(
           assertSingleStatement(`
-        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, reply, ts, delivery, topic, room_id, summary,
                attention_required, wakes_owner, is_incident, sender_authority, session_id, request,
                0 AS body_archived
         FROM messages
         WHERE id IN (${lookupPlaceholders})
           AND kind != 'event'
         UNION ALL
-        SELECT id, seq AS rowid, type, sender, recipient, '' AS content, bead_id, ref, ts, delivery, topic, room_id, summary,
+        SELECT id, seq AS rowid, type, sender, recipient, '' AS content, bead_id, ref, reply, ts, delivery, topic, room_id, summary,
                attention_required, 0 AS wakes_owner, is_incident, sender_authority, session_id, request,
                1 AS body_archived
         FROM messages_archive AS archived
