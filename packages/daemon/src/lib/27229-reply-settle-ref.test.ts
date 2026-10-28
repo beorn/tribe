@@ -204,7 +204,7 @@ describe("#27229 a reply to a referenced request settles its listed ball", () =>
     expect(reply.reply_close_failed).toBe(true)
   })
 
-  it("E: tribe.fetch projects reply on response rows across attention, snapshot events, and ids (#31104)", () => {
+  it("E: tribe.fetch projects reply on response rows across attention, getInboxRows events, snapshot events, and ids (#31104)", () => {
     handleToolCall(
       chief,
       "tribe.send",
@@ -233,6 +233,21 @@ describe("#27229 a reply to a referenced request settles its listed ball", () =>
       ),
     )
     const replyId = reply.id as string
+    const broadcastReply = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        {
+          to: "*",
+          message: "BROADCAST FOLLOW-UP",
+          type: "response",
+          reply: REQUEST_ID,
+          summary: "BROADCAST FOLLOW-UP",
+        },
+        opts(),
+      ),
+    )
+    const broadcastReplyId = broadcastReply.id as string
     const fetched = parseToolJson(handleToolCall(chief, "tribe.fetch", {}, opts())) as {
       attention: { actionable_unread: Array<{ id: string; reply: string | null; ref: string | null }> }
       events: Array<{ id: string; reply: string | null; ref: string | null }>
@@ -240,11 +255,16 @@ describe("#27229 a reply to a referenced request settles its listed ball", () =>
     expect(fetched.attention.actionable_unread).toEqual([
       expect.objectContaining({ id: replyId, reply: REQUEST_ID, ref: null }),
     ])
+    // getInboxRows (~5898 -> fetchEvent :5980) projects reply on events rows outside actionable_unread
+    expect(fetched.events).toEqual([expect.objectContaining({ id: broadcastReplyId, reply: REQUEST_ID, ref: null })])
 
     const snapshot = parseToolJson(handleToolCall(chief, "tribe.fetch", { from: "@agent/1" }, opts())) as {
       events: Array<{ id: string; reply: string | null }>
     }
-    expect(snapshot.events).toEqual([expect.objectContaining({ id: replyId, reply: REQUEST_ID })])
+    expect(snapshot.events).toEqual([
+      expect.objectContaining({ id: replyId, reply: REQUEST_ID }),
+      expect.objectContaining({ id: broadcastReplyId, reply: REQUEST_ID }),
+    ])
 
     const byIds = parseToolJson(handleToolCall(chief, "tribe.fetch", { ids: [replyId] }, opts())) as {
       events: Array<{ id: string; reply: string | null }>

@@ -4776,7 +4776,7 @@ export type FetchRow = {
   content: string
   bead_id: string | null
   ref: string | null
-  reply?: string | null
+  reply: string | null
   ts: number
   delivery: string
   topic: string | null
@@ -4893,7 +4893,7 @@ export function fetchEvent(row: FetchRow, replay?: boolean, settlement?: Attenti
     content: row.content,
     bead: row.bead_id,
     ref: row.ref,
-    reply: row.reply ?? null,
+    reply: row.reply,
     ts: new Date(row.ts).toISOString(),
     delivery: row.delivery,
     topic: row.topic,
