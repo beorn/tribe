@@ -2776,7 +2776,7 @@ describe("stdio adapter delivery modes", () => {
       actionable_unread: Array<Record<string, unknown>>
       pending_balls: Array<Record<string, unknown>>
     } = {
-      actionable_unread: [],
+      actionable_unread: [faultRow],
       pending_balls: [],
     }
     daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
@@ -2817,9 +2817,8 @@ describe("stdio adapter delivery modes", () => {
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
     await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
 
-    // First drain: the only row's notification is rejected by the transport.
-    fetchAttention.actionable_unread = [faultRow]
-    await drain("first faulted drain")
+    // #31777: join starts the first drain. Keep its fault row ready before join;
+    // another wake here can retry that rejected send before we observe its ledger.
     await waitForCondition(() => attempts().length === 1, "one rejected send attempt")
     expect(channelText().some((line) => line.includes("FAULT-ROW"))).toBe(false)
     await waitForCondition(() => existsSync(ledgerPath), "the per-pane ledger written")
