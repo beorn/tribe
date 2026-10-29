@@ -6078,6 +6078,12 @@ type MessageIdPrefixOutcome = { kind: "resolved"; id: string } | { kind: "refuse
  * refused by name (an ambiguity lists its candidates) so the caller can retry
  * with a full id or a longer prefix. It NEVER answers an empty list — the 27425
  * rule — because "not found" and "you abbreviated it" must not read alike.
+ *
+ * Both retention tiers are searched, matching the persisted-id set and the row selection below,
+ * which already union `messages_archive`: a prefix of an archived message responded "no message id
+ * starts with" — the same string as an id that never existed — even though the full id resolved and
+ * came back marked `body_archived`. A requester asking a seat to answer a ball whose request row had
+ * been archived therefore told it the ball did not exist.
  */
 function resolveMessageIdPrefix(ctx: TribeContext, prefix: string): MessageIdPrefixOutcome {
   const requirement = `pass a full message id, or a unique prefix of at least ${MIN_MESSAGE_ID_PREFIX} characters`
@@ -6092,22 +6098,29 @@ function resolveMessageIdPrefix(ctx: TribeContext, prefix: string): MessageIdPre
     ctx.db
       .prepare(
         assertSingleStatement(`
-        SELECT id
-        FROM messages
+        SELECT id FROM messages
+        WHERE id >= ?
+          AND id < ?
+          AND kind != 'event'
+        UNION
+        SELECT id FROM messages_archive
         WHERE id >= ?
           AND id < ?
           AND kind != 'event'
         ORDER BY id ASC
       `),
       )
-      .all(prefix, upper) as Array<{ id: string }>
+      .all(prefix, upper, prefix, upper) as Array<{ id: string }>
   )
     .map((row) => row.id)
     .filter((id) => id.startsWith(prefix))
   const only = matches.length === 1 ? matches[0] : undefined
   if (only !== undefined) return { kind: "resolved", id: only }
   if (matches.length === 0) {
-    return { kind: "refused", message: `no message id starts with '${prefix}' (${requirement}).` }
+    return {
+      kind: "refused",
+      message: `no message id starts with '${prefix}' in live or archived messages (${requirement}).`,
+    }
   }
   const shown = matches.slice(0, MISS_WARNING_EXAMPLES)
   const elided = matches.length - shown.length

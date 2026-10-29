@@ -603,6 +603,33 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     },
   )
 
+  // 31758: a PREFIX of an archived message must resolve. Before this, the prefix
+  // search read `messages` only, so it answered "no message id starts with" — the
+  // exact string used for an id that never existed — while the full id resolved
+  // and came back marked body_archived. A seat told to answer an archived ball by
+  // its abbreviation was told the ball did not exist.
+  it("resolves a PREFIX of an archived message instead of refusing it as unknown", () => {
+    const id = "430ded51-53d8-413d-9528-16b2e4abf26f"
+    message(id, null)
+    db.prepare(`INSERT INTO messages_archive (seq,id,type,sender,recipient,kind,content,ts,delivery,archived_at,request)
+      SELECT rowid,id,type,sender,recipient,kind,content,ts,delivery,?,request FROM messages WHERE id=?`).run(
+      TS + 100_000,
+      id,
+    )
+    db.prepare("DELETE FROM messages WHERE id=?").run(id)
+
+    const result = read(["430ded51"])
+    expect(result.error).toBeUndefined()
+    const rows = events(result)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ id, body_archived: true })
+  })
+
+  it("names both retention tiers when a prefix matches nothing in either", () => {
+    const result = read(["deadbeef"])
+    expect(String(result.error)).toContain("no message id starts with 'deadbeef' in live or archived messages")
+  })
+
   it("deduplicates request/member inputs without consuming the row budget twice", () => {
     for (const suffix of ["a", "b", "c"]) openBall(`msg-30743-${suffix}`, `@dev/${suffix}`, REQ)
     const complete = read([REQ, "msg-30743-a", REQ], 3)
