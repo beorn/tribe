@@ -317,6 +317,7 @@ export function toFts5Query(query: string): string {
   const tokens = remaining.split(/\s+/).filter(Boolean)
   const rawParts: string[] = []
   const parts: string[] = []
+  const leadingNegs: string[] = []
   let keptPositive = 0
 
   for (const token of tokens) {
@@ -334,7 +335,8 @@ export function toFts5Query(query: string): string {
     } else if (token.startsWith("-")) {
       const neg = `NOT ${ftsPhrase(token.slice(1))}`
       rawParts.push(neg)
-      parts.push(neg)
+      if (keptPositive === 0) leadingNegs.push(neg)
+      else parts.push(neg)
     } else {
       const formatted = ftsPhrase(token)
       rawParts.push(formatted)
@@ -348,7 +350,7 @@ export function toFts5Query(query: string): string {
     }
   }
 
-  return (keptPositive > 0 ? parts : rawParts).join(" ")
+  return (keptPositive > 0 ? [...parts, ...leadingNegs] : rawParts).join(" ")
 }
 
 export interface MessageSearchOptions {

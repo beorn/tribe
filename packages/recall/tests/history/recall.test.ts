@@ -222,6 +222,8 @@ describe("toFts5Query", () => {
 
   test("all-stopword positive terms with negation, quoted stopword phrases, and code verbs", () => {
     expect(toFts5Query("what -bad")).toBe('"what" NOT "bad"')
+    expect(toFts5Query("what -bad daemon")).toBe('"daemon" NOT "bad"')
+    expect(toFts5Query('what -bad "daemon restart"')).toBe('"daemon restart" NOT "bad"')
     expect(toFts5Query('"what is this" -the')).toBe('"what is this" NOT "the"')
     expect(toFts5Query("make new user")).toBe('"make" "new" "user"')
   })
@@ -238,7 +240,11 @@ describe("toFts5Query", () => {
     insertMessage(db, "u2", "s1", "assistant", "token and next appear together", null, null, now + 1)
     const id3 = insertMessage(db, "u3", "s1", "assistant", "tiebreaktoken alpha", null, null, now + 2)
     const id4 = insertMessage(db, "u4", "s1", "assistant", "tiebreaktoken bravo", null, null, now + 3)
+    insertMessage(db, "u5", "s1", "assistant", "the daemon is bad on restart", null, null, now + 4)
     expect(ftsSearchWithSnippet(db, "why did the daemon die on restart?").results).toHaveLength(1)
+    expect(ftsSearchWithSnippet(db, "what -bad daemon").results.map((r) => r.uuid)).toEqual(["u1"])
+    expect(ftsSearchWithSnippet(db, 'what -bad "daemon die"').results.map((r) => r.uuid)).toEqual(["u1"])
+    expect(ftsSearchWithSnippet(db, "what ? -bad daemon").results.map((r) => r.uuid)).toEqual(["u1"])
     expect(ftsSearchWithSnippet(db, "token ? next").results).toHaveLength(1)
     expect(ftsSearchWithSnippet(db, "tiebreaktoken", { mode: "exact" }).results.map((r) => r.id)).toEqual([id3, id4])
     expect(ftsSearchWithSnippet(db, "tiebreaktoken", { mode: "hook" }).results.map((r) => r.id)).toEqual([id3, id4])
