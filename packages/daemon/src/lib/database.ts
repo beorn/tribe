@@ -3284,6 +3284,31 @@ export function createStatements(db: Database) {
     `),
     ),
 
+    /**
+     * 31840 — the OLDEST unread attention row at or below `$upto` that this
+     * read did NOT return (`$returned` is the ids it returned). The mailbox
+     * cursor is a high-water mark, so acknowledging `$upto` retires every row
+     * beneath it; a read whose selection was narrowed (`from`/`to`/`with`) or
+     * whose returned set lost a row to the trust filter would retire mail the
+     * caller never received. NULL means nothing below `$upto` was skipped and
+     * the whole prefix is safe to acknowledge.
+     */
+    minUnreturnedAttentionSeq: db.prepare(
+      assertSingleStatement(`
+      SELECT MIN(m.rowid) AS seq
+      FROM messages AS m
+      WHERE m.recipient = $name
+        AND m.kind = 'direct'
+        AND m.sender != $name
+        AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1 OR m.wakes_owner = 1)
+        AND (m.wakes_owner = 1 OR ${noOpenIncidentAttentionPredicateSql("m")})
+        AND ${unretiredAttentionPredicateSql("m")}
+        AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+        AND m.rowid <= $upto
+        AND m.id NOT IN (SELECT value FROM json_each($returned))
+    `),
+    ),
+
     /** 29327 - the tracker's own answer to "which balls are still open for
      *  this seat", read ONCE per attention projection so a row whose ball has
      *  closed renders settled instead of owed. A closed ball leaves no

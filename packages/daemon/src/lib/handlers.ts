@@ -5982,6 +5982,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
   // in actionable_unread until the model's own read returns them.
   if (shouldAdvance && isReceipt) {
     let lastAttention = 0
+    const returnedAttentionIds: string[] = []
     const projectedAttentionIds = new Set(attentionRows.map((row) => row.id))
     for (const row of [...attentionRows, ...filtered]) {
       if (
@@ -5990,12 +5991,30 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
         (ACTIONABLE_TYPES_SET.has(row.type) || row.attention_required === 1 || row.wakes_owner === 1)
       ) {
         lastAttention = Math.max(lastAttention, row.rowid)
+        returnedAttentionIds.push(row.id)
       }
     }
     // 24284 — a read whose response never reaches the caller must not retire
     // the rows it "returned".
     if (lastAttention > 0 && deliveryAlive()) {
-      ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: lastAttention, $now: Date.now() })
+      // 31840 — the cursor is a HIGH-WATER MARK: acknowledging the highest
+      // returned row retires EVERY row below it, including direct attention
+      // this read never handed the caller (a `from`/`to`/`with`-narrowed
+      // since+advance page, or a row dropped by the trust filter). A seat that
+      // read one peer's thread could then find a verdict from another sender
+      // neither counted unread nor a wake, recoverable only by an explicit
+      // fetch --ids. Acknowledge only the contiguous prefix this caller
+      // actually received; the first skipped row caps the move.
+      const skipped = ctx.stmts.minUnreturnedAttentionSeq.get({
+        $name: currentName,
+        $upto: lastAttention,
+        $returned: JSON.stringify(returnedAttentionIds),
+      }) as { seq: number | null } | null
+      const acknowledged =
+        skipped?.seq === null || skipped?.seq === undefined ? lastAttention : Math.min(lastAttention, skipped.seq - 1)
+      if (acknowledged > 0) {
+        ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: acknowledged, $now: Date.now() })
+      }
     }
   }
 

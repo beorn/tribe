@@ -16,12 +16,13 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { readAttentionProjection, type HandlerOpts } from "./handlers.ts"
+import { handleToolCall, readAttentionProjection, TRIBE_COORD_METHODS, type HandlerOpts } from "./handlers.ts"
 import { createInboxWaitManager, type InboxStatus } from "./inbox-wait.ts"
 import { sendMessage } from "./messaging.ts"
 
 const REQUESTER = "@requester"
 const PEER = "@responder"
+const OTHER = "@third-party"
 const BALL = "req-31840"
 
 type Fixture = {
@@ -30,6 +31,7 @@ type Fixture = {
   stmts: TribeStatements
   requester: TribeContext
   peer: TribeContext
+  other: TribeContext
   manager: ReturnType<typeof createInboxWaitManager>
 }
 
@@ -70,8 +72,12 @@ function fixture(): Fixture {
   const manager = createInboxWaitManager(
     status,
     (session) => readAttentionProjection(reader, session, Date.now(), 0, makeOpts()).attention,
-    (session) => readAttentionProjection(reader, session, Date.now(), 0, makeOpts()).attention.actionable_unread.at(-1)?.rowid ?? 0,
-    (session) => readAttentionProjection(reader, session, Date.now(), 0, makeOpts()).attention.actionable_unread.at(-1)?.rowid ?? 0,
+    (session) =>
+      readAttentionProjection(reader, session, Date.now(), 0, makeOpts()).attention.actionable_unread.at(-1)?.rowid ??
+      0,
+    (session) =>
+      readAttentionProjection(reader, session, Date.now(), 0, makeOpts()).attention.actionable_unread.at(-1)?.rowid ??
+      0,
   )
   const mk = (id: string, name: string) =>
     createTribeContext({
@@ -91,6 +97,7 @@ function fixture(): Fixture {
     stmts,
     requester: mk("requester", REQUESTER),
     peer: mk("peer", PEER),
+    other: mk("other", OTHER),
     manager,
   }
   opened.push(built)
@@ -107,9 +114,19 @@ afterEach(() => {
 /** @requester opens the ball; the peer answers with a verdict that carries the
  *  ref and NO reply, which is the shape @dev/2 lost. */
 function openBallAndVerdict(f: Fixture) {
-  const ball = sendMessage(f.requester, PEER, "please answer", "request", undefined, undefined, "direct", {}, {
-    request: BALL,
-  })
+  const ball = sendMessage(
+    f.requester,
+    PEER,
+    "please answer",
+    "request",
+    undefined,
+    undefined,
+    "direct",
+    {},
+    {
+      request: BALL,
+    },
+  )
   const row = sendMessage(f.peer, REQUESTER, "verdict on your ball", "verdict", undefined, BALL)
   return { ball, row }
 }
@@ -124,9 +141,19 @@ describe("31840 a ref-bound verdict with no reply is attention and wakes", () =>
 
   it("wakes a wait that is already parked when the ref-only verdict arrives", async () => {
     const f = fixture()
-    const ball = sendMessage(f.requester, PEER, "please answer", "request", undefined, undefined, "direct", {}, {
-      request: BALL,
-    })
+    const ball = sendMessage(
+      f.requester,
+      PEER,
+      "please answer",
+      "request",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      {
+        request: BALL,
+      },
+    )
     expect(ball.id).toBeTruthy()
     const parked = f.manager.wait(REQUESTER, "conn-verdict", 3_000, {})
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -150,5 +177,54 @@ describe("31840 second reproduction attempt: the cursor move a drain performs", 
     // acknowledges the row, the VERDICT BODY IS GONE from the model-facing count
     // and from every later wake, even though no model read ever returned it.
     expect(after.actionable_unread.map((r) => r.id)).not.toContain(row.id)
+  })
+})
+
+describe("31840 self path: a narrowed read must not acknowledge what it did not return", () => {
+  it("keeps an unread direct that a --from-narrowed since+advance page never returned", async () => {
+    const f = fixture()
+    // Two unread directs for the reader from different senders. The reader asks
+    // for one peer's traffic only, which is the ordinary way a seat reads a
+    // thread back.
+    // Untracked attention on purpose: a `request` owns a ball, and the tracked
+    // branch of selectAttention keeps an untaken ball visible past the cursor,
+    // which would hide the defect behind a second mechanism. A verdict with no
+    // request is exactly the shape @dev/2 lost.
+    const unseen = sendMessage(f.other, REQUESTER, "verdict from the other peer", "verdict")
+    const seen = sendMessage(f.peer, REQUESTER, "verdict for you", "verdict")
+    expect(unseen.rowid).toBeLessThan(seen.rowid)
+
+    const page = await handleToolCall(
+      f.requester,
+      TRIBE_COORD_METHODS.fetch,
+      { since: unseen.rowid - 1, from: PEER, advance: true },
+      makeOpts(),
+    )
+    const body = JSON.parse((page.content[0] as { text: string }).text) as {
+      attention: unknown
+      events: Array<{ id: string }>
+    }
+    // The page really was narrowed: it returned the peer row and not the other one.
+    expect(body.events.map((row) => row.id)).toContain(seen.id)
+    expect(body.events.map((row) => row.id)).not.toContain(unseen.id)
+
+    // The row the page never returned must still be the reader's unread attention.
+    const after = readAttentionProjection(f.requester, REQUESTER, Date.now(), 0, makeOpts()).attention
+    expect(after.actionable_unread.map((row) => row.id)).toContain(unseen.id)
+
+    // And the acknowledgement must not have jumped over it: the cursor is a
+    // high-water mark, so any move past the skipped row retires it for good.
+    const cursor = f.stmts.getMailboxCursor.get({ $recipient: REQUESTER }) as {
+      last_actionable_seq: number
+    } | null
+    expect(cursor === null || cursor.last_actionable_seq < unseen.rowid).toBe(true)
+
+    // A full drain WITHOUT the narrowing does acknowledge both: the fix holds
+    // the cursor at the skipped row, it does not wedge the mailbox there.
+    await handleToolCall(f.requester, TRIBE_COORD_METHODS.fetch, { advance: true }, makeOpts())
+    const acknowledged = f.stmts.getMailboxCursor.get({ $recipient: REQUESTER }) as { last_actionable_seq: number }
+    expect(acknowledged.last_actionable_seq).toBe(seen.rowid)
+    const drained = readAttentionProjection(f.requester, REQUESTER, Date.now(), 0, makeOpts()).attention
+    expect(drained.actionable_unread.map((row) => row.id)).toEqual([])
   })
 })
