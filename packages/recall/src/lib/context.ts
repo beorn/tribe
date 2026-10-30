@@ -13,6 +13,7 @@ import * as fs from "fs"
 import { execSync } from "child_process"
 import type { Database } from "bun:sqlite"
 import { getDb, DB_PATH, getAllSessionTitles } from "../history/db.ts"
+import { QUERY_STOPWORDS } from "../history/recall-shared.ts"
 import { getCurrentSessionContext, renderSessionContextForPlanner, type SessionContext } from "./session-context.ts"
 
 // ============================================================================
@@ -284,13 +285,12 @@ function loadRareVocabulary(db: Database, max: number): string[] {
 
   // Tokenize + compute DF
   const df = new Map<string, number>()
-  const STOPWORDS = new Set(STOPWORDS_LIST)
 
   for (const row of rows) {
     const seen = new Set<string>()
     for (const tok of tokenize(row.content)) {
       if (tok.length < MIN_LEN) continue
-      if (STOPWORDS.has(tok.toLowerCase())) continue
+      if (CONTEXT_STOPWORDS.has(tok.toLowerCase())) continue
       if (seen.has(tok)) continue
       seen.add(tok)
       df.set(tok, (df.get(tok) ?? 0) + 1)
@@ -384,123 +384,18 @@ function relativeAge(ms: number): string {
   return `${w}w ago`
 }
 
-// Small, focused stopword list — we want to drop connective words but keep
-// anything that looks even mildly domain-specific. Tokenization already
-// removes pure-punctuation.
-const STOPWORDS_LIST = [
-  "the",
-  "and",
-  "for",
-  "you",
-  "this",
-  "that",
-  "with",
-  "have",
-  "from",
-  "they",
-  "are",
-  "was",
-  "were",
-  "will",
-  "would",
-  "could",
-  "should",
-  "but",
-  "not",
-  "any",
-  "all",
-  "can",
-  "has",
-  "had",
-  "its",
-  "his",
-  "her",
-  "one",
-  "two",
-  "new",
-  "now",
-  "use",
-  "using",
-  "used",
-  "user",
-  "just",
-  "only",
-  "also",
-  "what",
-  "when",
-  "where",
-  "which",
-  "who",
-  "how",
-  "why",
-  "more",
-  "most",
-  "some",
-  "into",
-  "out",
-  "out_of",
-  "about",
-  "over",
-  "under",
-  "via",
-  "per",
-  "etc",
-  "you're",
-  "you've",
-  "there",
-  "here",
-  "them",
-  "their",
-  "these",
-  "those",
-  "then",
-  "than",
-  "very",
-  "much",
-  "make",
-  "made",
-  "does",
-  "did",
-  "doing",
-  "done",
-  "run",
-  "ran",
-  "running",
-  "get",
-  "got",
-  "getting",
-  "goes",
-  "went",
-  "going",
-  "see",
-  "saw",
-  "seen",
-  "seeing",
-  "like",
-  "look",
-  "looks",
-  "think",
-  "thought",
-  "need",
-  "needs",
-  "try",
-  "tried",
-  "trying",
-  "want",
-  "wants",
-  "say",
-  "said",
-  "says",
-  "let",
-  "lets",
-  "letting",
-  "good",
-  "bad",
-  "ok",
-  "okay",
-  "yes",
-  "no",
-]
+// Shared 95-word query stopwords plus context's 55-word rare-vocabulary delta (150 words; #30268, @cto 910e3958).
+// Adds 38 exclusions to the old 112-word list (20 at len>=3: after, again, before, being, between, during, kind, name,
+// other, perhaps, really, still, such, things, well, while, whom, whose, your, yours; plus a, an, as, at, be, by, do,
+// i, if, in, is, it, of, on, or, so, to, we).
+// prettier-ignore
+const CONTEXT_STOPWORDS = new Set([
+  ...QUERY_STOPWORDS,
+  "bad", "etc", "get", "getting", "goes", "good", "got", "has", "her", "his", "its", "let", "lets", "letting", "look",
+  "looks", "made", "make", "most", "need", "needs", "new", "okay", "one", "out", "out_of", "per", "ran", "run",
+  "running", "said", "saw", "say", "says", "see", "seeing", "seen", "them", "thought", "tried", "try", "trying", "two",
+  "under", "use", "used", "user", "using", "via", "want", "wants", "went", "will", "you're", "you've",
+])
 
 // ============================================================================
 // Cache control (tests)

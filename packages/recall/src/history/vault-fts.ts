@@ -135,102 +135,8 @@ interface VaultAncestor {
   title: string | null
 }
 
-// Common English / chat stopwords — words too generic to be salient
-// project-vocab anchors. Kept conservative; project-specific terms (e.g.
-// "test", "bead", "fix", "make") are NOT in this list since they're
-// genuine signal in this codebase.
-const PROBE_STOPWORDS = new Set([
-  "the",
-  "and",
-  "for",
-  "are",
-  "but",
-  "not",
-  "you",
-  "all",
-  "any",
-  "can",
-  "had",
-  "was",
-  "were",
-  "this",
-  "that",
-  "with",
-  "have",
-  "from",
-  "they",
-  "what",
-  "when",
-  "where",
-  "which",
-  "while",
-  "their",
-  "there",
-  "these",
-  "those",
-  "would",
-  "could",
-  "should",
-  "about",
-  "after",
-  "again",
-  "before",
-  "being",
-  "between",
-  "during",
-  "into",
-  "just",
-  "like",
-  "more",
-  "much",
-  "only",
-  "other",
-  "over",
-  "such",
-  "than",
-  "then",
-  "things",
-  "think",
-  "very",
-  "well",
-  "your",
-  "yours",
-  "really",
-  "still",
-  "some",
-  "also",
-  "perhaps",
-  "kind",
-  "name",
-  "now",
-  "here",
-  "much",
-  "going",
-  "doing",
-  "done",
-  "does",
-  "did",
-  "do",
-  "is",
-  "it",
-  "of",
-  "to",
-  "in",
-  "on",
-  "at",
-  "as",
-  "be",
-  "we",
-  "i",
-  "a",
-  "an",
-  "or",
-  "if",
-  "so",
-  "yes",
-  "no",
-  "ok",
-])
+import { isStopword } from "./recall-shared.ts"
+export { isStopword }
 
 export interface PromptWord {
   token: string
@@ -253,11 +159,6 @@ export function promptWords(prompt: string): PromptWord[] {
     tokens.forEach((token, i) => words.push({ token, opensSentence: i === 0 }))
   }
   return words
-}
-
-/** Whether a prompt token is a common English or chat word ("now", "this"), at any length. */
-export function isStopword(token: string): boolean {
-  return PROBE_STOPWORDS.has(token.toLowerCase())
 }
 
 /**
@@ -285,7 +186,7 @@ export function vaultTerms(query: string): string[] {
   return terms
 }
 
-/** A quoted phrase or a `-term` at a word's start: the caller wrote FTS syntax, and it runs as written. */
+/** A quoted phrase or a `-term` at a word's start: the caller wrote FTS syntax, routed through {@link toFts5Query} (preserving quotes/negations and stripping unquoted stopwords). */
 const FTS_SYNTAX = /"|(?:^|\s)-\S/u
 
 /**
@@ -301,7 +202,7 @@ const FTS_SYNTAX = /"|(?:^|\s)-\S/u
  * The query is its terms (vaultTerms), each an exact token: all of them together first, and when that matches no
  * row, any of them ranked by bm25, so a question whose words no single paragraph holds still finds the nodes that
  * hold its rare words (@ag/recall/29487, @cto 7c3f702c). The receipt names the form that ran, the terms, and the terms
- * no node holds. A query in FTS syntax runs as written.
+ * no node holds. A query in FTS syntax routes through {@link toFts5Query} (preserving quotes/negations and stripping unquoted stopwords).
  *
  * `vaultDb` is the vault this search reads, named by the caller; null searches nothing, and the caller says so.
  */

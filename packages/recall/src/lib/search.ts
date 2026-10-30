@@ -15,7 +15,12 @@ import {
   type RecallSearchResult,
   type SynthesisDiagnostics,
 } from "../history/recall"
-import { DEFAULT_SYNTHESIS_TIMEOUT_MS, type IndexProvenanceDetail, type RecallSkip } from "../history/recall-shared.ts"
+import {
+  DEFAULT_SYNTHESIS_TIMEOUT_MS,
+  isStopword,
+  type IndexProvenanceDetail,
+  type RecallSkip,
+} from "../history/recall-shared.ts"
 import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
 import { retrieveCandidates, searchLiveSession, resolveSearchWindow } from "../history/search"
@@ -387,43 +392,12 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   }
 }
 
-const RAW_PROBE_STOPWORDS = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "as",
-  "be",
-  "but",
-  "by",
-  "do",
-  "for",
-  "from",
-  "how",
-  "i",
-  "in",
-  "is",
-  "it",
-  "of",
-  "or",
-  "should",
-  "the",
-  "this",
-  "to",
-  "we",
-  "what",
-  "when",
-  "where",
-  "why",
-  "with",
-])
-
 function literalRawProbeTokens(query: string): string[] {
   const seen = new Set<string>()
   return (query.match(/[\p{L}\p{N}_@#./:-]+/gu) ?? [])
     .map((token) => token.replace(/^[^\p{L}\p{N}_@#]+|[^\p{L}\p{N}_@#]+$/gu, ""))
     .filter((token) => token.length >= 3)
-    .filter((token) => !RAW_PROBE_STOPWORDS.has(token.toLowerCase()))
+    .filter((token) => !isStopword(token))
     .filter((token) => {
       const key = token.toLowerCase()
       if (seen.has(key)) return false
