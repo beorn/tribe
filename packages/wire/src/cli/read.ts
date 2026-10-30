@@ -1264,6 +1264,10 @@ async function cmdHealth(opts?: { json?: boolean; full?: boolean }): Promise<voi
     result = (await callDaemon("cli_health", undefined, opts?.json ? "throw" : "exit")) as typeof result
     if (opts?.json) {
       const body = mcpJsonContent(result)
+      // The shared unwrap preserves the raw wrapper when its text is not JSON.
+      if (typeof result?.content?.[0]?.text === "string" && body === result) {
+        throw new Error("cli_health content is not a JSON object")
+      }
       if (body === null || typeof body !== "object" || Array.isArray(body)) {
         throw new Error("cli_health body must be an object")
       }

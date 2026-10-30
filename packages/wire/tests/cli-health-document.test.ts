@@ -148,7 +148,8 @@ describe("health service-probe and full diagnostic capture contracts", () => {
   it.each([
     ["missing cadence", JSON.stringify({ issues: [] }), "cadence"],
     ["missing inbox lag", JSON.stringify({ cadence: {} }), "cadence.inbox_lag"],
-    ["non-JSON content", "not JSON", "cadence"],
+    ["non-JSON content", "not JSON", "content is not a JSON object"],
+    ["non-object body", "null", "body must be an object"],
   ])("refuses %s in a full capture", async (_name, text, missing) => {
     const response = await runHealthReply(["--full", "--json"], { result: { content: [{ type: "text", text }] } })
     expectOneDocument(response.stdout, response.code)
