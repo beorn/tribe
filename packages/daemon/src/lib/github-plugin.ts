@@ -11,6 +11,7 @@
  *   GITHUB_EVENTS                   — comma-separated event types (default: push,workflow_run,pull_request,issues)
  *   GITHUB_WORKFLOW_NOTIFY          — "all" | "failure" | "success" (default: "failure")
  *   GITHUB_WORKFLOW_INCIDENT_OWNER  — seat that owns main/release-tag CI failure incidents (optional; off when unset)
+ *   GITHUB_WORKFLOW_INCIDENT_WATCHERS — comma-separated seats also told when such an incident opens or clears; no ball
  */
 
 import { execSync } from "node:child_process"
@@ -693,6 +694,7 @@ export function formatEvent(event: GitHubEvent, eventTypes: string[]): Formatted
 export const GITHUB_WORKFLOW_INCIDENT_EMITTER = "github"
 export const GITHUB_WORKFLOW_INCIDENT_CONDITION = "failing"
 export const GITHUB_WORKFLOW_INCIDENT_OWNER_ENV = "GITHUB_WORKFLOW_INCIDENT_OWNER"
+export const GITHUB_WORKFLOW_INCIDENT_WATCHERS_ENV = "GITHUB_WORKFLOW_INCIDENT_WATCHERS"
 export const GITHUB_WORKFLOW_FAILING_CONCLUSIONS: ReadonlySet<string> = new Set([
   "failure",
   "timed_out",
@@ -730,15 +732,26 @@ export function resolveWorkflowIncidentOwner(
   return raw ? raw : undefined
 }
 
+/** Read the seats also told when a workflow incident opens or clears; empty when unset or blank. */
+export function resolveWorkflowIncidentWatchers(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string[] {
+  return (env[GITHUB_WORKFLOW_INCIDENT_WATCHERS_ENV] ?? "")
+    .split(",")
+    .map((seat) => seat.trim())
+    .filter(Boolean)
+}
+
 /** Startup log line summarizing event types, workflow notify filter, and workflow incident owner/off state. */
 export function formatGitHubPluginStartLine(
   eventTypes: readonly string[],
   workflowNotify: "all" | "failure" | "success",
   incidentOwner?: string,
+  incidentWatchers: readonly string[] = [],
 ): string {
   const owner = incidentOwner?.trim()
   const ownerClause = owner
-    ? `workflow incident owner: ${owner}`
+    ? `workflow incident owner: ${owner}${incidentWatchers.length > 0 ? `, also told: ${incidentWatchers.join(", ")}` : ""}`
     : `workflow incident routing: off (${GITHUB_WORKFLOW_INCIDENT_OWNER_ENV} unset)`
   return `event types: ${eventTypes.join(", ")}, workflow notify: ${workflowNotify}, ${ownerClause}`
 }
@@ -749,6 +762,8 @@ export type WorkflowIncidentRouterApi = Pick<TribeClientApi, "broadcast" | "send
 
 export interface WorkflowIncidentRouterOptions {
   incidentOwner?: string
+  /** Seats told (push, no ball) when an incident opens or clears; `incidentOwner` stays its one owner. */
+  incidentWatchers?: readonly string[]
   workflowNotify?: "all" | "failure" | "success"
 }
 
@@ -765,6 +780,8 @@ export interface WorkflowIncidentRouter {
  *   - `success` clears that exact `<repo>/<workflow>@<branch>` incident (`active: false`) only when
  *     `api.listOpenIncidents` shows it open; an ordinary green run sends nothing.
  *   - `cancelled`, `skipped`, `neutral`, `action_required`, and `stale` change no incident.
+ *   - Each `incidentWatchers` seat gets a push copy, never a ball, when the incident opens and when it clears; a repeat
+ *     failure that only upserts the open incident tells it nothing.
  * - Task-branch runs (and all runs when `incidentOwner` is unset) use the existing pull broadcast when `workflowNotify`
  *   matches.
  */
@@ -774,7 +791,13 @@ export function createWorkflowIncidentRouter(
 ): WorkflowIncidentRouter {
   const defaultNotify = options.workflowNotify ?? "failure"
   const incidentOwner = options.incidentOwner?.trim() || undefined
+  const incidentWatchers = options.incidentWatchers ?? []
   const seenWorkflowRuns = new Set<string>()
+  const tellWatchers = (content: string, topic: string, summary: string) => {
+    for (const watcher of incidentWatchers) {
+      api.send(watcher, content, "github:workflow", undefined, { delivery: "push", topic, summary })
+    }
+  }
 
   const router: WorkflowIncidentRouter = {
     handleRun(repo, run, workflowNotify = defaultNotify) {
@@ -790,7 +813,13 @@ export function createWorkflowIncidentRouter(
 
       if (incidentOwner !== undefined && isMainOrReleaseTag(run.head_branch)) {
         const subject = workflowIncidentSubject(repo, run.name, run.head_branch)
+        const isOpen = () =>
+          api
+            .listOpenIncidents(GITHUB_WORKFLOW_INCIDENT_EMITTER, GITHUB_WORKFLOW_INCIDENT_CONDITION)
+            .some((inc) => inc.subject === subject)
         if (isFailingWorkflowConclusion(run.conclusion)) {
+          const summary = `${repo} ${run.name} failing on ${run.head_branch}`
+          if (!isOpen()) tellWatchers(content, "github:workflow:failure", summary)
           api.send(
             incidentOwner,
             content,
@@ -799,7 +828,7 @@ export function createWorkflowIncidentRouter(
             {
               delivery: "push",
               topic: "github:workflow:failure",
-              summary: `${repo} ${run.name} failing on ${run.head_branch}`,
+              summary,
             },
             {
               emitter: GITHUB_WORKFLOW_INCIDENT_EMITTER,
@@ -811,10 +840,9 @@ export function createWorkflowIncidentRouter(
           return
         }
         if (run.conclusion === "success") {
-          const isOpen = api
-            .listOpenIncidents(GITHUB_WORKFLOW_INCIDENT_EMITTER, GITHUB_WORKFLOW_INCIDENT_CONDITION)
-            .some((inc) => inc.subject === subject)
-          if (isOpen) {
+          if (isOpen()) {
+            const summary = `${repo} ${run.name} passed on ${run.head_branch}`
+            tellWatchers(content, "github:workflow:success", summary)
             api.send(
               incidentOwner,
               content,
@@ -823,7 +851,7 @@ export function createWorkflowIncidentRouter(
               {
                 delivery: "push",
                 topic: "github:workflow:success",
-                summary: `${repo} ${run.name} passed on ${run.head_branch}`,
+                summary,
               },
               {
                 emitter: GITHUB_WORKFLOW_INCIDENT_EMITTER,
@@ -895,6 +923,7 @@ export const githubPlugin: TribePluginApi = {
     const eventTypes = (process.env.GITHUB_EVENTS ?? "push,workflow_run,pull_request,issues").split(",").filter(Boolean)
     const workflowNotify = (process.env.GITHUB_WORKFLOW_NOTIFY ?? "failure") as "all" | "failure" | "success"
     const incidentOwner = resolveWorkflowIncidentOwner(process.env)
+    const incidentWatchers = resolveWorkflowIncidentWatchers(process.env)
 
     const cursorPath = resolveGitHubCursorPath()
     // Anchored, not searched — see resolveLegacyGitHubCursorPath. A daemon with
@@ -926,7 +955,7 @@ export const githubPlugin: TribePluginApi = {
         send: (recipient, content, type, beadId, classification, incident) =>
           api.send(recipient, content, type, beadId, classification, incident),
       },
-      { incidentOwner, workflowNotify },
+      { incidentOwner, incidentWatchers, workflowNotify },
     )
 
     // Start with local repo for fast startup, then discover all user repos via API
@@ -947,7 +976,7 @@ export const githubPlugin: TribePluginApi = {
         log.error?.(`failed to fetch user repos: ${err instanceof Error ? err.message : err}`)
       })
 
-    log.info?.(formatGitHubPluginStartLine(eventTypes, workflowNotify, incidentOwner))
+    log.info?.(formatGitHubPluginStartLine(eventTypes, workflowNotify, incidentOwner, incidentWatchers))
     log.info?.(`cursor: ${cursorPath}`)
 
     // Shared pause/backoff gate + warn dedup for both polling legs

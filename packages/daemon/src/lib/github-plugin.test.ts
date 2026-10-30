@@ -32,6 +32,7 @@ import {
   partitionLateEvents,
   rateLimitInfoOf,
   resolveWorkflowIncidentOwner,
+  resolveWorkflowIncidentWatchers,
   selectNewEvents,
   summarizePollErrors,
   type GitHubEvent,
@@ -726,6 +727,47 @@ describe("createWorkflowIncidentRouter — per-branch incident routing on main a
     )
     expect(openIncidents()).toEqual([])
     expect(ballsFor(OWNER)).toEqual([])
+  })
+
+  // @failure A failing main CI run reached only the incident owner, so @chief learned of a red main only by asking
+  // (operator 2026-10-29 16:41, #31806). The owner keeps the one ball; each watcher gets a push copy when the incident
+  // opens and when it clears, never a ball and never a copy per repeat failure.
+  test("incident watchers: @chief gets a push copy, no ball, when a main incident opens and when it clears", () => {
+    const { api } = daemonApi()
+    const router = createWorkflowIncidentRouter(api, { incidentOwner: OWNER, incidentWatchers: ["@chief"] })
+    const toChief = () =>
+      db.query("SELECT content, delivery FROM messages WHERE recipient = ? ORDER BY rowid").all("@chief") as Array<{
+        content: string
+        delivery: string
+      }>
+
+    router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 960, conclusion: "failure", head_branch: "main" }))
+    router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 961, conclusion: "failure", head_branch: "main" }))
+    expect(ballsFor(OWNER).map((b) => b.request_id)).toEqual(["github:beorn/yrd/ci@main:failing"])
+    expect(ballsFor("@chief")).toEqual([])
+    expect(toChief()).toEqual([{ content: expect.stringContaining("#960 FAILED on main"), delivery: "push" }])
+
+    router.handleRun("beorn/yrd", makeRun({ name: "ci", run_number: 962, conclusion: "success", head_branch: "main" }))
+    expect(openIncidents()).toEqual([])
+    expect(toChief().map((m) => m.content)).toEqual([
+      expect.stringContaining("#960 FAILED on main"),
+      expect.stringContaining("#962 PASSED on main"),
+    ])
+
+    // a task-branch failure is no incident, so the watcher gets nothing
+    router.handleRun(
+      "beorn/yrd",
+      makeRun({ name: "ci", run_number: 963, conclusion: "failure", head_branch: "task/x" }),
+    )
+    expect(toChief()).toHaveLength(2)
+    expect(resolveWorkflowIncidentWatchers({ GITHUB_WORKFLOW_INCIDENT_WATCHERS: " @chief , ,@cto " })).toEqual([
+      "@chief",
+      "@cto",
+    ])
+    expect(resolveWorkflowIncidentWatchers({})).toEqual([])
+    expect(formatGitHubPluginStartLine(["workflow_run"], "failure", "@dev/fixer", ["@chief"])).toBe(
+      "event types: workflow_run, workflow notify: failure, workflow incident owner: @dev/fixer, also told: @chief",
+    )
   })
 
   test("named failing set: failure, timed_out, and startup_failure raise; cancelled, skipped, neutral, action_required, and stale change no incident", () => {

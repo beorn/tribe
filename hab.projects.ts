@@ -34,6 +34,8 @@ export default {
       log: "$HOME/.local/share/tribe/activity-*.jsonl",
       env: {
         GITHUB_WORKFLOW_INCIDENT_OWNER: "@dev/fixer",
+        // #31806 (operator 2026-10-29): a red main also reaches @chief, as a push copy; @dev/fixer keeps the one ball
+        GITHUB_WORKFLOW_INCIDENT_WATCHERS: "@chief",
         TRIBE_DUPLICATE_INCIDENT_OWNER: "@chief",
         TRIBE_DUPLICATE_YIELD_MODE: "observe",
         TRIBE_DELIVERY_FALLBACKS:
