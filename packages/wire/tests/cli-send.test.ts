@@ -1013,11 +1013,65 @@ describe("registerSendCommands", () => {
             const named = request.params?.reply as string | undefined
             const namedId = named === undefined ? undefined : named === "msg-123" ? "req-123" : named
             const refArg = request.params?.ref as string | undefined
+            const closedZeroFixtures: Record<string, { cause: string; cause_fact?: Record<string, unknown> }> = {
+              "req-withdrawn": {
+                cause: "sender-withdrawn: the ball's sender withdrew it before this reply arrived",
+              },
+              "req-withdrawn-other-owner": {
+                cause:
+                  "closed 0 rows for req-withdrawn-other-owner: never opened for @chief — the sender withdrew it (sender-withdrawn) for @dev/9 instead at 2026-10-30T11:20:00.000Z (check the id against tribe pending --owner @chief)",
+                cause_fact: {
+                  kind: "settled-for-other-owner",
+                  settlement: "sender-withdrawn",
+                  settled_by: "@agent/3",
+                  settled_at: 1793359200000,
+                  recipient: "@dev/9",
+                  fanout: "first",
+                },
+              },
+              "req-already-settled": {
+                cause: "closed 0 rows for req-already-settled: answered by @chief at 2026-10-28T14:36:43.059Z",
+                cause_fact: {
+                  kind: "settled",
+                  settlement: "answered",
+                  settled_by: "@chief",
+                  settled_at: 1793207803059,
+                  recipient: "@chief",
+                  fanout: "first",
+                  by_another_owner: false,
+                },
+              },
+              "req-fanout-loser": {
+                cause:
+                  "closed 0 rows for req-fanout-loser: answered by @dev/3 at 2026-10-29T18:08:27.481Z (fanout first: the first answer settled every owner's row, including @chief's)",
+                cause_fact: {
+                  kind: "settled",
+                  settlement: "answered",
+                  settled_by: "@dev/3",
+                  settled_at: 1793297307481,
+                  recipient: "@chief",
+                  fanout: "first",
+                  by_another_owner: true,
+                },
+              },
+              "req-offline-closed": {
+                cause:
+                  "closed 0 rows for req-offline-closed: @chief closed it because the owner was offline past its deadline (offline-owner-close) at 2026-10-22T18:08:27.481Z; its deadline had passed at 2026-10-22T18:02:17.685Z",
+                cause_fact: {
+                  kind: "settled",
+                  settlement: "offline-owner-close",
+                  settled_by: "@chief",
+                  settled_at: 1792692507481,
+                  recipient: "@dev/2",
+                  fanout: "first",
+                  by_another_owner: true,
+                  expired_at: 1792692137685,
+                },
+              },
+            }
+            const closedZeroFixture = namedId === undefined ? undefined : closedZeroFixtures[namedId]
             const closedNow =
-              namedId === "req-withdrawn" ||
-              namedId === "req-already-settled" ||
-              namedId === "req-fanout-loser" ||
-              namedId === "req-offline-closed"
+              closedZeroFixture !== undefined
                 ? 0
                 : message === "done" || message === "by-message"
                   ? 1
@@ -1029,12 +1083,6 @@ describe("registerSendCommands", () => {
               (progress
                 ? pendingListed.some((row) => row.request_id === namedId || row.message_id === namedId)
                 : closedNow > 0)
-            const alreadySettledCause =
-              "closed 0 rows for req-already-settled: answered by @chief at 2026-10-28T14:36:43.059Z"
-            const fanoutLoserCause =
-              "closed 0 rows for req-fanout-loser: answered by @dev/3 at 2026-10-29T18:08:27.481Z (fanout first: the first answer settled every owner's row, including @chief's)"
-            const offlineClosedCause =
-              "closed 0 rows for req-offline-closed: @chief closed it because the owner was offline past its deadline (offline-owner-close) at 2026-10-22T18:08:27.481Z; its deadline had passed at 2026-10-22T18:02:17.685Z"
             const ball =
               namedId === undefined
                 ? {}
@@ -1046,16 +1094,7 @@ describe("registerSendCommands", () => {
                       ...(ballOpen
                         ? {}
                         : {
-                            cause:
-                              namedId === "req-withdrawn"
-                                ? "sender-withdrawn: the ball's sender withdrew it before this reply arrived"
-                                : namedId === "req-already-settled"
-                                  ? alreadySettledCause
-                                  : namedId === "req-fanout-loser"
-                                    ? fanoutLoserCause
-                                    : namedId === "req-offline-closed"
-                                      ? offlineClosedCause
-                                      : `no open ball of @chief's currently matches ${namedId}`,
+                            cause: closedZeroFixture?.cause ?? `no open ball of @chief's currently matches ${namedId}`,
                           }),
                     },
                   }
@@ -1078,47 +1117,12 @@ describe("registerSendCommands", () => {
                     tracker: {
                       request_id: namedId ?? "req-123",
                       closed: closedNow,
-                      ...(namedId === "req-already-settled"
-                        ? {
-                            cause: alreadySettledCause,
-                            cause_fact: {
-                              kind: "settled",
-                              settlement: "answered",
-                              settled_by: "@chief",
-                              settled_at: 1793207803059,
-                              recipient: "@chief",
-                              fanout: "first",
-                              by_another_owner: false,
-                            },
-                          }
-                        : namedId === "req-fanout-loser"
-                          ? {
-                              cause: fanoutLoserCause,
-                              cause_fact: {
-                                kind: "settled",
-                                settlement: "answered",
-                                settled_by: "@dev/3",
-                                settled_at: 1793297307481,
-                                recipient: "@chief",
-                                fanout: "first",
-                                by_another_owner: true,
-                              },
-                            }
-                          : namedId === "req-offline-closed"
-                            ? {
-                                cause: offlineClosedCause,
-                                cause_fact: {
-                                  kind: "settled",
-                                  settlement: "offline-owner-close",
-                                  settled_by: "@chief",
-                                  settled_at: 1792692507481,
-                                  recipient: "@dev/2",
-                                  fanout: "first",
-                                  by_another_owner: true,
-                                  expired_at: 1792692137685,
-                                },
-                              }
-                            : {}),
+                      ...(closedZeroFixture?.cause_fact === undefined
+                        ? {}
+                        : {
+                            cause: closedZeroFixture.cause,
+                            cause_fact: closedZeroFixture.cause_fact,
+                          }),
                     },
                   }
           } else {
@@ -1234,6 +1238,25 @@ describe("registerSendCommands", () => {
       expect(withdrawn.stderr).toContain("sender-withdrawn")
       expect(withdrawn.stderr).not.toContain("settle it with --type response or verdict")
       expect(withdrawn.stderr).toContain("verify: tribe pending --owner @chief")
+
+      // #31829 (@dev/3 peer review finding): sender-withdrawn on a ball opened for
+      // another recipient (kind === "settled-for-other-owner" && settlement === "sender-withdrawn")
+      // must ALSO exit 3, never take the benign already-settled branch.
+      const withdrawnOtherOwner = await runCli([
+        "send",
+        "@agent/3",
+        "done",
+        "--type",
+        "response",
+        "--reply",
+        "req-withdrawn-other-owner",
+      ])
+      expect(withdrawnOtherOwner.code).toBe(3)
+      expect(withdrawnOtherOwner.stderr).toContain(
+        "response DELIVERED, but did not settle ball req-withdrawn-other-owner",
+      )
+      expect(withdrawnOtherOwner.stderr).toContain("sender-withdrawn")
+      expect(withdrawnOtherOwner.stderr).toContain("verify: tribe pending --owner @chief")
 
       // #31829: a response carrying --reply to a fanout=first ball that another
       // owner already settled, or a ball already closed via offline-owner-close,
@@ -1379,9 +1402,9 @@ describe("registerSendCommands", () => {
       // 12 through the reply scenarios plus the three 30160 sends above (the
       // status --ref receipt, the correlated notify --ref, and the verdict to a
       // withdrawn ball) plus the two #31416 sends (response --ref on open ball
-      // and response --reply on already-settled ball) plus the two #31829 sends
-      // (fanout=first loser and offline-owner-close).
-      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(19)
+      // and response --reply on already-settled ball) plus the three #31829 sends
+      // (fanout=first loser, offline-owner-close, and settled-for-other-owner sender-withdrawn).
+      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(20)
     } finally {
       server.close()
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })

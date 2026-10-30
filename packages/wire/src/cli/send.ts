@@ -546,13 +546,12 @@ type SendCloseCauseFact = {
 }
 
 function alreadySettledByOwner(_owner: string, causeFact?: SendCloseCauseFact, cause?: string): boolean {
-  if (
-    (causeFact?.kind === "settled" && causeFact.settlement !== "sender-withdrawn") ||
-    causeFact?.kind === "settled-for-other-owner"
-  ) {
+  if (causeFact?.settlement === "sender-withdrawn") return false
+  if (causeFact?.kind === "settled" || causeFact?.kind === "settled-for-other-owner") {
     return true
   }
   if (typeof cause === "string" && cause.length > 0) {
+    if (cause.includes("sender-withdrawn")) return false
     return (
       cause.includes("answered by ") ||
       cause.includes("already closed it manually") ||
