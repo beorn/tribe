@@ -1014,7 +1014,10 @@ describe("registerSendCommands", () => {
             const namedId = named === undefined ? undefined : named === "msg-123" ? "req-123" : named
             const refArg = request.params?.ref as string | undefined
             const closedNow =
-              namedId === "req-withdrawn" || namedId === "req-already-settled"
+              namedId === "req-withdrawn" ||
+              namedId === "req-already-settled" ||
+              namedId === "req-fanout-loser" ||
+              namedId === "req-offline-closed"
                 ? 0
                 : message === "done" || message === "by-message"
                   ? 1
@@ -1028,6 +1031,10 @@ describe("registerSendCommands", () => {
                 : closedNow > 0)
             const alreadySettledCause =
               "closed 0 rows for req-already-settled: answered by @chief at 2026-10-28T14:36:43.059Z"
+            const fanoutLoserCause =
+              "closed 0 rows for req-fanout-loser: answered by @dev/3 at 2026-10-29T18:08:27.481Z (fanout first: the first answer settled every owner's row, including @chief's)"
+            const offlineClosedCause =
+              "closed 0 rows for req-offline-closed: @chief closed it because the owner was offline past its deadline (offline-owner-close) at 2026-10-22T18:08:27.481Z; its deadline had passed at 2026-10-22T18:02:17.685Z"
             const ball =
               namedId === undefined
                 ? {}
@@ -1044,7 +1051,11 @@ describe("registerSendCommands", () => {
                                 ? "sender-withdrawn: the ball's sender withdrew it before this reply arrived"
                                 : namedId === "req-already-settled"
                                   ? alreadySettledCause
-                                  : `no open ball of @chief's currently matches ${namedId}`,
+                                  : namedId === "req-fanout-loser"
+                                    ? fanoutLoserCause
+                                    : namedId === "req-offline-closed"
+                                      ? offlineClosedCause
+                                      : `no open ball of @chief's currently matches ${namedId}`,
                           }),
                     },
                   }
@@ -1080,7 +1091,34 @@ describe("registerSendCommands", () => {
                               by_another_owner: false,
                             },
                           }
-                        : {}),
+                        : namedId === "req-fanout-loser"
+                          ? {
+                              cause: fanoutLoserCause,
+                              cause_fact: {
+                                kind: "settled",
+                                settlement: "answered",
+                                settled_by: "@dev/3",
+                                settled_at: 1793297307481,
+                                recipient: "@chief",
+                                fanout: "first",
+                                by_another_owner: true,
+                              },
+                            }
+                          : namedId === "req-offline-closed"
+                            ? {
+                                cause: offlineClosedCause,
+                                cause_fact: {
+                                  kind: "settled",
+                                  settlement: "offline-owner-close",
+                                  settled_by: "@chief",
+                                  settled_at: 1792692507481,
+                                  recipient: "@dev/2",
+                                  fanout: "first",
+                                  by_another_owner: true,
+                                  expired_at: 1792692137685,
+                                },
+                              }
+                            : {}),
                     },
                   }
           } else {
@@ -1197,6 +1235,41 @@ describe("registerSendCommands", () => {
       expect(withdrawn.stderr).not.toContain("settle it with --type response or verdict")
       expect(withdrawn.stderr).toContain("verify: tribe pending --owner @chief")
 
+      // #31829: a response carrying --reply to a fanout=first ball that another
+      // owner already settled, or a ball already closed via offline-owner-close,
+      // is not a failed close — the ball IS settled. It must exit 0 and print the
+      // delivery receipt, naming who settled it in the stderr note instead of
+      // exiting 3 ("did not settle ball").
+      const fanoutLoser = await runCli([
+        "send",
+        "@agent/3",
+        "my late answer",
+        "--type",
+        "response",
+        "--reply",
+        "req-fanout-loser",
+      ])
+      expect(fanoutLoser).toMatchObject({ code: 0 })
+      expect(fanoutLoser.stdout).toContain("Sent message to @agent/3")
+      expect(fanoutLoser.stderr).toContain("response DELIVERED; ball req-fanout-loser was already settled")
+      expect(fanoutLoser.stderr).toContain("answered by @dev/3")
+      expect(fanoutLoser.stderr).not.toContain("did not settle ball req-fanout-loser")
+
+      const offlineClosed = await runCli([
+        "send",
+        "@agent/3",
+        "my late retro answer",
+        "--type",
+        "response",
+        "--reply",
+        "req-offline-closed",
+      ])
+      expect(offlineClosed).toMatchObject({ code: 0 })
+      expect(offlineClosed.stdout).toContain("Sent message to @agent/3")
+      expect(offlineClosed.stderr).toContain("response DELIVERED; ball req-offline-closed was already settled")
+      expect(offlineClosed.stderr).toContain("offline-owner-close")
+      expect(offlineClosed.stderr).not.toContain("did not settle ball req-offline-closed")
+
       // #31416 (Part 1): a response carrying --ref <own open ball> with no --reply
       // surfaces the daemon's open-ball warning on stderr while still delivering (exit 0).
       pendingListed = [{ request_id: "req-123", message_id: "msg-123" }]
@@ -1306,8 +1379,9 @@ describe("registerSendCommands", () => {
       // 12 through the reply scenarios plus the three 30160 sends above (the
       // status --ref receipt, the correlated notify --ref, and the verdict to a
       // withdrawn ball) plus the two #31416 sends (response --ref on open ball
-      // and response --reply on already-settled ball).
-      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(17)
+      // and response --reply on already-settled ball) plus the two #31829 sends
+      // (fanout=first loser and offline-owner-close).
+      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(19)
     } finally {
       server.close()
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })

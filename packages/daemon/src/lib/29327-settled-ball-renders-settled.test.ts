@@ -134,6 +134,7 @@ type Row = {
   settled?: boolean
   settled_by?: string
   settled_at?: string
+  settlement_reason?: string
   by_another_owner?: boolean
 }
 
@@ -221,6 +222,21 @@ describe("29327 an unread request whose ball is closed renders settled", () => {
 
     expect(row?.settled).toBe(true)
     expect(row?.settled_by).toBe("@dev/7")
+    expect(row?.settlement_reason).toBe("answered")
+    expect(row?.by_another_owner).toBe(true)
+  })
+
+  it("exposes settlement_reason when a ball is closed via offline-owner-close (31829)", () => {
+    const { stmts, ctx } = fixture()
+    trackedRequest(stmts, "req-31829-offline")
+    settledFact(stmts, "req-31829-offline", { settlement: "offline-owner-close", settledBy: "@chief" })
+    stmts.closePendingRequest.run({ $request_id: "req-31829-offline", $recipient: SEAT })
+
+    const row = rowsOf(ctx).find((item) => item.id === "req-31829-offline")
+
+    expect(row?.settled).toBe(true)
+    expect(row?.settled_by).toBe("@chief")
+    expect(row?.settlement_reason).toBe("offline-owner-close")
     expect(row?.by_another_owner).toBe(true)
   })
 

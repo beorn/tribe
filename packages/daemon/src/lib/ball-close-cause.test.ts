@@ -528,4 +528,103 @@ describe("a closed: 0 ball result names its exact cause from the journal", () =>
     })
     expect(tracker.cause).toContain("answered by @dev/3 at")
   })
+
+  it("31829: a late reply carrying a unique 8+ char prefix of an already-settled ball resolves to the full request id, correlates, and retires the expired outcome instead of reporting never-tracked", () => {
+    const fullId = "430ded51-53d8-413d-9528-16b2e4abf26f"
+    const now = Date.now()
+    stmts.insertMessage.run({
+      $id: fullId,
+      $type: "query",
+      $sender: "@ci",
+      $recipient: "@dev/3",
+      $kind: "direct",
+      $content: "retro poll",
+      $bead_id: null,
+      $ref: null,
+      $ts: now - 30 * 60_000,
+      $delivery: "push",
+      $topic: null,
+      $room_id: null,
+      $request: fullId,
+      $reply: null,
+      $correlated_reply_requester: null,
+      $summary: "retro poll",
+      $session_id: "sess-ci",
+      $sender_authority: "verified",
+      $wakes_owner: 0,
+      $is_incident: 0,
+      $incident_data: null,
+      $attention_required: 1,
+      $between_personas: 1,
+    })
+    stmts.openPendingRequest.run({
+      $request_id: fullId,
+      $recipient: "@dev/3",
+      $sender: "@ci",
+      $opened_at: now - 30 * 60_000,
+      $expires_at: now - 20 * 60_000,
+      $message_id: fullId,
+      $fanout: "first",
+    })
+    // Simulate offline-owner-close by @chief while @dev/3 had no active transport
+    db.prepare(`INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, ref)
+      VALUES ('dev3-left', 'event.session.left', '@dev/3', '*', 'event', '{"reason":"harness-exited"}', $at, 'pull', 'sess-dev3')`).run(
+      { $at: Date.now() },
+    )
+    const chief = makeContext(db, stmts, "@chief", "sess-chief")
+    const offlineOpts = makeOpts(["sess-ci"])
+    const closedByChief = parseToolJson(
+      handleToolCall(chief, "tribe.pending", { owner: "@dev/3", close: fullId }, offlineOpts),
+    )
+    expect(closedByChief.closed).toBe(1)
+
+    // Before @dev/3 replies, pending --expired lists the ball as unanswered with settlement=offline-owner-close and settled_by=@chief
+    const expiredBefore = parseToolJson(
+      handleToolCall(dev3, "tribe.pending", { owner: "@dev/3", expired: true }, makeOpts(ALL_ACTIVE)),
+    ) as {
+      pending: Array<{ request_id: string; settlement: string; settled_by?: string; by_another_owner?: boolean }>
+    }
+    expect(expiredBefore.pending).toEqual([
+      expect.objectContaining({
+        request_id: fullId,
+        settlement: "offline-owner-close",
+        settled_by: "@chief",
+        by_another_owner: true,
+      }),
+    ])
+
+    // Now @dev/3 replies using the 8-char prefix "430ded51"
+    const lateReply = parseToolJson(
+      handleToolCall(
+        dev3,
+        "tribe.send",
+        { to: "@ci", message: "late retro answer", type: "response", reply: "430ded51" },
+        makeOpts(ALL_ACTIVE),
+      ),
+    )
+    const tracker = lateReply.tracker as TrackerJson
+    expect(tracker.request_id).toBe(fullId)
+    expect(tracker.closed).toBe(0)
+    expect(tracker.cause_fact).toMatchObject({
+      kind: "settled",
+      settlement: "offline-owner-close",
+      settled_by: "@chief",
+      recipient: "@dev/3",
+      by_another_owner: true,
+    })
+    expect(tracker.cause).toContain("offline-owner-close")
+
+    // The response row is correlated to the full request id and requester, and retires the expired outcome
+    const persistedReply = db
+      .prepare("SELECT reply, correlated_reply_requester FROM messages WHERE id = ?")
+      .get(String(lateReply.id)) as { reply: string | null; correlated_reply_requester: string | null }
+    expect(persistedReply).toEqual({
+      reply: fullId,
+      correlated_reply_requester: "@ci",
+    })
+    const expiredAfter = parseToolJson(
+      handleToolCall(dev3, "tribe.pending", { owner: "@dev/3", expired: true }, makeOpts(ALL_ACTIVE)),
+    ) as { pending: Array<{ request_id: string }> }
+    expect(expiredAfter.pending).toEqual([])
+  })
 })

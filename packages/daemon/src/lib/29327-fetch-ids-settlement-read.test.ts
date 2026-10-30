@@ -222,8 +222,9 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
 
     expect(byId.get("msg-29327-open")?.settlement).toBe("open")
     expect(byId.get("msg-29327-settled")?.settlement).toBe("settled")
-    // The settler comes from the daemon's own fact, never from a report row.
+    // The settler and settlement_reason come from the daemon's own fact, never from a report row.
     expect(byId.get("msg-29327-settled")?.settled_by).toBe(SENDER)
+    expect(byId.get("msg-29327-settled")?.settlement_reason).toBe("answered")
     expect(byId.get("msg-29327-untracked")?.settlement).toBe("untracked")
     // Every returned row carries an explicit answer: a consumer must never infer
     // a state from a missing label.

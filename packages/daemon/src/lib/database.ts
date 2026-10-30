@@ -3338,6 +3338,27 @@ export function createStatements(db: Database) {
     `),
     ),
 
+    /** 31829 - prefix of balls whose settlement or deadline observation is already in
+     *  the journal (or archive) after their `pending_request` row was deleted.
+     *  Indexed range scan `[prefix, upper)` on `idx_messages_event_type_ref_ts` and
+     *  `idx_messages_archive_event_type_ref_ts`; `substr` keeps `%` and `_` literal. */
+    selectSettledBallIdsByPrefix: db.prepare(
+      assertSingleStatement(`
+      SELECT DISTINCT ref AS request_id FROM (
+        SELECT ref FROM messages INDEXED BY idx_messages_event_type_ref_ts
+        WHERE kind = 'event' AND type IN ('event.ball.settled', 'event.ball.expired')
+          AND ref >= $prefix AND ref < $upper
+        UNION
+        SELECT ref FROM messages_archive INDEXED BY idx_messages_archive_event_type_ref_ts
+        WHERE kind = 'event' AND type IN ('event.ball.settled', 'event.ball.expired')
+          AND ref >= $prefix AND ref < $upper
+      )
+      WHERE substr(ref, 1, length($prefix)) = $prefix
+      ORDER BY ref
+      LIMIT 9
+    `),
+    ),
+
     /** 29327 - which of the ids a batch names still own an open ball, decided by
      *  the IDS ALONE (@cto verdict 2026-10-17, ruling 2, corrected against C1).
      *

@@ -545,18 +545,21 @@ type SendCloseCauseFact = {
   by_another_owner?: boolean
 }
 
-function alreadySettledByOwner(owner: string, causeFact?: SendCloseCauseFact, cause?: string): boolean {
+function alreadySettledByOwner(_owner: string, causeFact?: SendCloseCauseFact, cause?: string): boolean {
   if (
-    causeFact?.kind === "settled" &&
-    causeFact.by_another_owner === false &&
-    (causeFact.settlement === "answered" || causeFact.settlement === "manual-close")
+    (causeFact?.kind === "settled" && causeFact.settlement !== "sender-withdrawn") ||
+    causeFact?.kind === "settled-for-other-owner"
   ) {
     return true
   }
   if (typeof cause === "string" && cause.length > 0) {
     return (
-      (cause.includes(`answered by ${owner} at `) && !cause.includes("fanout first:")) ||
-      cause.includes(`${owner} closed it manually (manual-close) at `)
+      cause.includes("answered by ") ||
+      cause.includes("already closed it manually") ||
+      cause.includes("closed it manually (manual-close) at ") ||
+      cause.includes("closed it because the owner was offline past its deadline (offline-owner-close) at ") ||
+      cause.includes("settled gc-expired by ") ||
+      cause.includes("cleared the incident (incident-cleared) at ")
     )
   }
   return false

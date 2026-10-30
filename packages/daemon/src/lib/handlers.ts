@@ -1926,6 +1926,8 @@ type PendingOutcomeBall = PendingBall & {
   status: "expired" | "unanswered"
   settlement: BallSettlementReason | null
   settled_at: string | null
+  settled_by?: string | null
+  by_another_owner?: true
   /** Older generations of the same (request_id, recipient) collapsed behind
    * this row — the incident rail re-sends one condition under fresh message
    * ids, and each generation's deadline fact would otherwise render as its
@@ -2069,6 +2071,7 @@ function pendingOutcomeBall(
   now: number,
   settlement: BallSettlementReason | null,
   settledAt: number | null,
+  settledBy: string | null,
   conflict?: readonly BallSettlementFact[],
 ): PendingOutcomeBall {
   return {
@@ -2084,6 +2087,8 @@ function pendingOutcomeBall(
     status: "unanswered",
     settlement,
     settled_at: settledAt === null ? null : new Date(settledAt).toISOString(),
+    ...(settledBy === null ? {} : { settled_by: settledBy }),
+    ...(settledBy !== null && settledBy !== fact.recipient ? { by_another_owner: true as const } : {}),
     backing: "journal",
     ...(conflict === undefined ? {} : { settlement_conflict: pendingSettlementConflict(conflict) }),
   }
@@ -2196,7 +2201,14 @@ function expiredPendingBalls(ctx: TribeContext, now: number, owed = false, owner
     if (settlement?.settlement === "answered" && conflict === undefined) continue
     if (settlement) representedSettlements.add(key)
     outcomes.push(
-      pendingOutcomeBall(fact, now, settlement?.settlement ?? null, settlement?.settled_at ?? null, conflict),
+      pendingOutcomeBall(
+        fact,
+        now,
+        settlement?.settlement ?? null,
+        settlement?.settled_at ?? null,
+        settlement?.settled_by ?? null,
+        conflict,
+      ),
     )
   }
 
@@ -2206,7 +2218,7 @@ function expiredPendingBalls(ctx: TribeContext, now: number, owed = false, owner
     if (fact.settlement === "answered" && conflict === undefined) continue
     if (liveKeys.has(key) || representedSettlements.has(key)) continue
     if (conflict === undefined && pendingFactWasAnswered(fact, respondersByRef)) continue
-    outcomes.push(pendingOutcomeBall(fact, now, fact.settlement, fact.settled_at, conflict))
+    outcomes.push(pendingOutcomeBall(fact, now, fact.settlement, fact.settled_at, fact.settled_by, conflict))
   }
   return sortPendingBalls(collapseOutcomeGenerations(outcomes))
 }
@@ -4896,6 +4908,7 @@ export type FetchEvent = {
    *  AttentionSettlement. */
   settled_by?: string
   settled_at?: string
+  settlement_reason?: BallSettlementReason
   by_another_owner?: true
   /**
    * 29327 — the daemon's verdict for this row's ball, present on EVERY row an
@@ -4921,6 +4934,7 @@ export type AttentionSettlement = {
    *  close or the pruner. Absent when no fact survives to name them. */
   settled_by?: string
   settled_at?: string
+  settlement_reason?: BallSettlementReason
   /** True when the settler is not the ball's own owner (the same reading
    *  `pendingCloseCause` reports): fanout=first closes the shared request for
    *  every snapshotted owner, so the row a seat never answered is settled by
@@ -5079,6 +5093,7 @@ function settlementBatch(ctx: TribeContext, owner: string, rows: readonly FetchR
         settled: true,
         settled_by: fact.settled_by,
         settled_at: new Date(fact.settled_at).toISOString(),
+        settlement_reason: fact.settlement,
         ...(fact.settled_by === fact.recipient ? {} : { by_another_owner: true as const }),
       })
     }
@@ -5116,6 +5131,7 @@ export type MessageIdSettlementRead =
       settlement: "settled"
       settled_by?: string
       settled_at?: string
+      settlement_reason?: BallSettlementReason
       by_another_owner?: true
     }
   | { settlement: "untracked" | "undecided" }
@@ -5324,6 +5340,7 @@ function settlementReadInOneSnapshot(
         settlement: "settled",
         settled_by: fact.settled_by,
         settled_at: new Date(fact.settled_at).toISOString(),
+        settlement_reason: fact.settlement,
         ...(fact.settled_by === fact.recipient ? {} : { by_another_owner: true as const }),
       })
     }

@@ -774,7 +774,20 @@ export function sendMessage(
       $prefix: replyId,
     }) as Array<{ request_id: string }>
     const only = prefixMatches.length === 1 ? prefixMatches[0] : undefined
-    if (only !== undefined) replyId = only.request_id
+    if (only !== undefined) {
+      replyId = only.request_id
+    } else if (
+      prefixMatches.length === 0 &&
+      ctx.stmts.selectPendingOutcomeFactsForRequest.all({ $request_id: replyId }).length === 0
+    ) {
+      const lastCode = replyId.charCodeAt(replyId.length - 1)
+      const settledMatches = ctx.stmts.selectSettledBallIdsByPrefix.all({
+        $prefix: replyId,
+        $upper: `${replyId.slice(0, -1)}${String.fromCharCode(lastCode + 1)}`,
+      }) as Array<{ request_id: string }>
+      const onlySettled = settledMatches.length === 1 ? settledMatches[0] : undefined
+      if (onlySettled !== undefined) replyId = onlySettled.request_id
+    }
   }
   const correlationRef = ref ?? (!settles ? ballTracker.reply : undefined)
   const expiresInMs = ballTracker.expiresInMs ?? defaultBallTtlMs(type, requestId !== null)
