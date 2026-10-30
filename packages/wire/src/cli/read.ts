@@ -1267,7 +1267,7 @@ async function cmdHealth(opts?: { json?: boolean; full?: boolean }): Promise<voi
       if (body === null || typeof body !== "object" || Array.isArray(body)) {
         throw new Error("cli_health body must be an object")
       }
-      // The health command descriptor declares cadence.inbox_lag. Validate that
+      // ../command-descriptors.ts's health descriptor declares cadence.inbox_lag. Validate that
       // existing output contract; an absent projection is not an observed [].
       const cadence = (body as Record<string, unknown>).cadence
       if (cadence === null || typeof cadence !== "object" || Array.isArray(cadence)) {
