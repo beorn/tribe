@@ -181,6 +181,42 @@ describe("31840 second reproduction attempt: the cursor move a drain performs", 
 })
 
 describe("31840 self path: a narrowed read must not acknowledge what it did not return", () => {
+  it.each(["health:cpu", "HeAlTh:cpu", "bead:changed"])(
+    "drains past a trust-rejected direct on %s without replaying eligible verdicts",
+    async (topic) => {
+      const f = fixture()
+      f.stmts.insertMessage.run({
+        $id: "trust-rejected",
+        $type: "verdict",
+        $sender: "@unrostered",
+        $recipient: REQUESTER,
+        $kind: "direct",
+        $content: "untrusted direct",
+        $bead_id: null,
+        $ref: null,
+        $ts: Date.now(),
+        $delivery: "pull",
+        $topic: topic,
+        $room_id: null,
+        $request: null,
+        $reply: null,
+      })
+      const seen = sendMessage(f.peer, REQUESTER, "eligible verdict", "verdict")
+      expect(seen.rowid).toBe(2)
+      for (let drain = 0; drain < 6; drain += 1) {
+        const result = await handleToolCall(f.requester, TRIBE_COORD_METHODS.fetch, { limit: 1 }, makeOpts())
+        const body = JSON.parse((result.content[0] as { text: string }).text) as {
+          attention: { actionable_unread: Array<{ id: string }> }
+          events: Array<{ id: string }>
+        }
+        const returned = [...body.attention.actionable_unread, ...body.events].map((row) => row.id)
+        expect(returned).not.toContain("trust-rejected")
+        expect(returned).toEqual(drain === 0 ? [seen.id] : [])
+      }
+      expect(f.stmts.getMailboxCursor.get({ $recipient: REQUESTER })).toMatchObject({ last_actionable_seq: 2 })
+    },
+  )
+
   it("keeps an unread direct that a --from-narrowed since+advance page never returned", async () => {
     const f = fixture()
     // Two unread directs for the reader from different senders. The reader asks

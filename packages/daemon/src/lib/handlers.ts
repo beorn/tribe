@@ -4967,7 +4967,7 @@ function sessionRoster(ctx: TribeContext): SessionRoster {
   return ctx.stmts.sessionRoster.all() as Array<{ name: string; role: string | null }>
 }
 
-function filterRowsByTrust(ctx: TribeContext, rows: FetchRow[]): FetchRow[] {
+function filterRowsByTrust<Row extends Pick<FetchRow, "sender" | "topic">>(ctx: TribeContext, rows: Row[]): Row[] {
   if (rows.length === 0) return rows
   // `senderMayUseRegisteredTrustTopic` consults the roster only for a topic in
   // the registered trust set, and returns true without reading it for every
@@ -6000,18 +6000,18 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
       // 31840 — the cursor is a HIGH-WATER MARK: acknowledging the highest
       // returned row retires EVERY row below it, including direct attention
       // this read never handed the caller (a `from`/`to`/`with`-narrowed
-      // since+advance page, or a row dropped by the trust filter). A seat that
+      // since+advance page). A seat that
       // read one peer's thread could then find a verdict from another sender
       // neither counted unread nor a wake, recoverable only by an explicit
       // fetch --ids. Acknowledge only the contiguous prefix this caller
       // actually received; the first skipped row caps the move.
-      const skipped = ctx.stmts.minUnreturnedAttentionSeq.get({
+      const unreturned = ctx.stmts.selectUnreturnedAttention.all({
         $name: currentName,
         $upto: lastAttention,
         $returned: JSON.stringify(returnedAttentionIds),
-      }) as { seq: number | null } | null
-      const acknowledged =
-        skipped?.seq === null || skipped?.seq === undefined ? lastAttention : Math.min(lastAttention, skipped.seq - 1)
+      }) as Array<Pick<FetchRow, "rowid" | "sender" | "topic">>
+      const skipped = filterRowsByTrust(ctx, unreturned)[0]
+      const acknowledged = skipped === undefined ? lastAttention : Math.min(lastAttention, skipped.rowid - 1)
       if (acknowledged > 0) {
         ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: acknowledged, $now: Date.now() })
       }

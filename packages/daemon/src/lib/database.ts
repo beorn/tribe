@@ -3289,13 +3289,13 @@ export function createStatements(db: Database) {
      * read did NOT return (`$returned` is the ids it returned). The mailbox
      * cursor is a high-water mark, so acknowledging `$upto` retires every row
      * beneath it; a read whose selection was narrowed (`from`/`to`/`with`) or
-     * whose returned set lost a row to the trust filter would retire mail the
-     * caller never received. NULL means nothing below `$upto` was skipped and
-     * the whole prefix is safe to acknowledge.
+     * whose returned set omitted eligible mail would retire mail the caller
+     * never received. The caller applies its trust filter before choosing the
+     * oldest skipped row; an empty eligible set permits the whole prefix.
      */
-    minUnreturnedAttentionSeq: db.prepare(
+    selectUnreturnedAttention: db.prepare(
       assertSingleStatement(`
-      SELECT MIN(m.rowid) AS seq
+      SELECT m.rowid, m.sender, m.topic
       FROM messages AS m
       WHERE m.recipient = $name
         AND m.kind = 'direct'
@@ -3306,6 +3306,7 @@ export function createStatements(db: Database) {
         AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
         AND m.rowid <= $upto
         AND m.id NOT IN (SELECT value FROM json_each($returned))
+      ORDER BY m.rowid ASC
     `),
     ),
 
