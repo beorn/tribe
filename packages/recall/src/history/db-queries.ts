@@ -10,7 +10,13 @@ import * as fs from "fs"
 import type { SessionRecord, MessageRecord, ContentType, ContentRecord, SessionIndexEntry } from "./types.ts"
 import { PROJECTS_DIR } from "./db-schema.ts"
 import { HOOK_CANDIDATE_LIMIT } from "./recall-budget.ts"
-import type { CollapsedCopyLocation, HookSearchSummary, RecallSkip, SearchMode } from "./recall-shared.ts"
+import {
+  isStopword,
+  type CollapsedCopyLocation,
+  type HookSearchSummary,
+  type RecallSkip,
+  type SearchMode,
+} from "./recall-shared.ts"
 export type { CollapsedCopyLocation }
 
 // Assistant rows containing tool_use blocks mix prose with serialized tool
@@ -294,7 +300,11 @@ export function ftsPhrase(token: string): string {
   return `"${cleaned.replace(/"/g, '""')}"`
 }
 
-/** A query as FTS5 syntax: each token an exact phrase, a `"quoted phrase"` kept whole, `-term` a NOT; all AND-joined. */
+/**
+ * A query as FTS5 syntax: each non-stopword positive token an exact phrase, a `"quoted phrase"` kept whole,
+ * `-term` a NOT, and punctuation-only tokens kept as `""`; all AND-joined by space. When stopword filtering leaves
+ * no positive content term and no quoted phrase, falls back to the literal query (`rawParts.join(" ")`).
+ */
 export function toFts5Query(query: string): string {
   // Handle quoted phrases
   const phrases: string[] = []
@@ -305,7 +315,9 @@ export function toFts5Query(query: string): string {
 
   // Split into tokens
   const tokens = remaining.split(/\s+/).filter(Boolean)
+  const rawParts: string[] = []
   const parts: string[] = []
+  let keptPositive = 0
 
   for (const token of tokens) {
     const phraseMatch = token.match(/^__PHRASE_(\d+)__$/)
@@ -314,16 +326,29 @@ export function toFts5Query(query: string): string {
       const phrase = phrases[idx]
       if (phrase !== undefined) {
         // FTS5 phrase syntax: "word1 word2 word3"
-        parts.push(`"${phrase}"`)
+        const formatted = `"${phrase}"`
+        rawParts.push(formatted)
+        parts.push(formatted)
+        keptPositive++
       }
     } else if (token.startsWith("-")) {
-      parts.push(`NOT ${ftsPhrase(token.slice(1))}`)
+      const neg = `NOT ${ftsPhrase(token.slice(1))}`
+      rawParts.push(neg)
+      parts.push(neg)
     } else {
-      parts.push(ftsPhrase(token))
+      const formatted = ftsPhrase(token)
+      rawParts.push(formatted)
+      const cleaned = token.replace(/[?!.,;]+$/, "")
+      if (cleaned === "") {
+        parts.push(formatted)
+      } else if (!isStopword(cleaned)) {
+        parts.push(formatted)
+        keptPositive++
+      }
     }
   }
 
-  return parts.join(" ")
+  return (keptPositive > 0 ? parts : rawParts).join(" ")
 }
 
 export interface MessageSearchOptions {
@@ -504,7 +529,7 @@ export function ftsSearchWithSnippet(
     JOIN messages m ON f.rowid = m.id
     JOIN sessions s ON m.session_id = s.id
     ${where}
-    ORDER BY rank LIMIT ? OFFSET ?
+    ORDER BY rank, m.id ASC LIMIT ? OFFSET ?
   `
   const params = [ftsQuery, ...filter.params]
   const total = countMessages(db, ftsQuery, filter)
@@ -599,7 +624,7 @@ function hookMessageSearch(
        JOIN sessions s ON m.session_id = s.id
        WHERE messages_fts MATCH ? AND ${filter.sql}
          AND +f.rowid IN (SELECT value FROM json_each(?))
-       ORDER BY rank`),
+       ORDER BY rank, m.id ASC`),
           )
           .all(ftsQuery, ...filter.params, JSON.stringify(held.map((row) => row.id))) as (Candidate & {
           rank: number

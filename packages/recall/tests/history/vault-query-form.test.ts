@@ -59,8 +59,8 @@ describe("searchVault: content terms, conjunction first, then a bm25-ranked disj
     expect(paths(result)[0]).toBe("@i/20-search-and-memory/27897-memory-system.md")
     expect(result).toMatchObject({
       form: "any",
-      terms: ["how", "Jev", "memory", "system", "smarter", "linting", "work"],
-      unmatched: ["how", "linting", "work"],
+      terms: ["Jev", "memory", "system", "smarter", "linting", "work"],
+      unmatched: ["linting", "work"],
       matched: 2,
     })
   })

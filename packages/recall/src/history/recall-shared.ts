@@ -37,6 +37,23 @@ export const DEFAULT_SYNTHESIS_TIMEOUT_MS = 20_000
  */
 export const DEFAULT_PLAN_TIMEOUT_MS = 14_000
 
+// Shared 95-word query stopword vocabulary (vault 89 unique + by, how, why, who, whom, whose; #30268, @cto 910e3958).
+// Retains domain/code verbs ("test", "bead", "fix", "make", "run", "use", "new", "user").
+// prettier-ignore
+export const QUERY_STOPWORDS: ReadonlySet<string> = new Set([
+  "a", "about", "after", "again", "all", "also", "an", "and", "any", "are", "as", "at", "be", "before", "being",
+  "between", "but", "by", "can", "could", "did", "do", "does", "doing", "done", "during", "for", "from", "going",
+  "had", "have", "here", "how", "i", "if", "in", "into", "is", "it", "just", "kind", "like", "more", "much", "name",
+  "no", "not", "now", "of", "ok", "on", "only", "or", "other", "over", "perhaps", "really", "should", "so", "some",
+  "still", "such", "than", "that", "the", "their", "then", "there", "these", "they", "things", "think", "this",
+  "those", "to", "very", "was", "we", "well", "were", "what", "when", "where", "which", "while", "who", "whom",
+  "whose", "why", "with", "would", "yes", "you", "your", "yours",
+])
+
+export function isStopword(token: string): boolean {
+  return QUERY_STOPWORDS.has(token.toLowerCase())
+}
+
 // ============================================================================
 // Types
 // ============================================================================

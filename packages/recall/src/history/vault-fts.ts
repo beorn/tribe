@@ -135,102 +135,8 @@ interface VaultAncestor {
   title: string | null
 }
 
-// Common English / chat stopwords — words too generic to be salient
-// project-vocab anchors. Kept conservative; project-specific terms (e.g.
-// "test", "bead", "fix", "make") are NOT in this list since they're
-// genuine signal in this codebase.
-const PROBE_STOPWORDS = new Set([
-  "the",
-  "and",
-  "for",
-  "are",
-  "but",
-  "not",
-  "you",
-  "all",
-  "any",
-  "can",
-  "had",
-  "was",
-  "were",
-  "this",
-  "that",
-  "with",
-  "have",
-  "from",
-  "they",
-  "what",
-  "when",
-  "where",
-  "which",
-  "while",
-  "their",
-  "there",
-  "these",
-  "those",
-  "would",
-  "could",
-  "should",
-  "about",
-  "after",
-  "again",
-  "before",
-  "being",
-  "between",
-  "during",
-  "into",
-  "just",
-  "like",
-  "more",
-  "much",
-  "only",
-  "other",
-  "over",
-  "such",
-  "than",
-  "then",
-  "things",
-  "think",
-  "very",
-  "well",
-  "your",
-  "yours",
-  "really",
-  "still",
-  "some",
-  "also",
-  "perhaps",
-  "kind",
-  "name",
-  "now",
-  "here",
-  "much",
-  "going",
-  "doing",
-  "done",
-  "does",
-  "did",
-  "do",
-  "is",
-  "it",
-  "of",
-  "to",
-  "in",
-  "on",
-  "at",
-  "as",
-  "be",
-  "we",
-  "i",
-  "a",
-  "an",
-  "or",
-  "if",
-  "so",
-  "yes",
-  "no",
-  "ok",
-])
+import { isStopword } from "./recall-shared.ts"
+export { isStopword }
 
 export interface PromptWord {
   token: string
@@ -253,11 +159,6 @@ export function promptWords(prompt: string): PromptWord[] {
     tokens.forEach((token, i) => words.push({ token, opensSentence: i === 0 }))
   }
   return words
-}
-
-/** Whether a prompt token is a common English or chat word ("now", "this"), at any length. */
-export function isStopword(token: string): boolean {
-  return PROBE_STOPWORDS.has(token.toLowerCase())
 }
 
 /**

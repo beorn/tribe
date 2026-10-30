@@ -207,16 +207,72 @@ describe("toFts5Query", () => {
     expect(toFts5Query("what is this?")).toBe('"what" "is" "this"')
   })
 
-  test("trailing exclamation marks are stripped", () => {
-    expect(toFts5Query("fix this!")).toBe('"fix" "this"')
+  test("trailing exclamation marks are stripped and trailing stopword is dropped", () => {
+    expect(toFts5Query("fix this!")).toBe('"fix"')
   })
 
   test("trailing commas are stripped", () => {
     expect(toFts5Query("hello, world")).toBe('"hello" "world"')
   })
 
-  test("natural language question works", () => {
-    expect(toFts5Query("how does inline edit work?")).toBe('"how" "does" "inline" "edit" "work"')
+  test("natural language question strips stopwords and keeps content tokens", () => {
+    expect(toFts5Query("how does inline edit work?")).toBe('"inline" "edit" "work"')
+    expect(toFts5Query("why did the daemon die on restart?")).toBe('"daemon" "die" "restart"')
+  })
+
+  test("all-stopword positive terms with negation, quoted stopword phrases, and code verbs", () => {
+    expect(toFts5Query("what -bad")).toBe('"what" NOT "bad"')
+    expect(toFts5Query('"what is this" -the')).toBe('"what is this" NOT "the"')
+    expect(toFts5Query("make new user")).toBe('"make" "new" "user"')
+  })
+
+  test("punctuation-only token stays an empty phrase under implicit join and question matches indexed source", async () => {
+    const { Database } = await import("bun:sqlite")
+    const { initSchema, ftsSearchWithSnippet, insertMessage, upsertSession } = await import("../../src/history/db")
+    expect(toFts5Query("token ? next")).toBe('"token" "" "next"')
+    const db = new Database(":memory:")
+    initSchema(db)
+    const now = Date.now()
+    upsertSession(db, "s1", "/test", "/tmp/s1.jsonl", now, now, 2, "s1")
+    insertMessage(db, "u1", "s1", "assistant", "the daemon die on restart after crash", null, null, now)
+    insertMessage(db, "u2", "s1", "assistant", "token and next appear together", null, null, now + 1)
+    const id3 = insertMessage(db, "u3", "s1", "assistant", "tiebreaktoken alpha", null, null, now + 2)
+    const id4 = insertMessage(db, "u4", "s1", "assistant", "tiebreaktoken bravo", null, null, now + 3)
+    expect(ftsSearchWithSnippet(db, "why did the daemon die on restart?").results).toHaveLength(1)
+    expect(ftsSearchWithSnippet(db, "token ? next").results).toHaveLength(1)
+    expect(ftsSearchWithSnippet(db, "tiebreaktoken", { mode: "exact" }).results.map((r) => r.id)).toEqual([id3, id4])
+    expect(ftsSearchWithSnippet(db, "tiebreaktoken", { mode: "hook" }).results.map((r) => r.id)).toEqual([id3, id4])
+    expect(
+      db.prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?").all('"token" AND "" AND "next"'),
+    ).toEqual([])
+    db.close()
+  })
+
+  test("context rareVocabulary excludes the 38 added shared exclusions and 55-word delta while keeping rare tokens", async () => {
+    const { upsertContent } = await import("../../src/history/db")
+    const { buildQueryContext } = await import("../../src/lib/context")
+    const prev = process.env.RECALL_DB_PATH
+    const dir = fs.mkdtempSync(join(tmpdir(), "recall-ctx-vocab-"))
+    closeDb()
+    process.env.RECALL_DB_PATH = join(dir, "ctx.db")
+    try {
+      const db = getDb()
+      const now = Date.now()
+      for (let i = 0; i < 20; i++) {
+        const body = i < 4 ? "between during make getting barenode" : `padding document ${i}`
+        upsertContent(db, "bead", `bd-${i}`, "/test", `Title ${i}`, body, now - i)
+      }
+      const ctx = buildQueryContext({ cwd: dir, noCache: true })
+      expect(ctx.rareVocabulary).toContain("barenode")
+      for (const excluded of ["between", "during", "make", "getting"]) {
+        expect(ctx.rareVocabulary).not.toContain(excluded)
+      }
+    } finally {
+      closeDb()
+      if (prev === undefined) delete process.env.RECALL_DB_PATH
+      else process.env.RECALL_DB_PATH = prev
+      safeRemoveSync(dir, { within: tmpdir(), allowMissing: true })
+    }
   })
 
   test("single quotes are safely quoted", () => {
