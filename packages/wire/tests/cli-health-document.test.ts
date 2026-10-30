@@ -107,11 +107,12 @@ describe("health service-probe and full diagnostic capture contracts", () => {
     ["unhealthy", "diagnostic-failed"],
     ["unknown", "TRIBE_DAEMON_CALL_TIMEOUT"],
   ] as const)("uses lightweight status for the %s arm", async (state, errorCode) => {
-    const { stdout, code, methods } = await runHealthReply(["--json"], {
-      ...(errorCode
+    const { stdout, code, methods } = await runHealthReply(
+      ["--json"],
+      errorCode
         ? { error: { code: errorCode, message: "probe condition" } }
-        : { result: { daemon: { pid: 42, uptime: 100, clients: 2 }, sessions: [{ name: "a" }] } }),
-    })
+        : { result: { daemon: { pid: 42, uptime: 100, clients: 2 }, sessions: [{ name: "a" }] } },
+    )
     expectOneDocument(stdout, code)
     const document = JSON.parse(stdout) as { state: string; facts?: Record<string, unknown> }
     expect(document.state).toBe(state)
