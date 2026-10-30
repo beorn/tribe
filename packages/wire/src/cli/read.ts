@@ -1211,8 +1211,8 @@ export async function writeHealthDocument(document: WireHealthDocument, exitCode
   await writeJsonStdout(document, 2)
 }
 
-async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
-  if (opts?.json) {
+async function cmdHealth(opts?: { json?: boolean; full?: boolean }): Promise<void> {
+  if (opts?.json && !opts.full) {
     const socketPath = resolveSocketPath()
     let client: DaemonClient
     try {
@@ -1253,10 +1253,47 @@ async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
     return
   }
 
-  const result = (await callDaemon("cli_health")) as {
+  let result: {
     content: Array<{ type: string; text: string }>
     sessions?: Array<{ name: string; role: string; pid: number; cwd?: string; uptimeMs: number; idleMs: number }>
     daemon: { pid: number; uptime: number; clients: number }
+  }
+  try {
+    // A diagnostic capture shares the human path's restart-retry window. Only the
+    // lightweight socket measurement above opts out of it.
+    result = (await callDaemon("cli_health", undefined, opts?.json ? "throw" : "exit")) as typeof result
+    if (opts?.json) {
+      const body = mcpJsonContent(result)
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        throw new Error("cli_health body must be an object")
+      }
+      // The health command descriptor declares cadence.inbox_lag. Validate that
+      // existing output contract; an absent projection is not an observed [].
+      const cadence = (body as Record<string, unknown>).cadence
+      if (cadence === null || typeof cadence !== "object" || Array.isArray(cadence)) {
+        throw new Error("cli_health body lacks cadence (object)")
+      }
+      if (!Array.isArray((cadence as Record<string, unknown>).inbox_lag)) {
+        throw new Error("cli_health body lacks cadence.inbox_lag (array)")
+      }
+      process.exitCode = 0
+      await writeJsonStdout(body, 2)
+      return
+    }
+  } catch (error) {
+    if (!opts?.json) throw error
+    const socketPath = resolveSocketPath()
+    console.error(
+      `cli_health full capture (socket ${socketPath}): ${error instanceof Error ? error.message : String(error)}`,
+    )
+    // withCliDaemonClient wraps a missing socket for diagnostic callers. Preserve
+    // that measured absent state through the existing health exit/state table.
+    const cause = error instanceof Error ? error.cause : undefined
+    const causeCode = (cause as { code?: unknown } | undefined)?.code
+    const healthError = causeCode === "ENOENT" || causeCode === "ECONNREFUSED" ? cause : error
+    const { exitCode, document } = evaluateWireHealthDocument(null, healthError, socketPath)
+    await writeHealthDocument(document, exitCode)
+    return
   }
 
   console.log("TRIBE HEALTH DIAGNOSTICS\n")
@@ -2940,8 +2977,9 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
   program
     .command("health")
     .description("Run health diagnostics")
-    .option("--json", "Emit one hab-service-health/2 JSON document")
-    .action((opts: { json?: boolean }) => cmdHealth(opts))
+    .option("--json", "Emit the service probe JSON, or diagnostic body JSON with --full")
+    .option("--full", "Capture full diagnostics (the default human view); combine with --json for machine output")
+    .action((opts: { json?: boolean; full?: boolean }) => cmdHealth(opts))
 
   program
     .command("doctor")

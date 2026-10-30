@@ -345,6 +345,19 @@ percentiles by role and message type, open-ball counts and oldest age, per-
 session inbox lag, and database growth — surfaced via `tribe.health` /
 `tribe-wire health`. It reports; it does not act.
 
+`tribe health` and `tribe health --full` print the same human diagnostic view.
+`tribe health --json` is the lightweight service probe: one `hab-service-health/2`
+document, suitable for recurring liveness checks. It does not collect full diagnostics.
+
+Use `tribe health --full --json > health.json` for the full diagnostic snapshot,
+including `cadence.inbox_lag`. Exit 0 means stdout is exactly the existing MCP health
+body, without the transport wrapper or the CLI's roster additions. An empty
+`inbox_lag` array is an observed empty result. A missing or malformed projection
+fails rather than inventing an empty array. On failure, stdout holds one existing
+`hab-service-health/2` document and diagnostics go to stderr: absent daemon exits 1,
+failed or malformed response 2, and timeout 3. The exit code distinguishes a successful
+diagnostic body from a failure document; check it before consuming the capture.
+
 ---
 
 ## Configuration

@@ -106,11 +106,12 @@ describe("registerReadCommands", () => {
     expect(flags).toEqual(expect.arrayContaining(["--limit", "--all", "--follow", "--json", "--ref-prefix"]))
   })
 
-  test("health verb is registered with description and accepts --json", () => {
+  test("health verb is registered with description and accepts --json and --full", () => {
     const cmd = findCmd(buildProgram(), "health")
     expect(cmd).toBeDefined()
     expect(cmd!.description()).toMatch(/diagnostics/i)
     expect(optionFlags(cmd!)).toContain("--json")
+    expect(optionFlags(cmd!)).toContain("--full")
   })
 
   describe("evaluateWireHealthDocument", () => {

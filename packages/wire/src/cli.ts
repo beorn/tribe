@@ -89,7 +89,8 @@ export async function main(argv: readonly string[], options: WireCliOptions = {}
   }
 
   // Commander-routed subcommands (Phase A.2 verb families). `tribe health --json` owes its reader exactly
-  // one hab-service-health/2 document on EVERY exit path, so its one caller wraps the whole family: a throw
+  // one hab-service-health/2 document on EVERY probe exit path (full diagnostic JSON has its own success
+  // body), so its one caller wraps the whole family: a throw
   // out of registration or parse used to leave stdout empty, and a reader of an empty stdout can only say
   // the probe established nothing (bead 27871).
   try {
