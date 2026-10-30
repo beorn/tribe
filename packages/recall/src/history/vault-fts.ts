@@ -186,7 +186,7 @@ export function vaultTerms(query: string): string[] {
   return terms
 }
 
-/** A quoted phrase or a `-term` at a word's start: the caller wrote FTS syntax, and it runs as written. */
+/** A quoted phrase or a `-term` at a word's start: the caller wrote FTS syntax, routed through {@link toFts5Query} (preserving quotes/negations and stripping unquoted stopwords). */
 const FTS_SYNTAX = /"|(?:^|\s)-\S/u
 
 /**
@@ -202,7 +202,7 @@ const FTS_SYNTAX = /"|(?:^|\s)-\S/u
  * The query is its terms (vaultTerms), each an exact token: all of them together first, and when that matches no
  * row, any of them ranked by bm25, so a question whose words no single paragraph holds still finds the nodes that
  * hold its rare words (@ag/recall/29487, @cto 7c3f702c). The receipt names the form that ran, the terms, and the terms
- * no node holds. A query in FTS syntax runs as written.
+ * no node holds. A query in FTS syntax routes through {@link toFts5Query} (preserving quotes/negations and stripping unquoted stopwords).
  *
  * `vaultDb` is the vault this search reads, named by the caller; null searches nothing, and the caller says so.
  */
