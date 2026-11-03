@@ -1270,7 +1270,7 @@ export async function indexCodexTranscripts(
       }
     })
 
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       buffer += decoder.end()
       if (buffer.trim()) {
         if (!handleLine(buffer)) return
@@ -1280,7 +1280,7 @@ export async function indexCodexTranscripts(
         inTx = false
         reject(
           new Error(
-            `ag transcript export stream ended abruptly during active transaction for session ${currentSession?.nativeId ?? "unknown"} (committed ${batchSessionCount} sessions [${batchIndexedSessionIds.join(", ")}], ${batchRowCount} rows prior to interruption)`,
+            `ag transcript export stream ended abruptly during active transaction for session ${currentSession?.nativeId ?? "unknown"} (committed ${batchSessionCount} sessions [${batchIndexedSessionIds.join(", ")}], ${batchRowCount} rows prior to interruption; exit code ${code}; signal ${signal ?? "none"}; stderr ${JSON.stringify(stderr.trim())})`,
           ),
         )
         return

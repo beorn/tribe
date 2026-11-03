@@ -2673,8 +2673,13 @@ if (args.includes("list")) {
   })
 
   describe("Chief Review 2150: Corrections 4 & 5 - Failure Contract, Committed IDs, and UTF-8 Chunk Splitting", () => {
-    test("interrupted export reports committed session IDs alongside interrupted native ID", async () => {
-      const mockInterruptedAg = makeMockAg(`
+    test.each([
+      { kind: "exit", code: 7, signal: "none", terminate: "process.exit(7)" },
+      { kind: "signal", code: null, signal: "SIGTERM", terminate: 'process.kill(process.pid, "SIGTERM")' },
+    ])(
+      "interrupted export reports committed session IDs and child diagnostics ($kind)",
+      async ({ code, signal, terminate }) => {
+        const mockInterruptedAg = makeMockAg(`
 if (process.argv.includes("list")) {
   console.log(JSON.stringify({ kind: "schema", version: 1 }))
   console.log(JSON.stringify({
@@ -2728,14 +2733,23 @@ if (process.argv.includes("list")) {
   }))
   console.log(JSON.stringify({ kind: "row", sessionKey: "codex:sess-2-interrupted", line: 1, role: "user", text: "msg 2" }))
   // Child process exits abruptly without closing end record
-  process.exit(1)
+  process.stderr.write("fixture exporter stopped before end\\n")
+  ${terminate}
 }
 `)
 
-      await expect(indexCodexTranscripts(db, { agBin: mockInterruptedAg })).rejects.toThrow(
-        /sess-2-interrupted.*committed 1 sessions \[codex:sess-1\]/,
-      )
-    })
+        await expect(indexCodexTranscripts(db, { agBin: mockInterruptedAg })).rejects.toThrow(
+          new RegExp(
+            `sess-2-interrupted.*committed 1 sessions \\[codex:sess-1\\].*exit code ${code}.*signal ${signal}.*fixture exporter stopped before end`,
+          ),
+        )
+        expect(
+          db
+            .query("SELECT id FROM sessions WHERE id IN ('codex:sess-1', 'codex:sess-2-interrupted') ORDER BY id")
+            .all(),
+        ).toEqual([{ id: "codex:sess-1" }])
+      },
+    )
 
     test("nonzero producer failure includes failed path, wire reason, and timestamp", async () => {
       const mockListError = makeMockAg(`
