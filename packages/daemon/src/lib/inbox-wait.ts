@@ -63,6 +63,7 @@ type Waiter = {
   /** The mailbox owner is the one waiting, so this wait consumes `session`'s mailbox. */
   readonly consumesMailbox: boolean
   readonly baselineSeq: number
+  readonly freshLogicalWait: boolean
   readonly startedAt: number
   readonly effectiveTimeoutMs: number
   readonly wakeOnCorrelatedReply: boolean
@@ -128,14 +129,14 @@ export function createInboxWaitManager(
     }
   }
 
-  /** The waking row for a woken result; undefined for a timeout or an abort, which no row caused. */
+  /** The waking row for a woken result; undefined for a timeout, an abort, or an expiry wake (`seq <= 0`), which no message row caused. */
   function wokenBy(
     session: string,
     wakeOnCorrelatedReply: boolean,
     seq: number,
     flags: { timedOut: boolean; aborted: boolean },
   ): InboxWaitWokenBy | undefined {
-    if (flags.timedOut || flags.aborted || readWokenBy === undefined) return undefined
+    if (flags.timedOut || flags.aborted || seq <= 0 || readWokenBy === undefined) return undefined
     const woken = readWokenBy(session, seq, wakeOnCorrelatedReply)
     // 27407 - a wake that names a row the mailbox cursor is already past is a
     // REPLAY, not news. Say so in the daemon log so the showing path is
@@ -208,14 +209,82 @@ export function createInboxWaitManager(
       : { flags: { timedOut: true, aborted: false }, wakeSeq: 0 }
   }
 
-  function settleAtDeadline(waiter: Waiter): void {
+  function pendingBallDueMs(ball: Record<string, unknown>): number | undefined {
+    const dueMs = typeof ball.expires_at === "string" ? Date.parse(ball.expires_at) : Number.NaN
+    return Number.isFinite(dueMs) ? dueMs : undefined
+  }
+
+  /**
+   * 21739 Part A: the earliest remaining delay (ms) until an open pending ball's `expires_at` (`due_at` or active
+   * `quiet-until`) elapses inside the current wait window, or `undefined` when no pending ball expires before the
+   * caller's outer timeout.
+   */
+  function nextPendingExpiryDelayMs(snapshot: InboxWaitSnapshot, now: number, remainingMs: number): number | undefined {
+    let earliestDelayMs: number | undefined
+    for (const ball of snapshot.attention.pending_balls) {
+      if (ball.status === "expired") continue
+      const dueMs = pendingBallDueMs(ball)
+      if (dueMs === undefined || dueMs <= now) continue
+      const delayMs = dueMs - now
+      if (delayMs < remainingMs && (earliestDelayMs === undefined || delayMs < earliestDelayMs)) {
+        earliestDelayMs = delayMs
+      }
+    }
+    return earliestDelayMs
+  }
+
+  /**
+   * 21739 Part A: whether a pending ball in the refreshed snapshot transitioned to expired during this wait
+   * (`startedAt < dueMs <= now`), treating expiry as an existing attention recheck with no fabricated message.
+   */
+  function hasPendingBallExpiredSince(snapshot: InboxWaitSnapshot, startedAt: number, now: number): boolean {
+    for (const ball of snapshot.attention.pending_balls) {
+      const dueMs = pendingBallDueMs(ball)
+      if (dueMs !== undefined && dueMs > startedAt && (ball.status === "expired" || dueMs <= now)) {
+        return true
+      }
+    }
+    const newestOverdueDueAt = (snapshot.attention as { pending_balls_summary?: { newest_overdue_due_at?: unknown } })
+      .pending_balls_summary?.newest_overdue_due_at
+    return typeof newestOverdueDueAt === "number" && newestOverdueDueAt > startedAt && newestOverdueDueAt <= now
+  }
+
+  function armWaiterTimer(waiter: Waiter, snapshot: InboxWaitSnapshot, now = Date.now()): void {
     if (waiter.done) return
+    const remainingMs = Math.max(0, waiter.startedAt + waiter.effectiveTimeoutMs - now)
+    const nextExpiryMs = nextPendingExpiryDelayMs(snapshot, now, remainingMs)
+    clearTimeout(waiter.timer)
+    waiter.timer = setTimeout(() => onWaiterTimer(waiter), nextExpiryMs ?? remainingMs)
+  }
+
+  function onWaiterTimer(waiter: Waiter): void {
+    if (waiter.done) return
+    const now = Date.now()
     const snapshot = readSnapshot(waiter.session, waiter.wakeOnCorrelatedReply)
+    const qualified = waiter.freshLogicalWait
+      ? snapshot.currentQualifyingSeq > 0 || snapshot.latestQualifyingSeq > waiter.baselineSeq
+      : snapshot.latestQualifyingSeq > waiter.baselineSeq
+    if (qualified) {
+      settle(waiter, { timedOut: false, aborted: false }, snapshotWakeSeq(snapshot, waiter.freshLogicalWait), snapshot)
+      return
+    }
     const outcome = deadlineOutcome(snapshot, waiter.baselineSeq)
     if (outcome.wakeSeq > 0) {
       log.info?.(
         `inbox-wait: deadline for ${waiter.session} settles woken on retained attention row ${outcome.wakeSeq}, which arrived during the window past baseline ${waiter.baselineSeq} (30414)`,
       )
+      settle(waiter, outcome.flags, outcome.wakeSeq, snapshot)
+      return
+    }
+    if (hasPendingBallExpiredSince(snapshot, waiter.startedAt, now)) {
+      settle(waiter, { timedOut: false, aborted: false }, 0, snapshot)
+      return
+    }
+    if (now < waiter.startedAt + waiter.effectiveTimeoutMs) {
+      // 21739 Part A: woken reason at the mid-wait expiry recheck was not actionable (e.g. the ball was settled or
+      // re-dued before due); preserve the waiter's original full bound.
+      armWaiterTimer(waiter, snapshot, now)
+      return
     }
     settle(waiter, outcome.flags, outcome.wakeSeq, snapshot)
   }
@@ -372,19 +441,21 @@ export function createInboxWaitManager(
       )
     }
     return new Promise((resolve) => {
+      const startedAt = Date.now()
       const waiter: Waiter = {
         connId,
         session,
         consumesMailbox: opts.consumesMailbox === true,
         baselineSeq,
-        startedAt: Date.now(),
+        freshLogicalWait,
+        startedAt,
         effectiveTimeoutMs,
         wakeOnCorrelatedReply,
         resolve,
         done: false,
         timer: undefined as unknown as ReturnType<typeof setTimeout>,
       }
-      waiter.timer = setTimeout(() => settleAtDeadline(waiter), effectiveTimeoutMs)
+      armWaiterTimer(waiter, snapshot, startedAt)
       waiters.add(waiter)
 
       // Condition-variable discipline: check, subscribe, then recheck. A row
@@ -401,7 +472,9 @@ export function createInboxWaitManager(
           snapshotWakeSeq(afterSubscribe, freshLogicalWait),
           afterSubscribe,
         )
+        return
       }
+      armWaiterTimer(waiter, afterSubscribe)
     })
   }
 

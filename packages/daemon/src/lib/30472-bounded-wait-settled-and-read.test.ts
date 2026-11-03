@@ -377,4 +377,89 @@ describe("30472 bounded wait does not wake on settled requests or receipted open
     expect(waitAfterAnswer.timed_out).toBe(true)
     expect(waitAfterAnswer.woken_by).toBeUndefined()
   })
+
+  it("21739 Part A: a receipted open ball whose expires_at elapses mid-wait wakes on the expiry recheck without fabricating a message", async () => {
+    const { chief, recipient, manager } = fixture()
+
+    const req = sendMessage(
+      chief,
+      RECIPIENT,
+      "renew before due",
+      "request",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      {
+        expiresInMs: 60,
+      },
+    )
+    sendMessage(
+      recipient,
+      CHIEF,
+      `TAKING ${req.id} · owner ${RECIPIENT} · ETA 15:00 PDT · todo #21739`,
+      "status",
+      undefined,
+      req.id,
+    )
+
+    const result = await manager.wait(RECIPIENT, "conn-21739-due-wake", 300, {
+      consumesMailbox: true,
+      wakeOnCorrelatedReply: true,
+    })
+    expect(result.status).toBe("woken")
+    expect(result.timed_out).toBe(false)
+    expect(result.woken_by).toBeUndefined()
+    expect(result.waited_ms).toBeLessThan(220)
+    expect(result.attention.pending_balls).toEqual(
+      expect.arrayContaining([expect.objectContaining({ request_id: req.id, status: "expired" })]),
+    )
+  })
+
+  it("21739 Part A: when a ball's expires_at elapses mid-wait after the ball was settled before due, the expiry recheck is not actionable and preserves the original full bound", async () => {
+    const { chief, recipient, manager } = fixture()
+
+    const req = sendMessage(
+      chief,
+      RECIPIENT,
+      "settle before due",
+      "request",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      {
+        expiresInMs: 50,
+      },
+    )
+    sendMessage(
+      recipient,
+      CHIEF,
+      `TAKING ${req.id} · owner ${RECIPIENT} · ETA 15:00 PDT · todo #21739`,
+      "status",
+      undefined,
+      req.id,
+    )
+
+    const waitPromise = manager.wait(RECIPIENT, "conn-21739-due-settled", 180, {
+      consumesMailbox: true,
+      wakeOnCorrelatedReply: true,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 15))
+    handleToolCall(
+      chief,
+      "tribe.pending",
+      {
+        owner: RECIPIENT,
+        close: req.id,
+      },
+      handlerOpts(),
+    )
+
+    const result = await waitPromise
+    expect(result.status).toBe("timeout")
+    expect(result.timed_out).toBe(true)
+    expect(result.woken_by).toBeUndefined()
+    expect(result.waited_ms).toBeGreaterThanOrEqual(150)
+  })
 })
