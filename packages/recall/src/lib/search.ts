@@ -262,7 +262,8 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
       process.exit(1)
     }
     const limit = limitStr ? parseInt(limitStr, 10) : 50
-    await cmdGrep(query, { project, limit, session, json })
+    const { sinceTime } = resolveSearchWindow(since)
+    await cmdGrep(query, { project, limit, session, json, sinceTime })
     return
   }
 
@@ -1311,9 +1312,9 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
 
 async function cmdGrep(
   pattern: string,
-  options: { project?: string; limit?: number; session?: string; json?: boolean },
+  options: { project?: string; limit?: number; session?: string; json?: boolean; sinceTime?: number },
 ): Promise<void> {
-  const { project, limit = 50, session, json = false } = options
+  const { project, limit = 50, session, json = false, sinceTime } = options
   const contextLines = 2
   const startedAt = Date.now()
 
@@ -1372,6 +1373,8 @@ async function cmdGrep(
 
       try {
         const record = JSON.parse(line) as JsonlRecord
+        // Apply the message window before a matching line can consume the cap.
+        if (sinceTime !== undefined && !(new Date(record.timestamp || "").getTime() >= sinceTime)) continue
         const textContent = extractTextContent(record)
         if (!textContent || !regex.test(textContent)) continue
 
