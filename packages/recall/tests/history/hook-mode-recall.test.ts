@@ -458,3 +458,98 @@ describe("25071 row 2: the budget is stated once, as named constants", () => {
     expect(Object.keys(budget).sort()).toEqual(["HOOK_CANDIDATE_LIMIT", "RECALL_WALL_MS"].sort())
   })
 })
+
+// S2 refactor guards (/hh/var/@adhoc4/ac8-s1s2-design.md § S2 "Behaviour to preserve"): recall()'s synonym loop
+// moves into a shared variant executor, so its rank penalty and its reject cut are pinned here first. The skip
+// names on a rejected leg (synonym_messages / synonym_project_content) are already pinned by the
+// "late $phase $failure" table above; a capped synonym leg cannot occur, since synonyms never run in hook mode.
+describe("S2: recall() synonym variants", () => {
+  function seedDoc(sourceId: string, content: string): void {
+    getDb()
+      .prepare(
+        `INSERT INTO content (content_type, source_id, project_path, title, content, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run("doc", sourceId, "/test/km", sourceId, content, Date.now() - DAY_MS)
+  }
+
+  function seedSynonymFixture(): void {
+    seed([
+      { session: "base-hit", content: "auth token rotation note", ageDays: 1 },
+      { session: "synonym-only", content: "authentication flow rotation note", ageDays: 1 },
+    ])
+    seedDoc("synonym-doc", "authentication guide for the rotation")
+  }
+
+  const rankOf = (results: { sessionId: string; type: string; rank: number }[], sessionId: string, type: string) =>
+    results.find((r) => r.sessionId === sessionId && r.type === type)?.rank
+
+  // Pins: a synonym-only hit (message and project content) carries its own variant's raw rank + 5 (S2 refactor
+  // guard; hook-mode-recall's synonym control asserts only that the phase ran, recall.test.ts only the variant list).
+  test("a synonym-only hit ranks at its variant's own rank plus the +5 penalty, for messages and content", async () => {
+    seedSynonymFixture()
+    const viaSynonym = await recall("auth", { raw: true, excludeCurrentSession: true })
+    // recall() closes the in-memory index; the same corpus re-seeded gives the same bm25 statistics.
+    seedSynonymFixture()
+    const direct = await recall("authentication", { raw: true, excludeCurrentSession: true })
+
+    const directMessage = rankOf(direct.results, "synonym-only", "message")
+    const directDoc = rankOf(direct.results, "synonym-doc", "doc")
+    expect(directMessage).toBeLessThan(0)
+    expect(directDoc).toBeLessThan(0)
+    expect(rankOf(viaSynonym.results, "synonym-only", "message")).toBe(directMessage! + 5)
+    expect(rankOf(viaSynonym.results, "synonym-doc", "doc")).toBe(directDoc! + 5)
+    // The exact-match hit is not penalised and still leads.
+    expect(viaSynonym.results[0]).toMatchObject({ sessionId: "base-hit", type: "message" })
+    expect(viaSynonym.skipped ?? []).toEqual([])
+  })
+
+  // Pins: a variant whose message query is rejected skips that variant's content leg (records only
+  // synonym_messages), and the loop goes on to the next variant (S2 refactor guard; the late-failure table injects
+  // each leg's failure separately and never observes whether the content leg still ran).
+  test("a rejected synonym message query skips that variant's content leg and continues with the next variant", async () => {
+    seed([{ session: "base-hit", content: "auth token rotation note", ageDays: 1 }])
+    seedDoc("authentication-doc", "authentication guide for the rotation")
+    seedDoc("login-doc", "login guide for the rotation")
+    const db = getDb()
+    const originalPrepare = db.prepare
+    const prepare = originalPrepare.bind(db)
+    const contentQueries: unknown[][] = []
+    let injected = false
+    db.prepare = ((sql: string) => {
+      const statement = prepare(sql)
+      const execute = statement.all.bind(statement)
+      statement.all = ((...params: Parameters<typeof statement.all>) => {
+        const bindings = [...params]
+        if (sql.includes("content_fts")) contentQueries.push(bindings)
+        if (
+          !injected &&
+          sql.includes("messages_fts") &&
+          !sql.includes("GROUP BY") &&
+          bindings.includes('"authentication"')
+        ) {
+          injected = true
+          bindings[bindings.indexOf('"authentication"')] = ""
+        }
+        return execute(...bindings)
+      }) as typeof statement.all
+      return statement
+    }) as typeof db.prepare
+
+    try {
+      const result = await recall("auth", { raw: true, excludeCurrentSession: true })
+
+      expect(injected).toBe(true)
+      expect(result.skipped).toEqual([
+        { kind: "query-rejected", phase: "synonym_messages", anchor: "authentication", message: expect.any(String) },
+      ])
+      expect(contentQueries.some((params) => params.includes('"authentication"'))).toBe(false)
+      expect(contentQueries.some((params) => params.includes('"login"'))).toBe(true)
+      const ids = result.results.map((r) => r.sessionId)
+      expect(ids).not.toContain("authentication-doc")
+      expect(ids).toContain("login-doc")
+    } finally {
+      db.prepare = originalPrepare
+    }
+  })
+})

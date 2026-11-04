@@ -1426,4 +1426,361 @@ describe("recall search output", () => {
       rmSync(parent, { recursive: true, force: true })
     }
   })
+
+  // ==========================================================================
+  // S1 refactor guards (/hh/var/@adhoc4/ac8-s1s2-design.md § S1 "Behaviour to preserve"): pins that must be green
+  // at HEAD before rawSearch/cmdGrep share a renderer or rawSearch loses its own recent-rows SQL.
+  // ==========================================================================
+  describe("S1 golden pins", () => {
+    const NOW = Date.parse("2026-10-20T12:00:00.000Z")
+    const HOUR = 60 * 60 * 1000
+    const HEAVY = "━".repeat(60)
+    const LIGHT = "─".repeat(60)
+    const hl = (text: string) => `\x1b[1m\x1b[33m${text}\x1b[0m`
+    let savedSessionId: string | undefined
+    let savedHome: string | undefined
+    let savedExitCode: typeof process.exitCode
+    let nowSpy: ReturnType<typeof vi.spyOn>
+
+    beforeEach(() => {
+      savedSessionId = process.env.CLAUDE_SESSION_ID
+      savedHome = process.env.HOME
+      savedExitCode = process.exitCode
+      process.exitCode = 0
+      // No ambient live-session supplement: golden output must not depend on the runner's own transcript.
+      delete process.env.CLAUDE_SESSION_ID
+      // A fixed clock makes "Nh ago", "(3d ago)" and "in 0ms" exact.
+      nowSpy = vi.spyOn(Date, "now").mockReturnValue(NOW)
+    })
+
+    afterEach(() => {
+      nowSpy.mockRestore()
+      if (savedSessionId === undefined) delete process.env.CLAUDE_SESSION_ID
+      else process.env.CLAUDE_SESSION_ID = savedSessionId
+      if (savedHome === undefined) delete process.env.HOME
+      else process.env.HOME = savedHome
+      process.exitCode = savedExitCode
+    })
+
+    const stdoutLines = () => logSpy.mock.calls.map((args: unknown[]) => args.join(" "))
+    const stderrLines = () => errSpy.mock.calls.map((args: unknown[]) => args.join(" "))
+
+    function seedGoldenSession(
+      id: string,
+      cwd: string | null,
+      rows: Array<{ type: string; content: string; ageMs: number; line: number; tool?: string }>,
+      updatedAt = NOW,
+    ): void {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, cwd)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, "-test-golden-b", `/tmp/${id}.jsonl`, NOW - 10 * HOUR, updatedAt, rows.length, null, cwd)
+      rows.forEach((row, i) => {
+        db.prepare(
+          `INSERT INTO messages (uuid, session_id, type, content, tool_name, timestamp, line)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(`${id}-m${i}`, id, row.type, row.content, row.tool ?? null, NOW - row.ageMs, row.line)
+      })
+    }
+
+    function seedGoldenContent(content: string): void {
+      getDb()
+        .prepare(
+          `INSERT INTO content (content_type, source_id, project_path, title, content, timestamp)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run("doc", "golden-doc", "/test/golden", "Golden doc", content, NOW - 3 * 24 * HOUR)
+    }
+
+    function seedGoldenFixture(): void {
+      seedGoldenSession("golden-a-1111", "/test/golden", [
+        { type: "user", content: "goldenneedle first question", ageMs: 2 * HOUR, line: 11 },
+        { type: "assistant", content: "goldenneedle second answer", ageMs: 2 * HOUR + 1000, line: 12 },
+        { type: "user", content: "goldenneedle third question", ageMs: 2 * HOUR + 2000, line: 13 },
+        { type: "assistant", content: "goldenneedle fourth answer", ageMs: 2 * HOUR + 3000, line: 14 },
+      ])
+      seedGoldenSession("golden-b-2222", null, [
+        { type: "user", content: "goldenneedle from b one", ageMs: 5 * HOUR, line: 3 },
+        { type: "user", content: "goldenneedle from b two", ageMs: 5 * HOUR + 1000, line: 4 },
+      ])
+      seedGoldenContent("goldenneedle lives in a doc")
+      setIndexMeta(getDb(), "last_rebuild", new Date(NOW).toISOString())
+    }
+
+    // Pins: raw human layout — per-session header line, "... and N more matches in this session", the
+    // "Other Content" and "Vault" sections, "(showing X of Y" and the >>>/<<< and «» highlight ANSI codes
+    // (S1 refactor guard; search-output.test.ts otherwise asserts only "Searching:" / "Found N matches" / contains).
+    test("raw human output renders the exact grouped layout for a small fixture", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "recall-s1-golden-"))
+      try {
+        seedGoldenFixture()
+        const vaultPath = join(dir, "state.db")
+        seedVaultDb(vaultPath, "goldenneedle vault body")
+        bindVaultDb(vaultPath)
+
+        await cmdSearch("goldenneedle", { raw: true, limit: "5", project: "*" })
+
+        const { formatTime } = await import("../../src/lib/format")
+        const at = (ageMs: number) => formatTime(NOW - ageMs)
+        expect(stdoutLines()).toEqual([
+          `\x1b[2mSearching: "goldenneedle" last 30d\x1b[0m\n`,
+          `Found 8 matches for "goldenneedle" in 0ms:\n`,
+          HEAVY,
+          "\u{1F4C1} golden-a...  |  /test/golden  |  2h ago",
+          HEAVY,
+          `\n\u{1F464} User (${at(2 * HOUR)}, L11):`,
+          LIGHT,
+          `${hl("goldenneedle")} first question`,
+          `\n\u{1F916} Assistant (${at(2 * HOUR + 1000)}, L12):`,
+          LIGHT,
+          `${hl("goldenneedle")} second answer`,
+          `\n\u{1F464} User (${at(2 * HOUR + 2000)}, L13):`,
+          LIGHT,
+          `${hl("goldenneedle")} third question`,
+          "\n  ... and 1 more matches in this session",
+          "",
+          HEAVY,
+          "\u{1F4C1} golden-b...  |  /test/golden/b  |  5h ago",
+          HEAVY,
+          `\n\u{1F464} User (${at(5 * HOUR)}, L3):`,
+          LIGHT,
+          `${hl("goldenneedle")} from b one`,
+          "",
+          `\n${LIGHT}`,
+          "\x1b[1mOther Content\x1b[0m\n",
+          "\u{1F4D6} \x1b[36m[doc]\x1b[0m \x1b[1mGolden doc\x1b[0m \x1b[2m/test/golden\x1b[0m \x1b[2m(3d ago)\x1b[0m",
+          `   ${hl("goldenneedle")} lives in a doc`,
+          "",
+          `\n${LIGHT}`,
+          "\x1b[1mVault\x1b[0m\n",
+          "\u{1F4D6} \x1b[1mVault raw-mode fixture\x1b[0m \x1b[2mhub/vault-raw-fixture.md\x1b[0m",
+          `   ${hl("goldenneedle")} vault body`,
+          "",
+          "\x1b[2m(showing 7 of 8 matches, use -n/--limit <num> to see more)\x1b[0m",
+        ])
+      } finally {
+        safeRemoveSync(dir, { within: tmpdir() })
+      }
+    })
+
+    // Pins: the raw human CURRENT SESSION block (live, not-yet-indexed transcript) printed before the indexed
+    // groups, its 3-entry cut and "... and N more matches in current session" (S1 refactor guard; the only other
+    // live-session test mocks the supplement away and asserts its absence).
+    test("raw human output renders the CURRENT SESSION block from the live transcript", async () => {
+      const home = mkdtempSync(join(tmpdir(), "recall-s1-live-"))
+      try {
+        const liveId = "live-golden-session"
+        const liveDir = join(home, ".claude", "projects", process.cwd().replaceAll("/", "-"))
+        mkdirSync(liveDir, { recursive: true })
+        writeFileSync(
+          join(liveDir, `${liveId}.jsonl`),
+          ["one", "two", "three", "four"]
+            .map((word, i) =>
+              JSON.stringify({
+                type: i % 2 === 0 ? "human" : "assistant",
+                timestamp: NOW - (4 - i) * 1000,
+                message: { content: `livegoldenneedle live ${word}` },
+              }),
+            )
+            .join("\n") + "\n",
+        )
+        process.env.HOME = home
+        process.env.CLAUDE_SESSION_ID = liveId
+        seedGoldenSession("golden-a-1111", "/test/golden", [
+          { type: "user", content: "livegoldenneedle indexed row", ageMs: 2 * HOUR, line: 7 },
+        ])
+        setIndexMeta(getDb(), "last_rebuild", new Date(NOW).toISOString())
+
+        await cmdSearch("livegoldenneedle", { raw: true, limit: "10", project: "*" })
+
+        const { formatTime } = await import("../../src/lib/format")
+        expect(stdoutLines()).toEqual([
+          `\x1b[2mSearching: "livegoldenneedle" last 30d\x1b[0m\n`,
+          `Found 5 matches for "livegoldenneedle" in 0ms:\n`,
+          HEAVY,
+          "\u{1F534} CURRENT SESSION  |  4 matches",
+          HEAVY,
+          "\n\u{1F4AC} livegoldenneedle live four",
+          LIGHT,
+          "\n\u{1F4AC} livegoldenneedle live three",
+          LIGHT,
+          "\n\u{1F4AC} livegoldenneedle live two",
+          LIGHT,
+          "  ... and 1 more matches in current session",
+          "",
+          HEAVY,
+          "\u{1F4C1} golden-a...  |  /test/golden  |  2h ago",
+          HEAVY,
+          `\n\u{1F464} User (${formatTime(NOW - 2 * HOUR)}, L7):`,
+          LIGHT,
+          `${hl("livegoldenneedle")} indexed row`,
+          "",
+        ])
+      } finally {
+        safeRemoveSync(home, { within: tmpdir() })
+      }
+    })
+
+    // Pins: regex-mode (--grep) human output — the grouped header "Session: <12>... | Project: ... | <iso>", the
+    // 5-per-session cut and its "... and N more matches in this session" line (S1 refactor guard; grep-scope.test.ts
+    // asserts only which session ids appear, the JSON envelope and the refusal). Runs the real CLI under a temp HOME:
+    // the Project field derives from the module-load PROJECTS_DIR ($HOME/.claude/projects), which Bun fixes per
+    // process, so an in-process CLAUDE_DIR outside $HOME would print "..".
+    test("regex mode renders the exact grouped human layout with a 5-per-session cut", async () => {
+      const home = mkdtempSync(join(tmpdir(), "recall-s1-grep-"))
+      try {
+        const token = "golden_grep_7c1"
+        const session = "7c1a2b3d-4444-4c2d-8e3f-888888888888"
+        const dir = join(home, ".claude", "projects", "proj-gold")
+        mkdirSync(dir, { recursive: true })
+        const stamps = Array.from({ length: 7 }, (_, i) => `2026-10-09T19:00:0${i}.000Z`)
+        writeFileSync(
+          join(dir, `${session}.jsonl`),
+          stamps
+            .map((timestamp, i) =>
+              JSON.stringify({
+                type: i % 2 === 0 ? "user" : "assistant",
+                timestamp,
+                message: { role: i % 2 === 0 ? "user" : "assistant", content: `${token} row ${i}` },
+              }),
+            )
+            .join("\n") + "\n",
+        )
+        const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, RECALL_DB_PATH: ":memory:", RECALL_AGENT: "0" }
+        delete env.CLAUDE_DIR
+
+        const result = await runRecallCli([token, "--grep"], env)
+
+        expect(result.code, result.stderr).toBe(0)
+        const time = (iso: string) => new Date(iso).toLocaleTimeString()
+        const entries = stamps
+          .slice(0, 5)
+          .flatMap((iso, i) => [
+            `\n${i % 2 === 0 ? "\u{1F464} User" : "\u{1F916} Assistant"} (${time(iso)}):`,
+            LIGHT,
+            `${hl(token)} row ${i}`,
+          ])
+        expect(result.stdout).toBe(
+          [
+            `Searching for "${token}" in session content...\n`,
+            "Found 7 matches in 1 files:\n",
+            HEAVY,
+            `\u{1F4C1} Session: ${session.slice(0, 12)}...  |  Project: proj/gold  |  2026-10-09 19:00:00Z`,
+            HEAVY,
+            ...entries,
+            "\n  ... and 2 more matches in this session",
+            "",
+          ].join("\n") + "\n",
+        )
+      } finally {
+        safeRemoveSync(home, { within: tmpdir() })
+      }
+    }, 15_000)
+
+    // Pins: an ambiguous --session prefix refuses with exit code 1 and names every candidate id, newest first
+    // (S1 refactor guard; the session-scope test covers only the missing-session and empty-session refusals).
+    test("an ambiguous --session refuses with exit 1 and lists the provider-qualified candidates", async () => {
+      seedGoldenSession(
+        "grok:ambig1-older",
+        null,
+        [{ type: "user", content: "ambigneedle", ageMs: HOUR, line: 1 }],
+        NOW - HOUR,
+      )
+      seedGoldenSession("codex:ambig1-newer", null, [{ type: "user", content: "ambigneedle", ageMs: HOUR, line: 1 }])
+      setIndexMeta(getDb(), "last_rebuild", new Date(NOW).toISOString())
+      const filename = getDb().filename
+
+      await cmdSearch("ambigneedle", { session: "ambig1" })
+
+      expect(process.exitCode).toBe(1)
+      expect(stderrLines()).toContain(
+        `recall: ambiguous --session ambig1 in ${filename} (matching "ambigneedle" last 30d session ambig1...); ` +
+          "pass the required <provider>:<uuid> form: codex:ambig1-newer, grok:ambig1-older",
+      )
+      expect(stdoutLines()).toEqual([`\x1b[2mSearching: "ambigneedle" last 30d session ambig1...\x1b[0m\n`])
+    })
+
+    // Pins: invalid --include types refuse with process.exit(1) and both the "Invalid include types" and
+    // "Valid types:" messages, before any search (S1 refactor guard; no existing test drives a bad --include).
+    test("invalid --include types refuse with exit 1 and name the valid types", async () => {
+      seedGoldenFixture()
+      const exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+        throw new Error(`process.exit(${String(code)})`)
+      }) as never)
+      try {
+        await expect(cmdSearch("goldenneedle", { raw: true, include: "zzz" })).rejects.toThrow("process.exit(1)")
+      } finally {
+        exitSpy.mockRestore()
+      }
+      expect(stderrLines()).toEqual(
+        expect.arrayContaining([
+          "Invalid include types: zzz",
+          "Valid types: m,b,e,d,c or messages,beads,session_memory,project_memory,docs,claude_md,llm_research",
+        ]),
+      )
+      expect(stdoutLines()).toEqual([])
+    })
+
+    // Pins: a query-less raw search (filters only) returns recent messages newest-first with snippet '' and rank 0,
+    // and opens no project-content leg and no vault leg even when matching content and a bound vault exist
+    // (S1 refactor guard; the epoch-zero test pins only the window bounds with include=m, which already cuts both legs).
+    test.each([
+      ["--since only", { since: "1d" }, ["golden-a-1111", "golden-b-2222", "golden-a-1111", "golden-b-2222"]],
+      ["--tool", { tool: "Bash" }, ["golden-a-1111", "golden-b-2222"]],
+    ])(
+      "an empty raw query (%s) returns recent messages only, newest first, without content or vault legs",
+      async (_label, filter, expectedSources) => {
+        const dir = mkdtempSync(join(tmpdir(), "recall-s1-empty-"))
+        const history = await import("../../src/history/search")
+        const candidates = vi.spyOn(history, "retrieveCandidates")
+        try {
+          seedGoldenSession("golden-a-1111", "/test/golden", [
+            { type: "user", content: "recent alpha", ageMs: 1 * HOUR, line: 1, tool: "Bash" },
+            { type: "assistant", content: "recent beta", ageMs: 3 * HOUR, line: 2 },
+          ])
+          seedGoldenSession("golden-b-2222", null, [
+            { type: "user", content: "recent gamma", ageMs: 2 * HOUR, line: 1 },
+            { type: "user", content: "recent delta", ageMs: 4 * HOUR, line: 2, tool: "Bash" },
+          ])
+          // Rows the query-less path must not surface: project content and a bound vault, both "matching" anything.
+          seedGoldenContent("recent alpha beta gamma delta")
+          getDb()
+            .prepare("UPDATE content SET timestamp = ?")
+            .run(NOW - HOUR / 2)
+          setIndexMeta(getDb(), "last_rebuild", new Date(NOW).toISOString())
+          const vaultPath = join(dir, "state.db")
+          seedVaultDb(vaultPath, "recent alpha beta gamma delta")
+          bindVaultDb(vaultPath)
+
+          await cmdSearch(undefined, { raw: true, json: true, project: "*", ...filter })
+
+          const payload = jsonStdout<{
+            query?: string
+            total: number
+            results: Array<{ contentType: string; sourceId: string; snippet: string; rank: number; timestamp: number }>
+          }>(logSpy)
+          expect(payload.results.map((row) => row.sourceId)).toEqual(expectedSources)
+          expect(payload.results.every((row) => row.contentType === "message")).toBe(true)
+          expect(payload.results.every((row) => row.snippet === "" && row.rank === 0)).toBe(true)
+          const stamps = payload.results.map((row) => row.timestamp)
+          expect(stamps).toEqual([...stamps].sort((a, b) => b - a))
+          expect(payload.total).toBe(payload.results.length)
+          // Candidate reads happened, but none opened a content or vault leg (a recent-messages leg would be allowed).
+          expect(candidates).toHaveBeenCalled()
+          for (const [request] of candidates.mock.calls) {
+            expect(request.query).toBe("")
+            expect(request).not.toHaveProperty("projectContent")
+            expect(request).not.toHaveProperty("vault")
+          }
+          const legs = candidates.mock.results.flatMap((r) => (r.value as { legs: string[] }).legs)
+          expect(legs).not.toContain("project_content")
+          expect(legs).not.toContain("vault")
+        } finally {
+          candidates.mockRestore()
+          safeRemoveSync(dir, { within: tmpdir() })
+        }
+      },
+    )
+  })
 })
