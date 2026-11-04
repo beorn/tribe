@@ -24,6 +24,12 @@ import { openVaultDb, type VaultMatch } from "./vault-fts.ts"
 export const VAULT_RRF_K = 60
 /** The cold added-latency cap (CTO ff83cf0c): a slower query embedding is a named degradation, not a wait. */
 export const VAULT_SEMANTIC_TIMEOUT_MS = 5_000
+/**
+ * The longest recall() waits, before its lexical search, for the model's native load to be called (CTO 981cb56b, (b)).
+ * D5: import and getLlama take ~0.1 s but cannot run while the synchronous reads hold the main thread, so loadModel and
+ * context always started after the search. The load continues past a bound hit; only the wait is capped.
+ */
+export const VAULT_PRE_LEXICAL_BOUND_MS = 500
 
 /** One query model. Production loads node-llama-cpp directly (rev23); a test passes a fixture. */
 export interface VaultQueryModel {
@@ -66,6 +72,8 @@ export interface VaultSemanticReceipt {
  */
 export interface VaultSemanticSpans {
   readonly moduleMs: number
+  /** The bounded wait before the lexical search for the native load call; null when the leg never started. */
+  readonly preLexical: VaultPreLexicalWait | null
   readonly lexicalMs: number
   readonly loadMs: number
   /** The whole load, start to end (or to the settle end when it never finished), overlap with lexical included. */
@@ -75,8 +83,15 @@ export interface VaultSemanticSpans {
   readonly chunksScanned: number
   readonly mergeMs: number
   readonly totalMs: number
-  /** Each load step's start and end in ms from load start, and whether it started before the lexical search ended. */
+  /** Each load step's start and end in ms from load start, and when it started relative to the lexical search. */
   readonly loadSteps: readonly VaultLoadStepSpan[]
+}
+
+/** The wait before the lexical search: its ms, its bound, and whether the bound ran out first. */
+export interface VaultPreLexicalWait {
+  readonly waitMs: number
+  readonly boundMs: number
+  readonly hit: boolean
 }
 
 /** The production load's steps, in order (CTO 6a21299d): where the load's time goes. */
@@ -89,7 +104,7 @@ export interface VaultLoadStepSpan {
   readonly startMs: number
   /** null when the step never finished (a timed-out or failed load). */
   readonly endMs: number | null
-  readonly startedBeforeLexicalEnd: boolean
+  readonly started: "before lexical" | "during lexical" | "after lexical"
 }
 
 /** When the query model's load and embed began and ended, on the caller's clock; unset until reached. */
@@ -151,6 +166,11 @@ export interface VaultQueryEmbedding {
   settle(timeoutMs?: number): Promise<VaultQueryVector>
   /** The load and embed times reached so far; empty when the embedding never started. */
   readonly marks: VaultQueryMarks
+  /**
+   * Wait at most boundMs until the native load has been called (the loadModel step started), the load has settled, or
+   * the model has no separate load. Never rejects, never starts a second load; the load continues after a bound hit.
+   */
+  untilLoadCalled(boundMs?: number): Promise<VaultPreLexicalWait>
 }
 
 /**
@@ -172,6 +192,29 @@ export function startVaultQueryEmbedding(
   let modelStat: string
   let model: VaultQueryModel
   let embedded: Promise<{ ok: true; vector: Float32Array } | { ok: false; error: unknown }>
+  let markLoadCalled = () => {}
+  const loadCalled = new Promise<void>((resolve) => {
+    markLoadCalled = resolve
+  })
+  const untilLoadCalled = async (boundMs = VAULT_PRE_LEXICAL_BOUND_MS): Promise<VaultPreLexicalWait> => {
+    const start = clock()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let hit = false
+    try {
+      await Promise.race([
+        loadCalled,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(() => {
+            hit = true
+            resolve()
+          }, boundMs)
+        }),
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
+    return { waitMs: clock() - start, boundMs, hit }
+  }
   try {
     const modelPath = requireRecallEmbedModel(options.env ?? process.env)
     contract = recallEmbedContract()
@@ -179,8 +222,10 @@ export function startVaultQueryEmbedding(
     const steps: NonNullable<VaultQueryMarks["steps"]> = []
     marks.steps = steps
     const record: VaultLoadStepRecorder = (name, at) => {
-      if (at === "start") steps.push({ step: name, start: clock() })
-      else {
+      if (at === "start") {
+        steps.push({ step: name, start: clock() })
+        if (name === "loadModel") markLoadCalled()
+      } else {
         const open = steps.findLast((entry) => entry.step === name && entry.end === undefined)
         if (open) open.end = clock()
       }
@@ -198,8 +243,12 @@ export function startVaultQueryEmbedding(
     let vectorOf: Promise<Float32Array>
     if (loading === undefined) {
       marks.loadEnd = marks.loadStart
+      markLoadCalled()
       vectorOf = embed()
     } else {
+      // A load that settles before (or without) recording its loadModel call ends the wait too. Both branches handle a
+      // rejection here, so a failed or abandoned load is never unhandled; vectorOf below reuses this one load.
+      loading.then(markLoadCalled, markLoadCalled)
       vectorOf = loading.then(() => {
         marks.loadEnd = clock()
         return embed()
@@ -214,10 +263,12 @@ export function startVaultQueryEmbedding(
       (error: unknown) => ({ ok: false as const, error }),
     )
   } catch (error) {
-    return { settle: () => Promise.reject(error), marks }
+    markLoadCalled()
+    return { settle: () => Promise.reject(error), marks, untilLoadCalled }
   }
   return {
     marks,
+    untilLoadCalled,
     settle: async (timeoutMs = VAULT_SEMANTIC_TIMEOUT_MS) => {
       let timer: ReturnType<typeof setTimeout> | undefined
       let timedOut = false

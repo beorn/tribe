@@ -80,6 +80,8 @@ export interface RecallOptions {
     vaultQueryModel?: (modelPath: string, contextTokens: number, record?: VaultLoadStepRecorder) => VaultQueryModel
     /** The query embedding's cap; absent, VAULT_SEMANTIC_TIMEOUT_MS. */
     vaultQueryTimeoutMs?: number
+    /** The pre-lexical wait's bound in ms (default VAULT_PRE_LEXICAL_BOUND_MS); a test shortens it. */
+    vaultPreLexicalBoundMs?: number
     /** The clock the vault leg's spans read (CTO 3a638efb D1); absent, performance.now. */
     clock?: () => number
   }

@@ -206,7 +206,12 @@ function reportSearchSkips(result: RecallResult, json: boolean | undefined): voi
 export function formatVaultSemanticSpans(spans: VaultSemanticSpans): string {
   const ms = (value: number) => Math.round(value)
   return (
-    `ms: lexical ${ms(spans.lexicalMs)}, module ${ms(spans.moduleMs)}, load ${ms(spans.loadMs)} (raw ${ms(spans.rawLoadMs)}), ` +
+    `ms: lexical ${ms(spans.lexicalMs)}, module ${ms(spans.moduleMs)}, ` +
+    (spans.preLexical === null
+      ? ""
+      : `pre-lexical wait ${ms(spans.preLexical.waitMs)} (bound ${spans.preLexical.boundMs}, ` +
+        `${spans.preLexical.hit ? "HIT: lexical started before the load was called" : "not hit"}), `) +
+    `load ${ms(spans.loadMs)} (raw ${ms(spans.rawLoadMs)}), ` +
     `embed ${ms(spans.embedMs)}, scan ${ms(spans.scanMs)} (${spans.chunksScanned} chunks), ` +
     `merge ${ms(spans.mergeMs)}, total ${ms(spans.totalMs)}` +
     (spans.loadSteps.length === 0
@@ -214,8 +219,7 @@ export function formatVaultSemanticSpans(spans: VaultSemanticSpans): string {
       : `; load steps, ms from load start: ${spans.loadSteps
           .map(
             (s) =>
-              `${s.step} ${ms(s.startMs)}-${s.endMs === null ? "unfinished" : ms(s.endMs)} ` +
-              `(started ${s.startedBeforeLexicalEnd ? "during" : "after"} lexical)`,
+              `${s.step} ${ms(s.startMs)}-${s.endMs === null ? "unfinished" : ms(s.endMs)} ` + `(started ${s.started})`,
           )
           .join(", ")}`)
   )

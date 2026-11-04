@@ -333,9 +333,10 @@ describe("the vault semantic leg in recall()", () => {
 
   // CTO 3a638efb D1: pass 2's 23 s p95 could not say which part was slow; a printed span missing or overlapping
   // another would misname the cause. No other test reads the leg's clock. CTO fa3cf2f1: the timed-out row.
-  // CTO 1082ad46: D3 showed the whole ~0.94 s load after the lexical search; the reads now yield, so a load that needs
-  // N event-loop turns finishes inside lexical (clipped 0, raw shown) with the same results.
-  test("the spans: a load needing 3 turns overlaps the yielding lexical reads; a timed-out load shows after it (fake clock)", async () => {
+  // CTO 981cb56b (b): D5 showed the native load always starting after the lexical search. recall() now waits, bounded,
+  // until loadModel is called; nothing else proves the wait ends there, that a bound hit is printed, or that a failed
+  // load is neither unhandled nor loaded twice. Results stay those of the instant-model test above.
+  test("the spans: the pre-lexical wait ends at the loadModel call, a bound hit is printed, a timed-out or failed load degrades (fake clock)", async () => {
     await publish()
     let t = 0
     let ftsReads = 0
@@ -348,10 +349,18 @@ describe("the vault semantic leg in recall()", () => {
       if (sql.includes("SELECT vec FROM vault_doc_embed")) t += 25
       return prepare.call(this, sql)
     } as typeof prepare)
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason)
+    }
+    process.on("unhandledRejection", onUnhandled)
     const { recall, setRecallLogging } = await import("../../src/history/search")
     const { formatVaultSemanticSpans } = await import("../../src/lib/search")
     setRecallLogging(false)
-    const search = (model: (path: string, tokens: number, record?: VaultLoadStepRecorder) => VaultQueryModel) => {
+    const search = (
+      model: (path: string, tokens: number, record?: VaultLoadStepRecorder) => VaultQueryModel,
+      deps: { vaultQueryTimeoutMs?: number; vaultPreLexicalBoundMs?: number } = {},
+    ) => {
       t = 0
       ftsReads = 0
       return recall("zebracorn", {
@@ -359,19 +368,28 @@ describe("the vault semantic leg in recall()", () => {
         excludeCurrentSession: true,
         vaultDb: vaultPath,
         vaultSemantic: true,
-        deps: { clock: () => t, vaultQueryTimeoutMs: 50, vaultQueryModel: model },
+        deps: { clock: () => t, vaultQueryTimeoutMs: 50, vaultQueryModel: model, ...deps },
       })
     }
     const turn = () =>
       new Promise<void>((resolve) => {
         setImmediate(resolve)
       })
-    const sumOf = (s: VaultSemanticSpans) => s.moduleMs + s.lexicalMs + s.loadMs + s.embedMs + s.scanMs + s.mergeMs
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, ms)
+      })
+    const sumOf = (s: VaultSemanticSpans) =>
+      s.moduleMs + (s.preLexical?.waitMs ?? 0) + s.lexicalMs + s.loadMs + s.embedMs + s.scanMs + s.mergeMs
+    const embedAt40 = async () => {
+      await Promise.resolve()
+      t += 40
+      return basis(0)
+    }
     try {
-      // Overlapped: the load needs 3 event-loop turns; the lexical reads yield 3 (before messages, project content,
-      // vault FTS), so it finishes inside lexical.
+      // Inside the bound: import and getLlama take one turn each (100 and 200 ms); the wait ends when loadModel is
+      // called at 300, lexical starts there, and loadModel's last turn (400 ms) plus the embed (40) run inside lexical.
       const ok = await search((_path, _tokens, record) => ({
-        // Three recorded steps, one turn each: 100, 200 and 400 ms on the fake clock.
         load: async () => {
           for (const [name, ms] of [
             ["import", 100],
@@ -384,21 +402,17 @@ describe("the vault semantic leg in recall()", () => {
             record?.(name, "end")
           }
         },
-        embed: async () => {
-          await Promise.resolve()
-          t += 40
-          return basis(0)
-        },
+        embed: embedAt40,
         dispose: async () => {},
       }))
       expect(ftsReads).toBeGreaterThan(0)
       expect(ok.vaultSemantic).toMatchObject({ state: "ok", added: 1 })
-      // The same results as the instant-model test above.
       expect(vaultHits(ok)).toEqual(["a.md", "b.md"])
-      const lexical = 100 * ftsReads + 740
+      const lexical = 100 * ftsReads + 440
       const spans = ok.vaultSemantic?.spans
       expect(spans).toEqual({
         moduleMs: 0,
+        preLexical: { waitMs: 300, boundMs: 500, hit: false },
         lexicalMs: lexical,
         loadMs: 0,
         rawLoadMs: 700,
@@ -406,42 +420,102 @@ describe("the vault semantic leg in recall()", () => {
         scanMs: 25,
         chunksScanned: 1,
         mergeMs: 0,
-        totalMs: lexical + 25,
+        totalMs: 300 + lexical + 25,
         loadSteps: [
-          { step: "import", startMs: 0, endMs: 100, startedBeforeLexicalEnd: true },
-          { step: "getLlama", startMs: 100, endMs: 300, startedBeforeLexicalEnd: true },
-          { step: "loadModel", startMs: 300, endMs: 700, startedBeforeLexicalEnd: true },
+          { step: "import", startMs: 0, endMs: 100, started: "before lexical" },
+          { step: "getLlama", startMs: 100, endMs: 300, started: "before lexical" },
+          { step: "loadModel", startMs: 300, endMs: 700, started: "during lexical" },
         ],
       })
       if (!spans) throw new Error("no spans")
       expect(sumOf(spans)).toBeLessThanOrEqual(spans.totalMs)
       expect(ok.timing?.lexicalMs).toBe(lexical)
       expect(formatVaultSemanticSpans(spans)).toBe(
-        `ms: lexical ${lexical}, module 0, load 0 (raw 700), embed 0, scan 25 (1 chunks), merge 0, total ${lexical + 25}; ` +
-          "load steps, ms from load start: import 0-100 (started during lexical), " +
-          "getLlama 100-300 (started during lexical), loadModel 300-700 (started during lexical)",
+        `ms: lexical ${lexical}, module 0, pre-lexical wait 300 (bound 500, not hit), load 0 (raw 700), embed 0, ` +
+          `scan 25 (1 chunks), merge 0, total ${300 + lexical + 25}; load steps, ms from load start: ` +
+          "import 0-100 (started before lexical), getLlama 100-300 (started before lexical), " +
+          "loadModel 300-700 (started during lexical)",
       )
 
-      // Timed out: load never resolves; 300 ms pass on the fake clock after the lexical search, before settle gives up
-      // at its 50 ms cap, so the clipped load runs from the lexical end to the settle end.
-      const slow = await search((_path, _tokens, record) => ({
-        // loadModel starts after lexical and never finishes.
-        load: () =>
-          new Promise<void>(() => {
+      // Bound hit: import is still running when the 30 ms bound runs out at 500 on the fake clock; lexical starts
+      // there, the same load continues after it and the results are the same.
+      // recall() closes its in-memory index at the end, so this ranking row publishes again.
+      await publish()
+      let loads = 0
+      const bound = await search(
+        (_path, _tokens, record) => ({
+          load: async () => {
+            loads++
+            record?.("import", "start")
             setTimeout(() => {
-              t += 300
-              record?.("loadModel", "start")
-            }, 25)
-          }),
-        embed: () => new Promise<Float32Array>(() => {}),
-        dispose: async () => {},
-      }))
+              t += 500
+            }, 5)
+            await sleep(300)
+            record?.("import", "end")
+            record?.("getLlama", "start")
+            record?.("getLlama", "end")
+            record?.("loadModel", "start")
+            t += 400
+            record?.("loadModel", "end")
+          },
+          embed: embedAt40,
+          dispose: async () => {},
+        }),
+        { vaultQueryTimeoutMs: 5_000, vaultPreLexicalBoundMs: 30 },
+      )
+      expect(loads).toBe(1)
+      expect(bound.vaultSemantic).toMatchObject({ state: "ok", added: 1 })
+      expect(vaultHits(bound)).toEqual(["a.md", "b.md"])
+      const boundLexical = 100 * ftsReads
+      const lexicalEnd = 500 + boundLexical
+      const hit = bound.vaultSemantic?.spans
+      if (!hit) throw new Error("no spans on the bound-hit leg")
+      expect(hit).toEqual({
+        moduleMs: 0,
+        preLexical: { waitMs: 500, boundMs: 30, hit: true },
+        lexicalMs: boundLexical,
+        loadMs: 400,
+        rawLoadMs: lexicalEnd + 400,
+        embedMs: 40,
+        scanMs: 25,
+        chunksScanned: 1,
+        mergeMs: 0,
+        totalMs: lexicalEnd + 465,
+        loadSteps: [
+          { step: "import", startMs: 0, endMs: lexicalEnd, started: "before lexical" },
+          { step: "getLlama", startMs: lexicalEnd, endMs: lexicalEnd, started: "after lexical" },
+          { step: "loadModel", startMs: lexicalEnd, endMs: lexicalEnd + 400, started: "after lexical" },
+        ],
+      })
+      expect(sumOf(hit)).toBeLessThanOrEqual(hit.totalMs)
+      expect(formatVaultSemanticSpans(hit)).toContain(
+        "pre-lexical wait 500 (bound 30, HIT: lexical started before the load was called)",
+      )
+
+      // Timed out: a 1 ms bound runs out at once; the load never resolves and 300 ms pass on the fake clock after the
+      // lexical search, before settle gives up at its 50 ms cap, so the clipped load runs from the lexical end to the
+      // settle end.
+      const slow = await search(
+        (_path, _tokens, record) => ({
+          load: () =>
+            new Promise<void>(() => {
+              setTimeout(() => {
+                t += 300
+                record?.("loadModel", "start")
+              }, 25)
+            }),
+          embed: () => new Promise<Float32Array>(() => {}),
+          dispose: async () => {},
+        }),
+        { vaultPreLexicalBoundMs: 1 },
+      )
       expect(slow.vaultSemantic).toMatchObject({ state: "degraded", cause: /took longer than 50 ms/ })
       const late = slow.vaultSemantic?.spans
       if (!late) throw new Error("no spans on the degraded leg")
       const slowLexical = 100 * ftsReads
       expect(late).toEqual({
         moduleMs: 0,
+        preLexical: { waitMs: 0, boundMs: 1, hit: true },
         lexicalMs: slowLexical,
         loadMs: 300,
         rawLoadMs: slowLexical + 300,
@@ -450,14 +524,40 @@ describe("the vault semantic leg in recall()", () => {
         chunksScanned: 0,
         mergeMs: 0,
         totalMs: slowLexical + 300,
-        loadSteps: [{ step: "loadModel", startMs: slowLexical + 300, endMs: null, startedBeforeLexicalEnd: false }],
+        loadSteps: [{ step: "loadModel", startMs: slowLexical + 300, endMs: null, started: "after lexical" }],
       })
       expect(sumOf(late)).toBeLessThanOrEqual(late.totalMs)
       expect(formatVaultSemanticSpans(late)).toBe(
-        `ms: lexical ${slowLexical}, module 0, load 300 (raw ${slowLexical + 300}), embed 0, scan 0 (0 chunks), merge 0, total ${slowLexical + 300}; ` +
+        `ms: lexical ${slowLexical}, module 0, pre-lexical wait 0 (bound 1, HIT: lexical started before the load was ` +
+          `called), load 300 (raw ${slowLexical + 300}), embed 0, scan 0 (0 chunks), merge 0, total ${slowLexical + 300}; ` +
           `load steps, ms from load start: loadModel ${slowLexical + 300}-unfinished (started after lexical)`,
       )
+
+      // The chain rejects during import: the wait ends at once, the leg degrades with the load's own error, nothing
+      // embeds, nothing loads twice and no rejection goes unhandled.
+      let failedLoads = 0
+      let embeds = 0
+      const failed = await search((_path, _tokens, record) => ({
+        load: async () => {
+          failedLoads++
+          record?.("import", "start")
+          await turn()
+          throw new Error("node-llama-cpp failed to load")
+        },
+        embed: async () => {
+          embeds++
+          return basis(0)
+        },
+        dispose: async () => {},
+      }))
+      expect(failed.vaultSemantic).toMatchObject({ state: "degraded", cause: "node-llama-cpp failed to load" })
+      expect(failed.vaultSemantic?.spans?.preLexical).toEqual({ waitMs: 0, boundMs: 500, hit: false })
+      expect(vaultHits(failed).sort()).toEqual(["a.md", "c.md"])
+      expect([failedLoads, embeds]).toEqual([1, 0])
+      await sleep(10)
+      expect(unhandled).toEqual([])
     } finally {
+      process.off("unhandledRejection", onUnhandled)
       spy.mockRestore()
     }
   })

@@ -582,6 +582,12 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         }
       }
     }
+    // (b), CTO 981cb56b: D5 showed loadModel and context always starting after the lexical search, whose synchronous
+    // reads hold the main thread the load's JS steps (import, getLlama) need. Wait, bounded, until the native load is
+    // called, so it runs during the search; the wait and any bound hit are in the spans. Results are unchanged.
+    const preLexicalStart = clock()
+    const preLexical =
+      semantic?.ok === true ? await semantic.embedding.untilLoadCalled(options.deps?.vaultPreLexicalBoundMs) : null
     const searchStart = Date.now()
     const lexicalStart = clock()
     const candidateRequest: CandidateRequest = {
@@ -742,7 +748,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       const after = (start: number | undefined, stop: number | undefined) =>
         start === undefined ? 0 : Math.max(0, Math.min(stop ?? end, end) - Math.max(start, lexicalEnd))
       legSpans = (lexicalMs, totalMs) => ({
-        moduleMs: lexicalStart - semanticStarted,
+        moduleMs: preLexicalStart - semanticStarted,
+        preLexical,
         lexicalMs,
         loadMs: after(marks.loadStart, marks.loadEnd),
         rawLoadMs: marks.loadStart === undefined ? 0 : (marks.loadEnd ?? end) - marks.loadStart,
@@ -755,7 +762,12 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
           step: entry.step,
           startMs: entry.start - (marks.loadStart ?? entry.start),
           endMs: entry.end === undefined ? null : entry.end - (marks.loadStart ?? entry.start),
-          startedBeforeLexicalEnd: entry.start < lexicalEnd,
+          started:
+            entry.start < lexicalStart
+              ? "before lexical"
+              : entry.start < lexicalEnd
+                ? "during lexical"
+                : "after lexical",
         })),
       })
       phases.vault_semantic = clock() - semanticStarted
