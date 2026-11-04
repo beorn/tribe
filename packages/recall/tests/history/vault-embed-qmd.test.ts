@@ -121,7 +121,7 @@ describe("qmd embed runtime", () => {
       generation,
       contract: CONTRACT,
       ...runtime,
-      budgetSpent: () => false,
+      timeLeftMs: () => Number.POSITIVE_INFINITY,
     })
 
     expect(report).toMatchObject({ embeddedDocuments: 1, embeddedChunks: 1 })

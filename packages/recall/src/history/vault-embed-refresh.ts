@@ -34,6 +34,14 @@ export const UNCOVERED_EMPTY = "the document has no text to embed"
 /** km still lists the file but it cannot be read, e.g. after a delete: the reason carries the error code. */
 export const uncoveredUnreadable = (code: string) => `file unreadable (${code})`
 /**
+ * A document whose pending chunks the time left cannot embed is skipped, and the pass goes on (CTO r2 change 4):
+ * oldest-first order would otherwise put it first again every pass and block every newer document.
+ */
+export const uncoveredTooLarge = (needs: number, fits: number) =>
+  `needs ${needs} chunks; this pass has time for ${fits}`
+/** The rate a pass assumes before it has embedded anything: the native pilot, 250 chunks in 873.48 s. */
+export const VAULT_EMBED_PILOT_CHUNKS_PER_MS = 250 / 873_480
+/**
  * Chunks per embed call. The budget is checked between calls, so one call is the most a pass can overrun its budget:
  * at the measured pilot rate (0.2862 chunks/s) eight chunks take about 28 s, inside the 600 s ceiling's margin.
  */
@@ -61,8 +69,11 @@ export interface VaultEmbedRefreshOptions {
   readonly contract: VaultEmbedContract
   readonly chunker: VaultEmbedChunker
   readonly embedder: VaultEmbedder
-  /** Checked before each document that needs embedding and between embed batches; true stops the pass. */
-  readonly budgetSpent: () => boolean
+  /**
+   * Milliseconds this pass may still spend, read before each document that needs embedding and between embed
+   * batches: 0 or less stops the pass, and a document whose pending chunks do not fit the time left is skipped.
+   */
+  readonly timeLeftMs: () => number
 }
 
 interface FileRow {
@@ -111,6 +122,9 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
   let embeddedChunks = 0
   let reusedChunks = 0
   let stoppedEarly = false
+  let measuredChunks = 0
+  let measuredMs = 0
+  const chunksPerMs = () => (measuredMs > 0 ? measuredChunks / measuredMs : VAULT_EMBED_PILOT_CHUNKS_PER_MS)
 
   for (const file of files) {
     const hash = file.fs_content_hash
@@ -122,7 +136,8 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
       coveredDocuments++
       continue
     }
-    if (stoppedEarly || options.budgetSpent()) {
+    const timeLeft = stoppedEarly ? 0 : options.timeLeftMs()
+    if (timeLeft <= 0) {
       stoppedEarly = true
       miss(UNCOVERED_BUDGET)
       continue
@@ -151,13 +166,21 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
       const chunkInputs = inputs.map((input) => ({ key: vaultInputKey(contractJson, input), input }))
       keys = chunkInputs.map((c) => c.key)
       pending = chunkInputs.filter((c) => !vectorsByKey.has(c.key))
+      const fits = Math.floor(timeLeft * chunksPerMs())
+      if (pending.length > fits) {
+        miss(uncoveredTooLarge(pending.length, fits))
+        continue
+      }
       for (let start = 0; start < pending.length; start += VAULT_EMBED_BATCH) {
-        if (start > 0 && options.budgetSpent()) {
+        if (start > 0 && options.timeLeftMs() <= 0) {
           abandoned = true
           break
         }
         const batch = pending.slice(start, start + VAULT_EMBED_BATCH)
+        const startedAt = performance.now()
         const vectors = await embedder.embed(batch.map((p) => p.input))
+        measuredMs += performance.now() - startedAt
+        measuredChunks += batch.length
         if (vectors.length !== batch.length) {
           throw new Error(`for ${batch.length} inputs the embedder returned ${vectors.length} vector(s)`)
         }

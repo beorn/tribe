@@ -11,6 +11,10 @@
  * CTO verdict 0edff0e3 fixes 6 and 7: the budget is checked between embedding batches inside a document, so one huge
  * document cannot overrun the 600 s limit (it is abandoned unwritten and reported); a file km lists that cannot be
  * read is one uncovered document with a named reason, never a failed pass; an empty document is named, never silent.
+ * CTO r2 change 4 (b7e7f718): before a document's first batch its pending chunks are compared with what the time left
+ * can embed, at the rate measured so far in this pass or the pilot rate before any measurement; a document that does
+ * not fit is skipped under "needs N chunks; this pass has time for M" and the pass goes on to newer documents. Gap:
+ * an abandoned document stopped the pass, and oldest-first order put it first again every pass.
  * Gap: slice 1 tests cover storage and identity only; nothing exercises a refresh. Fixtures are private: an
  * in-memory km-shaped nodes table, files in a temp dir, a paragraph chunker and a hash-derived 4-dimension embedder.
  */
@@ -28,6 +32,7 @@ import {
   UNCOVERED_BUDGET,
   UNCOVERED_BUDGET_INSIDE,
   UNCOVERED_EMPTY,
+  uncoveredTooLarge,
   uncoveredUnreadable,
   VAULT_EMBED_BATCH,
   type VaultEmbedChunker,
@@ -96,7 +101,7 @@ describe("refreshVaultEmbeddings", () => {
       .prepare("INSERT INTO nodes (id, fstype, fs_path, fs_mtime, fs_content_hash) VALUES (?, 'mdfile', ?, ?, ?)")
       .run(`n:${fsPath}`, fsPath, mtime, hash)
   }
-  const run = (embedder: VaultEmbedder, extra: { budgetDocuments?: number } = {}) => {
+  const run = (embedder: VaultEmbedder, extra: { budgetDocuments?: number; timeLeftMs?: () => number } = {}) => {
     let left = extra.budgetDocuments ?? Number.POSITIVE_INFINITY
     return refreshVaultEmbeddings({
       db,
@@ -107,7 +112,7 @@ describe("refreshVaultEmbeddings", () => {
       contract: CONTRACT,
       chunker,
       embedder,
-      budgetSpent: () => left-- <= 0,
+      timeLeftMs: extra.timeLeftMs ?? (() => (left-- > 0 ? Number.POSITIVE_INFINITY : 0)),
     })
   }
   const rows = () =>
@@ -259,5 +264,37 @@ describe("refreshVaultEmbeddings", () => {
     const report = await run(recordingEmbedder())
     expect(report.uncovered).toEqual({ [UNCOVERED_EMPTY]: 1 })
     expect(rows()).toEqual([])
+  })
+
+  const tenParagraphs = Array.from({ length: 10 }, (_, i) => `p${i}`).join("\n\n")
+
+  test("a document too large for the time left is skipped by name and the pass goes on to newer documents", async () => {
+    // Ten chunks; 10 s left at the pilot rate (250 chunks in 873.48 s) has time for 2.
+    putFile("big.md", tenParagraphs, 10)
+    putFile("later.md", "L\n\nl", 20)
+    const embedder = recordingEmbedder()
+    const report = await run(embedder, { timeLeftMs: () => 10_000 })
+    expect(report.uncovered).toEqual({ [uncoveredTooLarge(10, 2)]: 1 })
+    expect(report).toMatchObject({ embeddedDocuments: 1, stoppedEarly: false })
+    expect(embedder.calls.flat().some((input) => input.includes("p0"))).toBe(false)
+    expect(new Set(rows().map((r) => r.fs_path))).toEqual(new Set(["later.md"]))
+  })
+
+  test("once the pass has measured its own rate, the fit check uses it instead of the pilot rate", async () => {
+    putFile("a.md", "A\n\na", 10)
+    putFile("big.md", tenParagraphs, 20)
+    const base = recordingEmbedder()
+    // 50 ms per call is far faster than the pilot: 10 s then has time for ten chunks, though the pilot allows two.
+    const fast: VaultEmbedder = {
+      embed: async (inputs) => {
+        await new Promise((resolve) => {
+          setTimeout(resolve, 50)
+        })
+        return base.embed(inputs)
+      },
+    }
+    const report = await run(fast, { timeLeftMs: () => 10_000 })
+    expect(report.uncovered).toEqual({})
+    expect(report.embeddedDocuments).toBe(2)
   })
 })

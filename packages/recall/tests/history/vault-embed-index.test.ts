@@ -84,7 +84,7 @@ describe("runVaultEmbedPass", () => {
     return runVaultEmbedPass({
       db,
       vaultDbPath: statePath,
-      budgetSpent: () => left-- <= 0,
+      timeLeftMs: () => (left-- > 0 ? Number.POSITIVE_INFINITY : 0),
       now: 1,
       env: { RECALL_EMBED_MODEL: modelPath },
       contract,
@@ -162,7 +162,7 @@ describe("runVaultEmbedPass", () => {
       await runVaultEmbedPass({
         db,
         vaultDbPath: join(linked, ".km", "state.db"),
-        budgetSpent: () => false,
+        timeLeftMs: () => Number.POSITIVE_INFINITY,
         now: 1,
         env: { RECALL_EMBED_MODEL: modelPath },
         contract: CONTRACT,
@@ -181,7 +181,7 @@ describe("runVaultEmbedPass", () => {
     await runVaultEmbedPass({
       db,
       vaultDbPath: statePath,
-      budgetSpent: () => false,
+      timeLeftMs: () => Number.POSITIVE_INFINITY,
       now: 1,
       env: { RECALL_EMBED_MODEL: link },
       contract: CONTRACT,
@@ -215,7 +215,7 @@ describe("runVaultEmbedPass", () => {
       runVaultEmbedPass({
         db,
         vaultDbPath: statePath,
-        budgetSpent: () => false,
+        timeLeftMs: () => Number.POSITIVE_INFINITY,
         env: {},
         contract: CONTRACT,
         runtime: () => {
@@ -266,7 +266,7 @@ describe("runVaultEmbedPass", () => {
     const report = await runVaultEmbedPass({
       db,
       vaultDbPath: statePath,
-      budgetSpent: () => false,
+      timeLeftMs: () => Number.POSITIVE_INFINITY,
       now: 1,
       env: { RECALL_EMBED_MODEL: modelPath },
       contract: CONTRACT,

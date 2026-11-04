@@ -155,7 +155,7 @@ export async function cmdIndex(opts: {
       const vault = await runVaultEmbedPass({
         db,
         vaultDbPath,
-        budgetSpent: () => Date.now() - startedAt > RECALL_VAULT_EMBED_STOP_MS,
+        timeLeftMs: () => startedAt + RECALL_VAULT_EMBED_STOP_MS - Date.now(),
       })
       const uncovered = Object.entries(vault.uncovered)
         .map(([reason, count]) => `${count} ${reason}`)

@@ -50,7 +50,7 @@ export interface VaultEmbedPassReport extends VaultEmbedRefreshReport {
 export interface VaultEmbedPassOptions {
   readonly db: Database
   readonly vaultDbPath: string
-  readonly budgetSpent: () => boolean
+  readonly timeLeftMs: () => number
   readonly now?: number
   readonly env?: NodeJS.ProcessEnv
   readonly contract?: VaultEmbedContract
@@ -159,7 +159,7 @@ export async function runVaultEmbedPass(options: VaultEmbedPassOptions): Promise
     contract,
     chunker: runtime.chunker,
     embedder: runtime.embedder,
-    budgetSpent: options.budgetSpent,
+    timeLeftMs: options.timeLeftMs,
   })
   let isPublished = !publishWhenComplete
   if (publishWhenComplete && !report.stoppedEarly) {
