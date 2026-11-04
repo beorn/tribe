@@ -799,7 +799,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
           .prepare(
             assertSingleStatement(`SELECT m.session_id, COUNT(*) as depth
            FROM messages_fts f
-           JOIN messages m ON f.rowid = m.id
+           JOIN messages m INDEXED BY idx_messages_id_session_ts ON f.rowid = m.id
            WHERE messages_fts MATCH ?
            ${untilTime === undefined ? "" : "AND m.timestamp <= ?"}
            GROUP BY m.session_id

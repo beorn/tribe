@@ -570,6 +570,15 @@ export const MIGRATION_STEPS: MigrationStep[] = [
       }
     },
   },
+  {
+    // Corroboration reads session_id per FTS match through this, not the wide row (CTO 441e80f5). Versioned, never
+    // in SCHEMA: SCHEMA runs on every open, so a reader would build it.
+    version: 7,
+    name: "messages-id-session-timestamp-covering-index",
+    up: (db: Database) => {
+      db.exec("CREATE INDEX IF NOT EXISTS idx_messages_id_session_ts ON messages(id, session_id, timestamp)")
+    },
+  },
 ]
 
 export const CURRENT_SCHEMA_VERSION = MIGRATION_STEPS.at(-1)?.version ?? 1

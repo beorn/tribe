@@ -68,7 +68,7 @@ describe("vault embedding tables in SCHEMA", () => {
     expect(userVersion(db)).toBe(CURRENT_SCHEMA_VERSION)
   })
 
-  test("opening an existing version-6 database adds both tables, keeps user_version and changes no row", () => {
+  test("opening an existing current-version database adds both tables, keeps user_version and changes no row", () => {
     initSchema(db)
     db.exec("DROP TABLE vault_doc_embed")
     db.exec("DROP TABLE vault_embed_generation")
@@ -76,7 +76,7 @@ describe("vault embedding tables in SCHEMA", () => {
       "INSERT INTO writes (session_id, session_file, tool_use_id, timestamp, file_path, content_hash, content_size, content) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     ).run("s1", "/f.jsonl", "t1", "2026-11-03T00:00:00Z", "/a.md", "h1", 3, "abc")
     const versionBefore = userVersion(db)
-    expect(versionBefore).toBe(6)
+    expect(versionBefore).toBe(CURRENT_SCHEMA_VERSION)
     const rowsBefore = db.prepare("SELECT * FROM writes").all()
 
     initSchema(db)

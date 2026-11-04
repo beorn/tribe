@@ -18,6 +18,13 @@ import { CURRENT_SCHEMA_VERSION, DB_PATH, initSchema } from "./db-schema.ts"
 export { CLAUDE_DIR, DB_PATH, PROJECTS_DIR, MAX_CONTENT_SIZE } from "./db-schema.ts"
 
 let dbInstance: Database | null = null
+/** The writer admission a migrating getDb took before migrating; this process holds it until closeDb. */
+let migrationWriter: Disposable | undefined
+
+function releaseMigrationWriter(): void {
+  migrationWriter?.[Symbol.dispose]()
+  migrationWriter = undefined
+}
 let snapshotPath: string | null = null
 
 /** Select the immutable index before CLI dispatch; closing a connection retains this selection. */
@@ -89,8 +96,11 @@ export function getDb(options?: GetDbOptions): Database {
   db.run(assertSingleStatement(`PRAGMA busy_timeout = ${DB_BUSY_TIMEOUT_MS}`))
 
   try {
+    // A migrating open is an index writer: admission first, held until closeDb (CTO 441e80f5).
+    if (options?.allowMigration) migrationWriter = acquireIndexWriter(db) ?? undefined
     initSchema(db, { allowMigration: options?.allowMigration })
   } catch (err) {
+    releaseMigrationWriter()
     db.close()
     throw err
   }
@@ -109,6 +119,7 @@ export function acquireIndexWriter(db: Database) {
   // SQLite's actual file identity includes RECALL_DB_PATH and symlink aliases.
   // In-memory databases cannot be shared by competing CLI processes.
   if (db.filename === ":memory:") return undefined
+  if (migrationWriter !== undefined && db === dbInstance) return undefined // held since this connection migrated
   const lockPath = `${fs.realpathSync(db.filename)}.rebuild.lock`
   const lock = tryAcquireFlock(lockPath, { body: JSON.stringify({ startedAt: Date.now() }) })
   if (lock !== null) return lock
@@ -145,6 +156,7 @@ export function closeDb(): void {
     dbInstance.close()
     dbInstance = null
   }
+  releaseMigrationWriter()
 }
 
 // Re-export schema
