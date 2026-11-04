@@ -98,21 +98,7 @@ export function resolveProjectScope(project: string | undefined, _cwd = process.
 // Read-only index provenance — see @i/20-search-and-memory/23189
 // ============================================================================
 
-// Pure helpers (parseThreshold/getStaleThresholdMs/RefreshResult/RECALL_STALE_THRESHOLD_DEFAULT)
-// live in staleness.ts so unit tests can import them without dragging the search.ts
-// transitive closure (bun:sqlite, indexer, llm/agent → zod) into vitest's node runtime.
-export {
-  RECALL_STALE_THRESHOLD_DEFAULT,
-  parseThreshold,
-  getStaleThresholdMs,
-  judgeIndexFreshness,
-  describeMs,
-  describeFreshness,
-  INDEX_FRESHNESS_ROOT,
-  type IndexFreshness,
-  type RefreshResult,
-} from "./staleness"
-import { describeFreshness, judgeIndexFreshness, type RefreshResult } from "./staleness"
+import { describeFreshness, judgeIndexFreshness } from "./staleness"
 
 /** Read `last_rebuild` index meta — returns null if missing, throws on DB access errors. */
 function readLastRebuild(): string | null {
@@ -126,20 +112,8 @@ function readLastRebuild(): string | null {
   return getIndexMeta(db, "last_rebuild") ?? null
 }
 
-import { refreshIndexIfStaleWithDeps, makeRefreshDeps, type RefreshDeps } from "./refresh"
-export { refreshIndexIfStaleWithDeps, type RefreshDeps } from "./refresh"
 /** The call-line vault binding (`--vault-db`), for hosts that load this engine by path (25149 a3). */
 export { bindVaultDb }
-
-/** Compatibility surface for direct callers. Search no longer invokes it. */
-export async function refreshIndexIfStale(
-  options: { refresh?: boolean },
-  /** Test seam — override deps for unit testing. Production callers omit. */
-  deps?: Partial<RefreshDeps>,
-): Promise<RefreshResult> {
-  const merged = { ...makeRefreshDeps(readLastRebuild), ...deps }
-  return refreshIndexIfStaleWithDeps(options, merged)
-}
 
 /**
  * The ONE freshness verdict for this process, judged by staleness.ts's
@@ -613,21 +587,6 @@ function printAgentTrace(result: AgentRecallResult, debugPlan: boolean): void {
 // ============================================================================
 // Recall output (synthesis mode)
 // ============================================================================
-
-/** Compatibility surface for direct refresh callers. Search no longer emits refresh notes. */
-export function emitRefreshNote(r: RefreshResult): void {
-  if (r.refreshed) {
-    const staleMin = Math.max(1, Math.round(r.staleMs / 60_000))
-    console.error(`${DIM}[recall] index was ${staleMin}m stale — refreshed (${r.refreshMs}ms) before search${RESET}`)
-    return
-  }
-  if (r.reason === "error") {
-    console.error(
-      `${YELLOW}⚠ recall: auto-refresh failed (${r.error}) — proceeding with possibly-stale index.${RESET}\n` +
-        `  Pass \`--no-refresh\` to skip this attempt, or run \`bun recall index --incremental\` manually.`,
-    )
-  }
-}
 
 async function formatRecallCost(result: RecallResult): Promise<string | undefined> {
   if (result.list_equivalent_basis !== undefined) {
