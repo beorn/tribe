@@ -1133,14 +1133,13 @@ export function searchAll(
     params.push(untilTime)
   }
 
-  // Keep COUNT's original shape: LIMIT 0 bypasses ranked MATCH, and SQLite's
-  // availability rewrite can skip invalid MATCH instead of raising its error.
-  // Proof: type-limit0-error-control-0817.json; VM: type-single-vm-0804.json (29482).
+  // No availabilityClause: SQLite's rewrite can skip an invalid MATCH instead of raising (29482, type-single-vm-0804).
+  // The id-range probe counts the join's rows without a wide content seek per match (CTO ee7e8bdd C3).
   const countQuery = `
     SELECT COUNT(*) as total
     FROM content_fts f
-    JOIN content c ON f.rowid = c.id
-    WHERE content_fts MATCH ?${typeClause}${projectClause}${timeClause}
+    WHERE content_fts MATCH ?
+      AND EXISTS (SELECT 1 FROM content c WHERE c.id >= f.rowid AND c.id <= f.rowid${typeClause}${projectClause}${timeClause})
   `
 
   const searchQuery = `
