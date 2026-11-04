@@ -58,8 +58,9 @@ function printVaultSemanticCensus(census: VaultSemanticCensus): void {
   console.log(
     `  ${mark} ${census.queryable}/${census.units} documents queryable; ${census.accepted} embedded under generation ${census.generation ?? "none"}`,
   )
-  for (const [reason, count] of Object.entries(census.excluded))
+  for (const [reason, count] of Object.entries(census.excluded)) {
     console.log(`  ${DIM}  ${count} excluded: ${reason}${RESET}`)
+  }
   if (census.cause) console.log(`  ${WARN} not queryable: ${census.cause}`)
   console.log()
 }
