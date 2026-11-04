@@ -151,14 +151,14 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
       const p = pending[i]
       if (p) added.set(p.key, encodeVaultVector(vec, contract.dimensions))
     })
-    const rowVectors = keys.map((key) => {
+    const rows = keys.map((key) => {
       const vec = added.get(key) ?? vectorsByKey.get(key)
       if (!vec) throw new Error(`vault embedding refresh on ${file.fs_path}: no vector for input key ${key}`)
-      return vec
+      return { key, vec }
     })
 
     db.transaction(() => {
-      keys.forEach((key, chunk) => insert.run(generation, vaultId, file.fs_path, hash, chunk, key, rowVectors[chunk]))
+      rows.forEach((row, chunk) => insert.run(generation, vaultId, file.fs_path, hash, chunk, row.key, row.vec))
     })()
     prune.run(generation, vaultId, file.fs_path, hash)
 
