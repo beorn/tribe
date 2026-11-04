@@ -21,7 +21,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
-import type { VaultQueryModel, VaultSemanticSpans } from "../../src/history/vault-semantic"
+import type { VaultLoadStepRecorder, VaultQueryModel, VaultSemanticSpans } from "../../src/history/vault-semantic"
 
 process.env.RECALL_DB_PATH = ":memory:"
 
@@ -351,7 +351,7 @@ describe("the vault semantic leg in recall()", () => {
     const { recall, setRecallLogging } = await import("../../src/history/search")
     const { formatVaultSemanticSpans } = await import("../../src/lib/search")
     setRecallLogging(false)
-    const search = (model: () => VaultQueryModel) => {
+    const search = (model: (path: string, tokens: number, record?: VaultLoadStepRecorder) => VaultQueryModel) => {
       t = 0
       ftsReads = 0
       return recall("zebracorn", {
