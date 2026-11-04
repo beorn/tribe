@@ -60,9 +60,9 @@ export interface VaultSemanticReceipt {
 
 /**
  * Span times in ms on one clock. The spans are disjoint, so they sum to at most totalMs. lexicalMs is the
- * synchronous lexical search and its synonym variants. loadMs and embedMs count only the time after that search,
- * because the model cannot progress while it runs. totalMs runs from the leg's module import to the end of the
- * synonyms.
+ * synchronous lexical search and its synonym variants. loadMs and embedMs count only the wait after that search;
+ * work the model does during it (it may load on native threads) is not shown here, and a run with the leg off
+ * measures any slowdown it causes. totalMs runs from the leg's module import to the end of the synonyms.
  */
 export interface VaultSemanticSpans {
   readonly moduleMs: number

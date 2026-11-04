@@ -640,7 +640,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       }
       const marks = semantic.ok ? semantic.embedding.marks : {}
       const end = settleEnd ?? lexicalEnd
-      // Only the time after the lexical search: the model cannot progress while that synchronous search runs.
+      // Load and embed count only the wait after the lexical search; work done during it is not shown here, and D2's
+      // leg-off run measures any slowdown it causes (CTO fa3cf2f1).
       const after = (start: number | undefined, stop: number | undefined) =>
         start === undefined ? 0 : Math.max(0, Math.min(stop ?? end, end) - Math.max(start, lexicalEnd))
       legSpans = (lexicalMs, totalMs) => ({

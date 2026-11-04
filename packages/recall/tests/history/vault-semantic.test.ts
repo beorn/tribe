@@ -21,7 +21,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
-import type { VaultQueryModel } from "../../src/history/vault-semantic"
+import type { VaultQueryModel, VaultSemanticSpans } from "../../src/history/vault-semantic"
 
 process.env.RECALL_DB_PATH = ":memory:"
 
@@ -332,8 +332,8 @@ describe("the vault semantic leg in recall()", () => {
   })
 
   // CTO 3a638efb D1: pass 2's 23 s p95 could not say which part was slow; a printed span missing or overlapping
-  // another would misname the cause. No other test reads the leg's clock.
-  test("every span is printed, and the disjoint spans sum to within the total (fake clock)", async () => {
+  // another would misname the cause. No other test reads the leg's clock. CTO fa3cf2f1: the timed-out row.
+  test("every span is printed, and the disjoint spans sum to within the total, ok and timed out (fake clock)", async () => {
     await publish()
     let t = 0
     let ftsReads = 0
@@ -346,55 +346,89 @@ describe("the vault semantic leg in recall()", () => {
       if (sql.includes("SELECT vec FROM vault_doc_embed")) t += 25
       return prepare.call(this, sql)
     } as typeof prepare)
-    let result: Awaited<ReturnType<typeof import("../../src/history/search").recall>>
-    try {
-      const { recall, setRecallLogging } = await import("../../src/history/search")
-      setRecallLogging(false)
-      result = await recall("zebracorn", {
+    const { recall, setRecallLogging } = await import("../../src/history/search")
+    const { formatVaultSemanticSpans } = await import("../../src/lib/search")
+    setRecallLogging(false)
+    const search = (model: () => VaultQueryModel) => {
+      t = 0
+      ftsReads = 0
+      return recall("zebracorn", {
         raw: true,
         excludeCurrentSession: true,
         vaultDb: vaultPath,
         vaultSemantic: true,
-        deps: {
-          clock: () => t,
-          vaultQueryTimeoutMs: 50,
-          vaultQueryModel: () => ({
-            // Both continue only after the synchronous lexical search, as the real model does.
-            load: async () => {
-              await Promise.resolve()
-              t += 700
-            },
-            embed: async () => {
-              await Promise.resolve()
-              t += 40
-              return basis(0)
-            },
-            dispose: async () => {},
-          }),
-        },
+        deps: { clock: () => t, vaultQueryTimeoutMs: 50, vaultQueryModel: model },
       })
+    }
+    const sumOf = (s: VaultSemanticSpans) => s.moduleMs + s.lexicalMs + s.loadMs + s.embedMs + s.scanMs + s.mergeMs
+    try {
+      // The fixture's load and embed continue after the synchronous lexical search. Load and embed count only the
+      // wait after the lexical search; work done during it is not shown here, and D2's leg-off run measures any
+      // slowdown it causes.
+      const ok = await search(() => ({
+        load: async () => {
+          await Promise.resolve()
+          t += 700
+        },
+        embed: async () => {
+          await Promise.resolve()
+          t += 40
+          return basis(0)
+        },
+        dispose: async () => {},
+      }))
+      expect(ftsReads).toBeGreaterThan(0)
+      const lexical = 100 * ftsReads
+      const spans = ok.vaultSemantic?.spans
+      expect(spans).toEqual({
+        moduleMs: 0,
+        lexicalMs: lexical,
+        loadMs: 700,
+        embedMs: 40,
+        scanMs: 25,
+        chunksScanned: 1,
+        mergeMs: 0,
+        totalMs: lexical + 765,
+      })
+      if (!spans) throw new Error("no spans")
+      expect(sumOf(spans)).toBeLessThanOrEqual(spans.totalMs)
+      expect(ok.timing?.lexicalMs).toBe(lexical)
+      expect(formatVaultSemanticSpans(spans)).toBe(
+        `ms: lexical ${lexical}, module 0, load 700, embed 40, scan 25 (1 chunks), merge 0, total ${lexical + 765}`,
+      )
+
+      // Timed out: load never resolves; 300 ms pass on the fake clock before settle gives up at its 50 ms cap, so the
+      // load runs from the lexical end to the settle end.
+      const slow = await search(() => ({
+        load: () =>
+          new Promise<void>(() => {
+            setTimeout(() => {
+              t += 300
+            }, 5)
+          }),
+        embed: () => new Promise<Float32Array>(() => {}),
+        dispose: async () => {},
+      }))
+      expect(slow.vaultSemantic).toMatchObject({ state: "degraded", cause: /took longer than 50 ms/ })
+      const late = slow.vaultSemantic?.spans
+      if (!late) throw new Error("no spans on the degraded leg")
+      const slowLexical = 100 * ftsReads
+      expect(late).toEqual({
+        moduleMs: 0,
+        lexicalMs: slowLexical,
+        loadMs: 300,
+        embedMs: 0,
+        scanMs: 0,
+        chunksScanned: 0,
+        mergeMs: 0,
+        totalMs: slowLexical + 300,
+      })
+      expect(sumOf(late)).toBeLessThanOrEqual(late.totalMs)
+      expect(formatVaultSemanticSpans(late)).toBe(
+        `ms: lexical ${slowLexical}, module 0, load 300, embed 0, scan 0 (0 chunks), merge 0, total ${slowLexical + 300}`,
+      )
     } finally {
       spy.mockRestore()
     }
-    expect(ftsReads).toBeGreaterThan(0)
-    const spans = result.vaultSemantic?.spans
-    expect(spans).toEqual({
-      moduleMs: 0,
-      lexicalMs: 100 * ftsReads,
-      loadMs: 700,
-      embedMs: 40,
-      scanMs: 25,
-      chunksScanned: 1,
-      mergeMs: 0,
-      totalMs: 100 * ftsReads + 765,
-    })
-    if (!spans) throw new Error("no spans")
-    const sum = spans.moduleMs + spans.lexicalMs + spans.loadMs + spans.embedMs + spans.scanMs + spans.mergeMs
-    expect(sum).toBeLessThanOrEqual(spans.totalMs)
-    expect(result.timing?.lexicalMs).toBe(100 * ftsReads)
-    const { formatVaultSemanticSpans } = await import("../../src/lib/search")
-    expect(formatVaultSemanticSpans(spans)).toBe(
-      `ms: lexical ${100 * ftsReads}, module 0, load 700, embed 40, scan 25 (1 chunks), merge 0, total ${100 * ftsReads + 765}`,
-    )
   })
 })
