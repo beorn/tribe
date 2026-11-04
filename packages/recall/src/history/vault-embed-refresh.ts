@@ -122,9 +122,18 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
   let embeddedChunks = 0
   let reusedChunks = 0
   let stoppedEarly = false
+  // The rate is measured on the caller's own clock, the time-left reading before and after each embed call, so the fit
+  // check and the budget agree on one clock (CTO r3).
   let measuredChunks = 0
   let measuredMs = 0
   const chunksPerMs = () => (measuredMs > 0 ? measuredChunks / measuredMs : VAULT_EMBED_PILOT_CHUNKS_PER_MS)
+  const readTimeLeft = () => {
+    const left = options.timeLeftMs()
+    if (!Number.isFinite(left)) {
+      throw new Error(`vault embedding refresh: timeLeftMs() returned ${left}; a pass needs a finite time budget`)
+    }
+    return left
+  }
 
   for (const file of files) {
     const hash = file.fs_content_hash
@@ -136,8 +145,7 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
       coveredDocuments++
       continue
     }
-    const timeLeft = stoppedEarly ? 0 : options.timeLeftMs()
-    if (timeLeft <= 0) {
+    if (stoppedEarly || readTimeLeft() <= 0) {
       stoppedEarly = true
       miss(UNCOVERED_BUDGET)
       continue
@@ -158,6 +166,7 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
     let keys: string[]
     const fresh: Float32Array[] = []
     let abandoned = false
+    let tooLarge: string | null = null
     try {
       const content = bytes.toString("utf8")
       const title = chunker.title(content, file.fs_path)
@@ -166,21 +175,26 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
       const chunkInputs = inputs.map((input) => ({ key: vaultInputKey(contractJson, input), input }))
       keys = chunkInputs.map((c) => c.key)
       pending = chunkInputs.filter((c) => !vectorsByKey.has(c.key))
-      const fits = Math.floor(timeLeft * chunksPerMs())
-      if (pending.length > fits) {
-        miss(uncoveredTooLarge(pending.length, fits))
-        continue
-      }
+      // Re-read after chunking, then before every batch: a document whose remaining chunks no longer fit the time
+      // left at the rate measured so far is skipped by name and the pass goes on (CTO r2 change 4, r3). Only a time
+      // left already spent stops the pass.
+      let left = readTimeLeft()
       for (let start = 0; start < pending.length; start += VAULT_EMBED_BATCH) {
-        if (start > 0 && options.timeLeftMs() <= 0) {
+        if (left <= 0) {
           abandoned = true
           break
         }
+        const fits = Math.floor(left * chunksPerMs())
+        if (pending.length - start > fits) {
+          tooLarge = uncoveredTooLarge(pending.length, start + fits)
+          break
+        }
         const batch = pending.slice(start, start + VAULT_EMBED_BATCH)
-        const startedAt = performance.now()
         const vectors = await embedder.embed(batch.map((p) => p.input))
-        measuredMs += performance.now() - startedAt
+        const after = readTimeLeft()
+        measuredMs += Math.max(0, left - after)
         measuredChunks += batch.length
+        left = after
         if (vectors.length !== batch.length) {
           throw new Error(`for ${batch.length} inputs the embedder returned ${vectors.length} vector(s)`)
         }
@@ -190,6 +204,10 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
       throw new Error(`vault embedding refresh failed on ${file.fs_path}: ${(error as Error).message}`, {
         cause: error,
       })
+    }
+    if (tooLarge !== null) {
+      miss(tooLarge)
+      continue
     }
     if (abandoned) {
       stoppedEarly = true

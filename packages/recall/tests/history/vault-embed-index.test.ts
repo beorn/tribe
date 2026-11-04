@@ -79,16 +79,26 @@ describe("runVaultEmbedPass", () => {
     vault.prepare("INSERT INTO nodes VALUES (?, 'mdfile', ?, ?, ?)").run(`n:${fsPath}`, fsPath, mtime, sha256(content))
     vault.close()
   }
+  /** A budget of embed calls: the time left reads as ample until that many calls have run, then as spent. */
   const pass = (budget = Number.POSITIVE_INFINITY, contract = CONTRACT) => {
-    let left = budget
+    let calls = 0
+    const base = fixtureRuntime()
     return runVaultEmbedPass({
       db,
       vaultDbPath: statePath,
-      timeLeftMs: () => (left-- > 0 ? Number.POSITIVE_INFINITY : 0),
+      timeLeftMs: () => (calls < budget ? 1e12 : 0),
       now: 1,
       env: { RECALL_EMBED_MODEL: modelPath },
       contract,
-      runtime: fixtureRuntime,
+      runtime: () => ({
+        chunker: base.chunker,
+        embedder: {
+          embed: async (inputs) => {
+            calls++
+            return base.embedder.embed(inputs)
+          },
+        },
+      }),
     })
   }
   const generations = () => db.prepare("SELECT id, gguf_sha256, state FROM vault_embed_generation ORDER BY id").all()
@@ -162,7 +172,7 @@ describe("runVaultEmbedPass", () => {
       await runVaultEmbedPass({
         db,
         vaultDbPath: join(linked, ".km", "state.db"),
-        timeLeftMs: () => Number.POSITIVE_INFINITY,
+        timeLeftMs: () => 1e12,
         now: 1,
         env: { RECALL_EMBED_MODEL: modelPath },
         contract: CONTRACT,
@@ -181,7 +191,7 @@ describe("runVaultEmbedPass", () => {
     await runVaultEmbedPass({
       db,
       vaultDbPath: statePath,
-      timeLeftMs: () => Number.POSITIVE_INFINITY,
+      timeLeftMs: () => 1e12,
       now: 1,
       env: { RECALL_EMBED_MODEL: link },
       contract: CONTRACT,
@@ -215,7 +225,7 @@ describe("runVaultEmbedPass", () => {
       runVaultEmbedPass({
         db,
         vaultDbPath: statePath,
-        timeLeftMs: () => Number.POSITIVE_INFINITY,
+        timeLeftMs: () => 1e12,
         env: {},
         contract: CONTRACT,
         runtime: () => {
@@ -265,7 +275,7 @@ describe("runVaultEmbedPass", () => {
     const report = await runVaultEmbedPass({
       db,
       vaultDbPath: statePath,
-      timeLeftMs: () => Number.POSITIVE_INFINITY,
+      timeLeftMs: () => 1e12,
       now: 1,
       env: { RECALL_EMBED_MODEL: modelPath },
       contract: CONTRACT,

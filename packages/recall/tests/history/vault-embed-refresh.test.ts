@@ -88,6 +88,19 @@ function recordingEmbedder(): VaultEmbedder & { calls: (readonly string[])[] } {
   }
 }
 
+/** A fixed clock: the embedder advances it msPerChunk per input, and the time left counts down from budgetMs. */
+function fixedClock(budgetMs: number, msPerChunk: number) {
+  let now = 0
+  const base = recordingEmbedder()
+  const embedder: VaultEmbedder = {
+    embed: async (inputs) => {
+      now += inputs.length * msPerChunk
+      return base.embed(inputs)
+    },
+  }
+  return { timeLeftMs: () => budgetMs - now, embedder }
+}
+
 describe("refreshVaultEmbeddings", () => {
   let db: Database
   let vault: Database
@@ -101,8 +114,16 @@ describe("refreshVaultEmbeddings", () => {
       .prepare("INSERT INTO nodes (id, fstype, fs_path, fs_mtime, fs_content_hash) VALUES (?, 'mdfile', ?, ?, ?)")
       .run(`n:${fsPath}`, fsPath, mtime, hash)
   }
-  const run = (embedder: VaultEmbedder, extra: { budgetDocuments?: number; timeLeftMs?: () => number } = {}) => {
-    let left = extra.budgetDocuments ?? Number.POSITIVE_INFINITY
+  /** budgetCalls: the time left reads as ample until that many embed calls have run, then as spent. */
+  const run = (embedder: VaultEmbedder, extra: { budgetCalls?: number; timeLeftMs?: () => number } = {}) => {
+    const budget = extra.budgetCalls ?? Number.POSITIVE_INFINITY
+    let calls = 0
+    const counted: VaultEmbedder = {
+      embed: async (inputs) => {
+        calls++
+        return embedder.embed(inputs)
+      },
+    }
     return refreshVaultEmbeddings({
       db,
       vaultDb: vault,
@@ -111,8 +132,8 @@ describe("refreshVaultEmbeddings", () => {
       generation,
       contract: CONTRACT,
       chunker,
-      embedder,
-      timeLeftMs: extra.timeLeftMs ?? (() => (left-- > 0 ? Number.POSITIVE_INFINITY : 0)),
+      embedder: counted,
+      timeLeftMs: extra.timeLeftMs ?? (() => (calls < budget ? 1e12 : 0)),
     })
   }
   const rows = () =>
@@ -192,7 +213,7 @@ describe("refreshVaultEmbeddings", () => {
     putFile("old.md", "Old\n\no", 100)
     putFile("mid.md", "Mid\n\nm", 200)
     const embedder = recordingEmbedder()
-    const report = await run(embedder, { budgetDocuments: 2 })
+    const report = await run(embedder, { budgetCalls: 2 })
     expect(embedder.calls.map((call) => call[0])).toEqual(["doc: Old | Old", "doc: Mid | Mid"])
     expect(report).toMatchObject({ embeddedDocuments: 2, stoppedEarly: true })
     expect(report.uncovered).toEqual({ "refresh budget spent before this document": 1 })
@@ -252,7 +273,7 @@ describe("refreshVaultEmbeddings", () => {
     putFile("big.md", big, 10)
     putFile("later.md", "L\n\nl", 20)
     const embedder = recordingEmbedder()
-    const report = await run(embedder, { budgetDocuments: 1 })
+    const report = await run(embedder, { budgetCalls: 1 })
     expect(embedder.calls.map((call) => call.length)).toEqual([VAULT_EMBED_BATCH])
     expect(report).toMatchObject({ embeddedDocuments: 0, stoppedEarly: true })
     expect(report.uncovered).toEqual({ [UNCOVERED_BUDGET_INSIDE]: 1, [UNCOVERED_BUDGET]: 1 })
@@ -283,18 +304,31 @@ describe("refreshVaultEmbeddings", () => {
   test("once the pass has measured its own rate, the fit check uses it instead of the pilot rate", async () => {
     putFile("a.md", "A\n\na", 10)
     putFile("big.md", tenParagraphs, 20)
-    const base = recordingEmbedder()
-    // 50 ms per call is far faster than the pilot: 10 s then has time for ten chunks, though the pilot allows two.
-    const fast: VaultEmbedder = {
-      embed: async (inputs) => {
-        await new Promise((resolve) => {
-          setTimeout(resolve, 50)
-        })
-        return base.embed(inputs)
-      },
-    }
-    const report = await run(fast, { timeLeftMs: () => 10_000 })
+    // 100 ms per chunk on a fixed clock is far faster than the pilot: after a.md, 9.8 s has time for 98 chunks, though
+    // the pilot rate would allow two.
+    const clock = fixedClock(10_000, 100)
+    const report = await run(clock.embedder, { timeLeftMs: clock.timeLeftMs })
     expect(report.uncovered).toEqual({})
     expect(report.embeddedDocuments).toBe(2)
+  })
+
+  test("a document admitted at the pilot rate on a slower host is skipped mid-way by name, and newer documents still embed (CTO r3)", async () => {
+    // 10 s per chunk is slower than the pilot (about 3.5 s). With 100 s left the pilot admits big.md's 20 chunks; after
+    // its first batch (80 s) the measured rate fits 2 of the 12 left, so big.md is skipped without stopping the pass,
+    // and later.md's 2 chunks fit the last 20 s.
+    putFile("big.md", Array.from({ length: 20 }, (_, i) => `p${i}`).join("\n\n"), 10)
+    putFile("later.md", "L\n\nl", 20)
+    const clock = fixedClock(100_000, 10_000)
+    const report = await run(clock.embedder, { timeLeftMs: clock.timeLeftMs })
+    expect(report.uncovered).toEqual({ [uncoveredTooLarge(20, VAULT_EMBED_BATCH + 2)]: 1 })
+    expect(report).toMatchObject({ embeddedDocuments: 1, stoppedEarly: false })
+    expect(new Set(rows().map((r) => r.fs_path))).toEqual(new Set(["later.md"]))
+  })
+
+  test("a time budget that is not a finite number is refused loudly", async () => {
+    putFile("a.md", "A\n\na", 10)
+    await expect(run(recordingEmbedder(), { timeLeftMs: () => Number.POSITIVE_INFINITY })).rejects.toThrow(
+      /returned Infinity; a pass needs a finite time budget/,
+    )
   })
 })
