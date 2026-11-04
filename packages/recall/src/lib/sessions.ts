@@ -167,6 +167,11 @@ export async function cmdIndex(opts: {
           (uncovered ? `; uncovered: ${uncovered}` : "") +
           (vault.stoppedEarly ? " (stopped at the time budget)" : ""),
       )
+      console.log(
+        `  vault embedding times: first embed call ${vault.batchMs.first ?? "none"} ms, steady median ` +
+          `${vault.batchMs.steadyMedian ?? "none"} ms; ${vault.tooLarge.documents} documents too large for this pass` +
+          (vault.tooLarge.documents > 0 ? ` (largest ${vault.tooLarge.largestChunks} chunks)` : ""),
+      )
     }
 
     // 25462: a refused incremental share-cap prune stays a non-zero REPORT (never a failure)

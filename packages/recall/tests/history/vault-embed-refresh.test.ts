@@ -322,6 +322,9 @@ describe("refreshVaultEmbeddings", () => {
     const report = await run(clock.embedder, { timeLeftMs: clock.timeLeftMs })
     expect(report.uncovered).toEqual({ [uncoveredTooLarge(20, VAULT_EMBED_BATCH + 2)]: 1 })
     expect(report).toMatchObject({ embeddedDocuments: 1, stoppedEarly: false })
+    // Slice 5 reports these as numbers: one document too large (20 chunks); calls of 8 chunks then 2, at 10 s a chunk.
+    expect(report.tooLarge).toEqual({ documents: 1, largestChunks: 20 })
+    expect(report.batchMs).toEqual({ first: 80_000, steadyMedian: 20_000 })
     expect(new Set(rows().map((r) => r.fs_path))).toEqual(new Set(["later.md"]))
   })
 

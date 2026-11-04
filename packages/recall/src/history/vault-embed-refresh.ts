@@ -55,6 +55,13 @@ export interface VaultEmbedRefreshReport {
   readonly reusedChunks: number
   readonly uncovered: Readonly<Record<string, number>>
   readonly stoppedEarly: boolean
+  /** Documents skipped because their chunks did not fit the time left, and the largest pending chunk count among them. */
+  readonly tooLarge: { readonly documents: number; readonly largestChunks: number }
+  /**
+   * Embed-call times on the caller's clock: the pass's first call (it includes the model load) and the median of the
+   * rest; null when the pass made no such call.
+   */
+  readonly batchMs: { readonly first: number | null; readonly steadyMedian: number | null }
 }
 
 export interface VaultEmbedRefreshOptions {
@@ -126,6 +133,9 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
   // check and the budget agree on one clock (CTO r3).
   let measuredChunks = 0
   let measuredMs = 0
+  const callMs: number[] = []
+  let tooLargeDocuments = 0
+  let largestTooLarge = 0
   const chunksPerMs = () => (measuredMs > 0 ? measuredChunks / measuredMs : VAULT_EMBED_PILOT_CHUNKS_PER_MS)
   const readTimeLeft = () => {
     const left = options.timeLeftMs()
@@ -187,12 +197,15 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
         const fits = Math.floor(left * chunksPerMs())
         if (pending.length - start > fits) {
           tooLarge = uncoveredTooLarge(pending.length, start + fits)
+          tooLargeDocuments++
+          largestTooLarge = Math.max(largestTooLarge, pending.length)
           break
         }
         const batch = pending.slice(start, start + VAULT_EMBED_BATCH)
         const vectors = await embedder.embed(batch.map((p) => p.input))
         const after = readTimeLeft()
         measuredMs += Math.max(0, left - after)
+        callMs.push(Math.max(0, left - after))
         measuredChunks += batch.length
         left = after
         if (vectors.length !== batch.length) {
@@ -256,5 +269,14 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
     reusedChunks,
     uncovered,
     stoppedEarly,
+    tooLarge: { documents: tooLargeDocuments, largestChunks: largestTooLarge },
+    batchMs: { first: callMs[0] ?? null, steadyMedian: median(callMs.slice(1)) },
   }
+}
+
+function median(values: readonly number[]): number | null {
+  if (values.length === 0) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 1 ? (sorted[mid] ?? null) : ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2
 }
