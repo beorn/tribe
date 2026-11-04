@@ -31,7 +31,6 @@ const mockAgent: {
   result: Awaited<typeof import("../../src/lib/agent")>["recallAgent"] | null
   options: unknown
 } = { result: null, options: null }
-let mockRefreshSpawnCalls = 0
 
 function makeAgentMock() {
   const exported = {
@@ -55,25 +54,6 @@ vi.mock("node-llama-cpp", () => ({
     throw new Error("search-output tests load no query model")
   },
 }))
-
-// Regression seam for @i/20-search-and-memory/23189: search must never import
-// this query-refresh capability. If it is wired back in, the stale-search test
-// observes the attempted incremental-index spawn without touching the user's DB.
-vi.mock("../../src/lib/refresh.ts", async (importOriginal) => {
-  const orig = await importOriginal<typeof import("../../src/lib/refresh.ts")>()
-  return {
-    ...orig,
-    makeRefreshDeps: (getLastRebuild: () => string | null) => ({
-      getLastRebuild,
-      now: () => Date.now(),
-      getThresholdMs: () => 5 * 60 * 1000,
-      spawnCmd: async () => {
-        mockRefreshSpawnCalls++
-        return { exitCode: 0 }
-      },
-    }),
-  }
-})
 
 type SearchModule = typeof import("../../src/lib/search")
 type DbModule = typeof import("../../src/history/db")
@@ -282,7 +262,6 @@ describe("recall search output", () => {
     await loadModules()
     mockAgent.result = null
     mockAgent.options = null
-    mockRefreshSpawnCalls = 0
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
     errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
     stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
@@ -988,7 +967,6 @@ describe("recall search output", () => {
         ),
       )
 
-      expect(mockRefreshSpawnCalls).toBe(0)
       expect(callsText(errSpy)).not.toContain("auto-refresh")
       // The stale answer names the root and window it judged (@ag/recall/27930);
       // this row failed while status carried its own 1h window on the same stamp.

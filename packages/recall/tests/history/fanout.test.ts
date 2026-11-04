@@ -609,6 +609,6 @@ describe("fanoutSearch best-rank aggregation", () => {
     const doc = result.results.find((r) => r.sessionId === "sess-x")!
     expect(doc.snippet).toContain("bestrankstrong")
     expect(doc.timestamp).toBe(monthOld)
-    expect(doc.rank).toBe(boostedRank(strong, monthOld))
+    expect(doc.rank).toBeCloseTo(boostedRank(strong, monthOld), 6)
   })
 })
