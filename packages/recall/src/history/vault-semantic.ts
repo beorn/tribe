@@ -156,12 +156,13 @@ export function startVaultQueryEmbedding(
     // Both calls start synchronously, before the lexical search, as before the load was timed apart.
     marks.loadStart = clock()
     const loading = model.load?.()
-    const vectorOf: Promise<Float32Array> = loading
-      ? loading.then(() => {
-          marks.loadEnd = clock()
-          return embed()
-        })
-      : ((marks.loadEnd = marks.loadStart), embed())
+    const vectorOf: Promise<Float32Array> =
+      loading !== undefined
+        ? loading.then(() => {
+            marks.loadEnd = clock()
+            return embed()
+          })
+        : ((marks.loadEnd = marks.loadStart), embed())
     // The outcome is held, error included, until settle() reads it, so an early failure is never unhandled.
     embedded = vectorOf.then(
       (vector) => {
