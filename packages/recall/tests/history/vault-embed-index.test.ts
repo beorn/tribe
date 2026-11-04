@@ -27,7 +27,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createStore, insertContent, insertDocument, insertEmbedding } from "@tobilu/qmd/store"
+import { createStore, insertContent, insertEmbedding } from "@tobilu/qmd/store"
 import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
 import { initSchema } from "../../src/history/db-schema"
@@ -234,7 +234,6 @@ describe("runVaultEmbedPass", () => {
     qmd.ensureVecTable(4)
     const hash = sha256("A\n\na")
     insertContent(qmd.db, hash, "A\n\na", "2026-11-01")
-    insertDocument(qmd.db, "pm", "a.md", "A", hash, "2026-11-01", "2026-11-01")
     for (const seq of [0, 1]) {
       insertEmbedding(qmd.db, hash, seq, 0, new Float32Array([seq, 1, 2, 3]), "hf:fixture/embed.gguf", "x", 2)
     }
@@ -274,6 +273,23 @@ describe("runVaultEmbedPass", () => {
     })
     expect(report).toMatchObject({ generation: 1, coveredDocuments: 1, embeddedChunks: 0 })
     expect(embedded).toBe(0)
+  })
+
+  test("the seed refuses a GGUF other than the contract's pinned digest, as the pass does, selecting nothing", async () => {
+    const qmdPath = join(root, "index.sqlite")
+    writeFileSync(qmdPath, "")
+    writeFileSync(modelPath, "not the ruled model")
+    await expect(
+      runVaultEmbedSeed({
+        db,
+        vaultDbPath: statePath,
+        qmdDbPath: qmdPath,
+        env: { RECALL_EMBED_MODEL: modelPath },
+        contract: CONTRACT,
+        runtime: fixtureRuntime,
+      }),
+    ).rejects.toThrow(new RegExp(`sha256 ${sha256("not the ruled model")}.*pins ${CONTRACT.modelSha256}`))
+    expect(generations()).toEqual([])
   })
 
   test("a missing qmd store is refused before anything is selected", async () => {
