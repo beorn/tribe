@@ -520,23 +520,20 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       mode,
     }
     const vaultDb = options.vaultDb ?? null
-    // The vault semantic leg (@ag/recall/three-dark-search-paths slice 3): opt-in, never in hook mode. Its one query
-    // embedding starts here, before the synchronous lexical work, and is awaited after it; it never rejects.
-    const semanticStarted = performance.now()
-    const semantic =
+    // The vault semantic leg (@ag/recall/three-dark-search-paths slice 3): opt-in, never in hook mode. Its module
+    // (no qmd store, no model) is loaded and its one query embedding is started here, before the synchronous lexical
+    // work, and awaited after it (CTO 0edff0e3 fix 1); the outcome never rejects.
+    const semanticLeg =
       options.vaultSemantic === true && !hook && vaultDb !== null && runs("vault")
-        ? import("./vault-semantic.ts").then(async ({ embedVaultQuery, fuseVaultMatches, rankVaultSemantic }) => ({
-            leg: { fuseVaultMatches, rankVaultSemantic },
-            query: await embedVaultQuery(query, {
-              open: options.deps?.vaultQueryModel,
-              timeoutMs: options.deps?.vaultQueryTimeoutMs,
-            }),
-          }))
+        ? await import("./vault-semantic.ts")
         : null
-    const semanticOutcome = semantic?.then(
-      (ok) => ({ ok: true as const, ...ok }),
-      (error: unknown) => ({ ok: false as const, cause: error instanceof Error ? error.message : String(error) }),
-    )
+    const semanticStarted = performance.now()
+    const semanticOutcome = semanticLeg
+      ?.embedVaultQuery(query, { open: options.deps?.vaultQueryModel, timeoutMs: options.deps?.vaultQueryTimeoutMs })
+      .then(
+        (vector) => ({ ok: true as const, leg: semanticLeg, query: vector }),
+        (error: unknown) => ({ ok: false as const, cause: error instanceof Error ? error.message : String(error) }),
+      )
     const searchStart = Date.now()
     const candidates = retrieveCandidates({
       db,

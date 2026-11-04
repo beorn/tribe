@@ -46,6 +46,16 @@ function makeAgentMock() {
 
 vi.mock("../../src/lib/agent.ts", () => makeAgentMock())
 
+// The vault semantic leg's model route (@ag/recall/three-dark-search-paths): counted, so a test proves a path never
+// loads a model; no test here needs a real one.
+const llamaLoads = vi.hoisted(() => ({ count: 0 }))
+vi.mock("node-llama-cpp", () => ({
+  getLlama: async () => {
+    llamaLoads.count++
+    throw new Error("search-output tests load no query model")
+  },
+}))
+
 // Regression seam for @i/20-search-and-memory/23189: search must never import
 // this query-refresh capability. If it is wired back in, the stale-search test
 // observes the attempted incremental-index spawn without touching the user's DB.
@@ -711,6 +721,69 @@ describe("recall search output", () => {
       expect(callsText(errSpy)).not.toContain("vault: not bound")
       expect(callsText(logSpy)).toContain("vaultboundneedle")
     } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // CTO 0edff0e3 fixes 2 and 9: a bound normal search with no query model keeps its lexical vault hits, names the
+  // degradation, exits 3, and ends the process after printing; raw search makes no receipt and loads no model.
+  test("a bound normal search without RECALL_EMBED_MODEL keeps the vault hits, exits 3 and ends the process", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-vault-semantic-unset-"))
+    const dbPath = join(dir, "state.db")
+    const savedModel = process.env.RECALL_EMBED_MODEL
+    const previousExitCode = process.exitCode
+    const previousLlmDir = process.env.TRIBE_LLM_DIR
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never)
+    // The process ends only after both streams flush, so the stubbed stderr acknowledges its writes.
+    stderrWriteSpy.mockImplementation(((_chunk: unknown, done?: unknown) => {
+      if (typeof done === "function") done()
+      return true
+    }) as never)
+    delete process.env.RECALL_EMBED_MODEL
+    delete process.env.TRIBE_LLM_DIR
+    try {
+      seedVaultDb(dbPath, "vaultsemanticneedle only lives in the km vault")
+      bindVaultDb(dbPath)
+      setIndexMeta(getDb(), "last_rebuild", new Date().toISOString())
+
+      await cmdSearch("vaultsemanticneedle", { refresh: false, project: "*" })
+
+      const output = callsText(logSpy)
+      expect(output).toContain("vault semantic leg degraded, lexical vault hits kept")
+      expect(output).toContain("RECALL_EMBED_MODEL is not set")
+      expect(output).toContain("vaultsemanticneedle")
+      expect(process.exitCode).toBe(3)
+      expect(exitSpy).toHaveBeenCalledTimes(1)
+      expect(llamaLoads.count).toBe(0)
+    } finally {
+      exitSpy.mockRestore()
+      process.exitCode = previousExitCode
+      if (savedModel === undefined) delete process.env.RECALL_EMBED_MODEL
+      else process.env.RECALL_EMBED_MODEL = savedModel
+      if (previousLlmDir === undefined) delete process.env.TRIBE_LLM_DIR
+      else process.env.TRIBE_LLM_DIR = previousLlmDir
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a bound raw search makes no vault semantic receipt and loads no model", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-vault-semantic-raw-"))
+    const dbPath = join(dir, "state.db")
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never)
+    try {
+      seedVaultDb(dbPath, "vaultsemanticrawneedle only lives in the km vault")
+      bindVaultDb(dbPath)
+
+      await cmdSearch("vaultsemanticrawneedle", { raw: true, json: true, project: "*" })
+
+      const payload = jsonStdout<{ vaultSemantic?: unknown; results: unknown[] | null }>(logSpy)
+      expect(payload.vaultSemantic).toBeUndefined()
+      expect(payload.results).not.toBeNull()
+      expect(callsText(errSpy)).not.toContain("vault semantic")
+      expect(exitSpy).not.toHaveBeenCalled()
+      expect(llamaLoads.count).toBe(0)
+    } finally {
+      exitSpy.mockRestore()
       rmSync(dir, { recursive: true, force: true })
     }
   })

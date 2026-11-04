@@ -18,6 +18,7 @@ import {
   vaultEmbedGenerationMismatch,
   type VaultEmbedContract,
 } from "./vault-embed-store.ts"
+import { log } from "./recall-shared.ts"
 import { openVaultDb, type VaultMatch } from "./vault-fts.ts"
 
 export const VAULT_RRF_K = 60
@@ -97,11 +98,15 @@ export async function embedVaultQuery(
   const model = (options.open ?? openVaultQueryModel)(modelPath, contract.contextTokens)
   const timeoutMs = options.timeoutMs ?? VAULT_SEMANTIC_TIMEOUT_MS
   let timer: ReturnType<typeof setTimeout> | undefined
+  let timedOut = false
   try {
     const vector = await Promise.race([
       model.embed(formatQueryForEmbedding(query, modelPath)),
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`the query embedding took longer than ${timeoutMs} ms`)), timeoutMs)
+        timer = setTimeout(() => {
+          timedOut = true
+          reject(new Error(`the query embedding took longer than ${timeoutMs} ms`))
+        }, timeoutMs)
       }),
     ])
     if (vector.length !== contract.dimensions) {
@@ -112,7 +117,15 @@ export async function embedVaultQuery(
     return { contract, modelStat, vector }
   } finally {
     clearTimeout(timer)
-    await model.dispose()
+    if (timedOut) {
+      // Production dispose waits for the load; awaiting it here would let a slow load outlast the cap (CTO 0edff0e3
+      // fix 2). The CLI ends the process after printing a degraded result.
+      model.dispose().catch((error: unknown) => {
+        log(`vault semantic: disposing the timed-out query model failed: ${String(error)}`)
+      })
+    } else {
+      await model.dispose()
+    }
   }
 }
 

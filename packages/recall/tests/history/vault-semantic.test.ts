@@ -172,6 +172,47 @@ describe("the vault semantic leg in recall()", () => {
     expect(vaultHits(result).sort()).toEqual(["a.md", "c.md"])
   })
 
+  test("the query embedding starts before the vault FTS runs (CTO 0edff0e3 fix 1)", async () => {
+    await publish()
+    const order: string[] = []
+    const prepare = Database.prototype.prepare
+    const spy = vi.spyOn(Database.prototype, "prepare").mockImplementation(function (this: Database, sql: string) {
+      if (sql.includes("nodes_fts")) order.push("fts")
+      return prepare.call(this, sql)
+    } as typeof prepare)
+    try {
+      const result = await run({
+        model: () => ({
+          embed: async () => {
+            order.push("embed")
+            return basis(0)
+          },
+          dispose: async () => {},
+        }),
+      })
+      expect(result.vaultSemantic?.state).toBe("ok")
+    } finally {
+      spy.mockRestore()
+    }
+    expect(order[0]).toBe("embed")
+    expect(order).toContain("fts")
+  })
+
+  test("a model load that never settles still degrades within the cap (CTO 0edff0e3 fix 2)", async () => {
+    await publish()
+    const started = performance.now()
+    const result = await run({
+      model: () => ({
+        embed: () => new Promise<Float32Array>(() => {}),
+        // Production dispose waits for the load, so it never settles either.
+        dispose: () => new Promise<void>(() => {}),
+      }),
+    })
+    expect(result.vaultSemantic).toMatchObject({ state: "degraded", cause: /took longer than 50 ms/ })
+    expect(performance.now() - started).toBeLessThan(2_000)
+    expect(vaultHits(result).sort()).toEqual(["a.md", "c.md"])
+  })
+
   test("no published generation degrades with its cause and keeps the lexical vault hits", async () => {
     const result = await run()
     expect(result.vaultSemantic).toMatchObject({
