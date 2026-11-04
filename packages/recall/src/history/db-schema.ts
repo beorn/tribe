@@ -167,6 +167,28 @@ CREATE TRIGGER IF NOT EXISTS content_au AFTER UPDATE ON content BEGIN
   INSERT INTO content_fts(rowid, title, content)
   VALUES (new.id, new.title, new.content);
 END;`,
+  // Vault semantic embeddings (@ag/recall/three-dark-search-paths D1). Additive tables follow the
+  // CREATE TABLE IF NOT EXISTS pattern, so user_version is unchanged. A later change to either
+  // table's shape needs a versioned MIGRATION_STEPS step.
+  `
+CREATE TABLE IF NOT EXISTS vault_embed_generation (
+  id INTEGER PRIMARY KEY,
+  contract_json TEXT NOT NULL,
+  gguf_sha256 TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('building','published','retired'))
+);`,
+  `
+CREATE TABLE IF NOT EXISTS vault_doc_embed (
+  generation INTEGER NOT NULL,
+  vault_id TEXT NOT NULL,
+  fs_path TEXT NOT NULL,
+  doc_hash TEXT NOT NULL,
+  chunk INTEGER NOT NULL,
+  input_key TEXT NOT NULL,
+  vec BLOB NOT NULL,
+  PRIMARY KEY(generation, vault_id, fs_path, doc_hash, chunk)
+);`,
 ]
 
 export interface MigrationStep {
