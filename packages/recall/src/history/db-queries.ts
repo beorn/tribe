@@ -408,24 +408,21 @@ function messageFilterSql(options: MessageSearchOptions): { sql: string; params:
   if (sinceTime !== undefined && untilTime !== undefined && sinceTime > untilTime) {
     throw new Error("--since is after --until")
   }
-  const clauses = [
-    "m.duplicate_of IS NULL",
-    `(m.uuid IS NULL OR m.id = (
-      SELECT m2.id FROM messages m2
-      JOIN sessions s2 ON m2.session_id = s2.id
-      WHERE m2.uuid = m.uuid
-      ORDER BY CASE WHEN s2.parent_session_id IS NULL THEN 0 ELSE 1 END, m2.id ASC
-      LIMIT 1
-    ))`,
-  ]
+  const clauses = ["m.duplicate_of IS NULL"]
   const params: (string | number)[] = []
   if (projectFilter) {
     clauses.push("s.cwd LIKE ?")
     params.push(`%${projectFilter}%`)
   }
   if (sinceTime !== undefined) {
-    clauses.push("m.timestamp >= ?")
-    params.push(sinceTime)
+    // Superset bound for the FTS cursor: every in-window row's id is at least the window's MIN(id), so matches
+    // below it are skipped before any row read; old timestamps at high ids still meet the clause after it (CTO e6b99892).
+    // INDEXED BY: unforced, SQLite answers MIN(id) by walking the wide table from its first rowid.
+    clauses.push(
+      "f.rowid >= (SELECT MIN(id) FROM messages INDEXED BY idx_messages_timestamp WHERE timestamp >= ?)",
+      "m.timestamp >= ?",
+    )
+    params.push(sinceTime, sinceTime)
   }
   if (untilTime !== undefined) {
     clauses.push("m.timestamp <= ?")
@@ -448,6 +445,14 @@ function messageFilterSql(options: MessageSearchOptions): { sql: string; params:
       params.push(session.id, session.id)
     }
   }
+  // Last, so the cheap tests above drop out-of-window matches before this per-match lookup runs (CTO e6b99892 C1).
+  clauses.push(`(m.uuid IS NULL OR m.id = (
+      SELECT m2.id FROM messages m2
+      JOIN sessions s2 ON m2.session_id = s2.id
+      WHERE m2.uuid = m.uuid
+      ORDER BY CASE WHEN s2.parent_session_id IS NULL THEN 0 ELSE 1 END, m2.id ASC
+      LIMIT 1
+    ))`)
   return { sql: clauses.join(" AND "), params }
 }
 
