@@ -13,6 +13,7 @@
  * Fixtures: a private km vault (nodes + nodes_fts) and an in-memory index; the query model is a fixture.
  */
 import { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 import { createHash } from "node:crypto"
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -99,7 +100,7 @@ describe("the vault semantic leg in recall()", () => {
       "CREATE VIRTUAL TABLE nodes_fts USING fts5(id, name, title, content, content='nodes', content_rowid='rowid')",
       "CREATE TRIGGER nodes_ai AFTER INSERT ON nodes BEGIN INSERT INTO nodes_fts(rowid, id, name, title, content) VALUES (new.rowid, new.id, new.name, new.title, new.content); END",
     ]) {
-      vault.exec(sql)
+      vault.exec(assertSingleStatement(sql))
     }
     const insert = vault.prepare(
       "INSERT INTO nodes (id, fs_path, name, title, content, fstype, fs_content_hash) VALUES (?, ?, ?, ?, ?, 'mdfile', ?)",
