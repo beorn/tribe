@@ -8,6 +8,9 @@
  * no vector in the target generation; it embeds a document only when its file bytes hash to km's current
  * fs_content_hash; it writes one transaction per document and prunes that path's older rows after the commit; it
  * takes documents oldest fs_mtime first, so a spent budget leaves the newest documents uncovered and reported.
+ * CTO verdict 0edff0e3 fixes 6 and 7: the budget is checked between embedding batches inside a document, so one huge
+ * document cannot overrun the 600 s limit (it is abandoned unwritten and reported); a file km lists that cannot be
+ * read is one uncovered document with a named reason, never a failed pass; an empty document is named, never silent.
  * Gap: slice 1 tests cover storage and identity only; nothing exercises a refresh. Fixtures are private: an
  * in-memory km-shaped nodes table, files in a temp dir, a paragraph chunker and a hash-derived 4-dimension embedder.
  */
@@ -21,6 +24,11 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest"
 import { initSchema } from "../../src/history/db-schema"
 import {
   refreshVaultEmbeddings,
+  UNCOVERED_BUDGET,
+  UNCOVERED_BUDGET_INSIDE,
+  UNCOVERED_EMPTY,
+  uncoveredUnreadable,
+  VAULT_EMBED_BATCH,
   type VaultEmbedChunker,
   type VaultEmbedder,
 } from "../../src/history/vault-embed-refresh"
@@ -50,7 +58,11 @@ const VAULT = "/fixture/vault/state.db"
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 
 const chunker: VaultEmbedChunker = {
-  chunk: async (content) => content.split("\n\n").map((text) => ({ text })),
+  chunk: async (content) =>
+    content
+      .split("\n\n")
+      .filter((text) => text.length > 0)
+      .map((text) => ({ text })),
   title: (content) => content.split("\n")[0] ?? "",
   format: async (text, title) => `doc: ${title} | ${text}`,
 }
@@ -197,6 +209,37 @@ describe("refreshVaultEmbeddings", () => {
     putFile("a.md", "A\n\na", 10)
     const short: VaultEmbedder = { embed: async () => [new Float32Array(4)] }
     await expect(run(short)).rejects.toThrow(/2 inputs.*1 vector/)
+    expect(rows()).toEqual([])
+  })
+
+  test("a file km lists that cannot be read is uncovered with its errno, and the pass continues", async () => {
+    putFile("a.md", "A\n\na", 10)
+    vault
+      .prepare("INSERT INTO nodes (id, fstype, fs_path, fs_mtime, fs_content_hash) VALUES (?, 'mdfile', ?, ?, ?)")
+      .run("n:gone.md", "gone.md", 5, sha256("gone"))
+    putFile("b.md", "B\n\nb", 20)
+    const report = await run(recordingEmbedder())
+    expect(report.uncovered).toEqual({ [uncoveredUnreadable("ENOENT")]: 1 })
+    expect(report.embeddedDocuments).toBe(2)
+    expect(new Set(rows().map((r) => r.fs_path))).toEqual(new Set(["a.md", "b.md"]))
+  })
+
+  test("a budget spent between batches inside one document abandons it unwritten and stops the pass", async () => {
+    const big = Array.from({ length: VAULT_EMBED_BATCH + 2 }, (_, i) => `p${i}`).join("\n\n")
+    putFile("big.md", big, 10)
+    putFile("later.md", "L\n\nl", 20)
+    const embedder = recordingEmbedder()
+    const report = await run(embedder, { budgetDocuments: 1 })
+    expect(embedder.calls.map((call) => call.length)).toEqual([VAULT_EMBED_BATCH])
+    expect(report).toMatchObject({ embeddedDocuments: 0, stoppedEarly: true })
+    expect(report.uncovered).toEqual({ [UNCOVERED_BUDGET_INSIDE]: 1, [UNCOVERED_BUDGET]: 1 })
+    expect(rows()).toEqual([])
+  })
+
+  test("a document with no text to embed is reported by name and writes nothing", async () => {
+    putFile("empty.md", "", 10)
+    const report = await run(recordingEmbedder())
+    expect(report.uncovered).toEqual({ [UNCOVERED_EMPTY]: 1 })
     expect(rows()).toEqual([])
   })
 })

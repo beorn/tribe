@@ -29,6 +29,15 @@ export interface VaultEmbedder {
 export const UNCOVERED_NO_HASH = "km has not recorded this file's hash"
 export const UNCOVERED_HASH_MISMATCH = "file bytes differ from km's recorded hash"
 export const UNCOVERED_BUDGET = "refresh budget spent before this document"
+export const UNCOVERED_BUDGET_INSIDE = "refresh budget spent inside this document; it is abandoned unwritten"
+export const UNCOVERED_EMPTY = "the document has no text to embed"
+/** km still lists the file but it cannot be read, e.g. after a delete: the reason carries the error code. */
+export const uncoveredUnreadable = (code: string) => `file unreadable (${code})`
+/**
+ * Chunks per embed call. The budget is checked between calls, so one call is the most a pass can overrun its budget:
+ * at the measured pilot rate (0.2862 chunks/s) eight chunks take about 28 s, inside the 600 s ceiling's margin.
+ */
+export const VAULT_EMBED_BATCH = 8
 
 export interface VaultEmbedRefreshReport {
   readonly documents: number
@@ -52,7 +61,7 @@ export interface VaultEmbedRefreshOptions {
   readonly contract: VaultEmbedContract
   readonly chunker: VaultEmbedChunker
   readonly embedder: VaultEmbedder
-  /** Checked before each document that needs embedding; true stops the pass. */
+  /** Checked before each document that needs embedding and between embed batches; true stops the pass. */
   readonly budgetSpent: () => boolean
 }
 
@@ -118,7 +127,13 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
       miss(UNCOVERED_BUDGET)
       continue
     }
-    const bytes = readFileSync(join(vaultRoot, file.fs_path))
+    let bytes: Buffer
+    try {
+      bytes = readFileSync(join(vaultRoot, file.fs_path))
+    } catch (error) {
+      miss(uncoveredUnreadable((error as NodeJS.ErrnoException).code ?? (error as Error).message))
+      continue
+    }
     if (createHash("sha256").update(bytes).digest("hex") !== hash) {
       miss(UNCOVERED_HASH_MISMATCH)
       continue
@@ -126,7 +141,8 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
 
     let pending: { key: string; input: string }[]
     let keys: string[]
-    let fresh: readonly Float32Array[]
+    const fresh: Float32Array[] = []
+    let abandoned = false
     try {
       const content = bytes.toString("utf8")
       const title = chunker.title(content, file.fs_path)
@@ -135,21 +151,37 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
       const chunkInputs = inputs.map((input) => ({ key: vaultInputKey(contractJson, input), input }))
       keys = chunkInputs.map((c) => c.key)
       pending = chunkInputs.filter((c) => !vectorsByKey.has(c.key))
-      fresh = pending.length > 0 ? await embedder.embed(pending.map((p) => p.input)) : []
+      for (let start = 0; start < pending.length; start += VAULT_EMBED_BATCH) {
+        if (start > 0 && options.budgetSpent()) {
+          abandoned = true
+          break
+        }
+        const batch = pending.slice(start, start + VAULT_EMBED_BATCH)
+        const vectors = await embedder.embed(batch.map((p) => p.input))
+        if (vectors.length !== batch.length) {
+          throw new Error(`for ${batch.length} inputs the embedder returned ${vectors.length} vector(s)`)
+        }
+        fresh.push(...vectors)
+      }
     } catch (error) {
       throw new Error(`vault embedding refresh failed on ${file.fs_path}: ${(error as Error).message}`, {
         cause: error,
       })
     }
-    if (fresh.length !== pending.length) {
-      throw new Error(
-        `vault embedding refresh on ${file.fs_path}: for ${pending.length} inputs the embedder returned ${fresh.length} vector(s)`,
-      )
+    if (abandoned) {
+      stoppedEarly = true
+      miss(UNCOVERED_BUDGET_INSIDE)
+      continue
+    }
+    if (keys.length === 0) {
+      miss(UNCOVERED_EMPTY)
+      continue
     }
     const added = new Map<string, Uint8Array>()
     fresh.forEach((vec, i) => {
       const p = pending[i]
-      if (p) added.set(p.key, encodeVaultVector(vec, contract.dimensions))
+      if (!p) throw new Error(`vault embedding refresh on ${file.fs_path}: vector ${i} has no pending input`)
+      added.set(p.key, encodeVaultVector(vec, contract.dimensions))
     })
     const rows = keys.map((key) => {
       const vec = added.get(key) ?? vectorsByKey.get(key)
