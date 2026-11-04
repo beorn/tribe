@@ -525,9 +525,12 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const semanticStarted = performance.now()
     const semantic =
       options.vaultSemantic === true && !hook && vaultDb !== null && runs("vault")
-        ? import("./vault-semantic.ts").then(async (leg) => ({
-            leg,
-            query: await leg.embedVaultQuery(query, { open: options.deps?.vaultQueryModel }),
+        ? import("./vault-semantic.ts").then(async ({ embedVaultQuery, fuseVaultMatches, rankVaultSemantic }) => ({
+            leg: { fuseVaultMatches, rankVaultSemantic },
+            query: await embedVaultQuery(query, {
+              open: options.deps?.vaultQueryModel,
+              timeoutMs: options.deps?.vaultQueryTimeoutMs,
+            }),
           }))
         : null
     const semanticOutcome = semantic?.then(

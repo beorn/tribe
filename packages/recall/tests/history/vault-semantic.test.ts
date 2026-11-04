@@ -20,7 +20,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
-import type { VaultMatch } from "../../src/history/vault-fts"
 import type { VaultQueryModel } from "../../src/history/vault-semantic"
 
 process.env.RECALL_DB_PATH = ":memory:"
@@ -32,32 +31,6 @@ const basis = (k: number) => {
   return v
 }
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
-const match = (fsPath: string, rank: number): VaultMatch => ({
-  id: `n:${fsPath}`,
-  fsPath,
-  name: null,
-  title: fsPath,
-  snippet: fsPath,
-  rank,
-})
-
-describe("fuseVaultMatches", () => {
-  test("equal RRF60: a semantic-only document enters the window and takes the lexical slot's rank", async () => {
-    const { fuseVaultMatches } = await import("../../src/history/vault-semantic")
-    const fused = fuseVaultMatches([match("a.md", -9), match("c.md", -5)], [{ fsPath: "b.md", title: "B", score: 0.9 }])
-    expect(fused.matches.map((m) => [m.fsPath, m.rank])).toEqual([
-      ["a.md", -9],
-      ["b.md", -5],
-    ])
-    expect(fused.added).toBe(1)
-  })
-
-  test("no lexical vault candidate means nothing is added", async () => {
-    const { fuseVaultMatches } = await import("../../src/history/vault-semantic")
-    expect(fuseVaultMatches([], [{ fsPath: "b.md", title: null, score: 1 }])).toEqual({ matches: [], added: 0 })
-  })
-})
-
 describe("the vault semantic leg in recall()", () => {
   let root: string
   let vaultPath: string
@@ -143,16 +116,18 @@ describe("the vault semantic leg in recall()", () => {
     insert.run(id, vaultPath, "a.md", sha256("old alpha"), store.encodeVaultVector(basis(0), DIM))
   }
 
-  async function run(options: { vaultSemantic?: boolean; mode?: "exact" | "hook" } = {}) {
+  async function run(
+    options: { vaultSemantic?: boolean; mode?: "exact" | "hook"; query?: string; model?: () => VaultQueryModel } = {},
+  ) {
     const { recall, setRecallLogging } = await import("../../src/history/search")
     setRecallLogging(false)
-    return recall("zebracorn", {
+    return recall(options.query ?? "zebracorn", {
       raw: true,
       excludeCurrentSession: true,
       vaultDb: vaultPath,
       vaultSemantic: options.vaultSemantic ?? true,
       mode: options.mode,
-      deps: { vaultQueryModel: fixtureModel },
+      deps: { vaultQueryModel: options.model ?? fixtureModel, vaultQueryTimeoutMs: 50 },
     })
   }
 
@@ -170,7 +145,31 @@ describe("the vault semantic leg in recall()", () => {
       coverage: { documents: 3, embedded: 1 },
       added: 1,
     })
-    expect(vaultHits(result).sort()).toEqual(["a.md", "b.md"])
+    // Equal RRF60: b.md (semantic only) ties a.md and outranks c.md, taking c.md's lexical slot and its rank.
+    expect(vaultHits(result)).toEqual(["a.md", "b.md"])
+  })
+
+  test("no lexical vault candidate means the semantic leg adds nothing", async () => {
+    await publish()
+    const result = await run({ query: "quokka" })
+    expect(inputs).toEqual(["task: search result | query: quokka"])
+    expect(result.vaultSemantic).toMatchObject({ state: "ok", added: 0 })
+    expect(vaultHits(result)).toEqual([])
+  })
+
+  test("a query embedding slower than its cap degrades with the cause, and the model is still disposed", async () => {
+    await publish()
+    const result = await run({
+      model: () => ({
+        embed: () => new Promise<Float32Array>(() => {}),
+        dispose: async () => {
+          disposed++
+        },
+      }),
+    })
+    expect(result.vaultSemantic).toMatchObject({ state: "degraded", cause: /took longer than 50 ms/ })
+    expect(disposed).toBe(1)
+    expect(vaultHits(result).sort()).toEqual(["a.md", "c.md"])
   })
 
   test("no published generation degrades with its cause and keeps the lexical vault hits", async () => {
@@ -207,32 +206,5 @@ describe("the vault semantic leg in recall()", () => {
     expect(opened).toBe(0)
     expect(plain.vaultSemantic).toBeUndefined()
     expect(hook.vaultSemantic).toBeUndefined()
-  })
-})
-
-describe("embedVaultQuery", () => {
-  test("a query embedding slower than the cap is a named failure, and the model is still disposed", async () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), "recall-vault-slow-")))
-    try {
-      const modelPath = join(root, "model.gguf")
-      writeFileSync(modelPath, "fixture model")
-      const { embedVaultQuery } = await import("../../src/history/vault-semantic")
-      let disposed = false
-      await expect(
-        embedVaultQuery("q", {
-          env: { RECALL_EMBED_MODEL: modelPath },
-          timeoutMs: 10,
-          open: () => ({
-            embed: () => new Promise(() => {}),
-            dispose: async () => {
-              disposed = true
-            },
-          }),
-        }),
-      ).rejects.toThrow(/took longer than 10 ms/)
-      expect(disposed).toBe(true)
-    } finally {
-      safeRemoveSync(root, { within: tmpdir() })
-    }
   })
 })

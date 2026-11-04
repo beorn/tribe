@@ -78,6 +78,8 @@ export interface RecallOptions {
     llm?: LlmBackend
     /** The vault semantic leg's query model; production loads qmd's LlamaCpp on RECALL_EMBED_MODEL. */
     vaultQueryModel?: (modelPath: string) => VaultQueryModel
+    /** The query embedding's cap; absent, VAULT_SEMANTIC_TIMEOUT_MS. */
+    vaultQueryTimeoutMs?: number
   }
   limit?: number // Max results to include (default 10)
   raw?: boolean // Return raw results without LLM synthesis
