@@ -362,7 +362,10 @@ describe("the vault semantic leg in recall()", () => {
         deps: { clock: () => t, vaultQueryTimeoutMs: 50, vaultQueryModel: model },
       })
     }
-    const turn = () => new Promise<void>((resolve) => setImmediate(resolve))
+    const turn = () =>
+      new Promise<void>((resolve) => {
+        setImmediate(resolve)
+      })
     const sumOf = (s: VaultSemanticSpans) => s.moduleMs + s.lexicalMs + s.loadMs + s.embedMs + s.scanMs + s.mergeMs
     try {
       // Overlapped: the load needs 3 event-loop turns; the lexical reads yield 3 (before messages, project content,

@@ -426,7 +426,10 @@ export function retrieveCandidates(request: CandidateRequest) {
 export type CandidateSet = ReturnType<typeof retrieveCandidates>
 
 /** One event-loop turn: timers, I/O and a started native call's completion all get to run. */
-const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve))
+const nextTurn = () =>
+  new Promise<void>((resolve) => {
+    setImmediate(resolve)
+  })
 
 /**
  * The same reads as retrieveCandidates, one at a time with an event-loop turn before each, so a query-model load
