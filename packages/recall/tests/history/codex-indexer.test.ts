@@ -3817,4 +3817,62 @@ if (process.argv.includes("list")) {
       }
     })
   })
+
+  // @failure a retained-session read snapshot cannot upgrade after another connection commits
+  // @level l3 @consumer indexCodexTranscripts
+  test("retained Codex tool import survives a concurrent WAL metadata writer", async () => {
+    db.close()
+    const databasePath = join(tempDir, "concurrent-index.db")
+    db = new Database(databasePath)
+    initSchema(db)
+    db.run("PRAGMA journal_mode=WAL")
+    db.run("PRAGMA busy_timeout=5000")
+    const transcriptPath = join(tempDir, "retained-rollout.jsonl")
+    const continuePath = join(tempDir, "continue-export")
+    writeFileSync(transcriptPath, '{"type":"session_meta"}\n{"type":"compacted"}\n')
+    upsertSession(db, "codex:wal-import", "/project", transcriptPath, 1000, 1000, 1, null, {
+      status: "complete",
+      tailFingerprint: "compacted:1",
+    })
+    insertMessage(db, "retained", "codex:wal-import", "user", "retained original", null, null, 1000)
+    const producer = makeMockAg(`
+import { existsSync } from "node:fs"
+console.log(JSON.stringify({kind:"schema",version:2}))
+console.log(JSON.stringify({kind:"session",provider:"codex",nativeId:"wal-import",sessionKey:"codex:wal-import",path:${JSON.stringify(transcriptPath)},keys:["codex:wal-import"]}))
+const deadline = Date.now() + 10000
+while (!existsSync(${JSON.stringify(continuePath)})) {
+  if (Date.now() > deadline) throw new Error("parent did not release export")
+  await Bun.sleep(5)
+}
+console.log(JSON.stringify({kind:"tool",sessionKey:"codex:wal-import",line:3,phase:"call",toolName:"exec_command",text:'{"cmd":"pwd"}',timestamp:2000,duplicateOf:null}))
+console.log(JSON.stringify({kind:"end",nativeId:"wal-import",keys:["codex:wal-import"],rows:0,tools:1,skipped:0,status:"complete"}))
+console.log(JSON.stringify({kind:"done",sessions:1,rows:0,tools:1,errors:0}))
+`)
+    const indexing = indexCodexTranscripts(db, { path: transcriptPath, agBin: producer })
+    const peer = new Database(databasePath)
+    peer.run("PRAGMA busy_timeout=0")
+    const writeMetadata = () => peer.run("INSERT OR REPLACE INTO index_meta(key,value) VALUES('peer','committed')")
+    let peerMustWait = false
+    try {
+      await vi.waitFor(() => expect(db.inTransaction).toBe(true), { timeout: 10000, interval: 5 })
+      try {
+        writeMetadata()
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "SQLITE_BUSY") throw error
+        peerMustWait = true
+      }
+      writeFileSync(continuePath, "")
+      await expect(indexing).resolves.toMatchObject({ sessions: 1, tools: 1 })
+      if (peerMustWait) writeMetadata()
+      expect(db.query("SELECT content FROM messages ORDER BY id").all()).toEqual([
+        { content: "retained original" },
+        { content: '{"cmd":"pwd"}' },
+      ])
+      expect(peer.query("SELECT value FROM index_meta WHERE key='peer'").get()).toEqual({ value: "committed" })
+    } finally {
+      writeFileSync(continuePath, "")
+      await indexing.catch(() => {})
+      peer.close()
+    }
+  }, 15000)
 })

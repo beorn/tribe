@@ -835,7 +835,9 @@ export async function indexCodexTranscripts(
         }
 
         try {
-          db.run("BEGIN")
+          // Retained sessions read signatures before inserting new rows. Reserve the writer now so a concurrent
+          // metadata commit cannot leave that read snapshot unable to upgrade (SQLITE_BUSY_SNAPSHOT).
+          db.run("BEGIN IMMEDIATE")
           inTx = true
         } catch (e) {
           reject(e)
