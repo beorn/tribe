@@ -13,6 +13,7 @@ import { THIRTY_DAYS_MS, formatBytes, displayProjectPath, matchProjectGlob } fro
 import { findSessionTranscriptById } from "./session-discovery"
 import * as os from "os"
 import { acquireIndexWriter, IndexWriterBusyError } from "../history/db.ts"
+import { getVaultDbPath } from "../history/vault-fts.ts"
 
 // ============================================================================
 // Index
@@ -22,6 +23,8 @@ import { acquireIndexWriter, IndexWriterBusyError } from "../history/db.ts"
 export const RECALL_INDEX_BUSY_EXIT = 4
 /** The incremental share-cap prune was refused: report the incomplete provenance (25462). */
 export const RECALL_INDEX_PRUNE_REFUSED_EXIT = 5
+/** The vault embedding pass takes no new document after this much of the run (hourly unit ceiling: 600 s). */
+export const RECALL_VAULT_EMBED_STOP_MS = 540_000
 
 export async function cmdIndex(opts: {
   incremental?: boolean
@@ -32,6 +35,7 @@ export async function cmdIndex(opts: {
   path?: string
   migrate?: boolean
 }): Promise<void> {
+  const startedAt = Date.now()
   const db = getDb({ allowMigration: opts.migrate })
   if (opts.migrate && !opts.incremental && !opts.full && !opts.path) {
     console.log("Database schema migration complete.")
@@ -125,6 +129,29 @@ export async function cmdIndex(opts: {
       if (result.claudeFailures.length > 5) {
         console.log(`    ... and ${result.claudeFailures.length - 5} more`)
       }
+    }
+
+    // @ag/recall/three-dark-search-paths: vault embeddings refresh only for a bound --vault-db, inside the same
+    // writer lock, and stop taking documents 60 s before the hourly unit's 600 s ceiling.
+    const vaultDbPath = getVaultDbPath()
+    if (vaultDbPath !== null) {
+      // Loaded only here: qmd and node-llama-cpp never load on an unbound index or any other command.
+      const { runVaultEmbedPass } = await import("../history/vault-embed-index.ts")
+      const vault = await runVaultEmbedPass({
+        db,
+        vaultDbPath,
+        budgetSpent: () => Date.now() - startedAt > RECALL_VAULT_EMBED_STOP_MS,
+      })
+      const uncovered = Object.entries(vault.uncovered)
+        .map(([reason, count]) => `${count} ${reason}`)
+        .join("; ")
+      console.log(
+        `  vault embeddings (generation ${vault.generation}${vault.published ? "" : ", building"}): ` +
+          `${vault.coveredDocuments + vault.embeddedDocuments} of ${vault.documents} documents covered, ` +
+          `${vault.embeddedChunks} chunks embedded, ${vault.reusedChunks} reused` +
+          (uncovered ? `; uncovered: ${uncovered}` : "") +
+          (vault.stoppedEarly ? " (stopped at the time budget)" : ""),
+      )
     }
 
     // 25462: a refused incremental share-cap prune stays a non-zero REPORT (never a failure)
