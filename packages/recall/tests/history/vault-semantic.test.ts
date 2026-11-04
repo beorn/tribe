@@ -441,4 +441,38 @@ describe("the vault semantic leg in recall()", () => {
       spy.mockRestore()
     }
   })
+
+  // CTO dab0bcbf: the leg's split reads must return exactly what the one synchronous call returns, or the overlap
+  // would change results; no other test compares the two.
+  test("retrieveCandidatesYielding deep-equals retrieveCandidates: all three sources, and without project content", async () => {
+    const { getDb } = await import("../../src/history/db")
+    const { insertMessage, upsertContent, upsertSession } = await import("../../src/history/db-queries")
+    const { retrieveCandidates, retrieveCandidatesYielding } = await import("../../src/history/search")
+    const db = getDb()
+    const now = Date.now()
+    upsertSession(db, "s1", "/p", "/p/s1.jsonl", now - 5000, now - 1000, 1)
+    upsertSession(db, "s2", "/p", "/p/s2.jsonl", now - 5000, now - 2000, 1)
+    insertMessage(db, "u1", "s1", "user", "zebracorn in a message", null, null, now - 1000)
+    insertMessage(db, "u2", "s2", "assistant", "another zebracorn reply", null, null, now - 2000)
+    upsertContent(db, "doc", "d1", null, "zebracorn doc", "zebracorn project content", now - 3000)
+    const messages = { limit: 20, sinceTime: now - 86_400_000, snippetTokens: 50 }
+    const projectContent = { limit: 20, snippetTokens: 50, types: ["doc"] as const }
+    const vault = { limit: 20, dbPath: vaultPath }
+    const all = {
+      db,
+      query: "zebracorn",
+      messages,
+      projectContent: { ...projectContent, types: [...projectContent.types] },
+      vault,
+    }
+    const sync = retrieveCandidates(all)
+    expect(sync.messages.results.length).toBeGreaterThan(0)
+    expect(sync.projectContent.results.length).toBeGreaterThan(0)
+    expect(sync.vault?.matches.length).toBeGreaterThan(0)
+    expect(await retrieveCandidatesYielding(all)).toEqual(sync)
+
+    // The hook shape: no project content.
+    const hook = { db, query: "zebracorn", messages, vault }
+    expect(await retrieveCandidatesYielding(hook)).toEqual(retrieveCandidates(hook))
+  })
 })
