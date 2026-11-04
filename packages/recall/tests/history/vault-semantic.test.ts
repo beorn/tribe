@@ -370,10 +370,19 @@ describe("the vault semantic leg in recall()", () => {
     try {
       // Overlapped: the load needs 3 event-loop turns; the lexical reads yield 3 (before messages, project content,
       // vault FTS), so it finishes inside lexical.
-      const ok = await search(() => ({
+      const ok = await search((_path, _tokens, record) => ({
+        // Three recorded steps, one turn each: 100, 200 and 400 ms on the fake clock.
         load: async () => {
-          for (let n = 0; n < 3; n++) await turn()
-          t += 700
+          for (const [name, ms] of [
+            ["import", 100],
+            ["getLlama", 200],
+            ["loadModel", 400],
+          ] as const) {
+            record?.(name, "start")
+            await turn()
+            t += ms
+            record?.(name, "end")
+          }
         },
         embed: async () => {
           await Promise.resolve()
@@ -398,21 +407,30 @@ describe("the vault semantic leg in recall()", () => {
         chunksScanned: 1,
         mergeMs: 0,
         totalMs: lexical + 25,
+        loadSteps: [
+          { step: "import", startMs: 0, endMs: 100, startedBeforeLexicalEnd: true },
+          { step: "getLlama", startMs: 100, endMs: 300, startedBeforeLexicalEnd: true },
+          { step: "loadModel", startMs: 300, endMs: 700, startedBeforeLexicalEnd: true },
+        ],
       })
       if (!spans) throw new Error("no spans")
       expect(sumOf(spans)).toBeLessThanOrEqual(spans.totalMs)
       expect(ok.timing?.lexicalMs).toBe(lexical)
       expect(formatVaultSemanticSpans(spans)).toBe(
-        `ms: lexical ${lexical}, module 0, load 0 (raw 700), embed 0, scan 25 (1 chunks), merge 0, total ${lexical + 25}`,
+        `ms: lexical ${lexical}, module 0, load 0 (raw 700), embed 0, scan 25 (1 chunks), merge 0, total ${lexical + 25}; ` +
+          "load steps, ms from load start: import 0-100 (started during lexical), " +
+          "getLlama 100-300 (started during lexical), loadModel 300-700 (started during lexical)",
       )
 
       // Timed out: load never resolves; 300 ms pass on the fake clock after the lexical search, before settle gives up
       // at its 50 ms cap, so the clipped load runs from the lexical end to the settle end.
-      const slow = await search(() => ({
+      const slow = await search((_path, _tokens, record) => ({
+        // loadModel starts after lexical and never finishes.
         load: () =>
           new Promise<void>(() => {
             setTimeout(() => {
               t += 300
+              record?.("loadModel", "start")
             }, 25)
           }),
         embed: () => new Promise<Float32Array>(() => {}),
@@ -432,10 +450,12 @@ describe("the vault semantic leg in recall()", () => {
         chunksScanned: 0,
         mergeMs: 0,
         totalMs: slowLexical + 300,
+        loadSteps: [{ step: "loadModel", startMs: slowLexical + 300, endMs: null, startedBeforeLexicalEnd: false }],
       })
       expect(sumOf(late)).toBeLessThanOrEqual(late.totalMs)
       expect(formatVaultSemanticSpans(late)).toBe(
-        `ms: lexical ${slowLexical}, module 0, load 300 (raw ${slowLexical + 300}), embed 0, scan 0 (0 chunks), merge 0, total ${slowLexical + 300}`,
+        `ms: lexical ${slowLexical}, module 0, load 300 (raw ${slowLexical + 300}), embed 0, scan 0 (0 chunks), merge 0, total ${slowLexical + 300}; ` +
+          `load steps, ms from load start: loadModel ${slowLexical + 300}-unfinished (started after lexical)`,
       )
     } finally {
       spy.mockRestore()

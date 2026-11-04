@@ -75,6 +75,21 @@ export interface VaultSemanticSpans {
   readonly chunksScanned: number
   readonly mergeMs: number
   readonly totalMs: number
+  /** Each load step's start and end in ms from load start, and whether it started before the lexical search ended. */
+  readonly loadSteps: readonly VaultLoadStepSpan[]
+}
+
+/** The production load's steps, in order (CTO 6a21299d): where the load's time goes. */
+export type VaultLoadStep = "import" | "getLlama" | "loadModel" | "context"
+/** Records one load step's start or end; the leg stamps it on its clock. */
+export type VaultLoadStepRecorder = (step: VaultLoadStep, at: "start" | "end") => void
+
+export interface VaultLoadStepSpan {
+  readonly step: VaultLoadStep
+  readonly startMs: number
+  /** null when the step never finished (a timed-out or failed load). */
+  readonly endMs: number | null
+  readonly startedBeforeLexicalEnd: boolean
 }
 
 /** When the query model's load and embed began and ended, on the caller's clock; unset until reached. */
@@ -83,20 +98,33 @@ export interface VaultQueryMarks {
   loadEnd?: number
   embedStart?: number
   embedEnd?: number
+  /** Each load step reached, in order, when the model records them. */
+  steps?: { step: VaultLoadStep; start: number; end?: number }[]
 }
 
 /**
  * Production: the rev23 query route (CTO B2), node-llama-cpp 3.20.0 on RECALL_EMBED_MODEL with CPU only, no build and
  * no download. Loading starts on the first embed, so a slow load counts against the query cap.
  */
-export function openVaultQueryModel(modelPath: string, contextTokens: number): VaultQueryModel {
+export function openVaultQueryModel(
+  modelPath: string,
+  contextTokens: number,
+  record?: VaultLoadStepRecorder,
+): VaultQueryModel {
   let loaded: Promise<{ dispose(): Promise<void>; embed(input: string): Promise<Float32Array> }> | undefined
+  // Marks only (CTO 6a21299d): the same awaits in the same order.
+  const step = async <T>(name: VaultLoadStep, run: () => Promise<T>): Promise<T> => {
+    record?.(name, "start")
+    const value = await run()
+    record?.(name, "end")
+    return value
+  }
   const load = () =>
     (loaded ??= (async () => {
-      const { getLlama } = await import("node-llama-cpp")
-      const llama = await getLlama({ gpu: false, build: "never", skipDownload: true })
-      const model = await llama.loadModel({ modelPath })
-      const context = await model.createEmbeddingContext({ contextSize: contextTokens })
+      const { getLlama } = await step("import", () => import("node-llama-cpp"))
+      const llama = await step("getLlama", () => getLlama({ gpu: false, build: "never", skipDownload: true }))
+      const model = await step("loadModel", () => llama.loadModel({ modelPath }))
+      const context = await step("context", () => model.createEmbeddingContext({ contextSize: contextTokens }))
       return {
         embed: async (input: string) => Float32Array.from((await context.getEmbeddingFor(input)).vector),
         dispose: async () => {
@@ -134,7 +162,7 @@ export function startVaultQueryEmbedding(
   query: string,
   options: {
     env?: NodeJS.ProcessEnv
-    open?: (modelPath: string, contextTokens: number) => VaultQueryModel
+    open?: (modelPath: string, contextTokens: number, record?: VaultLoadStepRecorder) => VaultQueryModel
     clock?: () => number
   } = {},
 ): VaultQueryEmbedding {
@@ -148,7 +176,16 @@ export function startVaultQueryEmbedding(
     const modelPath = requireRecallEmbedModel(options.env ?? process.env)
     contract = recallEmbedContract()
     modelStat = modelFileStat(modelPath)
-    model = (options.open ?? openVaultQueryModel)(modelPath, contract.contextTokens)
+    const steps: NonNullable<VaultQueryMarks["steps"]> = []
+    marks.steps = steps
+    const record: VaultLoadStepRecorder = (name, at) => {
+      if (at === "start") steps.push({ step: name, start: clock() })
+      else {
+        const open = steps.findLast((entry) => entry.step === name && entry.end === undefined)
+        if (open) open.end = clock()
+      }
+    }
+    model = (options.open ?? openVaultQueryModel)(modelPath, contract.contextTokens, record)
     const formatted = formatQueryForEmbedding(query, modelPath)
     const started = model
     const embed = () => {

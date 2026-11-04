@@ -751,6 +751,12 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         chunksScanned,
         mergeMs,
         totalMs,
+        loadSteps: (marks.steps ?? []).map((entry) => ({
+          step: entry.step,
+          startMs: entry.start - (marks.loadStart ?? entry.start),
+          endMs: entry.end === undefined ? null : entry.end - (marks.loadStart ?? entry.start),
+          startedBeforeLexicalEnd: entry.start < lexicalEnd,
+        })),
       })
       phases.vault_semantic = clock() - semanticStarted
       log(`vault semantic: ${JSON.stringify(vaultSemantic)}`)

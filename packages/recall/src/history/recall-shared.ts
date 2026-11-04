@@ -6,7 +6,7 @@ import { createLogger } from "loggily"
 import type { ContentType } from "./types.ts"
 import type { IndexFreshness } from "../lib/staleness.ts"
 import type { VaultQuery } from "./vault-fts.ts"
-import type { VaultQueryModel, VaultSemanticReceipt } from "./vault-semantic.ts"
+import type { VaultLoadStepRecorder, VaultQueryModel, VaultSemanticReceipt } from "./vault-semantic.ts"
 import type { LlmBackend, LlmCostCall, LlmCostFields } from "../lib/llm-backend.ts"
 
 // ============================================================================
@@ -77,7 +77,7 @@ export interface RecallOptions {
   deps?: {
     llm?: LlmBackend
     /** The vault semantic leg's query model; production loads node-llama-cpp on RECALL_EMBED_MODEL (rev23). */
-    vaultQueryModel?: (modelPath: string) => VaultQueryModel
+    vaultQueryModel?: (modelPath: string, contextTokens: number, record?: VaultLoadStepRecorder) => VaultQueryModel
     /** The query embedding's cap; absent, VAULT_SEMANTIC_TIMEOUT_MS. */
     vaultQueryTimeoutMs?: number
     /** The clock the vault leg's spans read (CTO 3a638efb D1); absent, performance.now. */
