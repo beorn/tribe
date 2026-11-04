@@ -34,8 +34,12 @@ export async function cmdIndex(opts: {
   force?: boolean
   path?: string
   migrate?: boolean
+  vaultSeedQmd?: string
 }): Promise<void> {
   const startedAt = Date.now()
+  if (opts.vaultSeedQmd !== undefined && getVaultDbPath() === null) {
+    throw new Error("--vault-seed-qmd needs --vault-db: the seed copies vectors for that vault's documents only")
+  }
   const db = getDb({ allowMigration: opts.migrate })
   if (opts.migrate && !opts.incremental && !opts.full && !opts.path) {
     console.log("Database schema migration complete.")
@@ -136,7 +140,18 @@ export async function cmdIndex(opts: {
     const vaultDbPath = getVaultDbPath()
     if (vaultDbPath !== null) {
       // Loaded only here: qmd and node-llama-cpp never load on an unbound index or any other command.
-      const { runVaultEmbedPass } = await import("../history/vault-embed-index.ts")
+      const { runVaultEmbedPass, runVaultEmbedSeed } = await import("../history/vault-embed-index.ts")
+      if (opts.vaultSeedQmd !== undefined) {
+        const seed = await runVaultEmbedSeed({ db, vaultDbPath, qmdDbPath: opts.vaultSeedQmd })
+        const skipped = Object.entries(seed.skipped)
+          .map(([reason, count]) => `${count} ${reason}`)
+          .join("; ")
+        console.log(
+          `  vault seed from qmd (generation ${seed.generation}): ${seed.seededDocuments} documents, ` +
+            `${seed.seededChunks} chunks copied, ${seed.alreadyCovered} already covered` +
+            (skipped ? `; not seeded: ${skipped}` : ""),
+        )
+      }
       const vault = await runVaultEmbedPass({
         db,
         vaultDbPath,

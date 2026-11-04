@@ -15,11 +15,12 @@ import { createHash } from "node:crypto"
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { createStore, insertContent, insertEmbedding } from "@tobilu/qmd/store"
 import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
 import { initSchema } from "../../src/history/db-schema"
 import type { QmdEmbedRuntime } from "../../src/history/vault-embed-qmd"
-import { runVaultEmbedPass, vaultRootOf } from "../../src/history/vault-embed-index"
+import { runVaultEmbedPass, runVaultEmbedSeed, vaultRootOf } from "../../src/history/vault-embed-index"
 import type { VaultEmbedContract } from "../../src/history/vault-embed-store"
 
 const CONTRACT: VaultEmbedContract = {
@@ -146,6 +147,68 @@ describe("runVaultEmbedPass", () => {
       }),
     ).rejects.toThrow(/RECALL_EMBED_MODEL is not set/)
     expect(built).toBe(false)
+  })
+
+  test("the seed fills the selected generation from a qmd store, and the next pass embeds nothing for it", async () => {
+    addDoc("a.md", "A\n\na", 1)
+    const qmdPath = join(root, "index.sqlite")
+    const qmd = createStore(qmdPath)
+    qmd.ensureVecTable(4)
+    const hash = sha256("A\n\na")
+    insertContent(qmd.db, hash, "A\n\na", "2026-11-01")
+    for (const seq of [0, 1]) {
+      insertEmbedding(qmd.db, hash, seq, 0, new Float32Array([seq, 1, 2, 3]), "hf:fixture/embed.gguf", "x", 2)
+    }
+    qmd.close()
+    let embedded = 0
+    const counting = (): QmdEmbedRuntime => {
+      const base = fixtureRuntime()
+      return {
+        chunker: base.chunker,
+        embedder: {
+          embed: async (inputs) => {
+            embedded += inputs.length
+            return base.embedder.embed(inputs)
+          },
+        },
+      }
+    }
+    const seed = await runVaultEmbedSeed({
+      db,
+      vaultDbPath: statePath,
+      qmdDbPath: qmdPath,
+      now: 1,
+      env: { RECALL_EMBED_MODEL: modelPath },
+      contract: CONTRACT,
+      runtime: counting,
+      qmdModel: "hf:fixture/embed.gguf",
+    })
+    expect(seed).toMatchObject({ generation: 1, seededDocuments: 1, seededChunks: 2 })
+    const report = await runVaultEmbedPass({
+      db,
+      vaultDbPath: statePath,
+      budgetSpent: () => false,
+      now: 1,
+      env: { RECALL_EMBED_MODEL: modelPath },
+      contract: CONTRACT,
+      runtime: counting,
+    })
+    expect(report).toMatchObject({ generation: 1, coveredDocuments: 1, embeddedChunks: 0 })
+    expect(embedded).toBe(0)
+  })
+
+  test("a missing qmd store is refused before anything is selected", async () => {
+    await expect(
+      runVaultEmbedSeed({
+        db,
+        vaultDbPath: statePath,
+        qmdDbPath: join(root, "absent.sqlite"),
+        env: { RECALL_EMBED_MODEL: modelPath },
+        contract: CONTRACT,
+        runtime: fixtureRuntime,
+      }),
+    ).rejects.toThrow(/absent\.sqlite does not exist/)
+    expect(generations()).toEqual([])
   })
 
   test("a vault database outside <root>/.km/state.db is refused with its cause", () => {
