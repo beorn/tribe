@@ -415,9 +415,8 @@ function messageFilterSql(options: MessageSearchOptions): { sql: string; params:
     params.push(`%${projectFilter}%`)
   }
   if (sinceTime !== undefined) {
-    // Superset bound for the FTS cursor: every in-window row's id is at least the window's MIN(id), so matches
-    // below it are skipped before any row read; old timestamps at high ids still meet the clause after it (CTO e6b99892).
-    // INDEXED BY: unforced, SQLite answers MIN(id) by walking the wide table from its first rowid.
+    // Superset FTS cursor bound: in-window ids are ≥ the window's MIN(id), so lower matches skip every row read; old
+    // timestamps at high ids still meet the next clause (CTO e6b99892). INDEXED BY: unforced, MIN(id) walks the table.
     clauses.push(
       "f.rowid >= (SELECT MIN(id) FROM messages INDEXED BY idx_messages_timestamp WHERE timestamp >= ?)",
       "m.timestamp >= ?",
@@ -528,11 +527,9 @@ export function ftsSearchWithSnippet(
   const overFetch = exactCopyOverFetch(limit, offset)
   const pageNeed = offset + limit
 
-  // Two phases (CTO 1cfcaba5; D7/D8 on the live db: the one ranked SELECT built m.*, a 200-token snippet and the
-  // duplicate_line subquery for EVERY match before its LIMIT, p95 2.6 s; ranking ids alone was p95 169 ms).
-  // Phase A ranks ids only, under the same MATCH, filter and ORDER BY rank, m.id; phase B builds the hit columns for
-  // exactly those ids under the same MATCH, so bm25's corpus-wide scores and the order are unchanged. One read
-  // transaction holds both, so no write between them can change the set; a phase B that differs is a named error.
+  // Two phases (CTO 1cfcaba5; D7/D8: one SELECT building every match's hit columns was p95 2.6 s, ids alone 169 ms).
+  // Phase A ranks ids (same MATCH, filter, ORDER BY rank, m.id); phase B builds hit columns for exactly those ids, so
+  // bm25 scores and order are unchanged. One read transaction holds both; a phase B that differs is a named error.
   const fromWhere = `
     FROM messages_fts f
     JOIN messages m ON f.rowid = m.id
@@ -1157,10 +1154,8 @@ export function searchAll(
     ORDER BY rank
     LIMIT ? OFFSET ?
   `
-  // The range is deliberate: integer ids make it equal to rowid equality,
-  // but SQLite can use the covering type index instead of wide record seeks.
-  // Frozen cold reads fell from 1.088 GB to 20 MB; the stats-aware contract is
-  // "type-filtered ranking avoids wide records" in fanout.test.ts.
+  // The id range equals rowid equality but lets SQLite use the covering type index, not wide record seeks (cold reads
+  // 1.088 GB → 20 MB); contract: "type-filtered ranking avoids wide records" in fanout.test.ts.
 
   const searchParams = types?.length ? [ftsQuery, ...types, ...params.slice(1)] : params
   const results = db.transaction(() => {
