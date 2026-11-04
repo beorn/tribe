@@ -52,8 +52,6 @@ import {
 
 export interface SearchOptions {
   raw?: boolean
-  /** Alias for raw — vocabulary parity with accountly's "snippet vs pointer" mode. */
-  snippets?: boolean
   json?: boolean
   since?: string
   until?: string
@@ -238,10 +236,11 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     include,
   } = options
   const project = resolveProjectScope(options.project)
+  // Power-user flags imply raw mode.
+  const indexedRaw = raw || !!question || !!response || !!tool || !!session || !!include
 
   if (options.until !== undefined) {
     resolveSearchWindow(since, options.until)
-    const indexedRaw = raw || !!options.snippets || !!question || !!response || !!tool || !!session || !!include
     if (!indexedRaw || regexMode || options.agent || options.debugPlan) {
       throw new Error("--until supports indexed raw search, not --grep, agent, debug-plan or synthesis")
     }
@@ -250,7 +249,6 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
 
   // Snapshot searches must not add live transcripts, vault rows, or model context.
   if (getSnapshotPath() !== null) {
-    const indexedRaw = raw || !!options.snippets || !!question || !!response || !!tool || !!session || !!include
     if (!indexedRaw || regexMode || options.agent || options.debugPlan || getVaultDbPath() !== null) {
       throw new Error(
         `Recall snapshot ${getSnapshotPath()} supports raw indexed search only; use --raw without --grep, --agent, --debug-plan or --vault-db`,
@@ -269,12 +267,6 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   const freshness = readIndexFreshness(options)
   const provenance = freshness.provenance
   if (!regexMode && provenance !== "complete" && provenance !== "snapshot") process.exitCode = 3
-
-  // Power-user flags imply raw mode. --snippets is an explicit alias for
-  // --raw — surfaces the vocabulary used by the accountly side ("snippet vs
-  // pointer" mode) for users who learned that distinction first.
-  const impliedRaw =
-    raw || !!options.snippets || !!question || !!response || !!tool || !!session || !!include || !!regexMode
 
   // Regex mode delegates to grep
   if (regexMode) {
@@ -295,7 +287,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   }
 
   // If raw/implied-raw with query → direct FTS5 search (old `bun history` behavior)
-  if (impliedRaw) {
+  if (indexedRaw) {
     rawSearch(query, {
       ...options,
       project,

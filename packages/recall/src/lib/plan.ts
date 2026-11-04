@@ -52,7 +52,6 @@ export interface PlanCall extends Partial<LlmCostFields> {
   model?: string
   elapsedMs: number
   calls: LlmCostCall[]
-  rawResponse?: string
   error?: string
 }
 
@@ -233,7 +232,6 @@ export async function planQuery(query: string, context: QueryContext, options: P
         elapsedMs: Date.now() - startedAt,
         calls,
         ...costFields(),
-        rawResponse,
       }
     }
     const error = parsed.error ?? parsed.reason
@@ -247,7 +245,6 @@ export async function planQuery(query: string, context: QueryContext, options: P
     elapsedMs: Date.now() - startedAt,
     calls,
     ...costFields(),
-    rawResponse,
     error:
       failures.length === 1
         ? failures[0]?.error
