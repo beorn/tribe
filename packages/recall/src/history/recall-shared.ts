@@ -6,6 +6,7 @@ import { createLogger } from "loggily"
 import type { ContentType } from "./types.ts"
 import type { IndexFreshness } from "../lib/staleness.ts"
 import type { VaultQuery } from "./vault-fts.ts"
+import type { VaultQueryModel, VaultSemanticReceipt } from "./vault-semantic.ts"
 import type { LlmBackend, LlmCostCall, LlmCostFields } from "../lib/llm-backend.ts"
 
 // ============================================================================
@@ -73,7 +74,11 @@ export type IndexProvenanceDetail =
 
 export interface RecallOptions {
   /** Existing host backend, also forwarded by the agent's fallback path. */
-  deps?: { llm?: LlmBackend }
+  deps?: {
+    llm?: LlmBackend
+    /** The vault semantic leg's query model; production loads qmd's LlamaCpp on RECALL_EMBED_MODEL. */
+    vaultQueryModel?: (modelPath: string) => VaultQueryModel
+  }
   limit?: number // Max results to include (default 10)
   raw?: boolean // Return raw results without LLM synthesis
   since?: string // Time filter (1h, 1d, 1w, etc.)
@@ -109,6 +114,11 @@ export interface RecallOptions {
    * Worker the binding never reached (the prompt hook's) still searches the vault.
    */
   vaultDb?: string | null
+  /**
+   * Add the vault semantic leg (@ag/recall/three-dark-search-paths): default false. Normal CLI search turns it on only
+   * with a bound vault; raw, regex and the prompt hook never do, and hook mode ignores it.
+   */
+  vaultSemantic?: boolean
 }
 
 /** A search phase one recall call may run (Phase 3). */
@@ -171,6 +181,8 @@ export interface RecallResult extends Partial<LlmCostFields> {
   hookSearch?: HookSearchSummary
   /** How the vault was searched, when it was: the form that ran, its terms, and the terms no node holds (29487). */
   vaultQuery?: VaultQuery
+  /** What the vault semantic leg did, when it was asked for: degraded with its cause, or its generation and coverage. */
+  vaultSemantic?: VaultSemanticReceipt
   /** Each phase skipped rather than run, or cut short (the hook's capped window); absent when none was. */
   skipped?: RecallSkip[]
   /**

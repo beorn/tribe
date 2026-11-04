@@ -21,7 +21,7 @@ import {
   encodeVaultVector,
   publishVaultEmbedGeneration,
   readPublishedVaultEmbedGeneration,
-  requireMatchingVaultEmbedGeneration,
+  vaultEmbedGenerationMismatch,
   vaultInputKey,
   type VaultEmbedContract,
 } from "../../src/history/vault-embed-store"
@@ -104,6 +104,7 @@ describe("vault embedding tables in SCHEMA", () => {
       ["id", 1],
       ["contract_json", 0],
       ["gguf_sha256", 0],
+      ["gguf_stat", 0],
       ["created_at", 0],
       ["state", 0],
     ])
@@ -119,7 +120,7 @@ describe("vault embedding tables in SCHEMA", () => {
     expect(() =>
       db
         .prepare(
-          "INSERT INTO vault_embed_generation (contract_json, gguf_sha256, created_at, state) VALUES ('{}', ?, 1, 'live')",
+          "INSERT INTO vault_embed_generation (contract_json, gguf_sha256, gguf_stat, created_at, state) VALUES ('{}', ?, 'm:1:1', 1, 'live')",
         )
         .run(GGUF),
     ).toThrow()
@@ -135,20 +136,21 @@ describe("vault embedding generation identity", () => {
   afterEach(() => db.close())
 
   test("a published generation records the contract identity and GGUF digest", () => {
-    const id = beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: GGUF, now: 1000 })
+    const id = beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: GGUF, ggufStat: "m:1:1", now: 1000 })
     expect(readPublishedVaultEmbedGeneration(db)).toBeNull()
     publishVaultEmbedGeneration(db, id)
     expect(readPublishedVaultEmbedGeneration(db)).toEqual({
       id,
       contractJson: contractIdentity(CONTRACT),
       ggufSha256: GGUF,
+      ggufStat: "m:1:1",
     })
   })
 
   test("publishing a new generation retires the previous one, so exactly one is published", () => {
-    const first = beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: GGUF, now: 1 })
+    const first = beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: GGUF, ggufStat: "m:1:1", now: 1 })
     publishVaultEmbedGeneration(db, first)
-    const second = beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: GGUF, now: 2 })
+    const second = beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: GGUF, ggufStat: "m:1:1", now: 2 })
     publishVaultEmbedGeneration(db, second)
     const states = db.prepare("SELECT id, state FROM vault_embed_generation ORDER BY id").all()
     expect(states).toEqual([
@@ -163,29 +165,42 @@ describe("vault embedding generation identity", () => {
     expect(contractIdentity({ ...CONTRACT, chunkTokens: 800 })).not.toBe(contractIdentity(CONTRACT))
   })
 
-  test("a published generation with a different GGUF digest is refused loudly, naming both digests", () => {
-    publishVaultEmbedGeneration(db, beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: GGUF, now: 1 }))
-    expect(() => requireMatchingVaultEmbedGeneration(db, CONTRACT, OTHER_GGUF)).toThrow(
-      new RegExp(`${GGUF}.*${OTHER_GGUF}|${OTHER_GGUF}.*${GGUF}`),
+  const published = () => {
+    publishVaultEmbedGeneration(
+      db,
+      beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: GGUF, ggufStat: "/m:1:1", now: 1 }),
+    )
+    const generation = readPublishedVaultEmbedGeneration(db)
+    if (!generation) throw new Error("fixture generation was not published")
+    return generation
+  }
+
+  test("a different GGUF digest is a mismatch naming both digests", () => {
+    expect(vaultEmbedGenerationMismatch(published(), CONTRACT, { sha256: OTHER_GGUF })).toMatch(
+      new RegExp(`${GGUF}.*${OTHER_GGUF}`),
     )
   })
 
-  test("a published generation with a different contract is refused loudly", () => {
-    publishVaultEmbedGeneration(db, beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: GGUF, now: 1 }))
-    expect(() => requireMatchingVaultEmbedGeneration(db, { ...CONTRACT, documentPrefix: "other: " }, GGUF)).toThrow(
-      /contract/,
+  test("a query names the model by its file stat: a changed stat is a mismatch, and no digest is needed", () => {
+    const generation = published()
+    expect(vaultEmbedGenerationMismatch(generation, CONTRACT, { stat: "/m:1:1" })).toBeNull()
+    expect(vaultEmbedGenerationMismatch(generation, CONTRACT, { stat: "/m:1:2" })).toMatch(
+      /recorded its model file as \/m:1:1, but it is now \/m:1:2/,
     )
   })
 
-  test("a matching published generation is returned; none published returns null", () => {
-    expect(requireMatchingVaultEmbedGeneration(db, CONTRACT, GGUF)).toBeNull()
-    const id = beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: GGUF, now: 1 })
-    publishVaultEmbedGeneration(db, id)
-    expect(requireMatchingVaultEmbedGeneration(db, CONTRACT, GGUF)?.id).toBe(id)
+  test("a different contract is a mismatch; a matching contract and digest is none", () => {
+    const generation = published()
+    expect(
+      vaultEmbedGenerationMismatch(generation, { ...CONTRACT, documentPrefix: "other: " }, { sha256: GGUF }),
+    ).toMatch(/contract/)
+    expect(vaultEmbedGenerationMismatch(generation, CONTRACT, { sha256: GGUF })).toBeNull()
   })
 
   test("a GGUF digest that is not 64 lowercase hex characters is refused", () => {
-    expect(() => beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: "abc", now: 1 })).toThrow(/sha256/i)
+    expect(() =>
+      beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: "abc", ggufStat: "m:1:1", now: 1 }),
+    ).toThrow(/sha256/i)
   })
 })
 

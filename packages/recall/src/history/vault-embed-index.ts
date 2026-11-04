@@ -8,7 +8,7 @@
  */
 import type { Database } from "bun:sqlite"
 import { createHash } from "node:crypto"
-import { createReadStream, existsSync, readFileSync, realpathSync } from "node:fs"
+import { createReadStream, existsSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { createStore } from "@tobilu/qmd/store"
 import { QMD_SEED_MODEL_URI, seedVaultEmbeddingsFromQmd, type VaultEmbedSeedReport } from "./vault-embed-seed.ts"
 import { basename, dirname } from "node:path"
@@ -26,6 +26,7 @@ import {
   contractIdentity,
   publishVaultEmbedGeneration,
   readPublishedVaultEmbedGeneration,
+  vaultEmbedGenerationMismatch,
   type VaultEmbedContract,
 } from "./vault-embed-store.ts"
 
@@ -61,10 +62,22 @@ export function vaultRootOf(stateDbPath: string): string {
   return dirname(dir)
 }
 
-async function sha256File(path: string): Promise<string> {
+/** The model as both sides name it: the refresh by digest, a query by `realpath:size:mtimeMs` (D4). */
+interface ModelIdentity {
+  readonly sha256: string
+  readonly stat: string
+}
+
+export function modelFileStat(path: string): string {
+  const real = realpathSync(path)
+  const stat = statSync(real)
+  return `${real}:${stat.size}:${stat.mtimeMs}`
+}
+
+async function modelIdentity(path: string): Promise<ModelIdentity> {
   const hash = createHash("sha256")
   for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer)
-  return hash.digest("hex")
+  return { sha256: hash.digest("hex"), stat: modelFileStat(path) }
 }
 
 export interface VaultEmbedPassReport extends VaultEmbedRefreshReport {
@@ -90,12 +103,15 @@ export interface VaultEmbedPassOptions {
 function selectGeneration(
   db: Database,
   contract: VaultEmbedContract,
-  ggufSha256: string,
+  model: ModelIdentity,
   now: number,
 ): { generation: number; publishWhenComplete: boolean } {
   const contractJson = contractIdentity(contract)
+  const ggufSha256 = model.sha256
   const published = readPublishedVaultEmbedGeneration(db)
-  if (published && published.contractJson === contractJson && published.ggufSha256 === ggufSha256) {
+  if (published && vaultEmbedGenerationMismatch(published, contract, { sha256: ggufSha256 }) === null) {
+    // Same digest: a moved or touched model file is the same model, so record where a query now finds it.
+    db.prepare("UPDATE vault_embed_generation SET gguf_stat = ? WHERE id = ?").run(model.stat, published.id)
     return { generation: published.id, publishWhenComplete: false }
   }
   const building = db
@@ -103,7 +119,7 @@ function selectGeneration(
       "SELECT id FROM vault_embed_generation WHERE state = 'building' AND contract_json = ? AND gguf_sha256 = ? ORDER BY id DESC LIMIT 1",
     )
     .get(contractJson, ggufSha256) as { id: number } | null
-  const generation = building?.id ?? beginVaultEmbedGeneration(db, { contract, ggufSha256, now })
+  const generation = building?.id ?? beginVaultEmbedGeneration(db, { contract, ggufSha256, ggufStat: model.stat, now })
   if (published) return { generation, publishWhenComplete: true }
   publishVaultEmbedGeneration(db, generation)
   return { generation, publishWhenComplete: false }
@@ -132,7 +148,12 @@ export async function runVaultEmbedSeed(
   }
   const vaultId = realpathSync(options.vaultDbPath)
   const contract = options.contract ?? recallEmbedContract()
-  const { generation } = selectGeneration(options.db, contract, await sha256File(modelPath), options.now ?? Date.now())
+  const { generation } = selectGeneration(
+    options.db,
+    contract,
+    await modelIdentity(modelPath),
+    options.now ?? Date.now(),
+  )
   const runtime = (options.runtime ?? ((c) => createQmdEmbedRuntime(c, env)))(contract)
   const qmd = createStore(options.qmdDbPath)
   try {
@@ -159,10 +180,9 @@ export async function runVaultEmbedPass(options: VaultEmbedPassOptions): Promise
   const vaultId = realpathSync(options.vaultDbPath)
   const vaultRoot = vaultRootOf(vaultId)
   const contract = options.contract ?? recallEmbedContract()
-  const ggufSha256 = await sha256File(modelPath)
   const now = options.now ?? Date.now()
 
-  const { generation, publishWhenComplete } = selectGeneration(db, contract, ggufSha256, now)
+  const { generation, publishWhenComplete } = selectGeneration(db, contract, await modelIdentity(modelPath), now)
 
   const runtime = (options.runtime ?? ((c) => createQmdEmbedRuntime(c, env)))(contract)
   const report = await refreshVaultEmbeddings({

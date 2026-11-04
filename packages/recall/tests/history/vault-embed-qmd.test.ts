@@ -109,7 +109,12 @@ describe("qmd embed runtime", () => {
       .run(createHash("sha256").update(content).digest("hex"))
     const db = new Database(":memory:")
     initSchema(db)
-    const generation = beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: "c".repeat(64), now: 1 })
+    const generation = beginVaultEmbedGeneration(db, {
+      contract: CONTRACT,
+      ggufSha256: "c".repeat(64),
+      ggufStat: "m:1:1",
+      now: 1,
+    })
 
     const report = await refreshVaultEmbeddings({
       db,

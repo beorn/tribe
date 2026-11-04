@@ -28,6 +28,8 @@ export interface PublishedVaultEmbedGeneration {
   readonly id: number
   readonly contractJson: string
   readonly ggufSha256: string
+  /** The model file's `realpath:size:mtimeMs` when the digest was last taken, so a query checks it without hashing. */
+  readonly ggufStat: string
 }
 
 const SHA256_HEX = /^[0-9a-f]{64}$/
@@ -45,16 +47,16 @@ export function vaultInputKey(contractJson: string, formattedInput: string): str
 
 export function beginVaultEmbedGeneration(
   db: Database,
-  options: { contract: VaultEmbedContract; ggufSha256: string; now: number },
+  options: { contract: VaultEmbedContract; ggufSha256: string; ggufStat: string; now: number },
 ): number {
   if (!SHA256_HEX.test(options.ggufSha256)) {
     throw new Error(`GGUF sha256 must be 64 lowercase hex characters, got ${JSON.stringify(options.ggufSha256)}`)
   }
   const row = db
     .prepare(
-      "INSERT INTO vault_embed_generation (contract_json, gguf_sha256, created_at, state) VALUES (?, ?, ?, 'building') RETURNING id",
+      "INSERT INTO vault_embed_generation (contract_json, gguf_sha256, gguf_stat, created_at, state) VALUES (?, ?, ?, ?, 'building') RETURNING id",
     )
-    .get(contractIdentity(options.contract), options.ggufSha256, options.now) as { id: number }
+    .get(contractIdentity(options.contract), options.ggufSha256, options.ggufStat, options.now) as { id: number }
   return row.id
 }
 
@@ -77,40 +79,39 @@ export function publishVaultEmbedGeneration(db: Database, id: number): void {
 
 export function readPublishedVaultEmbedGeneration(db: Database): PublishedVaultEmbedGeneration | null {
   const rows = db
-    .prepare("SELECT id, contract_json, gguf_sha256 FROM vault_embed_generation WHERE state = 'published'")
-    .all() as { id: number; contract_json: string; gguf_sha256: string }[]
+    .prepare("SELECT id, contract_json, gguf_sha256, gguf_stat FROM vault_embed_generation WHERE state = 'published'")
+    .all() as { id: number; contract_json: string; gguf_sha256: string; gguf_stat: string }[]
   if (rows.length > 1) {
     throw new Error(
       `vault embedding store has ${rows.length} published generations (${rows.map((r) => r.id).join(", ")}); exactly one is allowed`,
     )
   }
   const row = rows[0]
-  return row ? { id: row.id, contractJson: row.contract_json, ggufSha256: row.gguf_sha256 } : null
+  return row
+    ? { id: row.id, contractJson: row.contract_json, ggufSha256: row.gguf_sha256, ggufStat: row.gguf_stat }
+    : null
 }
 
 /**
- * The published generation, if it was made by this contract and model; null when none is published.
- * A published generation from a different contract or GGUF digest throws: its vectors are not comparable.
+ * Why `generation`'s vectors are not comparable with the running contract and model, or null when they are. The
+ * refresh names the model by its digest; a query names it by its file stat, so it never re-hashes the GGUF (D4).
  */
-export function requireMatchingVaultEmbedGeneration(
-  db: Database,
+export function vaultEmbedGenerationMismatch(
+  generation: PublishedVaultEmbedGeneration,
   contract: VaultEmbedContract,
-  ggufSha256: string,
-): PublishedVaultEmbedGeneration | null {
-  const published = readPublishedVaultEmbedGeneration(db)
-  if (!published) return null
-  if (published.ggufSha256 !== ggufSha256) {
-    throw new Error(
-      `vault embedding generation ${published.id} was made by GGUF sha256 ${published.ggufSha256}, but the running model is ${ggufSha256}; its vectors are not comparable`,
-    )
+  model: { readonly sha256: string } | { readonly stat: string },
+): string | null {
+  if ("sha256" in model && generation.ggufSha256 !== model.sha256) {
+    return `vault embedding generation ${generation.id} was made by GGUF sha256 ${generation.ggufSha256}, but the running model is ${model.sha256}`
+  }
+  if ("stat" in model && generation.ggufStat !== model.stat) {
+    return `vault embedding generation ${generation.id} recorded its model file as ${generation.ggufStat}, but it is now ${model.stat}; the next recall index re-checks its digest`
   }
   const running = contractIdentity(contract)
-  if (published.contractJson !== running) {
-    throw new Error(
-      `vault embedding generation ${published.id} was made under contract ${published.contractJson}, but the running contract is ${running}; its vectors are not comparable`,
-    )
+  if (generation.contractJson !== running) {
+    return `vault embedding generation ${generation.id} was made under contract ${generation.contractJson}, but the running contract is ${running}`
   }
-  return published
+  return null
 }
 
 /** Raw Float32 bytes, exactly `dimensions` values. */

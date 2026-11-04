@@ -198,6 +198,22 @@ function reportSearchSkips(result: RecallResult, json: boolean | undefined): voi
   }
 }
 
+/** The semantic leg's coverage, or its degradation: lexical vault hits are kept and the run exits 3. */
+function reportVaultSemantic(result: RecallResult, json: boolean | undefined): void {
+  const leg = result.vaultSemantic
+  if (!leg) return
+  if (leg.state === "degraded") {
+    process.exitCode = 3
+    if (!json) console.log(`${YELLOW}⚠ vault semantic leg degraded, lexical vault hits kept: ${leg.cause}${RESET}`)
+    return
+  }
+  if (!json && leg.coverage) {
+    console.error(
+      `vault semantic: generation ${leg.generation}, ${leg.coverage.embedded} of ${leg.coverage.documents} documents embedded, ${leg.added} added`,
+    )
+  }
+}
+
 // ============================================================================
 // Main search command
 // ============================================================================
@@ -310,7 +326,9 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     return
   }
 
-  const result = await recall(query, recallOpts)
+  // Normal search adds the vault semantic leg only with an explicit vault (rev23 P:70); raw, regex and agent stay FTS.
+  const result = await recall(query, { ...recallOpts, vaultSemantic: vaultDb !== null })
+  reportVaultSemantic(result, json)
   // The CLI's own verdict names its root and window on the result it prints, so a
   // stale answer says what it judged without the caller running a second tool.
   result.provenanceDetail = freshness

@@ -175,6 +175,7 @@ CREATE TABLE IF NOT EXISTS vault_embed_generation (
   id INTEGER PRIMARY KEY,
   contract_json TEXT NOT NULL,
   gguf_sha256 TEXT NOT NULL,
+  gguf_stat TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   state TEXT NOT NULL CHECK(state IN ('building','published','retired'))
 );`,

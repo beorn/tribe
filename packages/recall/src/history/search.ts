@@ -41,6 +41,7 @@ import { resolve } from "node:path"
 import type { Database } from "bun:sqlite"
 import { assertSingleStatement } from "@bearly/sqlite"
 import { searchVault, type VaultQuery } from "./vault-fts.ts"
+import type { VaultSemanticReceipt } from "./vault-semantic.ts"
 
 // Re-export shared items so existing internal imports continue to work
 export { setRecallLogging, log, ONE_HOUR_MS, ONE_DAY_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
@@ -480,7 +481,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
   }
   let hookSearch: HookMessageSearch | undefined
   let vaultQuery: VaultQuery | undefined
-  const said = (): Pick<RecallResult, "hookSearch" | "skipped" | "vaultQuery"> => ({
+  let vaultSemantic: VaultSemanticReceipt | undefined
+  const said = (): Pick<RecallResult, "hookSearch" | "skipped" | "vaultQuery" | "vaultSemantic"> => ({
     ...(hookSearch === undefined
       ? {}
       : {
@@ -491,6 +493,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         }),
     ...(skipped.length === 0 ? {} : { skipped }),
     ...(vaultQuery === undefined ? {} : { vaultQuery }),
+    ...(vaultSemantic === undefined ? {} : { vaultSemantic }),
   })
 
   const db = getDb()
@@ -517,6 +520,20 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       mode,
     }
     const vaultDb = options.vaultDb ?? null
+    // The vault semantic leg (@ag/recall/three-dark-search-paths slice 3): opt-in, never in hook mode. Its one query
+    // embedding starts here, before the synchronous lexical work, and is awaited after it; it never rejects.
+    const semanticStarted = performance.now()
+    const semantic =
+      options.vaultSemantic === true && !hook && vaultDb !== null && runs("vault")
+        ? import("./vault-semantic.ts").then(async (leg) => ({
+            leg,
+            query: await leg.embedVaultQuery(query, { open: options.deps?.vaultQueryModel }),
+          }))
+        : null
+    const semanticOutcome = semantic?.then(
+      (ok) => ({ ok: true as const, ...ok }),
+      (error: unknown) => ({ ok: false as const, cause: error instanceof Error ? error.message : String(error) }),
+    )
     const searchStart = Date.now()
     const candidates = retrieveCandidates({
       db,
@@ -529,7 +546,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const messageResults = candidates.messages
     const projectContentResults = candidates.projectContent
     const vault = candidates.vault
-    const vaultMatches = vault?.matches ?? []
+    let vaultMatches = vault?.matches ?? []
     const msgMs = phases.messages ?? 0
     hookSearch = messageResults.hook
     if (hookSearch?.capped) skipped.push(hookSearch.capped)
@@ -559,6 +576,26 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       log(
         `vault FTS: ${vaultMatches.length} of ${vault.matched} matched, ${vault.form} of [${vault.terms.join(", ")}]${vault.unmatched.length > 0 ? `, unmatched [${vault.unmatched.join(", ")}]` : ""} (${vaultMs}ms) [${vaultDb}]`,
       )
+    }
+
+    if (semanticOutcome !== undefined && vaultDb !== null) {
+      const outcome = await semanticOutcome
+      try {
+        if (!outcome.ok) throw new Error(outcome.cause)
+        const ranked = outcome.leg.rankVaultSemantic(db, vaultDb, outcome.query, limit * 2)
+        const fused = outcome.leg.fuseVaultMatches(vaultMatches, ranked.hits)
+        vaultMatches = fused.matches
+        vaultSemantic = {
+          state: "ok",
+          generation: ranked.generation,
+          coverage: { documents: ranked.documents, embedded: ranked.embedded },
+          added: fused.added,
+        }
+      } catch (error) {
+        vaultSemantic = { state: "degraded", cause: error instanceof Error ? error.message : String(error) }
+      }
+      phases.vault_semantic = performance.now() - semanticStarted
+      log(`vault semantic: ${JSON.stringify(vaultSemantic)}`)
     }
 
     // Query expansion: search with synonym variants for broader recall. Not in hook mode (Phase 3).

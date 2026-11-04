@@ -107,7 +107,7 @@ describe("refreshVaultEmbeddings", () => {
   beforeEach(() => {
     db = new Database(":memory:")
     initSchema(db)
-    generation = beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: GGUF, now: 1 })
+    generation = beginVaultEmbedGeneration(db, { contract: CONTRACT, ggufSha256: GGUF, ggufStat: "m:1:1", now: 1 })
     vault = new Database(":memory:")
     vault.exec(
       "CREATE TABLE nodes (id TEXT PRIMARY KEY, fstype TEXT, fs_path TEXT, fs_mtime INTEGER, fs_content_hash TEXT)",
