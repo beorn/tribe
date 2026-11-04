@@ -1,7 +1,7 @@
 /**
  * The vault semantic leg of recall() (@ag/recall/three-dark-search-paths slice 3; rev23 P:70/72, D2, D4).
  *
- * One query embedding is started before recall()'s synchronous lexical work and awaited after it. The published
+ * One query embedding is started before recall()'s synchronous lexical work, and its cap is armed after it. The published
  * generation must match the running contract and the model file's stat (no re-hash per query). A vector counts only
  * while its doc_hash equals km's current fs_content_hash for that path; every other document is reported as not
  * embedded, and FTS still finds it. The two vault rankings fuse by equal RRF60 over vault documents only: fused
@@ -83,49 +83,72 @@ export function openVaultQueryModel(modelPath: string, contextTokens: number): V
   }
 }
 
-/** Embed the query once. Rejects with a named cause: no model, a slow model, or no vector. */
-export async function embedVaultQuery(
+/** One query embedding, started early; its cap starts only when the caller settles it. */
+export interface VaultQueryEmbedding {
+  /** The vector, or a rejection with a named cause: no model, a slow model, or no vector. */
+  settle(timeoutMs?: number): Promise<VaultQueryVector>
+}
+
+/**
+ * Start the one query embedding so the model loads during recall()'s synchronous lexical work. The cap is the latency
+ * the leg adds after that work (CTO ff83cf0c ruling 5, r2 change 1), so it is armed by settle(), never here. Never
+ * throws: a failure to start is the rejection settle() returns.
+ */
+export function startVaultQueryEmbedding(
   query: string,
-  options: {
-    env?: NodeJS.ProcessEnv
-    open?: (modelPath: string, contextTokens: number) => VaultQueryModel
-    timeoutMs?: number
-  } = {},
-): Promise<VaultQueryVector> {
-  const modelPath = requireRecallEmbedModel(options.env ?? process.env)
-  const contract = recallEmbedContract()
-  const modelStat = modelFileStat(modelPath)
-  const model = (options.open ?? openVaultQueryModel)(modelPath, contract.contextTokens)
-  const timeoutMs = options.timeoutMs ?? VAULT_SEMANTIC_TIMEOUT_MS
-  let timer: ReturnType<typeof setTimeout> | undefined
-  let timedOut = false
+  options: { env?: NodeJS.ProcessEnv; open?: (modelPath: string, contextTokens: number) => VaultQueryModel } = {},
+): VaultQueryEmbedding {
+  let contract: VaultEmbedContract
+  let modelStat: string
+  let model: VaultQueryModel
+  let embedded: Promise<{ ok: true; vector: Float32Array } | { ok: false; error: unknown }>
   try {
-    const vector = await Promise.race([
-      model.embed(formatQueryForEmbedding(query, modelPath)),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          timedOut = true
-          reject(new Error(`the query embedding took longer than ${timeoutMs} ms`))
-        }, timeoutMs)
-      }),
-    ])
-    if (vector.length !== contract.dimensions) {
-      throw new Error(
-        `the query embedding has ${vector.length} values; the contract dimension is ${contract.dimensions}`,
-      )
-    }
-    return { contract, modelStat, vector }
-  } finally {
-    clearTimeout(timer)
-    if (timedOut) {
-      // Production dispose waits for the load; awaiting it here would let a slow load outlast the cap (CTO 0edff0e3
-      // fix 2). The CLI ends the process after printing a degraded result.
-      model.dispose().catch((error: unknown) => {
-        log(`vault semantic: disposing the timed-out query model failed: ${String(error)}`)
-      })
-    } else {
-      await model.dispose()
-    }
+    const modelPath = requireRecallEmbedModel(options.env ?? process.env)
+    contract = recallEmbedContract()
+    modelStat = modelFileStat(modelPath)
+    model = (options.open ?? openVaultQueryModel)(modelPath, contract.contextTokens)
+    // The outcome is held, error included, until settle() reads it, so an early failure is never unhandled.
+    embedded = model.embed(formatQueryForEmbedding(query, modelPath)).then(
+      (vector) => ({ ok: true as const, vector }),
+      (error: unknown) => ({ ok: false as const, error }),
+    )
+  } catch (error) {
+    return { settle: () => Promise.reject(error) }
+  }
+  return {
+    settle: async (timeoutMs = VAULT_SEMANTIC_TIMEOUT_MS) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let timedOut = false
+      try {
+        const outcome = await Promise.race([
+          embedded,
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => {
+              timedOut = true
+              reject(new Error(`the query embedding took longer than ${timeoutMs} ms after the lexical search`))
+            }, timeoutMs)
+          }),
+        ])
+        if (!outcome.ok) throw outcome.error
+        if (outcome.vector.length !== contract.dimensions) {
+          throw new Error(
+            `the query embedding has ${outcome.vector.length} values; the contract dimension is ${contract.dimensions}`,
+          )
+        }
+        return { contract, modelStat, vector: outcome.vector }
+      } finally {
+        clearTimeout(timer)
+        if (timedOut) {
+          // Production dispose waits for the load; awaiting it here would let a slow load outlast the cap (CTO
+          // 0edff0e3 fix 2). The CLI ends the process after printing a degraded result.
+          model.dispose().catch((error: unknown) => {
+            log(`vault semantic: disposing the timed-out query model failed: ${String(error)}`)
+          })
+        } else {
+          await model.dispose()
+        }
+      }
+    },
   }
 }
 

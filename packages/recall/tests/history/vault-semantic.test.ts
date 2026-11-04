@@ -8,7 +8,8 @@
  * km's current fs_content_hash; the published generation must match the running contract and model file stat;
  * equal RRF60 over vault documents only, fused document i taking lexical slot i's rank, nothing added when no lexical
  * vault candidate exists; any failure keeps the lexical hits and names its cause; the hook and an unset option never
- * load a model.
+ * load a model. CTO r2 (b7e7f718) changes 1-2: the 5 s cap is the latency the leg adds after the lexical search, so it
+ * is armed after that search; a leg module that fails to load degrades, never failing the search.
  * Gap: no test reads vault_doc_embed at query time or composes a second vault ranking in recall().
  * Fixtures: a private km vault (nodes + nodes_fts) and an in-memory index; the query model is a fixture.
  */
@@ -225,6 +226,57 @@ describe("the vault semantic leg in recall()", () => {
     }
     expect(order[0]).toBe("embed")
     expect(order).toContain("fts")
+  })
+
+  test("the cap counts only the time after the lexical search: a 100 ms vault FTS stall leaves a 30 ms embed ok (CTO r2 change 1)", async () => {
+    await publish()
+    const prepare = Database.prototype.prepare
+    const spy = vi.spyOn(Database.prototype, "prepare").mockImplementation(function (this: Database, sql: string) {
+      if (sql.includes("nodes_fts")) {
+        const until = performance.now() + 100
+        while (performance.now() < until) {
+          // A synchronous lexical search slower than the 50 ms cap.
+        }
+      }
+      return prepare.call(this, sql)
+    } as typeof prepare)
+    try {
+      const result = await run({
+        model: () => ({
+          // 30 ms, then one more tick, which can only run after the stall ends.
+          embed: async () => {
+            await new Promise((resolve) => {
+              setTimeout(resolve, 30)
+            })
+            await new Promise((resolve) => {
+              setTimeout(resolve, 0)
+            })
+            return basis(0)
+          },
+          dispose: async () => {},
+        }),
+      })
+      expect(result.vaultSemantic).toMatchObject({ state: "ok" })
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test("a vault semantic module that fails to load degrades with its cause and keeps the lexical hits (CTO r2 change 2)", async () => {
+    await publish()
+    vi.doMock("../../src/history/vault-semantic.ts", () => {
+      throw new Error("fixture module load failure")
+    })
+    try {
+      const result = await run()
+      expect(result.vaultSemantic).toMatchObject({
+        state: "degraded",
+        cause: /vault semantic module failed to load.*fixture module load failure/,
+      })
+      expect(vaultHits(result).sort()).toEqual(["a.md", "c.md"])
+    } finally {
+      vi.doUnmock("../../src/history/vault-semantic.ts")
+    }
   })
 
   test("a model load that never settles still degrades within the cap (CTO 0edff0e3 fix 2)", async () => {

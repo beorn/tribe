@@ -522,18 +522,33 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const vaultDb = options.vaultDb ?? null
     // The vault semantic leg (@ag/recall/three-dark-search-paths slice 3): opt-in, never in hook mode. Its module
     // (no qmd store, no model) is loaded and its one query embedding is started here, before the synchronous lexical
-    // work, and awaited after it (CTO 0edff0e3 fix 1); the outcome never rejects.
-    const semanticLeg =
-      options.vaultSemantic === true && !hook && vaultDb !== null && runs("vault")
-        ? await import("./vault-semantic.ts")
-        : null
+    // work (CTO 0edff0e3 fix 1); its cap is armed after that work (r2 change 1). A module that fails to load degrades
+    // the leg like any other failure, keeping the lexical hits (r2 change 2).
+    const semanticWanted = options.vaultSemantic === true && !hook && vaultDb !== null && runs("vault")
+    let semantic:
+      | {
+          ok: true
+          leg: typeof import("./vault-semantic.ts")
+          embedding: import("./vault-semantic.ts").VaultQueryEmbedding
+        }
+      | { ok: false; cause: string }
+      | null = null
     const semanticStarted = performance.now()
-    const semanticOutcome = semanticLeg
-      ?.embedVaultQuery(query, { open: options.deps?.vaultQueryModel, timeoutMs: options.deps?.vaultQueryTimeoutMs })
-      .then(
-        (vector) => ({ ok: true as const, leg: semanticLeg, query: vector }),
-        (error: unknown) => ({ ok: false as const, cause: error instanceof Error ? error.message : String(error) }),
-      )
+    if (semanticWanted) {
+      try {
+        const leg = await import("./vault-semantic.ts")
+        semantic = {
+          ok: true,
+          leg,
+          embedding: leg.startVaultQueryEmbedding(query, { open: options.deps?.vaultQueryModel }),
+        }
+      } catch (error) {
+        semantic = {
+          ok: false,
+          cause: `the vault semantic module failed to load: ${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+    }
     const searchStart = Date.now()
     const candidates = retrieveCandidates({
       db,
@@ -578,12 +593,12 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       )
     }
 
-    if (semanticOutcome !== undefined && vaultDb !== null) {
-      const outcome = await semanticOutcome
+    if (semantic !== null && vaultDb !== null) {
       try {
-        if (!outcome.ok) throw new Error(outcome.cause)
-        const ranked = outcome.leg.rankVaultSemantic(db, vaultDb, outcome.query, limit * 2)
-        const fused = outcome.leg.fuseVaultMatches(vaultMatches, ranked.hits)
+        if (!semantic.ok) throw new Error(semantic.cause)
+        const vector = await semantic.embedding.settle(options.deps?.vaultQueryTimeoutMs)
+        const ranked = semantic.leg.rankVaultSemantic(db, vaultDb, vector, limit * 2)
+        const fused = semantic.leg.fuseVaultMatches(vaultMatches, ranked.hits)
         vaultMatches = fused.matches
         vaultSemantic = {
           state: "ok",
