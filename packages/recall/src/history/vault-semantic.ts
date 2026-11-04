@@ -10,7 +10,7 @@
  */
 import type { Database } from "bun:sqlite"
 import { realpathSync } from "node:fs"
-import { formatQueryForEmbedding, LlamaCpp, setDefaultLlamaCpp } from "@tobilu/qmd/llm"
+import { formatQueryForEmbedding } from "@tobilu/qmd/llm"
 import { modelFileStat, recallEmbedContract } from "./vault-embed-index.ts"
 import { requireRecallEmbedModel } from "./vault-embed-qmd.ts"
 import {
@@ -25,7 +25,7 @@ export const VAULT_RRF_K = 60
 /** The cold added-latency cap (CTO ff83cf0c): a slower query embedding is a named degradation, not a wait. */
 export const VAULT_SEMANTIC_TIMEOUT_MS = 5_000
 
-/** One loaded query model. Production wraps qmd's LlamaCpp; a test passes a fixture. */
+/** One query model. Production loads node-llama-cpp directly (rev23); a test passes a fixture. */
 export interface VaultQueryModel {
   embed(formattedQuery: string): Promise<Float32Array>
   dispose(): Promise<void>
@@ -54,17 +54,32 @@ export interface VaultSemanticReceipt {
   readonly added?: number
 }
 
-/** Production: qmd's LlamaCpp on RECALL_EMBED_MODEL, registered as qmd's default before the call (CTO B2). */
-export function openVaultQueryModel(modelPath: string): VaultQueryModel {
-  const llm = new LlamaCpp({ embedModel: modelPath })
-  setDefaultLlamaCpp(llm)
+/**
+ * Production: the rev23 query route (CTO B2), node-llama-cpp 3.20.0 on RECALL_EMBED_MODEL with CPU only, no build and
+ * no download. Loading starts on the first embed, so a slow load counts against the query cap.
+ */
+export function openVaultQueryModel(modelPath: string, contextTokens: number): VaultQueryModel {
+  let loaded: Promise<{ dispose(): Promise<void>; embed(input: string): Promise<Float32Array> }> | undefined
+  const load = () =>
+    (loaded ??= (async () => {
+      const { getLlama } = await import("node-llama-cpp")
+      const llama = await getLlama({ gpu: false, build: "never", skipDownload: true })
+      const model = await llama.loadModel({ modelPath })
+      const context = await model.createEmbeddingContext({ contextSize: contextTokens })
+      return {
+        embed: async (input: string) => Float32Array.from((await context.getEmbeddingFor(input)).vector),
+        dispose: async () => {
+          await context.dispose()
+          await model.dispose()
+          await llama.dispose()
+        },
+      }
+    })())
   return {
-    embed: async (input) => {
-      const result = await llm.embed(input)
-      if (!result) throw new Error("the embedding model returned no vector for the query")
-      return new Float32Array(result.embedding)
+    embed: async (input) => (await load()).embed(input),
+    dispose: async () => {
+      if (loaded) await (await loaded).dispose()
     },
-    dispose: () => llm.dispose(),
   }
 }
 
@@ -73,14 +88,14 @@ export async function embedVaultQuery(
   query: string,
   options: {
     env?: NodeJS.ProcessEnv
-    open?: (modelPath: string) => VaultQueryModel
+    open?: (modelPath: string, contextTokens: number) => VaultQueryModel
     timeoutMs?: number
   } = {},
 ): Promise<VaultQueryVector> {
   const modelPath = requireRecallEmbedModel(options.env ?? process.env)
   const contract = recallEmbedContract()
   const modelStat = modelFileStat(modelPath)
-  const model = (options.open ?? openVaultQueryModel)(modelPath)
+  const model = (options.open ?? openVaultQueryModel)(modelPath, contract.contextTokens)
   const timeoutMs = options.timeoutMs ?? VAULT_SEMANTIC_TIMEOUT_MS
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
