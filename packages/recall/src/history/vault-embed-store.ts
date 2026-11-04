@@ -18,6 +18,10 @@ export interface VaultEmbedContract {
   readonly chunkTokens: number
   readonly overlapTokens: number
   readonly windowTokens: number
+  /** qmd package version and the SHA-256 of the patched dist/store.js and dist/llm.js that compute the input. */
+  readonly qmdVersion: string
+  readonly qmdStoreSha256: string
+  readonly qmdLlmSha256: string
 }
 
 export interface PublishedVaultEmbedGeneration {

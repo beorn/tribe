@@ -41,6 +41,9 @@ const CONTRACT: VaultEmbedContract = {
   chunkTokens: 900,
   overlapTokens: 135,
   windowTokens: 200,
+  qmdVersion: "2.8.3",
+  qmdStoreSha256: "a".repeat(64),
+  qmdLlmSha256: "b".repeat(64),
 }
 const GGUF = "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63"
 const VAULT = "/fixture/vault/state.db"
