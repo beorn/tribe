@@ -7,7 +7,8 @@
  * Requirement (CTO 0609d989 rule 5, 9686f199 conditions 1-2, D4): the seed copies a document's qmd vectors only when
  * km's current fs_content_hash equals qmd's stored hash and qmd's vector set for that hash is complete; input keys
  * come from running the chunker, never from an embedding; each document is one transaction; a qmd store with no
- * vectors for the expected model and fingerprint is refused loudly, naming what it holds.
+ * vectors for the expected model and fingerprint is refused loudly, naming what it holds. CTO 0edff0e3 fix 5: the
+ * title and chunks come from qmd's own path for the hash, and a hash with no active qmd path is skipped by name.
  * Gap: no test reads a qmd store. The fixture store is built by qmd's own createStore, insertContent and
  * insertEmbedding in a temp dir, with 4-dimension vectors; no model is loaded.
  */
@@ -16,16 +17,23 @@ import { createHash } from "node:crypto"
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createStore, getEmbeddingFingerprint, insertContent, insertEmbedding, type Store } from "@tobilu/qmd/store"
+import {
+  createStore,
+  getEmbeddingFingerprint,
+  insertContent,
+  insertDocument,
+  insertEmbedding,
+  type Store,
+} from "@tobilu/qmd/store"
 import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
 import { initSchema } from "../../src/history/db-schema"
 import type { VaultEmbedChunker } from "../../src/history/vault-embed-refresh"
-import { seedVaultEmbeddingsFromQmd } from "../../src/history/vault-embed-seed"
+import { SEED_SKIP_NO_QMD_PATH, seedVaultEmbeddingsFromQmd } from "../../src/history/vault-embed-seed"
 import {
   beginVaultEmbedGeneration,
   contractIdentity,
-  decodeVaultVector,
+  decodeVaultVectorInto,
   vaultInputKey,
   type VaultEmbedContract,
 } from "../../src/history/vault-embed-store"
@@ -49,7 +57,8 @@ const QMD_MODEL = "hf:fixture/embed.gguf"
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 const chunker: VaultEmbedChunker = {
   chunk: async (content) => content.split("\n\n").map((text) => ({ text })),
-  title: (content) => content.split("\n")[0] ?? "",
+  // A capitalized first line stands for a heading; a headingless document is titled by its path, as qmd's is.
+  title: (content, fsPath) => (/^[A-Z]/.test(content) ? (content.split("\n")[0] ?? "") : fsPath),
   format: async (text, title) => `doc: ${title} | ${text}`,
 }
 
@@ -60,9 +69,10 @@ describe("seedVaultEmbeddingsFromQmd", () => {
   let vault: Database
   let generation: number
 
-  const qmdDoc = (content: string, chunks: number[] | "all", model = QMD_MODEL) => {
+  const qmdDoc = (content: string, chunks: number[] | "all", model = QMD_MODEL, path: string | null = "a.md") => {
     const hash = sha256(content)
     insertContent(qmd.db, hash, content, "2026-11-01")
+    if (path !== null) insertDocument(qmd.db, "pm", path, path, hash, "2026-11-01", "2026-11-01")
     const parts = content.split("\n\n")
     parts.forEach((_, seq) => {
       if (chunks !== "all" && !chunks.includes(seq)) return
@@ -129,7 +139,22 @@ describe("seedVaultEmbeddingsFromQmd", () => {
       ["a.md", hash, 1],
     ])
     expect(stored[1]?.input_key).toBe(vaultInputKey(contractIdentity(CONTRACT), "doc: Alpha | one"))
-    expect(Array.from(decodeVaultVector(stored[1]!.vec, 4))).toEqual([1, 1, 2, 3])
+    expect(Array.from(decodeVaultVectorInto(stored[1]!.vec, new Float32Array(4)))).toEqual([1, 1, 2, 3])
+  })
+
+  test("a renamed headingless document is keyed by the path qmd embedded it under (CTO 0edff0e3 fix 5)", async () => {
+    const hash = qmdDoc("plain\n\none", "all", QMD_MODEL, "old-name.md")
+    kmDoc("new-name.md", hash)
+    const report = await seed()
+    expect(report).toMatchObject({ seededDocuments: 1, seededChunks: 2 })
+    expect(rows()[1]?.input_key).toBe(vaultInputKey(contractIdentity(CONTRACT), "doc: old-name.md | one"))
+  })
+
+  test("a hash qmd holds under no active path is skipped with a named reason", async () => {
+    kmDoc("a.md", qmdDoc("plain\n\none", "all", QMD_MODEL, null))
+    const report = await seed()
+    expect(report.skipped).toEqual({ [SEED_SKIP_NO_QMD_PATH]: 1 })
+    expect(rows()).toEqual([])
   })
 
   test("a document edited since qmd embedded it is not seeded", async () => {

@@ -18,7 +18,7 @@ import { createHash } from "node:crypto"
 import { mkdirSync, mkdtempSync, realpathSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createStore, insertContent, insertEmbedding } from "@tobilu/qmd/store"
+import { createStore, insertContent, insertDocument, insertEmbedding } from "@tobilu/qmd/store"
 import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
 import { initSchema } from "../../src/history/db-schema"
@@ -205,6 +205,7 @@ describe("runVaultEmbedPass", () => {
     qmd.ensureVecTable(4)
     const hash = sha256("A\n\na")
     insertContent(qmd.db, hash, "A\n\na", "2026-11-01")
+    insertDocument(qmd.db, "pm", "a.md", "A", hash, "2026-11-01", "2026-11-01")
     for (const seq of [0, 1]) {
       insertEmbedding(qmd.db, hash, seq, 0, new Float32Array([seq, 1, 2, 3]), "hf:fixture/embed.gguf", "x", 2)
     }

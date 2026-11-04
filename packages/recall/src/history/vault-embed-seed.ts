@@ -3,7 +3,8 @@
  *
  * For each bound-vault markdown file whose km fs_content_hash has a complete qmd vector set for the expected model
  * and fingerprint, copy those vectors into the generation. Input keys come from running the chunker over qmd's own
- * stored text (whose sha256 is that hash); nothing is embedded. Each document is one transaction. After the seed,
+ * stored text (whose sha256 is that hash) under qmd's own path for it, so a renamed file keys the input qmd embedded;
+ * nothing is embedded. Each document is one transaction. After the seed,
  * Recall never reads qmd's store. Running it needs the model loaded for tokenizing, so it waits for the declared
  * model and a grant (CTO 8d4ea4f4 B2).
  */
@@ -17,6 +18,7 @@ export const QMD_SEED_MODEL_URI = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddin
 
 export const SEED_SKIP_INCOMPLETE = "qmd has no complete vector set for km's current hash"
 export const SEED_SKIP_CHUNK_COUNT = "the chunker's chunk count differs from qmd's"
+export const SEED_SKIP_NO_QMD_PATH = "qmd has no active path for this hash, so the title it embedded is unknown"
 
 export interface VaultEmbedSeedReport {
   readonly seededDocuments: number
@@ -67,6 +69,8 @@ export async function seedVaultEmbeddingsFromQmd(options: VaultEmbedSeedOptions)
     "SELECT seq, total_chunks FROM content_vectors WHERE hash = ? AND model = ? AND embed_fingerprint = ? ORDER BY seq",
   )
   const qmdText = qmdDb.prepare("SELECT doc FROM content WHERE hash = ?")
+  // qmd titles and chunks a hash by MIN(path) over its active documents; the key must describe that input (ruling 17).
+  const qmdPath = qmdDb.prepare("SELECT MIN(path) AS path FROM documents WHERE hash = ? AND active = 1")
   const qmdVector = qmdDb.prepare("SELECT embedding FROM vectors_vec WHERE hash_seq = ?")
   const insert = db.prepare(
     "INSERT OR REPLACE INTO vault_doc_embed (generation, vault_id, fs_path, doc_hash, chunk, input_key, vec) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -104,8 +108,13 @@ export async function seedVaultEmbeddingsFromQmd(options: VaultEmbedSeedOptions)
       skip(SEED_SKIP_INCOMPLETE)
       continue
     }
-    const title = chunker.title(text.doc, file.fs_path)
-    const chunks = await chunker.chunk(text.doc, file.fs_path)
+    const embeddedAs = (qmdPath.get(hash) as { path: string | null } | null)?.path ?? null
+    if (embeddedAs === null) {
+      skip(SEED_SKIP_NO_QMD_PATH)
+      continue
+    }
+    const title = chunker.title(text.doc, embeddedAs)
+    const chunks = await chunker.chunk(text.doc, embeddedAs)
     if (chunks.length !== total) {
       skip(SEED_SKIP_CHUNK_COUNT)
       continue

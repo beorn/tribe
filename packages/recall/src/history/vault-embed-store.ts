@@ -124,13 +124,14 @@ export function encodeVaultVector(vec: Float32Array, dimensions: number): Uint8A
   return new Uint8Array(vec.buffer.slice(vec.byteOffset, vec.byteOffset + vec.byteLength))
 }
 
-export function decodeVaultVector(blob: Uint8Array, dimensions: number): Float32Array {
+/** Decode into the caller's buffer, so a scan over many rows allocates one vector, not one per row. */
+export function decodeVaultVectorInto(blob: Uint8Array, target: Float32Array): Float32Array {
+  const dimensions = target.length
   if (blob.byteLength !== dimensions * 4) {
     throw new Error(
       `vault vector blob is ${blob.byteLength} bytes; the contract dimension ${dimensions} needs ${dimensions * 4}`,
     )
   }
-  const copy = new Uint8Array(blob.byteLength)
-  copy.set(blob)
-  return new Float32Array(copy.buffer)
+  new Uint8Array(target.buffer, target.byteOffset, target.byteLength).set(blob)
+  return target
 }

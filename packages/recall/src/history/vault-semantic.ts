@@ -13,7 +13,7 @@ import { realpathSync } from "node:fs"
 import { formatQueryForEmbedding } from "@tobilu/qmd/llm"
 import { modelFileStat, recallEmbedContract, requireRecallEmbedModel } from "./vault-embed-model.ts"
 import {
-  decodeVaultVector,
+  decodeVaultVectorInto,
   readPublishedVaultEmbedGeneration,
   vaultEmbedGenerationMismatch,
   type VaultEmbedContract,
@@ -166,14 +166,20 @@ export function rankVaultSemantic(
     .all() as { fs_path: string; fs_content_hash: string | null; title: string | null }[]
   for (const file of files) current.set(file.fs_path, { hash: file.fs_content_hash, title: file.title })
 
+  // One primary-key lookup per document reads only the vectors for km's current hash, one row at a time, decoded into
+  // one reused buffer, so neither stale rows nor the whole generation are ever held (CTO 0edff0e3 fix 3).
   const best = new Map<string, number>()
-  const rows = db
-    .prepare("SELECT fs_path, doc_hash, vec FROM vault_doc_embed WHERE generation = ? AND vault_id = ?")
-    .all(published.id, realpathSync(vaultDbPath)) as { fs_path: string; doc_hash: string; vec: Uint8Array }[]
-  for (const row of rows) {
-    if (current.get(row.fs_path)?.hash !== row.doc_hash) continue
-    const score = cosine(query.vector, decodeVaultVector(row.vec, query.contract.dimensions))
-    if (score > (best.get(row.fs_path) ?? Number.NEGATIVE_INFINITY)) best.set(row.fs_path, score)
+  const vaultId = realpathSync(vaultDbPath)
+  const vectorsOf = db.prepare(
+    "SELECT vec FROM vault_doc_embed WHERE generation = ? AND vault_id = ? AND fs_path = ? AND doc_hash = ?",
+  )
+  const buffer = new Float32Array(query.contract.dimensions)
+  for (const [fsPath, file] of current) {
+    if (file.hash === null) continue
+    for (const row of vectorsOf.iterate(published.id, vaultId, fsPath, file.hash) as Iterable<{ vec: Uint8Array }>) {
+      const score = cosine(query.vector, decodeVaultVectorInto(row.vec, buffer))
+      if (score > (best.get(fsPath) ?? Number.NEGATIVE_INFINITY)) best.set(fsPath, score)
+    }
   }
   const hits = [...best.entries()]
     .map(([fsPath, score]) => ({ fsPath, title: current.get(fsPath)?.title ?? null, score }))

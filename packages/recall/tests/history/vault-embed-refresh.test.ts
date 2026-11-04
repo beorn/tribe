@@ -35,7 +35,7 @@ import {
 import {
   beginVaultEmbedGeneration,
   contractIdentity,
-  decodeVaultVector,
+  decodeVaultVectorInto,
   type VaultEmbedContract,
 } from "../../src/history/vault-embed-store"
 
@@ -148,7 +148,7 @@ describe("refreshVaultEmbeddings", () => {
       createHash("sha256").update(contractIdentity(CONTRACT)).update("\0").update("doc: Alpha | one").digest("hex"),
     )
     const vec = db.prepare("SELECT vec FROM vault_doc_embed WHERE chunk = 0").get() as { vec: Uint8Array }
-    expect(decodeVaultVector(vec.vec, 4)).toHaveLength(4)
+    expect(decodeVaultVectorInto(vec.vec, new Float32Array(4))).toHaveLength(4)
 
     const second = await run(embedder)
     expect(second).toMatchObject({ embeddedDocuments: 0, embeddedChunks: 0, coveredDocuments: 1 })

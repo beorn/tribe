@@ -17,7 +17,7 @@ import { CURRENT_SCHEMA_VERSION, initSchema } from "../../src/history/db-schema"
 import {
   beginVaultEmbedGeneration,
   contractIdentity,
-  decodeVaultVector,
+  decodeVaultVectorInto,
   encodeVaultVector,
   publishVaultEmbedGeneration,
   readPublishedVaultEmbedGeneration,
@@ -219,8 +219,8 @@ describe("vault input keys and vectors", () => {
     const vec = new Float32Array([0.5, -1, 2, 0.25])
     const blob = encodeVaultVector(vec, CONTRACT.dimensions)
     expect(blob.byteLength).toBe(16)
-    expect(Array.from(decodeVaultVector(blob, CONTRACT.dimensions))).toEqual([0.5, -1, 2, 0.25])
+    expect(Array.from(decodeVaultVectorInto(blob, new Float32Array(CONTRACT.dimensions)))).toEqual([0.5, -1, 2, 0.25])
     expect(() => encodeVaultVector(new Float32Array(3), CONTRACT.dimensions)).toThrow(/dimension/)
-    expect(() => decodeVaultVector(new Uint8Array(12), CONTRACT.dimensions)).toThrow(/dimension/)
+    expect(() => decodeVaultVectorInto(new Uint8Array(12), new Float32Array(CONTRACT.dimensions))).toThrow(/dimension/)
   })
 })
