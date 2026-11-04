@@ -8,6 +8,8 @@
  * to tokenize, truncate and embed; with a fixture instance registered, nothing reaches qmd's default model or a
  * download. A missing RECALL_EMBED_MODEL fails loudly with the remedy before any qmd call. A null vector from qmd's
  * embedBatch is an error, never a skipped chunk. contract_json can carry the patched store.js/llm.js SHA-256 (B1).
+ * CTO r2 author point (b): the context size read from qmd is refused loudly unless it is a positive integer, so a qmd
+ * that moves the static fails instead of recording null in the contract.
  * Gap: the refresh core tests inject a stand-in chunker; nothing exercises qmd's real chunker and formatter path.
  */
 import { Database } from "bun:sqlite"
@@ -19,7 +21,12 @@ import { getDefaultLlamaCpp, LlamaCpp, setDefaultLlamaCpp } from "@tobilu/qmd/ll
 import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { initSchema } from "../../src/history/db-schema"
-import { qmdModuleSha256, requireRecallEmbedModel } from "../../src/history/vault-embed-model"
+import {
+  qmdModuleSha256,
+  recallEmbedContract,
+  requireQmdContextSize,
+  requireRecallEmbedModel,
+} from "../../src/history/vault-embed-model"
 import { registerQmdEmbedRuntime, type QmdEmbedLlm } from "../../src/history/vault-embed-qmd"
 import { refreshVaultEmbeddings } from "../../src/history/vault-embed-refresh"
 import { beginVaultEmbedGeneration, type VaultEmbedContract } from "../../src/history/vault-embed-store"
@@ -74,6 +81,14 @@ describe("qmd embed runtime", () => {
     setDefaultLlamaCpp(null)
     vi.restoreAllMocks()
     safeRemoveSync(root, { within: tmpdir() })
+  })
+
+  test("qmd's context size must be a positive integer; the installed qmd's is, and the contract caps it at 2048", () => {
+    for (const bad of [undefined, null, 0, -1, 1.5, "2048"]) {
+      expect(() => requireQmdContextSize(bad)).toThrow(/EMBED_CONTEXT_SIZE is .* not a positive integer/)
+    }
+    expect(requireQmdContextSize(512)).toBe(512)
+    expect(recallEmbedContract().contextTokens).toBeLessThanOrEqual(2048)
   })
 
   test("a missing or absent RECALL_EMBED_MODEL fails loudly with the remedy", () => {

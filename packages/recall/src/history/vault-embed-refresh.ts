@@ -212,9 +212,15 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
       return { key, vec }
     })
 
-    db.transaction(() => {
-      rows.forEach((row, chunk) => insert.run(generation, vaultId, file.fs_path, hash, chunk, row.key, row.vec))
-    })()
+    try {
+      db.transaction(() => {
+        rows.forEach((row, chunk) => insert.run(generation, vaultId, file.fs_path, hash, chunk, row.key, row.vec))
+      })()
+    } catch (error) {
+      throw new Error(`vault embedding refresh could not write ${file.fs_path}: ${(error as Error).message}`, {
+        cause: error,
+      })
+    }
     prune.run(generation, vaultId, file.fs_path, hash)
 
     for (const [key, vec] of added) vectorsByKey.set(key, vec)

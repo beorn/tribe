@@ -224,7 +224,7 @@ describe("refreshVaultEmbeddings", () => {
         `CREATE TRIGGER fail_new BEFORE INSERT ON vault_doc_embed WHEN NEW.doc_hash = '${sha256("A\n\nnew")}' BEGIN SELECT RAISE(ABORT, 'fixture insert failure'); END`,
       ),
     )
-    await expect(run(recordingEmbedder())).rejects.toThrow(/fixture insert failure/)
+    await expect(run(recordingEmbedder())).rejects.toThrow(/could not write a\.md: .*fixture insert failure/)
     expect(rows()).toEqual(before)
   })
 
