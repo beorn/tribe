@@ -69,8 +69,9 @@ export function registerQmdEmbedRuntime(
       const results = await llm.embedBatch([...inputs])
       return results.map((result, index) => {
         // qmd's embedBatch logs and returns null on a failed text; a missing vector is an error here.
-        if (!result)
+        if (!result) {
           throw new Error(`the embedding model returned no vector for input ${index + 1} of ${inputs.length}`)
+        }
         return new Float32Array(result.embedding)
       })
     },

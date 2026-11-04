@@ -55,8 +55,8 @@ const chunker: VaultEmbedChunker = {
   format: async (text, title) => `doc: ${title} | ${text}`,
 }
 
-function recordingEmbedder(): VaultEmbedder & { calls: string[][] } {
-  const calls: string[][] = []
+function recordingEmbedder(): VaultEmbedder & { calls: (readonly string[])[] } {
+  const calls: (readonly string[])[] = []
   return {
     calls,
     embed: async (inputs) => {

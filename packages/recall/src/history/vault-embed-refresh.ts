@@ -124,7 +124,7 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
       continue
     }
 
-    let pending: { chunk: number; key: string; input: string }[]
+    let pending: { key: string; input: string }[]
     let keys: string[]
     let fresh: readonly Float32Array[]
     try {
@@ -132,11 +132,9 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
       const title = chunker.title(content, file.fs_path)
       const chunks = await chunker.chunk(content, file.fs_path)
       const inputs = await Promise.all(chunks.map((chunk) => chunker.format(chunk.text, title)))
-      keys = inputs.map((input) => vaultInputKey(contractJson, input))
-      pending = []
-      inputs.forEach((input, chunk) => {
-        if (!vectorsByKey.has(keys[chunk]!)) pending.push({ chunk, key: keys[chunk]!, input })
-      })
+      const chunkInputs = inputs.map((input) => ({ key: vaultInputKey(contractJson, input), input }))
+      keys = chunkInputs.map((c) => c.key)
+      pending = chunkInputs.filter((c) => !vectorsByKey.has(c.key))
       fresh = pending.length > 0 ? await embedder.embed(pending.map((p) => p.input)) : []
     } catch (error) {
       throw new Error(`vault embedding refresh failed on ${file.fs_path}: ${(error as Error).message}`, {
@@ -149,12 +147,18 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
       )
     }
     const added = new Map<string, Uint8Array>()
-    pending.forEach((p, i) => added.set(p.key, encodeVaultVector(fresh[i]!, contract.dimensions)))
+    fresh.forEach((vec, i) => {
+      const p = pending[i]
+      if (p) added.set(p.key, encodeVaultVector(vec, contract.dimensions))
+    })
+    const rowVectors = keys.map((key) => {
+      const vec = added.get(key) ?? vectorsByKey.get(key)
+      if (!vec) throw new Error(`vault embedding refresh on ${file.fs_path}: no vector for input key ${key}`)
+      return vec
+    })
 
     db.transaction(() => {
-      keys.forEach((key, chunk) =>
-        insert.run(generation, vaultId, file.fs_path, hash, chunk, key, added.get(key) ?? vectorsByKey.get(key)!),
-      )
+      keys.forEach((key, chunk) => insert.run(generation, vaultId, file.fs_path, hash, chunk, key, rowVectors[chunk]))
     })()
     prune.run(generation, vaultId, file.fs_path, hash)
 
