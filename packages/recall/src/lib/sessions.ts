@@ -168,8 +168,8 @@ export async function cmdIndex(opts: {
           (vault.stoppedEarly ? " (stopped at the time budget)" : ""),
       )
       console.log(
-        `  vault embedding times: first embed call ${vault.batchMs.first ?? "none"} ms, steady median ` +
-          `${vault.batchMs.steadyMedian ?? "none"} ms; ${vault.tooLarge.documents} documents too large for this pass` +
+        `  vault embedding times: ms per chunk, first embed call ${vault.msPerChunk.first ?? "none"}, steady median ` +
+          `${vault.msPerChunk.steadyMedian ?? "none"}; ${vault.tooLarge.documents} documents too large for this pass` +
           (vault.tooLarge.documents > 0 ? ` (largest ${vault.tooLarge.largestChunks} chunks)` : ""),
       )
     }

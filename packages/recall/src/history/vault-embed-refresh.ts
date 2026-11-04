@@ -58,10 +58,10 @@ export interface VaultEmbedRefreshReport {
   /** Documents skipped because their chunks did not fit the time left, and the largest pending chunk count among them. */
   readonly tooLarge: { readonly documents: number; readonly largestChunks: number }
   /**
-   * Embed-call times on the caller's clock: the pass's first call (it includes the model load) and the median of the
-   * rest; null when the pass made no such call.
+   * Milliseconds per chunk of each embed call on the caller's clock, so calls of different sizes compare: the pass's
+   * first call (it includes the model load) and the median of the rest; null when the pass made no such call.
    */
-  readonly batchMs: { readonly first: number | null; readonly steadyMedian: number | null }
+  readonly msPerChunk: { readonly first: number | null; readonly steadyMedian: number | null }
 }
 
 export interface VaultEmbedRefreshOptions {
@@ -205,7 +205,7 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
         const vectors = await embedder.embed(batch.map((p) => p.input))
         const after = readTimeLeft()
         measuredMs += Math.max(0, left - after)
-        callMs.push(Math.max(0, left - after))
+        callMs.push(Math.max(0, left - after) / batch.length)
         measuredChunks += batch.length
         left = after
         if (vectors.length !== batch.length) {
@@ -270,7 +270,7 @@ export async function refreshVaultEmbeddings(options: VaultEmbedRefreshOptions):
     uncovered,
     stoppedEarly,
     tooLarge: { documents: tooLargeDocuments, largestChunks: largestTooLarge },
-    batchMs: { first: callMs[0] ?? null, steadyMedian: median(callMs.slice(1)) },
+    msPerChunk: { first: callMs[0] ?? null, steadyMedian: median(callMs.slice(1)) },
   }
 }
 
