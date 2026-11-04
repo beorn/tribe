@@ -206,7 +206,7 @@ function reportSearchSkips(result: RecallResult, json: boolean | undefined): voi
 export function formatVaultSemanticSpans(spans: VaultSemanticSpans): string {
   const ms = (value: number) => Math.round(value)
   return (
-    `ms: lexical ${ms(spans.lexicalMs)}, module ${ms(spans.moduleMs)}, load ${ms(spans.loadMs)}, ` +
+    `ms: lexical ${ms(spans.lexicalMs)}, module ${ms(spans.moduleMs)}, load ${ms(spans.loadMs)} (raw ${ms(spans.rawLoadMs)}), ` +
     `embed ${ms(spans.embedMs)}, scan ${ms(spans.scanMs)} (${spans.chunksScanned} chunks), ` +
     `merge ${ms(spans.mergeMs)}, total ${ms(spans.totalMs)}`
   )

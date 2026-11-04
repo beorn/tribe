@@ -425,6 +425,34 @@ export function retrieveCandidates(request: CandidateRequest) {
 
 export type CandidateSet = ReturnType<typeof retrieveCandidates>
 
+/** One event-loop turn: timers, I/O and a started native call's completion all get to run. */
+const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve))
+
+/**
+ * The same reads as retrieveCandidates, one at a time with an event-loop turn before each, so a query-model load
+ * started before them reaches its native work and runs while they do (CTO 1082ad46). Same results, same legs order.
+ */
+export async function retrieveCandidatesYielding(
+  request: CandidateRequest,
+  turn: () => Promise<void> = nextTurn,
+): Promise<CandidateSet> {
+  const { messages, projectContent, vault, titles, ...shared } = request
+  await turn()
+  const m = retrieveCandidates({ ...shared, ...(messages ? { messages } : {}) })
+  await turn()
+  const p = retrieveCandidates({ ...shared, ...(projectContent ? { projectContent } : {}) })
+  await turn()
+  const v = retrieveCandidates({ ...shared, ...(vault ? { vault } : {}) })
+  const t = titles ? retrieveCandidates({ ...shared, titles }) : null
+  return {
+    messages: m.messages,
+    projectContent: p.projectContent,
+    vault: v.vault,
+    titles: t?.titles ?? new Map<string, string>(),
+    legs: [...m.legs, ...p.legs, ...v.legs, ...(t?.legs ?? [])],
+  }
+}
+
 // ============================================================================
 // Core recall function
 // ============================================================================
@@ -553,14 +581,20 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     }
     const searchStart = Date.now()
     const lexicalStart = clock()
-    const candidates = retrieveCandidates({
+    const candidateRequest: CandidateRequest = {
       db,
       query,
       ...(runs("messages") ? { messages: messageOpts } : {}),
       ...(!hook && options.phases === undefined ? { projectContent: projectContentOpts } : {}),
       ...(runs("vault") ? { vault: { limit: limit * 2, dbPath: vaultDb } } : {}),
       measure: phase,
-    })
+    }
+    // While the leg's query embedding is started, the lexical reads yield an event-loop turn before each, so the model
+    // load runs during them instead of after (CTO 1082ad46). With the leg off, one synchronous call as before.
+    const legStarted = semantic?.ok === true
+    const candidates = legStarted
+      ? await retrieveCandidatesYielding(candidateRequest)
+      : retrieveCandidates(candidateRequest)
     const messageResults = candidates.messages
     const projectContentResults = candidates.projectContent
     const vault = candidates.vault
@@ -596,8 +630,68 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       )
     }
 
+    // Query expansion: search with synonym variants for broader recall. Not in hook mode (Phase 3).
+    const SYNONYM_RANK_PENALTY = 5 // Penalize synonym matches to rank below exact matches
+    const queryVariants = hook ? null : expandQueryVariants(query)
+    let synonymMsgCount = 0
+    let synonymContentCount = 0
+
+    if (queryVariants && options.phases === undefined) {
+      log(`query expansion: "${query}" → ${queryVariants.length} variants`)
+      // Collect IDs already found to avoid duplicates
+      const seenMsgIds = new Set(messageResults.results.map((r) => r.id))
+      const seenContentIds = new Set(projectContentResults.results.map((r) => r.id))
+
+      for (const variant of queryVariants.slice(0, 4)) {
+        if (legStarted) await nextTurn()
+        const began = clock()
+        try {
+          try {
+            const varMsgs = retrieveCandidates({ db, query: variant, messages: { ...messageOpts, limit } }).messages
+            for (const r of varMsgs.results) {
+              if (!seenMsgIds.has(r.id)) {
+                seenMsgIds.add(r.id)
+                r.rank += SYNONYM_RANK_PENALTY
+                messageResults.results.push(r)
+                synonymMsgCount++
+              }
+            }
+          } catch (error) {
+            skipped.push(rejectedQuerySkip("synonym_messages", variant, error))
+            continue
+          }
+
+          // Keep messages already found if the content leg rejects this variant.
+          try {
+            const varProject = retrieveCandidates({
+              db,
+              query: variant,
+              projectContent: { ...projectContentOpts, limit },
+            }).projectContent
+            for (const r of varProject.results) {
+              if (!seenContentIds.has(r.id)) {
+                seenContentIds.add(r.id)
+                r.rank += SYNONYM_RANK_PENALTY
+                projectContentResults.results.push(r)
+                synonymContentCount++
+              }
+            }
+          } catch (error) {
+            skipped.push(rejectedQuerySkip("synonym_project_content", variant, error))
+          }
+        } finally {
+          phases.synonyms = (phases.synonyms ?? 0) + clock() - began
+        }
+      }
+
+      if (synonymMsgCount > 0 || synonymContentCount > 0) {
+        log(`query expansion: added ${synonymMsgCount} messages + ${synonymContentCount} content from synonyms`)
+      }
+    }
+
+    // The lexical search ends after the synonym variants; the leg settles only then, so its load can run during
+    // every lexical read (CTO 1082ad46). A span that throws keeps the time it took.
     const lexicalEnd = clock()
-    // The leg's spans, read once the synonyms have run; a span that throws keeps the time it took.
     let legSpans: ((lexicalMs: number, totalMs: number) => VaultSemanticSpans) | undefined
     if (semantic !== null && vaultDb !== null) {
       let settleEnd: number | undefined
@@ -648,6 +742,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         moduleMs: lexicalStart - semanticStarted,
         lexicalMs,
         loadMs: after(marks.loadStart, marks.loadEnd),
+        rawLoadMs: marks.loadStart === undefined ? 0 : (marks.loadEnd ?? end) - marks.loadStart,
         embedMs: after(marks.embedStart, marks.embedEnd),
         scanMs,
         chunksScanned,
@@ -658,67 +753,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       log(`vault semantic: ${JSON.stringify(vaultSemantic)}`)
     }
 
-    // Query expansion: search with synonym variants for broader recall. Not in hook mode (Phase 3).
-    const SYNONYM_RANK_PENALTY = 5 // Penalize synonym matches to rank below exact matches
-    const queryVariants = hook ? null : expandQueryVariants(query)
-    let synonymMsgCount = 0
-    let synonymContentCount = 0
-
-    if (queryVariants && options.phases === undefined) {
-      log(`query expansion: "${query}" → ${queryVariants.length} variants`)
-      // Collect IDs already found to avoid duplicates
-      const seenMsgIds = new Set(messageResults.results.map((r) => r.id))
-      const seenContentIds = new Set(projectContentResults.results.map((r) => r.id))
-
-      for (const variant of queryVariants.slice(0, 4)) {
-        const began = clock()
-        try {
-          try {
-            const varMsgs = retrieveCandidates({ db, query: variant, messages: { ...messageOpts, limit } }).messages
-            for (const r of varMsgs.results) {
-              if (!seenMsgIds.has(r.id)) {
-                seenMsgIds.add(r.id)
-                r.rank += SYNONYM_RANK_PENALTY
-                messageResults.results.push(r)
-                synonymMsgCount++
-              }
-            }
-          } catch (error) {
-            skipped.push(rejectedQuerySkip("synonym_messages", variant, error))
-            continue
-          }
-
-          // Keep messages already found if the content leg rejects this variant.
-          try {
-            const varProject = retrieveCandidates({
-              db,
-              query: variant,
-              projectContent: { ...projectContentOpts, limit },
-            }).projectContent
-            for (const r of varProject.results) {
-              if (!seenContentIds.has(r.id)) {
-                seenContentIds.add(r.id)
-                r.rank += SYNONYM_RANK_PENALTY
-                projectContentResults.results.push(r)
-                synonymContentCount++
-              }
-            }
-          } catch (error) {
-            skipped.push(rejectedQuerySkip("synonym_project_content", variant, error))
-          }
-        } finally {
-          phases.synonyms = (phases.synonyms ?? 0) + clock() - began
-        }
-      }
-
-      if (synonymMsgCount > 0 || synonymContentCount > 0) {
-        log(`query expansion: added ${synonymMsgCount} messages + ${synonymContentCount} content from synonyms`)
-      }
-    }
-
     const searchMs = Date.now() - searchStart
     log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms project=${projectMs}ms)`)
-    const lexicalMs = lexicalEnd - lexicalStart + (phases.synonyms ?? 0)
+    const lexicalMs = lexicalEnd - lexicalStart
     if (legSpans !== undefined && vaultSemantic !== undefined) {
       vaultSemantic = { ...vaultSemantic, spans: legSpans(lexicalMs, clock() - semanticStarted) }
     }

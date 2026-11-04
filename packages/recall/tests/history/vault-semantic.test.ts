@@ -333,7 +333,9 @@ describe("the vault semantic leg in recall()", () => {
 
   // CTO 3a638efb D1: pass 2's 23 s p95 could not say which part was slow; a printed span missing or overlapping
   // another would misname the cause. No other test reads the leg's clock. CTO fa3cf2f1: the timed-out row.
-  test("every span is printed, and the disjoint spans sum to within the total, ok and timed out (fake clock)", async () => {
+  // CTO 1082ad46: D3 showed the whole ~0.94 s load after the lexical search; the reads now yield, so a load that needs
+  // N event-loop turns finishes inside lexical (clipped 0, raw shown) with the same results.
+  test("the spans: a load needing 3 turns overlaps the yielding lexical reads; a timed-out load shows after it (fake clock)", async () => {
     await publish()
     let t = 0
     let ftsReads = 0
@@ -360,14 +362,14 @@ describe("the vault semantic leg in recall()", () => {
         deps: { clock: () => t, vaultQueryTimeoutMs: 50, vaultQueryModel: model },
       })
     }
+    const turn = () => new Promise<void>((resolve) => setImmediate(resolve))
     const sumOf = (s: VaultSemanticSpans) => s.moduleMs + s.lexicalMs + s.loadMs + s.embedMs + s.scanMs + s.mergeMs
     try {
-      // The fixture's load and embed continue after the synchronous lexical search. Load and embed count only the
-      // wait after the lexical search; work done during it is not shown here, and D2's leg-off run measures any
-      // slowdown it causes.
+      // Overlapped: the load needs 3 event-loop turns; the lexical reads yield 3 (before messages, project content,
+      // vault FTS), so it finishes inside lexical.
       const ok = await search(() => ({
         load: async () => {
-          await Promise.resolve()
+          for (let n = 0; n < 3; n++) await turn()
           t += 700
         },
         embed: async () => {
@@ -378,33 +380,37 @@ describe("the vault semantic leg in recall()", () => {
         dispose: async () => {},
       }))
       expect(ftsReads).toBeGreaterThan(0)
-      const lexical = 100 * ftsReads
+      expect(ok.vaultSemantic).toMatchObject({ state: "ok", added: 1 })
+      // The same results as the instant-model test above.
+      expect(vaultHits(ok)).toEqual(["a.md", "b.md"])
+      const lexical = 100 * ftsReads + 740
       const spans = ok.vaultSemantic?.spans
       expect(spans).toEqual({
         moduleMs: 0,
         lexicalMs: lexical,
-        loadMs: 700,
-        embedMs: 40,
+        loadMs: 0,
+        rawLoadMs: 700,
+        embedMs: 0,
         scanMs: 25,
         chunksScanned: 1,
         mergeMs: 0,
-        totalMs: lexical + 765,
+        totalMs: lexical + 25,
       })
       if (!spans) throw new Error("no spans")
       expect(sumOf(spans)).toBeLessThanOrEqual(spans.totalMs)
       expect(ok.timing?.lexicalMs).toBe(lexical)
       expect(formatVaultSemanticSpans(spans)).toBe(
-        `ms: lexical ${lexical}, module 0, load 700, embed 40, scan 25 (1 chunks), merge 0, total ${lexical + 765}`,
+        `ms: lexical ${lexical}, module 0, load 0 (raw 700), embed 0, scan 25 (1 chunks), merge 0, total ${lexical + 25}`,
       )
 
-      // Timed out: load never resolves; 300 ms pass on the fake clock before settle gives up at its 50 ms cap, so the
-      // load runs from the lexical end to the settle end.
+      // Timed out: load never resolves; 300 ms pass on the fake clock after the lexical search, before settle gives up
+      // at its 50 ms cap, so the clipped load runs from the lexical end to the settle end.
       const slow = await search(() => ({
         load: () =>
           new Promise<void>(() => {
             setTimeout(() => {
               t += 300
-            }, 5)
+            }, 25)
           }),
         embed: () => new Promise<Float32Array>(() => {}),
         dispose: async () => {},
@@ -417,6 +423,7 @@ describe("the vault semantic leg in recall()", () => {
         moduleMs: 0,
         lexicalMs: slowLexical,
         loadMs: 300,
+        rawLoadMs: slowLexical + 300,
         embedMs: 0,
         scanMs: 0,
         chunksScanned: 0,
@@ -425,7 +432,7 @@ describe("the vault semantic leg in recall()", () => {
       })
       expect(sumOf(late)).toBeLessThanOrEqual(late.totalMs)
       expect(formatVaultSemanticSpans(late)).toBe(
-        `ms: lexical ${slowLexical}, module 0, load 300, embed 0, scan 0 (0 chunks), merge 0, total ${slowLexical + 300}`,
+        `ms: lexical ${slowLexical}, module 0, load 300 (raw ${slowLexical + 300}), embed 0, scan 0 (0 chunks), merge 0, total ${slowLexical + 300}`,
       )
     } finally {
       spy.mockRestore()

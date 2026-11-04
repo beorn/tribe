@@ -68,6 +68,8 @@ export interface VaultSemanticSpans {
   readonly moduleMs: number
   readonly lexicalMs: number
   readonly loadMs: number
+  /** The whole load, start to end (or to the settle end when it never finished), overlap with lexical included. */
+  readonly rawLoadMs: number
   readonly embedMs: number
   readonly scanMs: number
   readonly chunksScanned: number
