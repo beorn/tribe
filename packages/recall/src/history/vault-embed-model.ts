@@ -18,6 +18,12 @@ export const RECALL_EMBED_MODEL_SHA256 = "b5ce9d77a3fc4b3b39ccb5643c36777911cc4e
 /** EmbeddingGemma-300M's trained context; qmd embeds at the smaller of this and its QMD_EMBED_CONTEXT_SIZE. */
 const EMBEDDINGGEMMA_TRAIN_CONTEXT = 2048
 
+/**
+ * qmd's embedding context size, which follows QMD_EMBED_CONTEXT_SIZE. qmd 2.8.3 declares the static private but sets
+ * it at load; the contract pins llm.js by hash, so a qmd that moves it is a different contract.
+ */
+const qmdEmbedContextSize = (LlamaCpp as unknown as { readonly EMBED_CONTEXT_SIZE: number }).EMBED_CONTEXT_SIZE
+
 /** The declared model, resolved to its realpath; unset or absent fails loudly with the remedy. */
 export function requireRecallEmbedModel(env: NodeJS.ProcessEnv = process.env): string {
   const path = env[RECALL_EMBED_MODEL_ENV]
@@ -51,7 +57,7 @@ export function recallEmbedContract(): VaultEmbedContract {
     modelSha256: RECALL_EMBED_MODEL_SHA256,
     dimensions: 768,
     pooling: "mean",
-    contextTokens: Math.min(LlamaCpp.EMBED_CONTEXT_SIZE, EMBEDDINGGEMMA_TRAIN_CONTEXT),
+    contextTokens: Math.min(qmdEmbedContextSize, EMBEDDINGGEMMA_TRAIN_CONTEXT),
     queryPrefix: "task: search result | query: ",
     documentPrefix: "title: <title> | text: ",
     chunkTokens: 900,

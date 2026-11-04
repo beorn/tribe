@@ -337,8 +337,12 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   // A timed-out query model may still be loading natively, and agents wait for the process, not the output: once the
   // output is flushed, a degraded leg ends the process (CTO 0edff0e3 fix 2).
   if (result.vaultSemantic?.state === "degraded") {
-    await new Promise<void>((resolve) => process.stdout.write("", () => resolve()))
-    await new Promise<void>((resolve) => process.stderr.write("", () => resolve()))
+    await new Promise<void>((resolve) => {
+      process.stdout.write("", () => resolve())
+    })
+    await new Promise<void>((resolve) => {
+      process.stderr.write("", () => resolve())
+    })
     process.exit()
   }
 }
