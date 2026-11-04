@@ -12,24 +12,21 @@
  */
 import { Database } from "bun:sqlite"
 import { createHash } from "node:crypto"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { getDefaultLlamaCpp, LlamaCpp, setDefaultLlamaCpp } from "@tobilu/qmd/llm"
 import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { initSchema } from "../../src/history/db-schema"
-import {
-  qmdModuleSha256,
-  registerQmdEmbedRuntime,
-  requireRecallEmbedModel,
-  type QmdEmbedLlm,
-} from "../../src/history/vault-embed-qmd"
+import { qmdModuleSha256, requireRecallEmbedModel } from "../../src/history/vault-embed-model"
+import { registerQmdEmbedRuntime, type QmdEmbedLlm } from "../../src/history/vault-embed-qmd"
 import { refreshVaultEmbeddings } from "../../src/history/vault-embed-refresh"
 import { beginVaultEmbedGeneration, type VaultEmbedContract } from "../../src/history/vault-embed-store"
 
 const CONTRACT: VaultEmbedContract = {
   model: "fixture-embed",
+  modelSha256: "b".repeat(64),
   dimensions: 4,
   pooling: "mean",
   contextTokens: 2048,
@@ -86,7 +83,7 @@ describe("qmd embed runtime", () => {
     )
     const present = join(root, "model.gguf")
     writeFileSync(present, "gguf")
-    expect(requireRecallEmbedModel({ RECALL_EMBED_MODEL: present })).toBe(present)
+    expect(requireRecallEmbedModel({ RECALL_EMBED_MODEL: present })).toBe(realpathSync(present))
   })
 
   test("with a fixture registered, a refresh runs qmd's chunker and formatter on it and never reaches qmd's default model", async () => {

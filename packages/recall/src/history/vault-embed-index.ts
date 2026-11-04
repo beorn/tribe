@@ -1,26 +1,26 @@
 /**
  * The vault embedding pass of `recall index` (@ag/recall/three-dark-search-paths, D3/D4).
  *
- * Runs only when `--vault-db` is bound. The GGUF is hashed once per pass. The pass refreshes the published
- * generation when its contract and digest match the running ones. Otherwise it fills a building generation with
- * the running identity, publishing it once a pass covers every document it can. When nothing is published yet, the
- * first generation is published at once, so its partial coverage is served and reported while the backfill runs.
+ * Runs only when `--vault-db` is bound. The GGUF is hashed once per pass and must be the digest the contract pins.
+ * The pass refreshes the published generation when its contract and digest match the running ones. Otherwise it
+ * fills a building generation with the running identity, publishing it once a pass covers every document it can.
+ * When nothing is published yet, the first generation is published at once, so its partial coverage is served and
+ * reported while the backfill runs.
  */
 import type { Database } from "bun:sqlite"
-import { createHash } from "node:crypto"
-import { createReadStream, existsSync, readFileSync, realpathSync, statSync } from "node:fs"
-import { createStore } from "@tobilu/qmd/store"
-import { QMD_SEED_MODEL_URI, seedVaultEmbeddingsFromQmd, type VaultEmbedSeedReport } from "./vault-embed-seed.ts"
+import { existsSync, realpathSync } from "node:fs"
 import { basename, dirname } from "node:path"
-import { fileURLToPath } from "node:url"
-import { openVaultDb } from "./vault-fts.ts"
+import { createStore } from "@tobilu/qmd/store"
 import {
-  createQmdEmbedRuntime,
-  qmdModuleSha256,
+  modelIdentity,
+  recallEmbedContract,
+  requirePinnedModel,
   requireRecallEmbedModel,
-  type QmdEmbedRuntime,
-} from "./vault-embed-qmd.ts"
+  type ModelIdentity,
+} from "./vault-embed-model.ts"
+import { createQmdEmbedRuntime, type QmdEmbedRuntime } from "./vault-embed-qmd.ts"
 import { refreshVaultEmbeddings, type VaultEmbedRefreshReport } from "./vault-embed-refresh.ts"
+import { QMD_SEED_MODEL_URI, seedVaultEmbeddingsFromQmd, type VaultEmbedSeedReport } from "./vault-embed-seed.ts"
 import {
   beginVaultEmbedGeneration,
   contractIdentity,
@@ -29,27 +29,7 @@ import {
   vaultEmbedGenerationMismatch,
   type VaultEmbedContract,
 } from "./vault-embed-store.ts"
-
-/** The rev23 contract: EmbeddingGemma-300M-Q8_0 through qmd 2.8.3's own procedure. */
-export function recallEmbedContract(): VaultEmbedContract {
-  const qmdPackage = JSON.parse(
-    readFileSync(fileURLToPath(new URL("../package.json", import.meta.resolve("@tobilu/qmd/store"))), "utf8"),
-  ) as { version: string }
-  return {
-    model: "EmbeddingGemma-300M-Q8_0",
-    dimensions: 768,
-    pooling: "mean",
-    contextTokens: 2048,
-    queryPrefix: "task: search result | query: ",
-    documentPrefix: "title: <title> | text: ",
-    chunkTokens: 900,
-    overlapTokens: 135,
-    windowTokens: 200,
-    qmdVersion: qmdPackage.version,
-    qmdStoreSha256: qmdModuleSha256("@tobilu/qmd/store"),
-    qmdLlmSha256: qmdModuleSha256("@tobilu/qmd/llm"),
-  }
-}
+import { openVaultDb } from "./vault-fts.ts"
 
 /** km keeps a vault's database at `<root>/.km/state.db`; fs_path values resolve against `<root>`. */
 export function vaultRootOf(stateDbPath: string): string {
@@ -60,24 +40,6 @@ export function vaultRootOf(stateDbPath: string): string {
     )
   }
   return dirname(dir)
-}
-
-/** The model as both sides name it: the refresh by digest, a query by `realpath:size:mtimeMs` (D4). */
-interface ModelIdentity {
-  readonly sha256: string
-  readonly stat: string
-}
-
-export function modelFileStat(path: string): string {
-  const real = realpathSync(path)
-  const stat = statSync(real)
-  return `${real}:${stat.size}:${stat.mtimeMs}`
-}
-
-async function modelIdentity(path: string): Promise<ModelIdentity> {
-  const hash = createHash("sha256")
-  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer)
-  return { sha256: hash.digest("hex"), stat: modelFileStat(path) }
 }
 
 export interface VaultEmbedPassReport extends VaultEmbedRefreshReport {
@@ -106,12 +68,14 @@ function selectGeneration(
   model: ModelIdentity,
   now: number,
 ): { generation: number; publishWhenComplete: boolean } {
+  requirePinnedModel(contract, model)
   const contractJson = contractIdentity(contract)
   const ggufSha256 = model.sha256
+  // Same digest: a moved or touched model file is the same model, so record where a query now finds it.
+  const recordStat = db.prepare("UPDATE vault_embed_generation SET gguf_stat = ? WHERE id = ?")
   const published = readPublishedVaultEmbedGeneration(db)
   if (published && vaultEmbedGenerationMismatch(published, contract, { sha256: ggufSha256 }) === null) {
-    // Same digest: a moved or touched model file is the same model, so record where a query now finds it.
-    db.prepare("UPDATE vault_embed_generation SET gguf_stat = ? WHERE id = ?").run(model.stat, published.id)
+    recordStat.run(model.stat, published.id)
     return { generation: published.id, publishWhenComplete: false }
   }
   const building = db
@@ -119,6 +83,7 @@ function selectGeneration(
       "SELECT id FROM vault_embed_generation WHERE state = 'building' AND contract_json = ? AND gguf_sha256 = ? ORDER BY id DESC LIMIT 1",
     )
     .get(contractJson, ggufSha256) as { id: number } | null
+  if (building) recordStat.run(model.stat, building.id)
   const generation = building?.id ?? beginVaultEmbedGeneration(db, { contract, ggufSha256, ggufStat: model.stat, now })
   if (published) return { generation, publishWhenComplete: true }
   publishVaultEmbedGeneration(db, generation)

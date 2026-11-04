@@ -10,6 +10,8 @@ import { createHash } from "node:crypto"
 
 export interface VaultEmbedContract {
   readonly model: string
+  /** The GGUF digest this contract is for; a pass or seed under another digest is refused (D4). */
+  readonly modelSha256: string
   readonly dimensions: number
   readonly pooling: "mean"
   readonly contextTokens: number

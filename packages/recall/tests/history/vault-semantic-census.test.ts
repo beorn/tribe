@@ -18,7 +18,7 @@ import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
 import { initSchema } from "../../src/history/db-schema"
-import { modelFileStat, recallEmbedContract } from "../../src/history/vault-embed-index"
+import { modelFileStat, recallEmbedContract } from "../../src/history/vault-embed-model"
 import {
   beginVaultEmbedGeneration,
   encodeVaultVector,

@@ -28,6 +28,7 @@ import {
 
 const CONTRACT: VaultEmbedContract = {
   model: "fixture-embed",
+  modelSha256: "b".repeat(64),
   dimensions: 4,
   pooling: "mean",
   contextTokens: 2048,

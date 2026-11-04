@@ -11,8 +11,7 @@
 import type { Database } from "bun:sqlite"
 import { realpathSync } from "node:fs"
 import { formatQueryForEmbedding } from "@tobilu/qmd/llm"
-import { modelFileStat, recallEmbedContract } from "./vault-embed-index.ts"
-import { requireRecallEmbedModel } from "./vault-embed-qmd.ts"
+import { modelFileStat, recallEmbedContract, requireRecallEmbedModel } from "./vault-embed-model.ts"
 import {
   decodeVaultVector,
   readPublishedVaultEmbedGeneration,

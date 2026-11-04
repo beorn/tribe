@@ -98,7 +98,7 @@ describe("the vault semantic leg in recall()", () => {
   /** Publish a generation for the running contract and this model file, holding b.md's vector (and a stale a.md). */
   async function publish(options: { stat?: string } = {}) {
     const { getDb } = await import("../../src/history/db")
-    const { modelFileStat, recallEmbedContract } = await import("../../src/history/vault-embed-index")
+    const { modelFileStat, recallEmbedContract } = await import("../../src/history/vault-embed-model")
     const store = await import("../../src/history/vault-embed-store")
     const db = getDb()
     const id = store.beginVaultEmbedGeneration(db, {
