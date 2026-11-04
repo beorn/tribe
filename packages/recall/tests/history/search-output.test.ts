@@ -762,7 +762,7 @@ describe("recall search output", () => {
       else process.env.RECALL_EMBED_MODEL = savedModel
       if (previousLlmDir === undefined) delete process.env.TRIBE_LLM_DIR
       else process.env.TRIBE_LLM_DIR = previousLlmDir
-      rmSync(dir, { recursive: true, force: true })
+      safeRemoveSync(dir, { within: tmpdir() })
     }
   })
 
@@ -784,7 +784,7 @@ describe("recall search output", () => {
       expect(llamaLoads.count).toBe(0)
     } finally {
       exitSpy.mockRestore()
-      rmSync(dir, { recursive: true, force: true })
+      safeRemoveSync(dir, { within: tmpdir() })
     }
   })
 
