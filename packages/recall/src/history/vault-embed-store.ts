@@ -57,12 +57,14 @@ export function beginVaultEmbedGeneration(
 /** Publish a building generation and retire the previously published one, in one transaction. */
 export function publishVaultEmbedGeneration(db: Database, id: number): void {
   db.transaction(() => {
-    const target = db.prepare("SELECT state FROM vault_embed_generation WHERE id = ?").get(id) as
-      | { state: string }
-      | null
+    const target = db.prepare("SELECT state FROM vault_embed_generation WHERE id = ?").get(id) as {
+      state: string
+    } | null
     if (!target) throw new Error(`vault embedding generation ${id} does not exist`)
     if (target.state !== "building") {
-      throw new Error(`vault embedding generation ${id} is ${target.state}; only a building generation can be published`)
+      throw new Error(
+        `vault embedding generation ${id} is ${target.state}; only a building generation can be published`,
+      )
     }
     db.prepare("UPDATE vault_embed_generation SET state = 'retired' WHERE state = 'published'").run()
     db.prepare("UPDATE vault_embed_generation SET state = 'published' WHERE id = ?").run(id)
@@ -74,7 +76,9 @@ export function readPublishedVaultEmbedGeneration(db: Database): PublishedVaultE
     .prepare("SELECT id, contract_json, gguf_sha256 FROM vault_embed_generation WHERE state = 'published'")
     .all() as { id: number; contract_json: string; gguf_sha256: string }[]
   if (rows.length > 1) {
-    throw new Error(`vault embedding store has ${rows.length} published generations (${rows.map((r) => r.id).join(", ")}); exactly one is allowed`)
+    throw new Error(
+      `vault embedding store has ${rows.length} published generations (${rows.map((r) => r.id).join(", ")}); exactly one is allowed`,
+    )
   }
   const row = rows[0]
   return row ? { id: row.id, contractJson: row.contract_json, ggufSha256: row.gguf_sha256 } : null
@@ -115,7 +119,9 @@ export function encodeVaultVector(vec: Float32Array, dimensions: number): Uint8A
 
 export function decodeVaultVector(blob: Uint8Array, dimensions: number): Float32Array {
   if (blob.byteLength !== dimensions * 4) {
-    throw new Error(`vault vector blob is ${blob.byteLength} bytes; the contract dimension ${dimensions} needs ${dimensions * 4}`)
+    throw new Error(
+      `vault vector blob is ${blob.byteLength} bytes; the contract dimension ${dimensions} needs ${dimensions * 4}`,
+    )
   }
   const copy = new Uint8Array(blob.byteLength)
   copy.set(blob)

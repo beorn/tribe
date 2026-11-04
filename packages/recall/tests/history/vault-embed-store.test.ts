@@ -44,9 +44,11 @@ const tableNames = (db: Database): string[] =>
 const userVersion = (db: Database): number =>
   (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
 const schemaText = (db: Database): string =>
-  (db.prepare("SELECT group_concat(sql, ';') AS s FROM (SELECT sql FROM sqlite_master ORDER BY name)").get() as {
-    s: string
-  }).s
+  (
+    db.prepare("SELECT group_concat(sql, ';') AS s FROM (SELECT sql FROM sqlite_master ORDER BY name)").get() as {
+      s: string
+    }
+  ).s
 
 describe("vault embedding tables in SCHEMA", () => {
   let db: Database
@@ -109,7 +111,11 @@ describe("vault embedding tables in SCHEMA", () => {
       ["vec", 0],
     ])
     expect(() =>
-      db.prepare("INSERT INTO vault_embed_generation (contract_json, gguf_sha256, created_at, state) VALUES ('{}', ?, 1, 'live')").run(GGUF),
+      db
+        .prepare(
+          "INSERT INTO vault_embed_generation (contract_json, gguf_sha256, created_at, state) VALUES ('{}', ?, 1, 'live')",
+        )
+        .run(GGUF),
     ).toThrow()
   })
 })
