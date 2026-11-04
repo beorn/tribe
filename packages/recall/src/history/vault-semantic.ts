@@ -206,3 +206,68 @@ export function fuseVaultMatches(
   })
   return { matches, added: window.filter((entry) => !entry.lexical).length }
 }
+
+export const CENSUS_NO_HASH = "km has not recorded this file's hash"
+export const CENSUS_STALE = "its vector is for older text; the next refresh replaces it"
+export const CENSUS_NOT_EMBEDDED = "not embedded yet"
+export const CENSUS_NO_GENERATION = "no vault embedding generation is published"
+
+/**
+ * AC1: U = A + X for the bound vault. U is its markdown documents; A those with a vector for km's current hash in the
+ * published generation; X the rest, one reason each. I is A when the generation matches the running contract and
+ * model file, else 0 with the cause.
+ */
+export interface VaultSemanticCensus {
+  readonly units: number
+  readonly accepted: number
+  readonly excluded: Readonly<Record<string, number>>
+  readonly queryable: number
+  readonly generation: number | null
+  readonly cause?: string
+}
+
+export function vaultSemanticCensus(
+  db: Database,
+  vaultDbPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): VaultSemanticCensus {
+  const files = openVaultDb(vaultDbPath)
+    .prepare("SELECT fs_path, fs_content_hash FROM nodes WHERE fstype = 'mdfile' AND fs_path IS NOT NULL")
+    .all() as { fs_path: string; fs_content_hash: string | null }[]
+  const published = readPublishedVaultEmbedGeneration(db)
+  const held = new Map<string, Set<string>>()
+  if (published) {
+    const rows = db
+      .prepare("SELECT DISTINCT fs_path, doc_hash FROM vault_doc_embed WHERE generation = ? AND vault_id = ?")
+      .all(published.id, realpathSync(vaultDbPath)) as { fs_path: string; doc_hash: string }[]
+    for (const row of rows) held.set(row.fs_path, (held.get(row.fs_path) ?? new Set()).add(row.doc_hash))
+  }
+  const excluded: Record<string, number> = {}
+  let accepted = 0
+  for (const file of files) {
+    const hashes = held.get(file.fs_path)
+    const reason =
+      file.fs_content_hash === null
+        ? CENSUS_NO_HASH
+        : !published
+          ? CENSUS_NO_GENERATION
+          : hashes?.has(file.fs_content_hash)
+            ? null
+            : hashes
+              ? CENSUS_STALE
+              : CENSUS_NOT_EMBEDDED
+    if (reason === null) accepted++
+    else excluded[reason] = (excluded[reason] ?? 0) + 1
+  }
+  const base = { units: files.length, accepted, excluded, generation: published?.id ?? null }
+  if (!published) return { ...base, queryable: 0, cause: CENSUS_NO_GENERATION }
+  let cause: string | null
+  try {
+    cause = vaultEmbedGenerationMismatch(published, recallEmbedContract(), {
+      stat: modelFileStat(requireRecallEmbedModel(env)),
+    })
+  } catch (error) {
+    cause = error instanceof Error ? error.message : String(error)
+  }
+  return cause === null ? { ...base, queryable: accepted } : { ...base, queryable: 0, cause }
+}

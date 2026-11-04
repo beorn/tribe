@@ -9,6 +9,7 @@ import type { Database } from "bun:sqlite"
 import { getDb, closeDb, DB_PATH, getActiveSessionsInWindow, getActivitySummary, getIndexMeta } from "../history/db"
 import { reviewMemorySystem } from "../history/recall"
 import { getVaultDbPath } from "../history/vault-fts.ts"
+import { vaultSemanticCensus, type VaultSemanticCensus } from "../history/vault-semantic.ts"
 import { requireLlm } from "./llm-backend.ts"
 import { discoverActiveSession, renderDiscoveryDiagnostics } from "./session-discovery.ts"
 import { resolveHostProjectRoot } from "./project-root.ts"
@@ -51,6 +52,18 @@ export function getPersistedFailedSessions(db: Database): PersistedFailedSession
     .all() as PersistedFailedSession[]
 }
 
+function printVaultSemanticCensus(census: VaultSemanticCensus): void {
+  console.log(`${BOLD}Vault Semantic${RESET}`)
+  const mark = census.queryable === census.units ? CHECK : WARN
+  console.log(
+    `  ${mark} ${census.queryable}/${census.units} documents queryable; ${census.accepted} embedded under generation ${census.generation ?? "none"}`,
+  )
+  for (const [reason, count] of Object.entries(census.excluded))
+    console.log(`  ${DIM}  ${count} excluded: ${reason}${RESET}`)
+  if (census.cause) console.log(`  ${WARN} not queryable: ${census.cause}`)
+  console.log()
+}
+
 export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Promise<void> {
   // Resolve the project root from the CALLER's cwd, not this file's location.
   // recall is a vendored submodule, so a code-relative walk lands on
@@ -73,8 +86,18 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   const sessionDiscovery = discoverActiveSession({ cwd: process.cwd() }).diagnostics
 
   if (opts.json) {
+    let vaultSemantic: VaultSemanticCensus | { error: string } | undefined
+    if (vaultDb !== null) {
+      try {
+        vaultSemantic = vaultSemanticCensus(getDb(), vaultDb)
+      } catch (error) {
+        vaultSemantic = { error: error instanceof Error ? error.message : String(error) }
+      } finally {
+        closeDb()
+      }
+    }
     const review = await reviewMemorySystem(projectRoot, { skipLlm, skipSearchBenchmarks, vaultDb })
-    console.log(JSON.stringify({ ...review, sessionDiscovery }, null, 2))
+    console.log(JSON.stringify({ ...review, sessionDiscovery, ...(vaultSemantic ? { vaultSemantic } : {}) }, null, 2))
     return
   }
 
@@ -300,6 +323,9 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
       }
       console.log()
     }
+
+    // ── Vault semantic census (AC1: U = A + X, and I) ─────────────────────
+    if (vaultDb !== null) printVaultSemanticCensus(vaultSemanticCensus(db, vaultDb))
   } finally {
     closeDb()
   }
