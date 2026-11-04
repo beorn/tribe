@@ -44,11 +44,9 @@ const tableNames = (db: Database): string[] =>
 const userVersion = (db: Database): number =>
   (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
 const schemaText = (db: Database): string =>
-  (
-    db.prepare("SELECT group_concat(sql, ';') AS s FROM (SELECT sql FROM sqlite_master ORDER BY name)").get() as {
-      s: string
-    }
-  ).s
+  (db.prepare("SELECT sql FROM sqlite_master ORDER BY name").all() as { sql: string | null }[])
+    .map((row) => row.sql ?? "")
+    .join("\n")
 
 describe("vault embedding tables in SCHEMA", () => {
   let db: Database
@@ -93,7 +91,9 @@ describe("vault embedding tables in SCHEMA", () => {
   test("the tables have exactly the ruled D1 columns and primary key", () => {
     initSchema(db)
     const columns = (table: string) =>
-      (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string; pk: number }[]).map((c) => [c.name, c.pk])
+      (db.prepare("SELECT name, pk FROM pragma_table_info(?)").all(table) as { name: string; pk: number }[]).map(
+        (c) => [c.name, c.pk],
+      )
     expect(columns("vault_embed_generation")).toEqual([
       ["id", 1],
       ["contract_json", 0],
