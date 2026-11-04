@@ -1,5 +1,8 @@
 /**
  * @failure Vault semantic vectors could be served from a different model or contract than the one that made them.
+ * @level l1
+ * @consumer @ag/recall/three-dark-search-paths (vault semantic leg, slice 1: storage and generation identity)
+ * @testonly none
  *
  * Requirement (issue @ag/recall/three-dark-search-paths, slice 1; CTO D1/D4 at 9686f199 as amended by 3572804d):
  * session-index.db gains vault_embed_generation and vault_doc_embed through SCHEMA (CREATE TABLE IF NOT EXISTS,
