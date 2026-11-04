@@ -15,6 +15,7 @@
  * in-memory km-shaped nodes table, files in a temp dir, a paragraph chunker and a hash-derived 4-dimension embedder.
  */
 import { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 import { createHash } from "node:crypto"
 import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -204,6 +205,22 @@ describe("refreshVaultEmbeddings", () => {
     }
     await expect(run(failing)).rejects.toThrow(/b\.md.*fixture embedder failed on B/)
     expect(new Set(rows().map((r) => r.fs_path))).toEqual(new Set(["a.md"]))
+  })
+
+  test("an edited document whose new embedding fails keeps its old vectors: prune runs only after the insert commits", async () => {
+    putFile("a.md", "A\n\nold", 10)
+    await run(recordingEmbedder())
+    const before = rows()
+    expect(before.map((r) => r.doc_hash)).toEqual([sha256("A\n\nold"), sha256("A\n\nold")])
+    putFile("a.md", "A\n\nnew", 20)
+    // The insert itself fails, so a prune placed before it would already have deleted the old rows.
+    db.exec(
+      assertSingleStatement(
+        `CREATE TRIGGER fail_new BEFORE INSERT ON vault_doc_embed WHEN NEW.doc_hash = '${sha256("A\n\nnew")}' BEGIN SELECT RAISE(ABORT, 'fixture insert failure'); END`,
+      ),
+    )
+    await expect(run(recordingEmbedder())).rejects.toThrow(/fixture insert failure/)
+    expect(rows()).toEqual(before)
   })
 
   test("an embedder that returns the wrong number of vectors is refused loudly", async () => {

@@ -54,9 +54,9 @@ describe("the vault semantic leg in recall()", () => {
   }
 
   const docs = [
-    { fsPath: "a.md", content: "zebracorn alpha" },
+    { fsPath: "a.md", content: "zebracorn zebracorn alpha" },
     { fsPath: "b.md", content: "nothing lexical here" },
-    { fsPath: "c.md", content: "zebracorn gamma" },
+    { fsPath: "c.md", content: "zebracorn gamma delta epsilon zeta eta theta iota kappa lambda" },
   ]
 
   beforeEach(async () => {
@@ -147,6 +147,35 @@ describe("the vault semantic leg in recall()", () => {
     })
     // Equal RRF60: b.md (semantic only) ties a.md and outranks c.md, taking c.md's lexical slot and its rank.
     expect(vaultHits(result)).toEqual(["a.md", "b.md"])
+  })
+
+  test("fused vault documents inherit the lexical slots' ranks, so a non-vault result between them keeps its place", async () => {
+    // recall() closes its in-memory index, so each run gets the same fixture: the generation and one transcript hit.
+    const seeded = async () => {
+      await publish()
+      const { getDb } = await import("../../src/history/db")
+      const db = getDb()
+      const now = Date.now()
+      db.prepare(
+        "INSERT OR IGNORE INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, cwd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("sess-m", "/test/km", "/tmp/sess-m.jsonl", now - 60_000, now, 1, "Session m", "/test/km")
+      db.prepare(
+        "INSERT OR IGNORE INTO messages (uuid, session_id, type, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+      ).run("msg-m", "sess-m", "user", "zebracorn zebracorn zebracorn in a transcript", now)
+    }
+    const shape = (result: { results: { type: string; sessionId: string; rank: number }[] }) =>
+      result.results.map((r) => [r.type, r.type === "vault" ? "vault" : r.sessionId, r.rank])
+    await seeded()
+    const lexical = await run({ vaultSemantic: false })
+    await seeded()
+    const fused = await run()
+    expect(fused.vaultSemantic).toMatchObject({ state: "ok", added: 1 })
+    expect(vaultHits(fused)).toEqual(["a.md", "b.md"])
+    // Same types, same non-vault results, same ranks, slot for slot: only which vault document fills a slot changed.
+    expect(shape(fused)).toEqual(shape(lexical))
+    const types = fused.results.map((r) => r.type)
+    expect(types.indexOf("message")).toBeGreaterThan(types.indexOf("vault"))
+    expect(types.indexOf("message")).toBeLessThan(types.lastIndexOf("vault"))
   })
 
   test("no lexical vault candidate means the semantic leg adds nothing", async () => {

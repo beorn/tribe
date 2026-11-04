@@ -15,7 +15,16 @@
  */
 import { Database } from "bun:sqlite"
 import { createHash } from "node:crypto"
-import { mkdirSync, mkdtempSync, realpathSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createStore, insertContent, insertDocument, insertEmbedding } from "@tobilu/qmd/store"
@@ -143,6 +152,26 @@ describe("runVaultEmbedPass", () => {
       new RegExp(`sha256 ${sha256("not the ruled model")}.*pins ${CONTRACT.modelSha256}`),
     )
     expect(generations()).toEqual([])
+  })
+
+  test("a vault bound through a symlink is keyed by the realpath of its state.db", async () => {
+    addDoc("a.md", "A\n\na", 1)
+    const linked = `${root}-link`
+    symlinkSync(root, linked)
+    try {
+      await runVaultEmbedPass({
+        db,
+        vaultDbPath: join(linked, ".km", "state.db"),
+        budgetSpent: () => false,
+        now: 1,
+        env: { RECALL_EMBED_MODEL: modelPath },
+        contract: CONTRACT,
+        runtime: fixtureRuntime,
+      })
+      expect(db.prepare("SELECT DISTINCT vault_id FROM vault_doc_embed").all()).toEqual([{ vault_id: statePath }])
+    } finally {
+      unlinkSync(linked)
+    }
   })
 
   test("a symlinked RECALL_EMBED_MODEL is hashed and stat'ed as its one realpath", async () => {
