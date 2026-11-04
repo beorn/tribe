@@ -41,7 +41,7 @@ import { resolve } from "node:path"
 import type { Database } from "bun:sqlite"
 import { assertSingleStatement } from "@bearly/sqlite"
 import { searchVault, type VaultQuery } from "./vault-fts.ts"
-import type { VaultSemanticReceipt } from "./vault-semantic.ts"
+import type { VaultSemanticReceipt, VaultSemanticSpans } from "./vault-semantic.ts"
 
 // Re-export shared items so existing internal imports continue to work
 export { setRecallLogging, log, ONE_HOUR_MS, ONE_DAY_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
@@ -533,14 +533,16 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         }
       | { ok: false; cause: string }
       | null = null
-    const semanticStarted = performance.now()
+    // One clock for the leg's spans (CTO 3a638efb D1); a test passes a fake one.
+    const clock = options.deps?.clock ?? (() => performance.now())
+    const semanticStarted = clock()
     if (semanticWanted) {
       try {
         const leg = await import("./vault-semantic.ts")
         semantic = {
           ok: true,
           leg,
-          embedding: leg.startVaultQueryEmbedding(query, { open: options.deps?.vaultQueryModel }),
+          embedding: leg.startVaultQueryEmbedding(query, { open: options.deps?.vaultQueryModel, clock }),
         }
       } catch (error) {
         semantic = {
@@ -550,6 +552,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       }
     }
     const searchStart = Date.now()
+    const lexicalStart = clock()
     const candidates = retrieveCandidates({
       db,
       query,
@@ -593,12 +596,38 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       )
     }
 
+    const lexicalEnd = clock()
+    // The leg's spans, read once the synonyms have run; a span that throws keeps the time it took.
+    let legSpans: ((lexicalMs: number, totalMs: number) => VaultSemanticSpans) | undefined
     if (semantic !== null && vaultDb !== null) {
+      let settleEnd: number | undefined
+      let scanMs = 0
+      let mergeMs = 0
+      let chunksScanned = 0
+      const timed = <T>(run: () => T, took: (ms: number) => void): T => {
+        const began = clock()
+        try {
+          return run()
+        } finally {
+          took(clock() - began)
+        }
+      }
       try {
         if (!semantic.ok) throw new Error(semantic.cause)
-        const vector = await semantic.embedding.settle(options.deps?.vaultQueryTimeoutMs)
-        const ranked = semantic.leg.rankVaultSemantic(db, vaultDb, vector, limit * 2)
-        const fused = semantic.leg.fuseVaultMatches(vaultMatches, ranked.hits)
+        const embedding = semantic.embedding
+        const leg = semantic.leg
+        const vector = await embedding.settle(options.deps?.vaultQueryTimeoutMs).finally(() => {
+          settleEnd = clock()
+        })
+        const ranked = timed(
+          () => leg.rankVaultSemantic(db, vaultDb, vector, limit * 2),
+          (ms) => (scanMs = ms),
+        )
+        chunksScanned = ranked.scanned
+        const fused = timed(
+          () => leg.fuseVaultMatches(vaultMatches, ranked.hits),
+          (ms) => (mergeMs = ms),
+        )
         vaultMatches = fused.matches
         vaultSemantic = {
           state: "ok",
@@ -609,7 +638,22 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       } catch (error) {
         vaultSemantic = { state: "degraded", cause: error instanceof Error ? error.message : String(error) }
       }
-      phases.vault_semantic = performance.now() - semanticStarted
+      const marks = semantic.ok ? semantic.embedding.marks : {}
+      const end = settleEnd ?? lexicalEnd
+      // Only the time after the lexical search: the model cannot progress while that synchronous search runs.
+      const after = (start: number | undefined, stop: number | undefined) =>
+        start === undefined ? 0 : Math.max(0, Math.min(stop ?? end, end) - Math.max(start, lexicalEnd))
+      legSpans = (lexicalMs, totalMs) => ({
+        moduleMs: lexicalStart - semanticStarted,
+        lexicalMs,
+        loadMs: after(marks.loadStart, marks.loadEnd),
+        embedMs: after(marks.embedStart, marks.embedEnd),
+        scanMs,
+        chunksScanned,
+        mergeMs,
+        totalMs,
+      })
+      phases.vault_semantic = clock() - semanticStarted
       log(`vault semantic: ${JSON.stringify(vaultSemantic)}`)
     }
 
@@ -626,7 +670,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       const seenContentIds = new Set(projectContentResults.results.map((r) => r.id))
 
       for (const variant of queryVariants.slice(0, 4)) {
-        const began = performance.now()
+        const began = clock()
         try {
           try {
             const varMsgs = retrieveCandidates({ db, query: variant, messages: { ...messageOpts, limit } }).messages
@@ -662,7 +706,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
             skipped.push(rejectedQuerySkip("synonym_project_content", variant, error))
           }
         } finally {
-          phases.synonyms = (phases.synonyms ?? 0) + performance.now() - began
+          phases.synonyms = (phases.synonyms ?? 0) + clock() - began
         }
       }
 
@@ -673,6 +717,10 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
 
     const searchMs = Date.now() - searchStart
     log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms project=${projectMs}ms)`)
+    const lexicalMs = lexicalEnd - lexicalStart + (phases.synonyms ?? 0)
+    if (legSpans !== undefined && vaultSemantic !== undefined) {
+      vaultSemantic = { ...vaultSemantic, spans: legSpans(lexicalMs, clock() - semanticStarted) }
+    }
 
     // Title enrichment follows the lexical and synonym reads, as before.
     const sessionTitles = retrieveCandidates({ db, query: "", titles: runs("titles"), measure: phase }).titles
@@ -843,7 +891,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         synthesis: null,
         results: [],
         durationMs: Date.now() - startTime,
-        timing: { searchMs, phases },
+        timing: { searchMs, lexicalMs, phases },
         ...said(),
       }
     }
@@ -857,7 +905,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         synthesis: null,
         results: deduped,
         durationMs: Date.now() - startTime,
-        timing: { searchMs, phases },
+        timing: { searchMs, lexicalMs, phases },
         ...said(),
       }
     }
@@ -886,7 +934,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         synthesis: null,
         results: deduped,
         durationMs: totalMs,
-        timing: { searchMs, llmMs, phases },
+        timing: { searchMs, lexicalMs, llmMs, phases },
         synthesisFailure: failure,
         calls: failure.calls ?? [],
         ...(llm ? llm.serializeCost(llm.deserializeCost(failure)) : {}),
@@ -908,7 +956,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       durationMs: totalMs,
       calls: synthesis.calls,
       ...(llm ? llm.serializeCost(llm.deserializeCost(synthesis)) : {}),
-      timing: { searchMs, llmMs, phases },
+      timing: { searchMs, lexicalMs, llmMs, phases },
       ...said(),
     }
   } finally {

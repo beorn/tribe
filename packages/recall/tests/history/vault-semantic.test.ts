@@ -145,6 +145,7 @@ describe("the vault semantic leg in recall()", () => {
       generation: 1,
       coverage: { documents: 3, embedded: 1 },
       added: 1,
+      spans: expect.any(Object),
     })
     // Equal RRF60: b.md (semantic only) ties a.md and outranks c.md, taking c.md's lexical slot and its rank.
     expect(vaultHits(result)).toEqual(["a.md", "b.md"])
@@ -328,5 +329,72 @@ describe("the vault semantic leg in recall()", () => {
     expect(opened).toBe(0)
     expect(plain.vaultSemantic).toBeUndefined()
     expect(hook.vaultSemantic).toBeUndefined()
+  })
+
+  // CTO 3a638efb D1: pass 2's 23 s p95 could not say which part was slow; a printed span missing or overlapping
+  // another would misname the cause. No other test reads the leg's clock.
+  test("every span is printed, and the disjoint spans sum to within the total (fake clock)", async () => {
+    await publish()
+    let t = 0
+    let ftsReads = 0
+    const prepare = Database.prototype.prepare
+    const spy = vi.spyOn(Database.prototype, "prepare").mockImplementation(function (this: Database, sql: string) {
+      if (sql.includes("nodes_fts")) {
+        ftsReads++
+        t += 100
+      }
+      if (sql.includes("SELECT vec FROM vault_doc_embed")) t += 25
+      return prepare.call(this, sql)
+    } as typeof prepare)
+    let result: Awaited<ReturnType<typeof import("../../src/history/search").recall>>
+    try {
+      const { recall, setRecallLogging } = await import("../../src/history/search")
+      setRecallLogging(false)
+      result = await recall("zebracorn", {
+        raw: true,
+        excludeCurrentSession: true,
+        vaultDb: vaultPath,
+        vaultSemantic: true,
+        deps: {
+          clock: () => t,
+          vaultQueryTimeoutMs: 50,
+          vaultQueryModel: () => ({
+            // Both continue only after the synchronous lexical search, as the real model does.
+            load: async () => {
+              await Promise.resolve()
+              t += 700
+            },
+            embed: async () => {
+              await Promise.resolve()
+              t += 40
+              return basis(0)
+            },
+            dispose: async () => {},
+          }),
+        },
+      })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(ftsReads).toBeGreaterThan(0)
+    const spans = result.vaultSemantic?.spans
+    expect(spans).toEqual({
+      moduleMs: 0,
+      lexicalMs: 100 * ftsReads,
+      loadMs: 700,
+      embedMs: 40,
+      scanMs: 25,
+      chunksScanned: 1,
+      mergeMs: 0,
+      totalMs: 100 * ftsReads + 765,
+    })
+    if (!spans) throw new Error("no spans")
+    const sum = spans.moduleMs + spans.lexicalMs + spans.loadMs + spans.embedMs + spans.scanMs + spans.mergeMs
+    expect(sum).toBeLessThanOrEqual(spans.totalMs)
+    expect(result.timing?.lexicalMs).toBe(100 * ftsReads)
+    const { formatVaultSemanticSpans } = await import("../../src/lib/search")
+    expect(formatVaultSemanticSpans(spans)).toBe(
+      `ms: lexical ${100 * ftsReads}, module 0, load 700, embed 40, scan 25 (1 chunks), merge 0, total ${100 * ftsReads + 765}`,
+    )
   })
 })

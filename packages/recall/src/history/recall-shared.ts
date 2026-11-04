@@ -80,6 +80,8 @@ export interface RecallOptions {
     vaultQueryModel?: (modelPath: string) => VaultQueryModel
     /** The query embedding's cap; absent, VAULT_SEMANTIC_TIMEOUT_MS. */
     vaultQueryTimeoutMs?: number
+    /** The clock the vault leg's spans read (CTO 3a638efb D1); absent, performance.now. */
+    clock?: () => number
   }
   limit?: number // Max results to include (default 10)
   raw?: boolean // Return raw results without LLM synthesis
@@ -175,6 +177,8 @@ export interface RecallResult extends Partial<LlmCostFields> {
   calls?: LlmCostCall[]
   timing?: {
     searchMs: number
+    /** The lexical search and its synonym variants, without the vault semantic leg's wait, scan and merge. */
+    lexicalMs?: number
     llmMs?: number
     /** Each search phase's wall time in ms, so a slow run names the slow phase (@ag/tribe/25071). */
     phases?: Record<string, number>

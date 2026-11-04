@@ -27,6 +27,8 @@ export const VAULT_SEMANTIC_TIMEOUT_MS = 5_000
 
 /** One query model. Production loads node-llama-cpp directly (rev23); a test passes a fixture. */
 export interface VaultQueryModel {
+  /** Load the model before the first embed, so the load is timed apart from the embed; absent, embed loads. */
+  load?(): Promise<void>
   embed(formattedQuery: string): Promise<Float32Array>
   dispose(): Promise<void>
 }
@@ -52,6 +54,33 @@ export interface VaultSemanticReceipt {
   readonly coverage?: { readonly documents: number; readonly embedded: number }
   /** Documents only the semantic ranking found, fused into the vault window. */
   readonly added?: number
+  /** Where the search's time went (CTO 3a638efb D1), on success and on degradation alike. */
+  readonly spans?: VaultSemanticSpans
+}
+
+/**
+ * Span times in ms on one clock. The spans are disjoint, so they sum to at most totalMs. lexicalMs is the
+ * synchronous lexical search and its synonym variants. loadMs and embedMs count only the time after that search,
+ * because the model cannot progress while it runs. totalMs runs from the leg's module import to the end of the
+ * synonyms.
+ */
+export interface VaultSemanticSpans {
+  readonly moduleMs: number
+  readonly lexicalMs: number
+  readonly loadMs: number
+  readonly embedMs: number
+  readonly scanMs: number
+  readonly chunksScanned: number
+  readonly mergeMs: number
+  readonly totalMs: number
+}
+
+/** When the query model's load and embed began and ended, on the caller's clock; unset until reached. */
+export interface VaultQueryMarks {
+  loadStart?: number
+  loadEnd?: number
+  embedStart?: number
+  embedEnd?: number
 }
 
 /**
@@ -76,6 +105,9 @@ export function openVaultQueryModel(modelPath: string, contextTokens: number): V
       }
     })())
   return {
+    load: async () => {
+      await load()
+    },
     embed: async (input) => (await load()).embed(input),
     dispose: async () => {
       if (loaded) await (await loaded).dispose()
@@ -87,6 +119,8 @@ export function openVaultQueryModel(modelPath: string, contextTokens: number): V
 export interface VaultQueryEmbedding {
   /** The vector, or a rejection with a named cause: no model, a slow model, or no vector. */
   settle(timeoutMs?: number): Promise<VaultQueryVector>
+  /** The load and embed times reached so far; empty when the embedding never started. */
+  readonly marks: VaultQueryMarks
 }
 
 /**
@@ -96,8 +130,14 @@ export interface VaultQueryEmbedding {
  */
 export function startVaultQueryEmbedding(
   query: string,
-  options: { env?: NodeJS.ProcessEnv; open?: (modelPath: string, contextTokens: number) => VaultQueryModel } = {},
+  options: {
+    env?: NodeJS.ProcessEnv
+    open?: (modelPath: string, contextTokens: number) => VaultQueryModel
+    clock?: () => number
+  } = {},
 ): VaultQueryEmbedding {
+  const clock = options.clock ?? (() => performance.now())
+  const marks: VaultQueryMarks = {}
   let contract: VaultEmbedContract
   let modelStat: string
   let model: VaultQueryModel
@@ -107,15 +147,34 @@ export function startVaultQueryEmbedding(
     contract = recallEmbedContract()
     modelStat = modelFileStat(modelPath)
     model = (options.open ?? openVaultQueryModel)(modelPath, contract.contextTokens)
+    const formatted = formatQueryForEmbedding(query, modelPath)
+    const started = model
+    const embed = () => {
+      marks.embedStart = clock()
+      return started.embed(formatted)
+    }
+    // Both calls start synchronously, before the lexical search, as before the load was timed apart.
+    marks.loadStart = clock()
+    const loading = model.load?.()
+    const vectorOf: Promise<Float32Array> = loading
+      ? loading.then(() => {
+          marks.loadEnd = clock()
+          return embed()
+        })
+      : ((marks.loadEnd = marks.loadStart), embed())
     // The outcome is held, error included, until settle() reads it, so an early failure is never unhandled.
-    embedded = model.embed(formatQueryForEmbedding(query, modelPath)).then(
-      (vector) => ({ ok: true as const, vector }),
+    embedded = vectorOf.then(
+      (vector) => {
+        marks.embedEnd = clock()
+        return { ok: true as const, vector }
+      },
       (error: unknown) => ({ ok: false as const, error }),
     )
   } catch (error) {
-    return { settle: () => Promise.reject(error) }
+    return { settle: () => Promise.reject(error), marks }
   }
   return {
+    marks,
     settle: async (timeoutMs = VAULT_SEMANTIC_TIMEOUT_MS) => {
       let timer: ReturnType<typeof setTimeout> | undefined
       let timedOut = false
@@ -175,7 +234,7 @@ export function rankVaultSemantic(
   vaultDbPath: string,
   query: VaultQueryVector,
   limit: number,
-): { generation: number; hits: VaultSemanticHit[]; documents: number; embedded: number } {
+): { generation: number; hits: VaultSemanticHit[]; documents: number; embedded: number; scanned: number } {
   const published = readPublishedVaultEmbedGeneration(db)
   if (!published) {
     throw new Error("no vault embedding generation is published; recall index --vault-db builds one")
@@ -197,9 +256,11 @@ export function rankVaultSemantic(
     "SELECT vec FROM vault_doc_embed WHERE generation = ? AND vault_id = ? AND fs_path = ? AND doc_hash = ?",
   )
   const buffer = new Float32Array(query.contract.dimensions)
+  let scanned = 0
   for (const [fsPath, file] of current) {
     if (file.hash === null) continue
     for (const row of vectorsOf.iterate(published.id, vaultId, fsPath, file.hash) as Iterable<{ vec: Uint8Array }>) {
+      scanned++
       const score = cosine(query.vector, decodeVaultVectorInto(row.vec, buffer))
       if (score > (best.get(fsPath) ?? Number.NEGATIVE_INFINITY)) best.set(fsPath, score)
     }
@@ -208,7 +269,7 @@ export function rankVaultSemantic(
     .map(([fsPath, score]) => ({ fsPath, title: current.get(fsPath)?.title ?? null, score }))
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
-  return { generation: published.id, hits, documents: current.size, embedded: best.size }
+  return { generation: published.id, hits, documents: current.size, embedded: best.size, scanned }
 }
 
 /** Equal RRF60 over vault documents; fused document i takes lexical slot i's rank (rev23 P:72). */

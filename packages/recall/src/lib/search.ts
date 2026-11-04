@@ -25,6 +25,7 @@ import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
 import { retrieveCandidates, searchLiveSession, resolveSearchWindow } from "../history/search"
 import { bindVaultDb, getVaultDbPath, type VaultMatch } from "../history/vault-fts.ts"
+import type { VaultSemanticSpans } from "../history/vault-semantic.ts"
 import { findSessionFiles, extractTextContent, parseSessionPath } from "../history/indexer"
 import type { ContentType, ContentRecord, MessageRecord, JsonlRecord } from "../history/types"
 import {
@@ -198,18 +199,35 @@ function reportSearchSkips(result: RecallResult, json: boolean | undefined): voi
   }
 }
 
+/**
+ * The leg's spans as the search prints them (CTO 3a638efb D1), after its line or its degradation. Kept here so the CLI
+ * never loads the leg's module (and qmd) just to print.
+ */
+export function formatVaultSemanticSpans(spans: VaultSemanticSpans): string {
+  const ms = (value: number) => Math.round(value)
+  return (
+    `ms: lexical ${ms(spans.lexicalMs)}, module ${ms(spans.moduleMs)}, load ${ms(spans.loadMs)}, ` +
+    `embed ${ms(spans.embedMs)}, scan ${ms(spans.scanMs)} (${spans.chunksScanned} chunks), ` +
+    `merge ${ms(spans.mergeMs)}, total ${ms(spans.totalMs)}`
+  )
+}
+
 /** The semantic leg's coverage, or its degradation: lexical vault hits are kept and the run exits 3. */
 function reportVaultSemantic(result: RecallResult, json: boolean | undefined): void {
   const leg = result.vaultSemantic
   if (!leg) return
   if (leg.state === "degraded") {
     process.exitCode = 3
-    if (!json) console.log(`${YELLOW}⚠ vault semantic leg degraded, lexical vault hits kept: ${leg.cause}${RESET}`)
+    if (!json) {
+      console.log(`${YELLOW}⚠ vault semantic leg degraded, lexical vault hits kept: ${leg.cause}${RESET}`)
+      if (leg.spans) console.error(`vault semantic: ${formatVaultSemanticSpans(leg.spans)}`)
+    }
     return
   }
   if (!json && leg.coverage) {
     console.error(
-      `vault semantic: generation ${leg.generation}, ${leg.coverage.embedded} of ${leg.coverage.documents} documents embedded, ${leg.added} added`,
+      `vault semantic: generation ${leg.generation}, ${leg.coverage.embedded} of ${leg.coverage.documents} documents embedded, ${leg.added} added` +
+        (leg.spans ? `; ${formatVaultSemanticSpans(leg.spans)}` : ""),
     )
   }
 }
@@ -785,8 +803,9 @@ function renderSynthesisFailure(result: RecallResult, diag: SynthesisDiagnostics
 
   // What DID work — never let a synthesis failure imply the search failed too.
   const searchMs = result.timing?.searchMs
+  const lexicalMs = result.timing?.lexicalMs
   console.log(
-    `${GREEN}Lexical search: OK${RESET} — found ${result.results.length} result(s)${searchMs !== undefined ? ` in ${searchMs}ms` : ""} (shown below).`,
+    `${GREEN}Lexical search: OK${RESET} — found ${result.results.length} result(s)${searchMs !== undefined ? ` in ${searchMs}ms` : ""}${lexicalMs !== undefined ? ` (lexical ${Math.round(lexicalMs)}ms)` : ""} (shown below).`,
   )
   console.log()
 
