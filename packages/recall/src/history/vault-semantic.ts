@@ -86,7 +86,7 @@ export async function embedVaultQuery(
   try {
     const vector = await Promise.race([
       model.embed(formatQueryForEmbedding(query, modelPath)),
-      new Promise<never>((_, reject) => {
+      new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => reject(new Error(`the query embedding took longer than ${timeoutMs} ms`)), timeoutMs)
       }),
     ])

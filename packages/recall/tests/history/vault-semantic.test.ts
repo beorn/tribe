@@ -104,8 +104,9 @@ describe("the vault semantic leg in recall()", () => {
     const insert = vault.prepare(
       "INSERT INTO nodes (id, fs_path, name, title, content, fstype, fs_content_hash) VALUES (?, ?, ?, ?, ?, 'mdfile', ?)",
     )
-    for (const doc of docs)
+    for (const doc of docs) {
       insert.run(`n:${doc.fsPath}`, doc.fsPath, doc.fsPath, doc.fsPath, doc.content, sha256(doc.content))
+    }
     vault.close()
     modelPath = join(root, "model.gguf")
     writeFileSync(modelPath, "fixture model")
