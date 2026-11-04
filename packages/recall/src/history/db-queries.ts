@@ -523,19 +523,50 @@ export function ftsSearchWithSnippet(
   const overFetch = exactCopyOverFetch(limit, offset)
   const pageNeed = offset + limit
 
-  const searchQuery = `
-    SELECT ${MESSAGE_HIT_COLUMNS_SQL},
-           snippet(messages_fts, 0, '>>>', '<<<', '...', ${snippetTokens}) as snippet,
-           ${MESSAGE_RANK_SQL} as rank
+  // Two phases (CTO 1cfcaba5; D7/D8 on the live db: the one ranked SELECT built m.*, a 200-token snippet and the
+  // duplicate_line subquery for EVERY match before its LIMIT, p95 2.6 s; ranking ids alone was p95 169 ms).
+  // Phase A ranks ids only, under the same MATCH, filter and ORDER BY rank, m.id; phase B builds the hit columns for
+  // exactly those ids under the same MATCH, so bm25's corpus-wide scores and the order are unchanged. One read
+  // transaction holds both, so no write between them can change the set; a phase B that differs is a named error.
+  const fromWhere = `
     FROM messages_fts f
     JOIN messages m ON f.rowid = m.id
     JOIN sessions s ON m.session_id = s.id
-    ${where}
+    ${where}`
+  const idsQuery = `
+    SELECT m.id AS id, ${MESSAGE_RANK_SQL} as rank${fromWhere}
     ORDER BY rank, m.id ASC LIMIT ? OFFSET ?
   `
+  // Unary + keeps one MATCH cursor (as hookMessageSearch): a bare rowid IN would re-run the MATCH per id.
+  const hitsQuery = `
+    SELECT ${MESSAGE_HIT_COLUMNS_SQL},
+           snippet(messages_fts, 0, '>>>', '<<<', '...', ${snippetTokens}) as snippet,
+           ${MESSAGE_RANK_SQL} as rank${fromWhere}
+      AND +f.rowid IN (SELECT value FROM json_each(?))
+    ORDER BY rank, m.id ASC
+  `
   const params = [ftsQuery, ...filter.params]
-  const total = countMessages(db, ftsQuery, filter)
-  const ranked = db.prepare(assertSingleStatement(searchQuery)).all(...params, overFetch, 0) as MessageSearchHit[]
+  const { total, ranked } = db.transaction(() => {
+    const counted = countMessages(db, ftsQuery, filter)
+    const ids = (db.prepare(assertSingleStatement(idsQuery)).all(...params, overFetch, 0) as { id: number }[]).map(
+      (row) => row.id,
+    )
+    const hits =
+      ids.length === 0
+        ? []
+        : (db.prepare(assertSingleStatement(hitsQuery)).all(...params, JSON.stringify(ids)) as MessageSearchHit[])
+    const got = hits.map((hit) => hit.id)
+    const differs = got.findIndex((id, i) => id !== ids[i])
+    if (got.length !== ids.length || differs !== -1) {
+      throw new Error(
+        `recall messages: the hit read (phase B) returned ${String(got.length)} rows for the ${String(ids.length)} ` +
+          `ranked ids (phase A) of "${query}", first differing at position ` +
+          `${String(differs === -1 ? Math.min(got.length, ids.length) : differs)}; both phases share one read ` +
+          `transaction, so this is a defect, not a race`,
+      )
+    }
+    return { total: counted, ranked: hits }
+  })()
   const distinct = collapseNullUuidCopies(ranked)
   const results = distinct.slice(offset, offset + limit)
   const capped: RecallSkip | undefined =
