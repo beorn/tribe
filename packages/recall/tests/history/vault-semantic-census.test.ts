@@ -7,6 +7,9 @@
  * Requirement (AC1, the issue's census contract): U = A + X, where U is the bound vault's markdown documents, A those
  * with a vector for km's current hash in the published generation, and X every other document with exactly one
  * reason; I is A only when the generation matches the running contract and model file, otherwise 0 with the cause.
+ * CTO r2 change 5 (b7e7f718): the text path of recall status reads the census as the JSON path does, so a census
+ * failure prints its cause instead of ending the command with FATAL after partial output, and the check mark means
+ * no cause (a 0/0 vault that is not queryable shows a warning).
  * Gap: recall status reports no vault semantic census at all, and the query leg reports only documents/embedded.
  */
 import { Database } from "bun:sqlite"
@@ -31,6 +34,8 @@ import {
   CENSUS_STALE,
   vaultSemanticCensus,
 } from "../../src/history/vault-semantic"
+import { CHECK, WARN } from "../../src/lib/format"
+import { readVaultSemanticCensus, vaultSemanticCensusLines } from "../../src/lib/vault-semantic-status"
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 
@@ -114,5 +119,22 @@ describe("vaultSemanticCensus", () => {
       queryable: 0,
       cause: expect.stringMatching(/RECALL_EMBED_MODEL is not set/),
     })
+  })
+
+  test("recall status prints a census failure as its cause instead of throwing", async () => {
+    const bare = new Database(":memory:")
+    try {
+      const reading = await readVaultSemanticCensus(bare, vaultPath)
+      expect(reading).toEqual({ error: expect.stringMatching(/no such table/) })
+      expect(vaultSemanticCensusLines(reading)[1]).toMatch(/census failed: .*no such table/)
+    } finally {
+      bare.close()
+    }
+  })
+
+  test("the check mark means no cause: a vault with no queryable documents shows a warning", () => {
+    const empty = { units: 0, accepted: 0, excluded: {}, queryable: 0, generation: null, cause: CENSUS_NO_GENERATION }
+    expect(vaultSemanticCensusLines(empty)[1]).toContain(WARN)
+    expect(vaultSemanticCensusLines({ ...empty, cause: undefined, generation: 1 })[1]).toContain(CHECK)
   })
 })

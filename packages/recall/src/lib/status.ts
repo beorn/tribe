@@ -9,7 +9,11 @@ import type { Database } from "bun:sqlite"
 import { getDb, closeDb, DB_PATH, getActiveSessionsInWindow, getActivitySummary, getIndexMeta } from "../history/db"
 import { reviewMemorySystem } from "../history/recall"
 import { getVaultDbPath } from "../history/vault-fts.ts"
-import { vaultSemanticCensus, type VaultSemanticCensus } from "../history/vault-semantic.ts"
+import {
+  readVaultSemanticCensus,
+  vaultSemanticCensusLines,
+  type VaultSemanticCensusReading,
+} from "./vault-semantic-status.ts"
 import { requireLlm } from "./llm-backend.ts"
 import { discoverActiveSession, renderDiscoveryDiagnostics } from "./session-discovery.ts"
 import { resolveHostProjectRoot } from "./project-root.ts"
@@ -52,19 +56,6 @@ export function getPersistedFailedSessions(db: Database): PersistedFailedSession
     .all() as PersistedFailedSession[]
 }
 
-function printVaultSemanticCensus(census: VaultSemanticCensus): void {
-  console.log(`${BOLD}Vault Semantic${RESET}`)
-  const mark = census.queryable === census.units ? CHECK : WARN
-  console.log(
-    `  ${mark} ${census.queryable}/${census.units} documents queryable; ${census.accepted} embedded under generation ${census.generation ?? "none"}`,
-  )
-  for (const [reason, count] of Object.entries(census.excluded)) {
-    console.log(`  ${DIM}  ${count} excluded: ${reason}${RESET}`)
-  }
-  if (census.cause) console.log(`  ${WARN} not queryable: ${census.cause}`)
-  console.log()
-}
-
 export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Promise<void> {
   // Resolve the project root from the CALLER's cwd, not this file's location.
   // recall is a vendored submodule, so a code-relative walk lands on
@@ -87,12 +78,10 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   const sessionDiscovery = discoverActiveSession({ cwd: process.cwd() }).diagnostics
 
   if (opts.json) {
-    let vaultSemantic: VaultSemanticCensus | { error: string } | undefined
+    let vaultSemantic: VaultSemanticCensusReading | undefined
     if (vaultDb !== null) {
       try {
-        vaultSemantic = vaultSemanticCensus(getDb(), vaultDb)
-      } catch (error) {
-        vaultSemantic = { error: error instanceof Error ? error.message : String(error) }
+        vaultSemantic = await readVaultSemanticCensus(getDb(), vaultDb)
       } finally {
         closeDb()
       }
@@ -326,7 +315,10 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
     }
 
     // ── Vault semantic census (AC1: U = A + X, and I) ─────────────────────
-    if (vaultDb !== null) printVaultSemanticCensus(vaultSemanticCensus(db, vaultDb))
+    if (vaultDb !== null) {
+      for (const line of vaultSemanticCensusLines(await readVaultSemanticCensus(db, vaultDb))) console.log(line)
+      console.log()
+    }
   } finally {
     closeDb()
   }
