@@ -248,7 +248,7 @@ export function startVaultQueryEmbedding(
     } else {
       // A load that settles before (or without) recording its loadModel call ends the wait too. Both branches handle a
       // rejection here, so a failed or abandoned load is never unhandled; vectorOf below reuses this one load.
-      loading.then(markLoadCalled, markLoadCalled)
+      loading.then(markLoadCalled).catch(markLoadCalled)
       vectorOf = loading.then(() => {
         marks.loadEnd = clock()
         return embed()
