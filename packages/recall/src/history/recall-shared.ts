@@ -76,7 +76,7 @@ export interface RecallOptions {
   /** Existing host backend, also forwarded by the agent's fallback path. */
   deps?: {
     llm?: LlmBackend
-    /** The vault semantic leg's query model; production loads qmd's LlamaCpp on RECALL_EMBED_MODEL. */
+    /** The vault semantic leg's query model; production loads node-llama-cpp on RECALL_EMBED_MODEL (rev23). */
     vaultQueryModel?: (modelPath: string) => VaultQueryModel
     /** The query embedding's cap; absent, VAULT_SEMANTIC_TIMEOUT_MS. */
     vaultQueryTimeoutMs?: number
