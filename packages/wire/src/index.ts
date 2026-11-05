@@ -174,6 +174,7 @@ export {
   MCP_INBOX_WAIT_HOST_CEILING_SOURCE,
   deriveInboxWaitCallTimeoutMs,
   inboxWaitHostCutResult,
+  parseInboxWaitResult,
   parseInboxWaitTimeoutMs,
   resolveInboxWaitOptions,
   resolveWaitOptions,
@@ -193,6 +194,7 @@ export type {
 } from "./barrels/records.ts"
 export {
   TRIBE_COMMAND_DESCRIPTORS,
+  TRIBE_ACTIONABLE_TYPES,
   TRIBE_DELIVERY_MODES,
   TRIBE_FANOUTS,
   TRIBE_MESSAGE_TYPES,
