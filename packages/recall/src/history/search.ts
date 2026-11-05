@@ -819,7 +819,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     phases.corroboration = performance.now() - corroborationBegan
     if (sessionDepths.size > 0) {
       const maxDepth = Math.max(...sessionDepths.values())
-      log(`corroboration: ${sessionDepths.size} sessions, max depth=${maxDepth} (${Math.round(phases.corroboration)}ms)`)
+      log(`corroboration: ${sessionDepths.size} sessions, max depth=${maxDepth}`)
     }
 
     // Search current (live) session — not yet indexed.
