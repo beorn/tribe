@@ -556,12 +556,12 @@ export async function indexCodexTranscripts(
     .map((row) => row.id)
 
   // Filter which transcripts need export
-  const pathsToExport: string[] = []
+  const pathsToExport: { sessionId: string; paths: string[] }[] = []
   const skippedSessionIds: string[] = []
   let skipped = 0
 
   if (options.path) {
-    pathsToExport.push(options.path)
+    pathsToExport.push({ sessionId: options.path, paths: [options.path] })
   } else {
     const storedCodexMap = new Map<string, SessionRecord>()
     if (options.incremental) {
@@ -574,16 +574,19 @@ export async function indexCodexTranscripts(
     }
 
     for (const session of catalogSessions) {
+      const sessionId = `${session.provider}:${session.nativeId}`
       if (options.full) {
+        const paths: string[] = []
         if (session.status === "ambiguous") {
           for (const copy of session.copies) {
-            if (copy.path) pathsToExport.push(copy.path)
+            if (copy.path) paths.push(copy.path)
           }
         } else if (session.canonicalPath) {
-          pathsToExport.push(session.canonicalPath)
+          paths.push(session.canonicalPath)
         } else if (session.copies[0]?.path) {
-          pathsToExport.push(session.copies[0].path)
+          paths.push(session.copies[0].path)
         }
+        if (paths.length) pathsToExport.push({ sessionId, paths })
         continue
       }
 
@@ -630,13 +633,16 @@ export async function indexCodexTranscripts(
         if (stored.jsonl_path !== path) return false
         if (stored.size_bytes !== c.sizeBytes) return false
         if (stored.mtime_ms == null || Math.abs(stored.mtime_ms - c.mtimeMs) >= 1) return false
-        if (c.lastEventAtMs != null && stored.last_event_at_ms !== c.lastEventAtMs) return false
+        if (c.lastEventAtMs != null && stored.last_event_at_ms != null && stored.last_event_at_ms !== c.lastEventAtMs) {
+          return false
+        }
         return true
       }
 
       // Check skip key using real copy metadata and copy keys
       if (session.status === "ambiguous") {
         let allCopiesSkipped = true
+        const paths: string[] = []
         for (const c of session.copies) {
           if (!c.path) continue
           const copyKey = c.key ?? `${session.provider}:${session.nativeId}`
@@ -646,11 +652,13 @@ export async function indexCodexTranscripts(
             skippedSessionIds.push(copyKey)
           } else {
             allCopiesSkipped = false
-            pathsToExport.push(c.path)
+            paths.push(c.path)
           }
         }
         if (allCopiesSkipped) {
           skipped++
+        } else {
+          pathsToExport.push({ sessionId, paths })
         }
       } else {
         const targetPath = session.canonicalPath ?? copy.path
@@ -662,7 +670,7 @@ export async function indexCodexTranscripts(
           continue
         }
         if (targetPath) {
-          pathsToExport.push(targetPath)
+          pathsToExport.push({ sessionId, paths: [targetPath] })
         }
       }
     }
@@ -686,478 +694,432 @@ export async function indexCodexTranscripts(
     }
   }
 
-  // Pass ALL changed paths in ONE call (CTO ruling: "Recall must pass ALL changed paths in ONE call, never one call per file")
-  const exportArgs = ["transcript", "export", "--provider", "all", "--json"]
-  for (const p of pathsToExport) {
-    exportArgs.push("--path", p)
+  // One call per bounded batch (CTO 2026-11-05); a session's copies must stay together.
+  // Count UTF-8 arguments and NULs, leaving ample kernel/environment headroom.
+  const argvBudget = 64 * 1024
+  const fixedArgs = ["transcript", "export", "--provider", "all", "--json"]
+  const fixedBytes = [agBin, ...fixedArgs].reduce((bytes, arg) => bytes + Buffer.byteLength(arg) + 1, 0)
+  const exportBatches: string[][] = []
+  let exportArgs = [...fixedArgs]
+  let argvBytes = fixedBytes
+  for (const group of pathsToExport) {
+    const groupBytes = group.paths.reduce((bytes, p) => bytes + Buffer.byteLength(p) + 1 + 7, 0)
+    if (fixedBytes + groupBytes > argvBudget) {
+      throw new Error(`ag transcript export session ${group.sessionId} exceeds the ${argvBudget}-byte argv budget`)
+    }
+    if (argvBytes + groupBytes > argvBudget) {
+      exportBatches.push(exportArgs)
+      exportArgs = [...fixedArgs]
+      argvBytes = fixedBytes
+    }
+    for (const p of group.paths) exportArgs.push("--path", p)
+    argvBytes += groupBytes
+  }
+  exportBatches.push(exportArgs)
+
+  const batchResult = {
+    sessions: 0,
+    rows: 0,
+    tools: 0,
+    unreadable: 0,
+    errors: 0,
+    failures,
+    reasonCounts,
+    indexedSessionIds: [] as string[],
+    retainedSessionIds: [] as string[],
   }
 
-  const batchResult = await new Promise<{
-    sessions: number
-    rows: number
-    tools: number
-    unreadable: number
-    errors: number
-    failures: CodexFailureRecord[]
-    reasonCounts: Record<string, number>
-    indexedSessionIds: string[]
-    retainedSessionIds: string[]
-  }>((resolve, reject) => {
-    const child = spawn(agBin, exportArgs, {
-      stdio: ["ignore", "pipe", "pipe"],
-    })
+  const exportBatch = (exportArgs: string[]) =>
+    new Promise<{
+      sessions: number
+      rows: number
+      tools: number
+      unreadable: number
+      errors: number
+      failures: CodexFailureRecord[]
+      reasonCounts: Record<string, number>
+      indexedSessionIds: string[]
+      retainedSessionIds: string[]
+    }>((resolve, reject) => {
+      const child = spawn(agBin, exportArgs, {
+        stdio: ["ignore", "pipe", "pipe"],
+      })
 
-    const batchIndexedSessionIds: string[] = []
-    const batchRetainedSessionIds: string[] = []
-    let currentSession: TranscriptExportSessionRecord | null = null
-    const currentExistingCounts = new Map<string, number>()
-    const currentBaselineCounts = new Map<string, number>()
-    const currentHeadChanged = new Map<string, boolean>()
-    const currentHeadFingerprints = new Map<string, string | null>()
-    const currentKeepExisting = new Map<string, boolean>()
-    const existingSigCounts = new Map<string, Map<string, number>>()
-    const seenSigCounts = new Map<string, Map<string, number>>()
-    const currentRowCounts = new Map<string, number>()
-    let totalRowsThisSession = 0
-    let totalToolsThisSession = 0
-    let inTx = false
-    let isFirstLine = true
-    let doneRecord: Record<string, unknown> | null = null
-    let stderr = ""
-    let batchSessionCount = 0
-    let batchRowCount = 0
-    let batchToolCount = 0
-    let batchUnreadableCount = 0
-    let batchErrorCount = 0
+      const batchIndexedSessionIds: string[] = []
+      const batchRetainedSessionIds: string[] = []
+      let currentSession: TranscriptExportSessionRecord | null = null
+      const currentExistingCounts = new Map<string, number>()
+      const currentBaselineCounts = new Map<string, number>()
+      const currentHeadChanged = new Map<string, boolean>()
+      const currentHeadFingerprints = new Map<string, string | null>()
+      const currentKeepExisting = new Map<string, boolean>()
+      const existingSigCounts = new Map<string, Map<string, number>>()
+      const seenSigCounts = new Map<string, Map<string, number>>()
+      const currentRowCounts = new Map<string, number>()
+      let totalRowsThisSession = 0
+      let totalToolsThisSession = 0
+      let inTx = false
+      let isFirstLine = true
+      let doneRecord: Record<string, unknown> | null = null
+      let stderr = ""
+      let batchSessionCount = 0
+      let batchRowCount = 0
+      let batchToolCount = 0
+      let batchUnreadableCount = 0
+      let batchErrorCount = 0
 
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8")
-    })
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString("utf8")
+      })
 
-    child.on("error", (err) => {
-      if (inTx) {
-        safeRollback(db)
-        inTx = false
-      }
-      reject(new Error(`Failed to spawn ag transcript export: ${err.message}`))
-    })
-
-    let buffer = ""
-    const handleLine = (line: string): boolean => {
-      const trimmed = line.trim()
-      if (!trimmed) return true
-
-      let record: Record<string, unknown>
-      try {
-        record = JSON.parse(trimmed) as Record<string, unknown>
-      } catch {
+      child.on("error", (err) => {
         if (inTx) {
           safeRollback(db)
           inTx = false
         }
-        reject(new Error(`Malformed JSON from ag transcript export: ${trimmed}`))
-        child.kill()
-        return false
-      }
+        reject(new Error(`Failed to spawn ag transcript export: ${err.message}`))
+      })
 
-      if (isFirstLine) {
-        isFirstLine = false
-        if (record.kind !== "schema" || (record.version !== 1 && record.version !== 2)) {
-          reject(
-            new Error(`Unsupported ag transcript schema version: expected 1 or 2, got ${record.version ?? "unknown"}`),
-          )
-          child.kill()
-          return false
-        }
-        return true
-      }
+      let buffer = ""
+      const handleLine = (line: string): boolean => {
+        const trimmed = line.trim()
+        if (!trimmed) return true
 
-      if (record.kind === "session") {
-        if (inTx) {
-          safeRollback(db)
-          inTx = false
-          reject(
-            new Error(
-              `Protocol error: received session record for ${record.nativeId} while previous session was active`,
-            ),
-          )
-          child.kill()
-          return false
-        }
-        currentSession = record as unknown as TranscriptExportSessionRecord
-        const nativeId = currentSession.nativeId
-        const keys =
-          currentSession.keys && currentSession.keys.length > 0
-            ? currentSession.keys
-            : currentSession.sessionKey
-              ? [currentSession.sessionKey]
-              : [`${currentSession.provider ?? "codex"}:${nativeId}`]
-
-        currentExistingCounts.clear()
-        currentBaselineCounts.clear()
-        currentHeadChanged.clear()
-        currentHeadFingerprints.clear()
-        currentKeepExisting.clear()
-        existingSigCounts.clear()
-        seenSigCounts.clear()
-
-        for (const key of keys) {
-          const matchedCopy =
-            keys.length > 1
-              ? currentSession.copies?.find((c) => c.key === key)
-              : currentSession.copies?.find((c) => c.path === currentSession?.path)
-          const copyPath = matchedCopy?.path ?? currentSession.path ?? ""
-          const headFp = computeTranscriptHeadFingerprint(copyPath)
-          currentHeadFingerprints.set(key, headFp)
-
-          const existing = getSession(db, key)
-          if (existing) {
-            currentExistingCounts.set(key, existing.message_count)
-            const priorCompacted =
-              typeof existing.tail_fingerprint === "string" && existing.tail_fingerprint.startsWith("compacted:")
-                ? Number.parseInt(existing.tail_fingerprint.slice("compacted:".length), 10)
-                : Number.NaN
-            const hasPriorCompacted = Number.isFinite(priorCompacted)
-            const baselineCount = hasPriorCompacted ? priorCompacted : existing.message_count
-            currentBaselineCounts.set(key, baselineCount)
-            const headChanged =
-              existing.head_fingerprint != null
-                ? headFp !== null && headFp !== existing.head_fingerprint
-                : hasCompactionHeadMarker(copyPath)
-            currentHeadChanged.set(key, headChanged)
-            const keepExisting = !options.force && existing.message_count > 0 && (headChanged || hasPriorCompacted)
-            currentKeepExisting.set(key, keepExisting)
-          } else {
-            currentBaselineCounts.set(key, 0)
-            currentHeadChanged.set(key, false)
-            currentKeepExisting.set(key, false)
-          }
-        }
-
+        let record: Record<string, unknown>
         try {
-          // Retained sessions read signatures before inserting new rows. Reserve the writer now so a concurrent
-          // metadata commit cannot leave that read snapshot unable to upgrade (SQLITE_BUSY_SNAPSHOT).
-          db.run("BEGIN IMMEDIATE")
-          inTx = true
-        } catch (e) {
-          reject(e)
-          child.kill()
-          return false
-        }
-
-        try {
-          const defaultKey = `${currentSession.provider ?? "codex"}:${nativeId}`
-          const keysToDelete = keys.filter((k) => !currentKeepExisting.get(k))
-          if (keysToDelete.length > 0) {
-            const deleteList = currentKeepExisting.get(defaultKey) ? keysToDelete : [defaultKey, ...keysToDelete]
-            // Delete old rows for this native id inside the transaction by explicit keys list (A1: fully indexed)
-            deleteCodexSessionKeys(db, deleteList)
-          }
-          for (const key of keys) {
-            if (!currentKeepExisting.get(key)) continue
-            const sigMap = new Map<string, number>()
-            const rows = db
-              .prepare(
-                "SELECT type, COALESCE(tool_name, '') AS tool_name, COALESCE(content, '') AS content, timestamp FROM messages WHERE session_id = ?",
-              )
-              .all(key) as Array<{ type: string; tool_name: string; content: string; timestamp: number }>
-            for (const r of rows) {
-              const sig = `${r.type}\0${r.tool_name}\0${r.timestamp}\0${r.content}`
-              sigMap.set(sig, (sigMap.get(sig) ?? 0) + 1)
-            }
-            existingSigCounts.set(key, sigMap)
-            seenSigCounts.set(key, new Map())
-          }
-        } catch (err) {
-          safeRollback(db)
-          inTx = false
-          reject(err)
-          child.kill()
-          return false
-        }
-
-        currentRowCounts.clear()
-        totalRowsThisSession = 0
-        totalToolsThisSession = 0
-      } else if (record.kind === "row") {
-        if (!currentSession || !inTx) {
-          if (inTx) safeRollback(db)
-          inTx = false
-          reject(new Error(`Protocol error: received row record without active session transaction`))
-          child.kill()
-          return false
-        }
-        const row = record as unknown as TranscriptExportRowRecord
-        const key = row.sessionKey
-        const createdAtMs = currentSession.createdAt ? new Date(currentSession.createdAt).getTime() : Date.now()
-        const rowTimestamp = row.timestamp ? new Date(row.timestamp).getTime() : createdAtMs
-
-        let shouldInsert = true
-        if (currentKeepExisting.get(key)) {
-          const sig = `${row.role}\0\0${rowTimestamp}\0${row.text ?? ""}`
-          let seenMap = seenSigCounts.get(key)
-          if (!seenMap) {
-            seenMap = new Map()
-            seenSigCounts.set(key, seenMap)
-          }
-          const seen = (seenMap.get(sig) ?? 0) + 1
-          seenMap.set(sig, seen)
-          const existingCount = existingSigCounts.get(key)?.get(sig) ?? 0
-          if (seen <= existingCount) {
-            shouldInsert = false
-          }
-        }
-
-        if (shouldInsert) {
-          try {
-            insertMessage(
-              db,
-              null,
-              key,
-              row.role,
-              row.text,
-              null,
-              null,
-              rowTimestamp,
-              row.duplicateOf ?? null,
-              row.line ?? null,
-            )
-          } catch (err) {
+          record = JSON.parse(trimmed) as Record<string, unknown>
+        } catch {
+          if (inTx) {
             safeRollback(db)
             inTx = false
-            reject(err)
+          }
+          reject(new Error(`Malformed JSON from ag transcript export: ${trimmed}`))
+          child.kill()
+          return false
+        }
+
+        if (isFirstLine) {
+          isFirstLine = false
+          if (record.kind !== "schema" || (record.version !== 1 && record.version !== 2)) {
+            reject(
+              new Error(
+                `Unsupported ag transcript schema version: expected 1 or 2, got ${record.version ?? "unknown"}`,
+              ),
+            )
             child.kill()
             return false
           }
+          return true
         }
 
-        currentRowCounts.set(key, (currentRowCounts.get(key) ?? 0) + 1)
-        totalRowsThisSession++
-      } else if (record.kind === "tool") {
-        if (!currentSession || !inTx) {
-          if (inTx) safeRollback(db)
-          inTx = false
-          reject(new Error(`Protocol error: received tool record without active session transaction`))
-          child.kill()
-          return false
-        }
-        const tool = record as unknown as TranscriptExportToolRecord
-        const key = tool.sessionKey
-        const createdAtMs = currentSession.createdAt ? new Date(currentSession.createdAt).getTime() : Date.now()
-        const toolTimestamp = tool.timestamp ? new Date(tool.timestamp).getTime() : createdAtMs
-        const toolType = tool.phase === "call" ? "tool_use" : "tool_result"
-        const filePaths = tool.phase === "call" ? extractToolFilePathsFromArguments(tool.text) : null
-
-        let shouldInsert = true
-        if (currentKeepExisting.get(key)) {
-          const sig = `${toolType}\0${tool.toolName ?? ""}\0${toolTimestamp}\0${tool.text ?? ""}`
-          let seenMap = seenSigCounts.get(key)
-          if (!seenMap) {
-            seenMap = new Map()
-            seenSigCounts.set(key, seenMap)
-          }
-          const seen = (seenMap.get(sig) ?? 0) + 1
-          seenMap.set(sig, seen)
-          const existingCount = existingSigCounts.get(key)?.get(sig) ?? 0
-          if (seen <= existingCount) {
-            shouldInsert = false
-          }
-        }
-
-        if (shouldInsert) {
-          try {
-            insertMessage(
-              db,
-              null,
-              key,
-              toolType,
-              tool.text,
-              tool.toolName ?? null,
-              filePaths,
-              toolTimestamp,
-              tool.duplicateOf ?? null,
-              tool.line ?? null,
-            )
-          } catch (err) {
+        if (record.kind === "session") {
+          if (inTx) {
             safeRollback(db)
             inTx = false
-            reject(err)
+            reject(
+              new Error(
+                `Protocol error: received session record for ${record.nativeId} while previous session was active`,
+              ),
+            )
             child.kill()
             return false
           }
-        }
+          currentSession = record as unknown as TranscriptExportSessionRecord
+          const nativeId = currentSession.nativeId
+          const keys =
+            currentSession.keys && currentSession.keys.length > 0
+              ? currentSession.keys
+              : currentSession.sessionKey
+                ? [currentSession.sessionKey]
+                : [`${currentSession.provider ?? "codex"}:${nativeId}`]
 
-        // A stored tool event is a message; message_count is the count of stored
-        // messages for the session, and the wire's narration-only `rows` stays separate.
-        currentRowCounts.set(key, (currentRowCounts.get(key) ?? 0) + 1)
-        totalRowsThisSession++
-        totalToolsThisSession++
-      } else if (record.kind === "skipped") {
-        const reason = String(record.reason ?? "unknown-skip")
-        reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
-        failures.push({
-          kind: "skipped",
-          path: (record.path as string) || (currentSession?.path ?? ""),
-          reason,
-          line: typeof record.line === "number" ? record.line : undefined,
-          timestamp: Date.now(),
-        })
-      } else if (record.kind === "unreadable") {
-        const reason = String(record.reason ?? "unknown-unreadable")
-        reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
-        failures.push({
-          kind: "unreadable",
-          path: (record.path as string) || (currentSession?.path ?? ""),
-          reason,
-          timestamp: Date.now(),
-        })
-        batchUnreadableCount++
-      } else if (record.kind === "error") {
-        const reason = String(record.reason ?? record.message ?? "unknown-error")
-        reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
-        failures.push({
-          kind: "error",
-          path: (record.path as string) || (currentSession?.path ?? ""),
-          reason,
-          timestamp: Date.now(),
-        })
-        batchErrorCount++
-      } else if (record.kind === "end") {
-        if (!currentSession || !inTx) {
-          if (inTx) safeRollback(db)
-          inTx = false
-          reject(new Error(`Protocol error: received end record without active session`))
-          child.kill()
-          return false
-        }
+          currentExistingCounts.clear()
+          currentBaselineCounts.clear()
+          currentHeadChanged.clear()
+          currentHeadFingerprints.clear()
+          currentKeepExisting.clear()
+          existingSigCounts.clear()
+          seenSigCounts.clear()
 
-        const endRecord = record as unknown as TranscriptExportEndRecord
-        if (!endRecord.status) {
-          if (inTx) safeRollback(db)
-          inTx = false
-          reject(
-            new Error(
-              `Protocol error: received end record without status for session ${currentSession.nativeId || currentSession.path}`,
-            ),
-          )
-          child.kill()
-          return false
-        }
-
-        const status = endRecord.status
-        const nativeId = endRecord.nativeId
-        const keys =
-          currentSession.keys && currentSession.keys.length > 0
-            ? currentSession.keys
-            : currentSession.sessionKey
-              ? [currentSession.sessionKey]
-              : [`${currentSession.provider ?? "codex"}:${nativeId}`]
-        const createdAtMs = currentSession.createdAt ? new Date(currentSession.createdAt).getTime() : Date.now()
-
-        if (status === "bad-header" || status === "unreadable") {
-          safeRollback(db)
-          inTx = false
-          batchUnreadableCount++
-          const reason = status
-          reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
-          const now = Date.now()
-          failures.push({
-            kind: "unreadable",
-            path: currentSession.path,
-            nativeId: currentSession.nativeId,
-            reason,
-            timestamp: now,
-          })
-
-          const session = currentSession
           for (const key of keys) {
-            // Stated rule: for ambiguous copies (multiple keys), the copy matching key; for single key, the copy matching session.path
             const matchedCopy =
               keys.length > 1
-                ? session.copies?.find((c) => c.key === key)
-                : session.copies?.find((c) => c.path === session.path)
-            const copyPath = matchedCopy?.path ?? session.path
-            let copySize = matchedCopy?.sizeBytes ?? (copyPath === session.path ? session.sizeBytes : null)
-            let copyMtime = matchedCopy?.mtimeMs ?? (copyPath === session.path ? session.mtimeMs : null)
-            const copyLastEvent = matchedCopy?.lastEventAtMs ?? session.lastEventAtMs
-
-            if (copySize == null || copyMtime == null) {
-              try {
-                const st = fs.statSync(copyPath)
-                if (copySize == null) copySize = st.size
-                if (copyMtime == null) copyMtime = st.mtimeMs ?? st.mtime.getTime()
-              } catch {
-                // silent-fallback-allow: file might have been deleted or inaccessible
-              }
-            }
+                ? currentSession.copies?.find((c) => c.key === key)
+                : currentSession.copies?.find((c) => c.path === currentSession?.path)
+            const copyPath = matchedCopy?.path ?? currentSession.path ?? ""
+            const headFp = computeTranscriptHeadFingerprint(copyPath)
+            currentHeadFingerprints.set(key, headFp)
 
             const existing = getSession(db, key)
             if (existing) {
-              updateSessionStatus(db, key, `stale-${status}`, {
-                jsonlPath: copyPath,
-                failureReason: reason,
-                failureTime: now,
-                sizeBytes: copySize,
-                mtimeMs: copyMtime,
-                lastEventAtMs: copyLastEvent,
-              })
+              currentExistingCounts.set(key, existing.message_count)
+              const priorCompacted =
+                typeof existing.tail_fingerprint === "string" && existing.tail_fingerprint.startsWith("compacted:")
+                  ? Number.parseInt(existing.tail_fingerprint.slice("compacted:".length), 10)
+                  : Number.NaN
+              const hasPriorCompacted = Number.isFinite(priorCompacted)
+              const baselineCount = hasPriorCompacted ? priorCompacted : existing.message_count
+              currentBaselineCounts.set(key, baselineCount)
+              const headChanged =
+                existing.head_fingerprint != null
+                  ? headFp !== null && headFp !== existing.head_fingerprint
+                  : hasCompactionHeadMarker(copyPath)
+              currentHeadChanged.set(key, headChanged)
+              const keepExisting = !options.force && existing.message_count > 0 && (headChanged || hasPriorCompacted)
+              currentKeepExisting.set(key, keepExisting)
             } else {
-              upsertSession(db, key, currentSession.cwd || "", copyPath, createdAtMs, Date.now(), 0, null, {
-                status: status,
-                failureReason: reason,
-                failureTime: now,
-                sizeBytes: copySize,
-                mtimeMs: copyMtime,
-                lastEventAtMs: copyLastEvent,
-                cwd: currentSession.cwd || null,
-              })
-            }
-          }
-          batchRetainedSessionIds.push(...keys)
-        } else if (status === "complete" || status === "incomplete-tail") {
-          // Check shrink condition (D1): a lower re-read row count on an unchanged head is a projector regression
-          // (or file truncation without compaction) and is refused as shrunk; when the head fingerprint changed
-          // on compaction, existing rows were preserved above and the union is committed.
-          let isShrunk = false
-          let shrinkOldCount = 0
-          let shrinkNewCount = 0
-          for (const key of keys) {
-            const baselineCount = currentBaselineCounts.get(key) ?? currentExistingCounts.get(key) ?? 0
-            const newCount = currentRowCounts.get(key) ?? 0
-            const headChanged = currentHeadChanged.get(key) ?? false
-            if (baselineCount > newCount && !options.force && !headChanged) {
-              isShrunk = true
-              shrinkOldCount = currentExistingCounts.get(key) ?? baselineCount
-              shrinkNewCount = newCount
+              currentBaselineCounts.set(key, 0)
+              currentHeadChanged.set(key, false)
+              currentKeepExisting.set(key, false)
             }
           }
 
-          if (isShrunk) {
+          try {
+            // Retained sessions read signatures before inserting new rows. Reserve the writer now so a concurrent
+            // metadata commit cannot leave that read snapshot unable to upgrade (SQLITE_BUSY_SNAPSHOT).
+            db.run("BEGIN IMMEDIATE")
+            inTx = true
+          } catch (e) {
+            reject(e)
+            child.kill()
+            return false
+          }
+
+          try {
+            const defaultKey = `${currentSession.provider ?? "codex"}:${nativeId}`
+            const keysToDelete = keys.filter((k) => !currentKeepExisting.get(k))
+            if (keysToDelete.length > 0) {
+              const deleteList = currentKeepExisting.get(defaultKey) ? keysToDelete : [defaultKey, ...keysToDelete]
+              // Delete old rows for this native id inside the transaction by explicit keys list (A1: fully indexed)
+              deleteCodexSessionKeys(db, deleteList)
+            }
+            for (const key of keys) {
+              if (!currentKeepExisting.get(key)) continue
+              const sigMap = new Map<string, number>()
+              const rows = db
+                .prepare(
+                  "SELECT type, COALESCE(tool_name, '') AS tool_name, COALESCE(content, '') AS content, timestamp FROM messages WHERE session_id = ?",
+                )
+                .all(key) as Array<{ type: string; tool_name: string; content: string; timestamp: number }>
+              for (const r of rows) {
+                const sig = `${r.type}\0${r.tool_name}\0${r.timestamp}\0${r.content}`
+                sigMap.set(sig, (sigMap.get(sig) ?? 0) + 1)
+              }
+              existingSigCounts.set(key, sigMap)
+              seenSigCounts.set(key, new Map())
+            }
+          } catch (err) {
             safeRollback(db)
             inTx = false
-            const reason = "shrunk"
+            reject(err)
+            child.kill()
+            return false
+          }
+
+          currentRowCounts.clear()
+          totalRowsThisSession = 0
+          totalToolsThisSession = 0
+        } else if (record.kind === "row") {
+          if (!currentSession || !inTx) {
+            if (inTx) safeRollback(db)
+            inTx = false
+            reject(new Error(`Protocol error: received row record without active session transaction`))
+            child.kill()
+            return false
+          }
+          const row = record as unknown as TranscriptExportRowRecord
+          const key = row.sessionKey
+          const createdAtMs = currentSession.createdAt ? new Date(currentSession.createdAt).getTime() : Date.now()
+          const rowTimestamp = row.timestamp ? new Date(row.timestamp).getTime() : createdAtMs
+
+          let shouldInsert = true
+          if (currentKeepExisting.get(key)) {
+            const sig = `${row.role}\0\0${rowTimestamp}\0${row.text ?? ""}`
+            let seenMap = seenSigCounts.get(key)
+            if (!seenMap) {
+              seenMap = new Map()
+              seenSigCounts.set(key, seenMap)
+            }
+            const seen = (seenMap.get(sig) ?? 0) + 1
+            seenMap.set(sig, seen)
+            const existingCount = existingSigCounts.get(key)?.get(sig) ?? 0
+            if (seen <= existingCount) {
+              shouldInsert = false
+            }
+          }
+
+          if (shouldInsert) {
+            try {
+              insertMessage(
+                db,
+                null,
+                key,
+                row.role,
+                row.text,
+                null,
+                null,
+                rowTimestamp,
+                row.duplicateOf ?? null,
+                row.line ?? null,
+              )
+            } catch (err) {
+              safeRollback(db)
+              inTx = false
+              reject(err)
+              child.kill()
+              return false
+            }
+          }
+
+          currentRowCounts.set(key, (currentRowCounts.get(key) ?? 0) + 1)
+          totalRowsThisSession++
+        } else if (record.kind === "tool") {
+          if (!currentSession || !inTx) {
+            if (inTx) safeRollback(db)
+            inTx = false
+            reject(new Error(`Protocol error: received tool record without active session transaction`))
+            child.kill()
+            return false
+          }
+          const tool = record as unknown as TranscriptExportToolRecord
+          const key = tool.sessionKey
+          const createdAtMs = currentSession.createdAt ? new Date(currentSession.createdAt).getTime() : Date.now()
+          const toolTimestamp = tool.timestamp ? new Date(tool.timestamp).getTime() : createdAtMs
+          const toolType = tool.phase === "call" ? "tool_use" : "tool_result"
+          const filePaths = tool.phase === "call" ? extractToolFilePathsFromArguments(tool.text) : null
+
+          let shouldInsert = true
+          if (currentKeepExisting.get(key)) {
+            const sig = `${toolType}\0${tool.toolName ?? ""}\0${toolTimestamp}\0${tool.text ?? ""}`
+            let seenMap = seenSigCounts.get(key)
+            if (!seenMap) {
+              seenMap = new Map()
+              seenSigCounts.set(key, seenMap)
+            }
+            const seen = (seenMap.get(sig) ?? 0) + 1
+            seenMap.set(sig, seen)
+            const existingCount = existingSigCounts.get(key)?.get(sig) ?? 0
+            if (seen <= existingCount) {
+              shouldInsert = false
+            }
+          }
+
+          if (shouldInsert) {
+            try {
+              insertMessage(
+                db,
+                null,
+                key,
+                toolType,
+                tool.text,
+                tool.toolName ?? null,
+                filePaths,
+                toolTimestamp,
+                tool.duplicateOf ?? null,
+                tool.line ?? null,
+              )
+            } catch (err) {
+              safeRollback(db)
+              inTx = false
+              reject(err)
+              child.kill()
+              return false
+            }
+          }
+
+          // A stored tool event is a message; message_count is the count of stored
+          // messages for the session, and the wire's narration-only `rows` stays separate.
+          currentRowCounts.set(key, (currentRowCounts.get(key) ?? 0) + 1)
+          totalRowsThisSession++
+          totalToolsThisSession++
+        } else if (record.kind === "skipped") {
+          const reason = String(record.reason ?? "unknown-skip")
+          reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
+          failures.push({
+            kind: "skipped",
+            path: (record.path as string) || (currentSession?.path ?? ""),
+            reason,
+            line: typeof record.line === "number" ? record.line : undefined,
+            timestamp: Date.now(),
+          })
+        } else if (record.kind === "unreadable") {
+          const reason = String(record.reason ?? "unknown-unreadable")
+          reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
+          failures.push({
+            kind: "unreadable",
+            path: (record.path as string) || (currentSession?.path ?? ""),
+            reason,
+            timestamp: Date.now(),
+          })
+          batchUnreadableCount++
+        } else if (record.kind === "error") {
+          const reason = String(record.reason ?? record.message ?? "unknown-error")
+          reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
+          failures.push({
+            kind: "error",
+            path: (record.path as string) || (currentSession?.path ?? ""),
+            reason,
+            timestamp: Date.now(),
+          })
+          batchErrorCount++
+        } else if (record.kind === "end") {
+          if (!currentSession || !inTx) {
+            if (inTx) safeRollback(db)
+            inTx = false
+            reject(new Error(`Protocol error: received end record without active session`))
+            child.kill()
+            return false
+          }
+
+          const endRecord = record as unknown as TranscriptExportEndRecord
+          if (!endRecord.status) {
+            if (inTx) safeRollback(db)
+            inTx = false
+            reject(
+              new Error(
+                `Protocol error: received end record without status for session ${currentSession.nativeId || currentSession.path}`,
+              ),
+            )
+            child.kill()
+            return false
+          }
+
+          const status = endRecord.status
+          const nativeId = endRecord.nativeId
+          const keys =
+            currentSession.keys && currentSession.keys.length > 0
+              ? currentSession.keys
+              : currentSession.sessionKey
+                ? [currentSession.sessionKey]
+                : [`${currentSession.provider ?? "codex"}:${nativeId}`]
+          const createdAtMs = currentSession.createdAt ? new Date(currentSession.createdAt).getTime() : Date.now()
+
+          if (status === "bad-header" || status === "unreadable") {
+            safeRollback(db)
+            inTx = false
+            batchUnreadableCount++
+            const reason = status
             reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
             const now = Date.now()
-            const shrinkReason = `shrunk: prior count ${shrinkOldCount} > new count ${shrinkNewCount}`
             failures.push({
-              kind: "skipped",
+              kind: "unreadable",
               path: currentSession.path,
               nativeId: currentSession.nativeId,
-              reason: shrinkReason,
+              reason,
               timestamp: now,
-              oldRowCount: shrinkOldCount,
-              newRowCount: shrinkNewCount,
             })
+
             const session = currentSession
             for (const key of keys) {
+              // Stated rule: for ambiguous copies (multiple keys), the copy matching key; for single key, the copy matching session.path
               const matchedCopy =
                 keys.length > 1
-                  ? session?.copies?.find((c) => c.key === key)
-                  : session?.copies?.find((c) => c.path === session?.path)
-              const copyPath = matchedCopy?.path ?? session?.path ?? ""
-              let copySize = matchedCopy?.sizeBytes ?? (copyPath === session?.path ? session?.sizeBytes : null)
-              let copyMtime = matchedCopy?.mtimeMs ?? (copyPath === session?.path ? session?.mtimeMs : null)
-              const copyLastEvent = matchedCopy?.lastEventAtMs ?? session?.lastEventAtMs ?? null
+                  ? session.copies?.find((c) => c.key === key)
+                  : session.copies?.find((c) => c.path === session.path)
+              const copyPath = matchedCopy?.path ?? session.path
+              let copySize = matchedCopy?.sizeBytes ?? (copyPath === session.path ? session.sizeBytes : null)
+              let copyMtime = matchedCopy?.mtimeMs ?? (copyPath === session.path ? session.mtimeMs : null)
+              const copyLastEvent = matchedCopy?.lastEventAtMs ?? session.lastEventAtMs
 
               if (copySize == null || copyMtime == null) {
                 try {
@@ -1169,164 +1131,254 @@ export async function indexCodexTranscripts(
                 }
               }
 
-              const headFp = currentHeadFingerprints.get(key) ?? computeTranscriptHeadFingerprint(copyPath)
-              updateSessionStatus(db, key, "shrunk", {
-                failureReason: shrinkReason,
-                failureTime: now,
-                shrinkOldCount,
-                shrinkNewCount,
-                sizeBytes: copySize,
-                mtimeMs: copyMtime,
-                lastEventAtMs: copyLastEvent,
-                jsonlPath: copyPath,
-                headFingerprint: headFp,
-              })
-            }
-            batchRetainedSessionIds.push(...keys)
-          } else {
-            try {
-              const session = currentSession
-              for (const key of keys) {
-                const rereadCount = currentRowCounts.get(key) ?? 0
-                const kept = currentKeepExisting.get(key) ?? false
-                const count = kept
-                  ? ((
-                      db.prepare("SELECT COUNT(*) AS c FROM messages WHERE session_id = ?").get(key) as {
-                        c: number
-                      } | null
-                    )?.c ?? rereadCount)
-                  : rereadCount
-                // Stated rule: for ambiguous copies (multiple keys), the copy matching key; for single key, the copy matching session.path
-                const matchedCopy =
-                  keys.length > 1
-                    ? session.copies?.find((c) => c.key === key)
-                    : session.copies?.find((c) => c.path === session.path)
-                const copyPath = matchedCopy?.path ?? session.path
-                const copySize = matchedCopy?.sizeBytes ?? session.sizeBytes
-                const copyMtime = matchedCopy?.mtimeMs ?? session.mtimeMs ?? Date.now()
-                const copyLastEvent = matchedCopy?.lastEventAtMs ?? session.lastEventAtMs ?? null
-                const headFp = currentHeadFingerprints.get(key) ?? computeTranscriptHeadFingerprint(copyPath)
-                const tailFp = kept ? `compacted:${rereadCount}` : null
-
-                upsertSession(db, key, session.cwd || "", copyPath, createdAtMs, copyMtime, count, null, {
-                  status: status,
+              const existing = getSession(db, key)
+              if (existing) {
+                updateSessionStatus(db, key, `stale-${status}`, {
+                  jsonlPath: copyPath,
+                  failureReason: reason,
+                  failureTime: now,
                   sizeBytes: copySize,
                   mtimeMs: copyMtime,
                   lastEventAtMs: copyLastEvent,
-                  cwd: session.cwd || null,
-                  headFingerprint: headFp,
-                  tailFingerprint: tailFp,
+                })
+              } else {
+                upsertSession(db, key, currentSession.cwd || "", copyPath, createdAtMs, Date.now(), 0, null, {
+                  status: status,
+                  failureReason: reason,
+                  failureTime: now,
+                  sizeBytes: copySize,
+                  mtimeMs: copyMtime,
+                  lastEventAtMs: copyLastEvent,
+                  cwd: currentSession.cwd || null,
                 })
               }
+            }
+            batchRetainedSessionIds.push(...keys)
+          } else if (status === "complete" || status === "incomplete-tail") {
+            // Check shrink condition (D1): a lower re-read row count on an unchanged head is a projector regression
+            // (or file truncation without compaction) and is refused as shrunk; when the head fingerprint changed
+            // on compaction, existing rows were preserved above and the union is committed.
+            let isShrunk = false
+            let shrinkOldCount = 0
+            let shrinkNewCount = 0
+            for (const key of keys) {
+              const baselineCount = currentBaselineCounts.get(key) ?? currentExistingCounts.get(key) ?? 0
+              const newCount = currentRowCounts.get(key) ?? 0
+              const headChanged = currentHeadChanged.get(key) ?? false
+              if (baselineCount > newCount && !options.force && !headChanged) {
+                isShrunk = true
+                shrinkOldCount = currentExistingCounts.get(key) ?? baselineCount
+                shrinkNewCount = newCount
+              }
+            }
 
-              db.run("COMMIT")
-              inTx = false
-              batchRowCount += totalRowsThisSession
-              batchToolCount += totalToolsThisSession
-              batchSessionCount++
-              batchIndexedSessionIds.push(...keys)
-            } catch (err) {
+            if (isShrunk) {
               safeRollback(db)
               inTx = false
-              reject(err)
-              child.kill()
-              return false
+              const reason = "shrunk"
+              reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
+              const now = Date.now()
+              const shrinkReason = `shrunk: prior count ${shrinkOldCount} > new count ${shrinkNewCount}`
+              failures.push({
+                kind: "skipped",
+                path: currentSession.path,
+                nativeId: currentSession.nativeId,
+                reason: shrinkReason,
+                timestamp: now,
+                oldRowCount: shrinkOldCount,
+                newRowCount: shrinkNewCount,
+              })
+              const session = currentSession
+              for (const key of keys) {
+                const matchedCopy =
+                  keys.length > 1
+                    ? session?.copies?.find((c) => c.key === key)
+                    : session?.copies?.find((c) => c.path === session?.path)
+                const copyPath = matchedCopy?.path ?? session?.path ?? ""
+                let copySize = matchedCopy?.sizeBytes ?? (copyPath === session?.path ? session?.sizeBytes : null)
+                let copyMtime = matchedCopy?.mtimeMs ?? (copyPath === session?.path ? session?.mtimeMs : null)
+                const copyLastEvent = matchedCopy?.lastEventAtMs ?? session?.lastEventAtMs ?? null
+
+                if (copySize == null || copyMtime == null) {
+                  try {
+                    const st = fs.statSync(copyPath)
+                    if (copySize == null) copySize = st.size
+                    if (copyMtime == null) copyMtime = st.mtimeMs ?? st.mtime.getTime()
+                  } catch {
+                    // silent-fallback-allow: file might have been deleted or inaccessible
+                  }
+                }
+
+                const headFp = currentHeadFingerprints.get(key) ?? computeTranscriptHeadFingerprint(copyPath)
+                updateSessionStatus(db, key, "shrunk", {
+                  failureReason: shrinkReason,
+                  failureTime: now,
+                  shrinkOldCount,
+                  shrinkNewCount,
+                  sizeBytes: copySize,
+                  mtimeMs: copyMtime,
+                  lastEventAtMs: copyLastEvent,
+                  jsonlPath: copyPath,
+                  headFingerprint: headFp,
+                })
+              }
+              batchRetainedSessionIds.push(...keys)
+            } else {
+              try {
+                const session = currentSession
+                for (const key of keys) {
+                  const rereadCount = currentRowCounts.get(key) ?? 0
+                  const kept = currentKeepExisting.get(key) ?? false
+                  const count = kept
+                    ? ((
+                        db.prepare("SELECT COUNT(*) AS c FROM messages WHERE session_id = ?").get(key) as {
+                          c: number
+                        } | null
+                      )?.c ?? rereadCount)
+                    : rereadCount
+                  // Stated rule: for ambiguous copies (multiple keys), the copy matching key; for single key, the copy matching session.path
+                  const matchedCopy =
+                    keys.length > 1
+                      ? session.copies?.find((c) => c.key === key)
+                      : session.copies?.find((c) => c.path === session.path)
+                  const copyPath = matchedCopy?.path ?? session.path
+                  const copySize = matchedCopy?.sizeBytes ?? session.sizeBytes
+                  const copyMtime = matchedCopy?.mtimeMs ?? session.mtimeMs ?? Date.now()
+                  const copyLastEvent = matchedCopy?.lastEventAtMs ?? session.lastEventAtMs ?? null
+                  const headFp = currentHeadFingerprints.get(key) ?? computeTranscriptHeadFingerprint(copyPath)
+                  const tailFp = kept ? `compacted:${rereadCount}` : null
+
+                  upsertSession(db, key, session.cwd || "", copyPath, createdAtMs, copyMtime, count, null, {
+                    status: status,
+                    sizeBytes: copySize,
+                    mtimeMs: copyMtime,
+                    lastEventAtMs: copyLastEvent,
+                    cwd: session.cwd || null,
+                    headFingerprint: headFp,
+                    tailFingerprint: tailFp,
+                  })
+                }
+
+                db.run("COMMIT")
+                inTx = false
+                batchRowCount += totalRowsThisSession
+                batchToolCount += totalToolsThisSession
+                batchSessionCount++
+                batchIndexedSessionIds.push(...keys)
+              } catch (err) {
+                safeRollback(db)
+                inTx = false
+                reject(err)
+                child.kill()
+                return false
+              }
             }
+          } else {
+            if (inTx) safeRollback(db)
+            inTx = false
+            reject(
+              new Error(
+                `Protocol error: unknown end record status "${status}" for session ${currentSession.nativeId || currentSession.path}`,
+              ),
+            )
+            child.kill()
+            return false
           }
-        } else {
-          if (inTx) safeRollback(db)
+
+          options.onProgress?.({
+            sessionsProcessed: batchResult.sessions + batchSessionCount,
+            messagesIndexed: batchResult.rows + batchRowCount,
+            currentSession: nativeId,
+          })
+
+          currentSession = null
+          currentExistingCounts.clear()
+          currentRowCounts.clear()
+          totalRowsThisSession = 0
+        } else if (record.kind === "done") {
+          doneRecord = record
+        }
+        return true
+      }
+
+      const decoder = new StringDecoder("utf8")
+      child.stdout.on("data", (chunk: Buffer) => {
+        buffer += decoder.write(chunk)
+        let idx: number
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx)
+          buffer = buffer.slice(idx + 1)
+          if (!handleLine(line)) return
+        }
+      })
+
+      child.on("close", (code, signal) => {
+        buffer += decoder.end()
+        if (buffer.trim()) {
+          if (!handleLine(buffer)) return
+        }
+        if (inTx) {
+          safeRollback(db)
           inTx = false
           reject(
             new Error(
-              `Protocol error: unknown end record status "${status}" for session ${currentSession.nativeId || currentSession.path}`,
+              `ag transcript export stream ended abruptly during active transaction for session ${currentSession?.nativeId ?? "unknown"} (committed ${batchResult.sessions + batchSessionCount} sessions [${[...batchResult.indexedSessionIds, ...batchIndexedSessionIds].join(", ")}], ${batchResult.rows + batchRowCount} rows prior to interruption; exit code ${code}; signal ${signal ?? "none"}; stderr ${JSON.stringify(stderr.trim())})`,
             ),
           )
-          child.kill()
-          return false
+          return
         }
-
-        options.onProgress?.({
-          sessionsProcessed: batchSessionCount,
-          messagesIndexed: batchRowCount,
-          currentSession: nativeId,
+        if (!doneRecord) {
+          const failureDetails =
+            failures.length > 0
+              ? ` (recorded ${failures.length} failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}${f.oldRowCount !== undefined ? ` [rows: ${f.oldRowCount} -> ${f.newRowCount}]` : ""}`).join(", ")})`
+              : ""
+          const committedProgress = ` (committed ${batchResult.sessions + batchSessionCount} sessions [${[...batchResult.indexedSessionIds, ...batchIndexedSessionIds].join(", ")}], ${batchResult.rows + batchRowCount} rows prior to error)`
+          const err = new Error(
+            `ag transcript export ${code !== 0 ? `exited with code ${code}: ` : "stream ended without done record"}${stderr.trim()}${failureDetails}${committedProgress}`,
+          )
+          ;(err as any).failures = failures
+          reject(err)
+          return
+        }
+        const hasLedgeredIssues = failures.length > 0 || batchUnreadableCount > 0 || batchErrorCount > 0
+        if (code !== 0 && !(code === 1 && hasLedgeredIssues)) {
+          const failureDetails =
+            failures.length > 0
+              ? ` (recorded ${failures.length} failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}${f.oldRowCount !== undefined ? ` [rows: ${f.oldRowCount} -> ${f.newRowCount}]` : ""}`).join(", ")})`
+              : ""
+          const committedProgress = ` (committed ${batchResult.sessions + batchSessionCount} sessions [${[...batchResult.indexedSessionIds, ...batchIndexedSessionIds].join(", ")}], ${batchResult.rows + batchRowCount} rows prior to error)`
+          const err = new Error(
+            `ag transcript export exited with code ${code}: ${stderr.trim()}${failureDetails}${committedProgress}`,
+          )
+          ;(err as any).failures = failures
+          reject(err)
+          return
+        }
+        resolve({
+          sessions: batchSessionCount,
+          rows: batchRowCount,
+          tools: batchToolCount,
+          unreadable: batchUnreadableCount,
+          errors: batchErrorCount,
+          failures,
+          reasonCounts,
+          indexedSessionIds: batchIndexedSessionIds,
+          retainedSessionIds: batchRetainedSessionIds,
         })
-
-        currentSession = null
-        currentExistingCounts.clear()
-        currentRowCounts.clear()
-        totalRowsThisSession = 0
-      } else if (record.kind === "done") {
-        doneRecord = record
-      }
-      return true
-    }
-
-    const decoder = new StringDecoder("utf8")
-    child.stdout.on("data", (chunk: Buffer) => {
-      buffer += decoder.write(chunk)
-      let idx: number
-      while ((idx = buffer.indexOf("\n")) !== -1) {
-        const line = buffer.slice(0, idx)
-        buffer = buffer.slice(idx + 1)
-        if (!handleLine(line)) return
-      }
-    })
-
-    child.on("close", (code, signal) => {
-      buffer += decoder.end()
-      if (buffer.trim()) {
-        if (!handleLine(buffer)) return
-      }
-      if (inTx) {
-        safeRollback(db)
-        inTx = false
-        reject(
-          new Error(
-            `ag transcript export stream ended abruptly during active transaction for session ${currentSession?.nativeId ?? "unknown"} (committed ${batchSessionCount} sessions [${batchIndexedSessionIds.join(", ")}], ${batchRowCount} rows prior to interruption; exit code ${code}; signal ${signal ?? "none"}; stderr ${JSON.stringify(stderr.trim())})`,
-          ),
-        )
-        return
-      }
-      if (!doneRecord) {
-        const failureDetails =
-          failures.length > 0
-            ? ` (recorded ${failures.length} failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}${f.oldRowCount !== undefined ? ` [rows: ${f.oldRowCount} -> ${f.newRowCount}]` : ""}`).join(", ")})`
-            : ""
-        const committedProgress = ` (committed ${batchSessionCount} sessions [${batchIndexedSessionIds.join(", ")}], ${batchRowCount} rows prior to error)`
-        const err = new Error(
-          `ag transcript export ${code !== 0 ? `exited with code ${code}: ` : "stream ended without done record"}${stderr.trim()}${failureDetails}${committedProgress}`,
-        )
-        ;(err as any).failures = failures
-        reject(err)
-        return
-      }
-      const hasLedgeredIssues = failures.length > 0 || batchUnreadableCount > 0 || batchErrorCount > 0
-      if (code !== 0 && !(code === 1 && hasLedgeredIssues)) {
-        const failureDetails =
-          failures.length > 0
-            ? ` (recorded ${failures.length} failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}${f.oldRowCount !== undefined ? ` [rows: ${f.oldRowCount} -> ${f.newRowCount}]` : ""}`).join(", ")})`
-            : ""
-        const committedProgress = ` (committed ${batchSessionCount} sessions [${batchIndexedSessionIds.join(", ")}], ${batchRowCount} rows prior to error)`
-        const err = new Error(
-          `ag transcript export exited with code ${code}: ${stderr.trim()}${failureDetails}${committedProgress}`,
-        )
-        ;(err as any).failures = failures
-        reject(err)
-        return
-      }
-      resolve({
-        sessions: batchSessionCount,
-        rows: batchRowCount,
-        tools: batchToolCount,
-        unreadable: batchUnreadableCount,
-        errors: batchErrorCount,
-        failures,
-        reasonCounts,
-        indexedSessionIds: batchIndexedSessionIds,
-        retainedSessionIds: batchRetainedSessionIds,
       })
     })
-  })
+
+  for (const args of exportBatches) {
+    const result = await exportBatch(args)
+    batchResult.sessions += result.sessions
+    batchResult.rows += result.rows
+    batchResult.tools += result.tools
+    batchResult.unreadable += result.unreadable
+    batchResult.errors += result.errors
+    batchResult.indexedSessionIds.push(...result.indexedSessionIds)
+    batchResult.retainedSessionIds.push(...result.retainedSessionIds)
+    // failures/reasonCounts are shared with the existing wire consumer, not copied per batch.
+  }
 
   return {
     discovered,

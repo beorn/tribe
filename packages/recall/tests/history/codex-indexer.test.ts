@@ -25,6 +25,7 @@ import {
   fetchCodexCatalog,
   indexCodexTranscripts,
   safeRollback,
+  type CodexCatalog,
 } from "../../src/history/codex-indexer.ts"
 // indexer.ts memoizes the parsed .recall-ignore list, so a fresh module graph
 // per test is what the removed resetIgnoreCache export used to give. Rebinding
@@ -1056,6 +1057,181 @@ if (args.includes("list")) {
   })
 
   describe("Batching & Multi-Session Atomic Transactions", () => {
+    function batchFixture(groups: string[][], failSecondBatch = false) {
+      const invocationsFile = join(tempDir, "batch-invocations.jsonl")
+      const catalog: CodexCatalog = {
+        sessions: groups.map((paths, i) => ({
+          kind: "session",
+          provider: "codex",
+          nativeId: `batch-${i}`,
+          key: `codex:batch-${i}`,
+          canonicalPath: paths.length === 1 ? paths[0]! : null,
+          status: paths.length === 1 ? "canonical" : "ambiguous",
+          copies: paths.map((path, c) => ({
+            path,
+            key: paths.length === 1 ? `codex:batch-${i}` : `codex:batch-${i}@copy-${c}`,
+            account: null,
+            sizeBytes: 100,
+            mtimeMs: 1000,
+            lastEventAtMs: 2000,
+            decision: paths.length === 1 ? "canonical" : "ambiguous",
+          })),
+        })),
+        discovered: groups.length,
+        canonical: groups.filter((g) => g.length === 1).length,
+        ambiguous: groups.filter((g) => g.length > 1).length,
+        stale: 0,
+        invalid: 0,
+        failures: [],
+      }
+      const catalogFile = join(tempDir, "batch-catalog.json")
+      writeFileSync(catalogFile, JSON.stringify(catalog))
+      const agBin = makeMockAg(`
+import { appendFileSync, readFileSync, existsSync } from "node:fs"
+const catalog = JSON.parse(readFileSync(${JSON.stringify(catalogFile)}, "utf8"))
+const args = process.argv.slice(2)
+const invocationFile = ${JSON.stringify(invocationsFile)}
+const previous = existsSync(invocationFile) ? readFileSync(invocationFile, "utf8").trim().split("\\n").length : 0
+appendFileSync(invocationFile, JSON.stringify(args) + "\\n")
+if (${failSecondBatch} && previous === 1) {
+  console.error("fixture later batch failed")
+  process.exit(2)
+}
+const paths = new Set(args.filter((_, i) => args[i - 1] === "--path"))
+console.log(JSON.stringify({ kind: "schema", version: 1 }))
+let sessions = 0, rows = 0
+for (const session of catalog.sessions) {
+  const copies = session.copies.filter(copy => paths.has(copy.path))
+  if (!copies.length) continue
+  const keys = copies.map(copy => copy.key)
+  console.log(JSON.stringify({ kind: "session", provider: "codex", nativeId: session.nativeId,
+    path: copies[0].path, copies, keys, sizeBytes: 100, mtimeMs: 1000, lastEventAtMs: 2000 }))
+  for (const copy of copies) {
+    console.log(JSON.stringify({ kind: "row", sessionKey: copy.key, line: 1, role: "user",
+      text: "message " + copy.key, timestamp: "2026-11-05T00:00:00Z" }))
+    console.log(JSON.stringify({ kind: "tool", sessionKey: copy.key, line: 2, phase: "call",
+      toolName: "Read", text: "{}", timestamp: "2026-11-05T00:00:00Z" }))
+    rows++
+  }
+  console.log(JSON.stringify({ kind: "end", nativeId: session.nativeId, keys, status: "complete", rows: copies.length }))
+  sessions++
+}
+console.log(JSON.stringify({ kind: "skipped", reason: "fixture skipped event" }))
+console.log(JSON.stringify({ kind: "done", sessions, rows, errors: 0 }))
+`)
+      return { agBin, catalog, invocationsFile }
+    }
+
+    // @failure Legacy NULL event metadata must not force unchanged files through export;
+    // known event changes and real path/size/mtime changes must still be imported.
+    // @level l2 — public index operation, isolated SQLite and real exporter subprocess.
+    // @consumer incremental Recall after a producer freshness upgrade.
+    test("skips legacy NULL event metadata only when path size and mtime are unchanged", async () => {
+      const fixture = batchFixture(Array.from({ length: 6 }, (_, i) => [`/fixture/skip-${i}.jsonl`]))
+      for (const [i, session] of fixture.catalog.sessions.entries()) {
+        const copy = session.copies[0]!
+        db.prepare(`INSERT INTO sessions
+          (id, project_path, jsonl_path, created_at, updated_at, message_count, status, size_bytes, mtime_ms, last_event_at_ms)
+          VALUES (?, '/fixture', ?, 1000, 1000, 1, 'complete', ?, ?, ?)`).run(
+          copy.key,
+          i === 3 ? "/fixture/old-path.jsonl" : copy.path,
+          i === 4 ? 99 : copy.sizeBytes,
+          i === 5 ? 999 : copy.mtimeMs,
+          i === 1 ? 2000 : i === 2 ? 1000 : null,
+        )
+        insertMessage(db, null, copy.key, "user", "legacy message", null, null, 1000, null, 1)
+      }
+      const result = await indexCodexTranscripts(db, { ...fixture, incremental: true })
+      expect(result.skipped).toBe(2)
+      expect(result.sessions).toBe(4)
+      const args: string[] = JSON.parse(readFileSync(fixture.invocationsFile, "utf8").trim())
+      expect(args.filter((_, i) => args[i - 1] === "--path")).toEqual(
+        fixture.catalog.sessions.slice(2).map((s) => s.copies[0]!.path),
+      )
+      for (const session of fixture.catalog.sessions.slice(0, 2)) {
+        const row = db.prepare("SELECT content FROM messages WHERE session_id = ?").get(session.key!) as {
+          content: string
+        }
+        expect(row.content).toBe("legacy message")
+      }
+    })
+
+    // @failure A valid catchup population exceeds exec argv capacity; all paths and
+    // ambiguous copies must survive byte-bounded batching, with cumulative results.
+    // Existing three-path coverage cannot reach this OS/process boundary.
+    test("exports a large UTF8 path population once in order without splitting sessions", async () => {
+      const prefix = "/fixture/" + Array.from({ length: 18 }, () => "界".repeat(40)).join("/")
+      const groups = Array.from({ length: 1200 }, (_, i) =>
+        Array.from({ length: i % 7 === 0 ? 2 : 1 }, (_, c) => `${prefix}/session-${i}-copy-${c}.jsonl`),
+      )
+      const fixture = batchFixture(groups)
+      fixture.catalog.failures.push({ kind: "unreadable", reason: "fixture catalog issue", timestamp: 1000 })
+      fixture.catalog.failedProviders = ["grok"]
+      db.prepare(`INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count)
+        VALUES ('grok:retained', '/fixture', '/fixture/grok.jsonl', 1000, 1000, 0)`).run()
+      const progress: number[] = []
+      const result = await indexCodexTranscripts(db, {
+        ...fixture,
+        onProgress: (p) => progress.push(p.sessionsProcessed),
+      })
+      const invocations = readFileSync(fixture.invocationsFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[])
+      expect(invocations.length).toBeGreaterThan(1)
+      const exportedPaths = invocations.map((args) => args.filter((_, i) => args[i - 1] === "--path"))
+      expect(exportedPaths.flat()).toEqual(groups.flat())
+      for (const args of invocations) {
+        expect(
+          [fixture.agBin, ...args].reduce((bytes, arg) => bytes + Buffer.byteLength(arg) + 1, 0),
+        ).toBeLessThanOrEqual(64 * 1024)
+      }
+      for (const group of groups) {
+        expect(exportedPaths.filter((batch) => group.some((path) => batch.includes(path)))).toHaveLength(1)
+      }
+      expect(result.sessions).toBe(groups.length)
+      expect(result.rows).toBe(groups.flat().length * 2)
+      expect(result.tools).toBe(groups.flat().length)
+      expect(result.reasonCounts).toEqual({
+        "fixture catalog issue": 1,
+        "fixture skipped event": invocations.length,
+      })
+      expect(result.failures).toHaveLength(invocations.length + 1)
+      expect(result.retainedSessionIds).toEqual(["grok:retained"])
+      expect(result.indexedSessionIds).toEqual(fixture.catalog.sessions.flatMap((s) => s.copies.map((c) => c.key)))
+      expect(progress).toEqual(Array.from({ length: groups.length }, (_, i) => i + 1))
+      for (const key of result.indexedSessionIds) {
+        const row = db.prepare("SELECT content FROM messages WHERE session_id = ? AND type = 'user'").get(key) as {
+          content: string
+        }
+        expect(row.content).toBe("message " + key)
+      }
+    }, 30_000)
+
+    test("fails loud by session name when one session exceeds the argv budget", async () => {
+      const fixture = batchFixture([Array.from({ length: 80 }, (_, i) => `/fixture/${"x".repeat(1000)}/${i}.jsonl`)])
+      await expect(indexCodexTranscripts(db, fixture)).rejects.toThrow(/batch-0.*argv.*budget/i)
+      expect(existsSync(fixture.invocationsFile)).toBe(false)
+    })
+
+    test("a later batch failure aborts loudly and reports earlier committed sessions", async () => {
+      const groups = Array.from({ length: 100 }, (_, i) => [`/fixture/${"x".repeat(1000)}/${i}.jsonl`])
+      const fixture = batchFixture(groups, true)
+      let error: Error | undefined
+      try {
+        await indexCodexTranscripts(db, fixture)
+      } catch (e) {
+        error = e as Error
+      }
+      expect(error?.message).toContain("fixture later batch failed")
+      const committed = db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number }
+      expect(committed.n).toBeGreaterThan(0)
+      expect(committed.n).toBeLessThan(groups.length)
+      expect(error?.message).toContain(`committed ${committed.n} sessions`)
+      const invocations = readFileSync(fixture.invocationsFile, "utf8").trim().split("\n")
+      expect(invocations).toHaveLength(2)
+    })
+
     test("passes all changed paths in ONE single invocation of ag transcript export", async () => {
       const invocationsFile = join(tempDir, "export-invocations.txt")
       const mock = makeMockAg(`
@@ -2115,6 +2291,7 @@ if (args.includes("list")) {
               rolloutFile,
               JSON.stringify({
                 type: "session_meta",
+                timestamp: "2026-09-21T12:00:00.000Z",
                 payload: { id: "019fce85-test-skip", cwd: "/home/work", timestamp: "2026-09-21T10:00:00.000Z" },
               }) +
                 "\n" +
@@ -2151,6 +2328,7 @@ if (args.includes("list")) {
               rolloutFile,
               JSON.stringify({
                 type: "session_meta",
+                timestamp: "2026-09-21T12:00:00.000Z",
                 payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" },
               }) +
                 "\n" +
@@ -2167,6 +2345,7 @@ if (args.includes("list")) {
               rolloutFile,
               JSON.stringify({
                 type: "session_meta",
+                timestamp: "2026-09-21T12:00:00.000Z",
                 payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" },
               }) +
                 "\n" +
@@ -2206,6 +2385,7 @@ if (args.includes("list")) {
             const content =
               JSON.stringify({
                 type: "session_meta",
+                timestamp: "2026-09-21T12:00:00.000Z",
                 payload: { id: "019fce85-test-ambig", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" },
               }) +
               "\n" +
