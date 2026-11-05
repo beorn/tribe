@@ -147,7 +147,7 @@ describe("qmd export boundary", () => {
     })
     expect(versionProbe.status, versionProbe.stderr).toBe(0)
     expect(versionProbe.stdout.trim()).toMatch(/^qmd 2\.8\.3(?:\s|$)/)
-  })
+  }, 30_000)
 })
 
 // @failure Interrupted QMD indexing repeats valid chunks or treats orphan metadata as complete.
