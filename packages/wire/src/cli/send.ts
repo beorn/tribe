@@ -59,6 +59,8 @@ import { mcpJsonContent } from "./mcp-json-content.ts"
 import { warnIfSelfTransportDown } from "./self-transport-warning.ts"
 import { oversizedMessageError } from "../lib/send-validation.ts"
 import { TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV } from "../launch-environment.ts"
+import { launchSender, registerLaunchSender, type LaunchSender } from "../service-send.ts"
+import { resolveSocketPath } from "../paths.ts"
 
 const SEND_CLI = visibleCliProjectionForMcp("send")
 const JOIN_CLI = visibleCliProjectionForMcp("join")
@@ -102,7 +104,9 @@ export function classifyIdentityGrant(
  * of that launch instead of colliding on the name. A bare TRIBE_NAME caller
  * omits the launch fields.
  */
-type SendCaller = { name: string; idToken?: string; launchId?: string; launchParentPid?: number }
+type SendCaller =
+  | { name: string; idToken?: string; launchId?: string; launchParentPid?: number }
+  | Extract<LaunchSender, { kind: "service" }>
 
 async function callDaemon(
   method: string,
@@ -123,7 +127,9 @@ async function callDaemon(
     // so this never lets an unrelated caller steal a name. For a bare
     // TRIBE_NAME caller (no launch), we omit it; the grant check below then
     // decides between fail-loud abort (tracked reply) and attributed warn.
-    if (as) {
+    if (as && "kind" in as && as.kind === "service") {
+      await registerLaunchSender(client, as, { producer: "tribe.send", socketPath: resolveSocketPath() })
+    } else if (as) {
       // A runtime rename changes the live session name, while the token still names its spawn-time actor.
       // Register under that actor so the daemon can verify it, then reapply the rename from the launch tuple.
       const registerAs = as.idToken === undefined ? as : { ...as, name: readUnverifiedTokenClaims(as.idToken).actor }
@@ -269,6 +275,12 @@ function replyOwnerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null 
 
 async function resolveCallerNameHint(): Promise<string | null> {
   try {
+    if (
+      readIdentityTokenFromEnvironment(process.env) !== null &&
+      launchSender("tribe.send", process.env).kind === "service"
+    ) {
+      return replyOwnerFromEnv()
+    }
     const launchId = readLaunchIdFromToken(process.env)
     if (launchId) {
       const idToken = readIdentityTokenFromEnvironment(process.env)
@@ -433,6 +445,15 @@ async function resolveSendCaller(reply?: string, anonymous = false): Promise<Sen
   if (anonymous) return null
   let launchId: string | null
   try {
+    if (readIdentityTokenFromEnvironment(process.env) !== null) {
+      const sender = launchSender("tribe.send", process.env)
+      if (sender.kind === "service") {
+        if (reply) {
+          throw new Error("a service cannot send a tracked reply; a tracked reply must be sent by the ball's owner")
+        }
+        return sender
+      }
+    }
     launchId = readLaunchIdFromToken(process.env)
   } catch (error) {
     console.error(

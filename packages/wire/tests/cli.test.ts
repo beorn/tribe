@@ -30,6 +30,9 @@ import { fileURLToPath } from "node:url"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
 import { launchEnvironment, launchToken } from "./launch-token.ts"
+import { generateKeyPairSync, sign } from "node:crypto"
+import { Database } from "bun:sqlite"
+import { connectToDaemon } from "../src/client.ts"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
 const DAEMON = resolve(dirname(fileURLToPath(import.meta.url)), "../../daemon/src/daemon.ts")
@@ -255,6 +258,223 @@ async function waitForSocket(socketPath: string, timeoutMs = 5_000): Promise<voi
   }
   throw new Error(`timed out waiting for daemon socket ${socketPath}`)
 }
+
+/**
+ * @failure A fresh service CLI looks up a nonexistent seat before registering; forged service claims bypass authority.
+ * @level l4
+ * @consumer Hab command services sending their first actionable through the Wire CLI (32353).
+ * Library service-send tests do not exercise CLI admission; a claims-only verifier cannot catch a forged signature.
+ */
+describe("service CLI admission", () => {
+  // The convenience verb resolves a name hint before cmdSend; a plain send never reaches that second lookup site.
+  it("taking skips seat discovery for a service token", async () => {
+    const { result, calls } = await runManagedPendingCliAgainst(
+      (request) => ({
+        result:
+          request.method === "tribe.pending"
+            ? { pending: [{ request_id: "service-request", sender: "receiver" }] }
+            : { sent: true },
+      }),
+      {
+        token: launchToken("service-taking-launch", "heartbeat-service", "service"),
+        args: ["taking", "service-request", "Taking service work"],
+      },
+    )
+    expect(result.code, result.stderr).toBe(0)
+    expect(calls.some((call) => call.method === "cli_inbox_status_by_launch_v1")).toBe(false)
+    expect(calls.filter((call) => call.method === "tribe.send")).toEqual([
+      {
+        method: "tribe.send",
+        params: {
+          to: "receiver",
+          message: "Taking service work",
+          type: "status",
+          ref: "service-request",
+          summary: "Taking service work",
+        },
+      },
+    ])
+  })
+
+  // A stalled transport is the one boundary the real verifier journey above cannot supply without a new daemon seam.
+  it("registration deadline exits nonzero without sending", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-service-deadline-"))
+    const socketPath = join(dir, "tribe.sock")
+    const calls: string[] = []
+    const sockets = new Set<Socket>()
+    const server = createServer((socket) => {
+      sockets.add(socket)
+      socket.once("close", () => sockets.delete(socket))
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
+          const request = JSON.parse(buffer.slice(0, newline)) as OneShotRpcRequest
+          buffer = buffer.slice(newline + 1)
+          calls.push(request.method)
+          if (request.method !== "register") {
+            socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { pending: [] } })}\n`)
+          }
+        }
+      })
+    })
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, resolveListen)
+      })
+      const env = { ...process.env }
+      for (const name of tribeAmbientEnvironmentNames()) delete env[name]
+      const result = await runCliAsync(
+        ["send", "receiver", "stalled service message", "--type", "request", "--summary", "stalled"],
+        {
+          ...env,
+          TRIBE_SOCKET: socketPath,
+          TRIBE_DB: join(dir, "tribe.db"),
+          TRIBE_NO_AUTOSTART: "1",
+          HAB_ID_TOKEN: launchToken("stalled-launch", "heartbeat-service", "service"),
+        },
+        { timeoutMs: 30_000 },
+      )
+      expect(result.code).not.toBe(0)
+      expect(result.signal).toBeNull()
+      expect(result.stderr).toContain("Request register timed out after 10000ms")
+      expect(calls).toContain("register")
+      expect(calls).not.toContain("tribe.send")
+      expect(calls).not.toContain("cli_inbox_status_by_launch_v1")
+    } finally {
+      for (const socket of sockets) socket.destroy()
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 40_000)
+
+  it("registers a fresh service and sends one verified actionable; refuses a forged signature and tracked reply", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-service-cli-"))
+    const socketPath = join(dir, "tribe.sock")
+    const dbPath = join(dir, "tribe.db")
+    const verifierPath = join(dir, "verifier.ts")
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519")
+    writeFileSync(
+      verifierPath,
+      `import { verify } from "node:crypto"
+export const IDENTITY_VERIFIER_INTERFACE = 1
+export const IDENTITY_VERIFIER_SUPPLIES_GEN = true
+export async function verifyIdentity(token) {
+  const [header, payload, signature] = token.split(".")
+  if (!verify(null, Buffer.from(header + "." + payload), ${JSON.stringify(publicKey.export({ type: "spki", format: "pem" }))}, Buffer.from(signature, "base64url"))) {
+    return { result: "contradicted", reason: "invalid service signature" }
+  }
+  const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"))
+  return { result: "verified", actor: claims.act.sub, kind: claims.act.kind, sid: claims.sid, gen: claims.gen }
+}
+`,
+    )
+    const unsigned = launchToken("fresh-service-launch", "heartbeat-service", "service")
+      .split(".")
+      .slice(0, 2)
+      .join(".")
+    const token = `${unsigned}.${sign(null, Buffer.from(unsigned), privateKey).toString("base64url")}`
+    const env: NodeJS.ProcessEnv = { ...process.env }
+    for (const name of tribeAmbientEnvironmentNames()) delete env[name]
+    Object.assign(env, {
+      TRIBE_SOCKET: socketPath,
+      TRIBE_DB: dbPath,
+      TRIBE_NO_AUTOSTART: "1",
+      TRIBE_SUMMARIZER_MODEL: "off",
+      HAB_ID_TOKEN: token,
+    })
+    const daemon = spawn(
+      BUN_BIN,
+      [
+        DAEMON,
+        "--socket",
+        socketPath,
+        "--db",
+        dbPath,
+        "--idle-quit-after",
+        "never",
+        "--no-lore",
+        "--identity-verifier",
+        verifierPath,
+      ],
+      { env, stdio: "pipe" },
+    )
+    const daemonExit = new Promise<void>((resolveExit) => daemon.once("close", () => resolveExit()))
+    let daemonError = ""
+    daemon.stderr!.on("data", (chunk) => {
+      daemonError += chunk.toString("utf8")
+    })
+    daemon.stdout!.resume()
+    try {
+      await waitForSocket(socketPath, 10_000).catch((error) => {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}\n${daemonError}`)
+      })
+      const receiver = await connectToDaemon(socketPath)
+      const receiverUnsigned = launchToken("receiver-launch", "receiver").split(".").slice(0, 2).join(".")
+      const receiverToken = `${receiverUnsigned}.${sign(null, Buffer.from(receiverUnsigned), privateKey).toString("base64url")}`
+      await receiver.call("register", {
+        name: "receiver",
+        idToken: receiverToken,
+        launchId: "receiver-launch",
+        launchParentPid: process.pid,
+        principalClass: "agent",
+        delivery: "pull",
+      })
+      const db = new Database(dbPath, { readonly: true })
+      try {
+        expect(db.query("SELECT name FROM sessions WHERE name = ?").all("heartbeat-service")).toEqual([])
+        const fresh = await runCliAsync(
+          ["send", "receiver", "service heartbeat", "--type", "request", "--summary", "heartbeat", "--json"],
+          env,
+          { timeoutMs: 30_000 },
+        )
+        expect(fresh.code, fresh.stderr).toBe(0)
+        expect(fresh.signal).toBeNull()
+        const sent = JSON.parse(fresh.stdout) as { sent?: boolean; request_id: string; to?: string }
+        expect(sent).toMatchObject({ sent: true, to: "receiver" })
+        expect(typeof sent.request_id).toBe("string")
+        expect(
+          db.query("SELECT sender, sender_authority, type FROM messages WHERE content = ?").all("service heartbeat"),
+        ).toEqual([{ sender: "heartbeat-service", sender_authority: "verified", type: "request" }])
+
+        const forged = await runCliAsync(
+          ["send", "receiver", "forged service heartbeat", "--type", "request", "--summary", "forged"],
+          { ...env, HAB_ID_TOKEN: `${unsigned}.${Buffer.alloc(64).toString("base64url")}` },
+          { timeoutMs: 30_000 },
+        )
+        expect(forged.code).not.toBe(0)
+        expect(forged.signal).toBeNull()
+        expect(forged.stderr).toContain("invalid service signature")
+        expect(db.query("SELECT id FROM messages WHERE content = ?").all("forged service heartbeat")).toEqual([])
+
+        const reply = await runCliAsync(
+          ["send", "receiver", "service tracked reply", "--type", "response", "--reply", sent.request_id],
+          env,
+          { timeoutMs: 30_000 },
+        )
+        expect(reply.code).not.toBe(0)
+        expect(reply.signal).toBeNull()
+        expect(db.query("SELECT id FROM messages WHERE content = ?").all("service tracked reply")).toEqual([])
+
+        const anonymous = await runCliAsync(["send", "receiver", "anonymous service notice", "--anonymous"], env, {
+          timeoutMs: 30_000,
+        })
+        expect(anonymous.code, anonymous.stderr).toBe(0)
+        expect(
+          db.query("SELECT sender, sender_authority FROM messages WHERE content = ?").get("anonymous service notice"),
+        ).toEqual({ sender: expect.stringMatching(/^pending-/), sender_authority: "claimed" })
+      } finally {
+        db.close()
+        receiver.close()
+      }
+    } finally {
+      daemon.kill("SIGTERM")
+      await daemonExit
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 45_000)
+})
 
 /** A daemon whose bridge-lost paging is armed (25662): doctor reads it from cli_health. */
 const ARMED_BRIDGE_LOST = { armed: true, config: { owners: ["@chief", "@cto"], graceMs: 180_000 } }
