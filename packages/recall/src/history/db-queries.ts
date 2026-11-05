@@ -408,24 +408,20 @@ function messageFilterSql(options: MessageSearchOptions): { sql: string; params:
   if (sinceTime !== undefined && untilTime !== undefined && sinceTime > untilTime) {
     throw new Error("--since is after --until")
   }
-  const clauses = [
-    "m.duplicate_of IS NULL",
-    `(m.uuid IS NULL OR m.id = (
-      SELECT m2.id FROM messages m2
-      JOIN sessions s2 ON m2.session_id = s2.id
-      WHERE m2.uuid = m.uuid
-      ORDER BY CASE WHEN s2.parent_session_id IS NULL THEN 0 ELSE 1 END, m2.id ASC
-      LIMIT 1
-    ))`,
-  ]
+  const clauses = ["m.duplicate_of IS NULL"]
   const params: (string | number)[] = []
   if (projectFilter) {
     clauses.push("s.cwd LIKE ?")
     params.push(`%${projectFilter}%`)
   }
   if (sinceTime !== undefined) {
-    clauses.push("m.timestamp >= ?")
-    params.push(sinceTime)
+    // Superset FTS cursor bound: in-window ids are ≥ the window's MIN(id), so lower matches skip every row read; old
+    // timestamps at high ids still meet the next clause (CTO e6b99892). INDEXED BY: unforced, MIN(id) walks the table.
+    clauses.push(
+      "f.rowid >= (SELECT MIN(id) FROM messages INDEXED BY idx_messages_timestamp WHERE timestamp >= ?)",
+      "m.timestamp >= ?",
+    )
+    params.push(sinceTime, sinceTime)
   }
   if (untilTime !== undefined) {
     clauses.push("m.timestamp <= ?")
@@ -448,6 +444,14 @@ function messageFilterSql(options: MessageSearchOptions): { sql: string; params:
       params.push(session.id, session.id)
     }
   }
+  // Last, so the cheap tests above drop out-of-window matches before this per-match lookup runs (CTO e6b99892 C1).
+  clauses.push(`(m.uuid IS NULL OR m.id = (
+      SELECT m2.id FROM messages m2
+      JOIN sessions s2 ON m2.session_id = s2.id
+      WHERE m2.uuid = m.uuid
+      ORDER BY CASE WHEN s2.parent_session_id IS NULL THEN 0 ELSE 1 END, m2.id ASC
+      LIMIT 1
+    ))`)
   return { sql: clauses.join(" AND "), params }
 }
 
@@ -523,19 +527,48 @@ export function ftsSearchWithSnippet(
   const overFetch = exactCopyOverFetch(limit, offset)
   const pageNeed = offset + limit
 
-  const searchQuery = `
-    SELECT ${MESSAGE_HIT_COLUMNS_SQL},
-           snippet(messages_fts, 0, '>>>', '<<<', '...', ${snippetTokens}) as snippet,
-           ${MESSAGE_RANK_SQL} as rank
+  // Two phases (CTO 1cfcaba5; D7/D8: one SELECT building every match's hit columns was p95 2.6 s, ids alone 169 ms).
+  // Phase A ranks ids (same MATCH, filter, ORDER BY rank, m.id); phase B builds hit columns for exactly those ids, so
+  // bm25 scores and order are unchanged. One read transaction holds both; a phase B that differs is a named error.
+  const fromWhere = `
     FROM messages_fts f
     JOIN messages m ON f.rowid = m.id
     JOIN sessions s ON m.session_id = s.id
-    ${where}
+    ${where}`
+  const idsQuery = `
+    SELECT m.id AS id, ${MESSAGE_RANK_SQL} as rank${fromWhere}
     ORDER BY rank, m.id ASC LIMIT ? OFFSET ?
   `
+  // Unary + keeps one MATCH cursor (as hookMessageSearch): a bare rowid IN would re-run the MATCH per id.
+  const hitsQuery = `
+    SELECT ${MESSAGE_HIT_COLUMNS_SQL},
+           snippet(messages_fts, 0, '>>>', '<<<', '...', ${snippetTokens}) as snippet,
+           ${MESSAGE_RANK_SQL} as rank${fromWhere}
+      AND +f.rowid IN (SELECT value FROM json_each(?))
+    ORDER BY rank, m.id ASC
+  `
   const params = [ftsQuery, ...filter.params]
-  const total = countMessages(db, ftsQuery, filter)
-  const ranked = db.prepare(assertSingleStatement(searchQuery)).all(...params, overFetch, 0) as MessageSearchHit[]
+  const { total, ranked } = db.transaction(() => {
+    const counted = countMessages(db, ftsQuery, filter)
+    const ids = (db.prepare(assertSingleStatement(idsQuery)).all(...params, overFetch, 0) as { id: number }[]).map(
+      (row) => row.id,
+    )
+    const hits =
+      ids.length === 0
+        ? []
+        : (db.prepare(assertSingleStatement(hitsQuery)).all(...params, JSON.stringify(ids)) as MessageSearchHit[])
+    const got = hits.map((hit) => hit.id)
+    const differs = got.findIndex((id, i) => id !== ids[i])
+    if (got.length !== ids.length || differs !== -1) {
+      throw new Error(
+        `recall messages: the hit read (phase B) returned ${String(got.length)} rows for the ${String(ids.length)} ` +
+          `ranked ids (phase A) of "${query}", first differing at position ` +
+          `${String(differs === -1 ? Math.min(got.length, ids.length) : differs)}; both phases share one read ` +
+          `transaction, so this is a defect, not a race`,
+      )
+    }
+    return { total: counted, ranked: hits }
+  })()
   const distinct = collapseNullUuidCopies(ranked)
   const results = distinct.slice(offset, offset + limit)
   const capped: RecallSkip | undefined =
@@ -1100,14 +1133,13 @@ export function searchAll(
     params.push(untilTime)
   }
 
-  // Keep COUNT's original shape: LIMIT 0 bypasses ranked MATCH, and SQLite's
-  // availability rewrite can skip invalid MATCH instead of raising its error.
-  // Proof: type-limit0-error-control-0817.json; VM: type-single-vm-0804.json (29482).
+  // No availabilityClause: SQLite's rewrite can skip an invalid MATCH instead of raising (29482, type-single-vm-0804).
+  // The id-range probe counts the join's rows without a wide content seek per match (CTO ee7e8bdd C3).
   const countQuery = `
     SELECT COUNT(*) as total
     FROM content_fts f
-    JOIN content c ON f.rowid = c.id
-    WHERE content_fts MATCH ?${typeClause}${projectClause}${timeClause}
+    WHERE content_fts MATCH ?
+      AND EXISTS (SELECT 1 FROM content c WHERE c.id >= f.rowid AND c.id <= f.rowid${typeClause}${projectClause}${timeClause})
   `
 
   const searchQuery = `
@@ -1121,10 +1153,8 @@ export function searchAll(
     ORDER BY rank
     LIMIT ? OFFSET ?
   `
-  // The range is deliberate: integer ids make it equal to rowid equality,
-  // but SQLite can use the covering type index instead of wide record seeks.
-  // Frozen cold reads fell from 1.088 GB to 20 MB; the stats-aware contract is
-  // "type-filtered ranking avoids wide records" in fanout.test.ts.
+  // The id range equals rowid equality but lets SQLite use the covering type index, not wide record seeks (cold reads
+  // 1.088 GB → 20 MB); contract: "type-filtered ranking avoids wide records" in fanout.test.ts.
 
   const searchParams = types?.length ? [ftsQuery, ...types, ...params.slice(1)] : params
   const results = db.transaction(() => {

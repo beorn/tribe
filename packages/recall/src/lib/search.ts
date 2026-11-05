@@ -25,6 +25,7 @@ import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
 import { retrieveCandidates, searchLiveSession, resolveSearchWindow } from "../history/search"
 import { bindVaultDb, getVaultDbPath, type VaultMatch } from "../history/vault-fts.ts"
+import type { VaultSemanticSpans } from "../history/vault-semantic.ts"
 import { findSessionFiles, extractTextContent, parseSessionPath } from "../history/indexer"
 import type { ContentType, ContentRecord, MessageRecord, JsonlRecord } from "../history/types"
 import {
@@ -51,8 +52,6 @@ import {
 
 export interface SearchOptions {
   raw?: boolean
-  /** Alias for raw — vocabulary parity with accountly's "snippet vs pointer" mode. */
-  snippets?: boolean
   json?: boolean
   since?: string
   until?: string
@@ -97,21 +96,7 @@ export function resolveProjectScope(project: string | undefined, _cwd = process.
 // Read-only index provenance — see @i/20-search-and-memory/23189
 // ============================================================================
 
-// Pure helpers (parseThreshold/getStaleThresholdMs/RefreshResult/RECALL_STALE_THRESHOLD_DEFAULT)
-// live in staleness.ts so unit tests can import them without dragging the search.ts
-// transitive closure (bun:sqlite, indexer, llm/agent → zod) into vitest's node runtime.
-export {
-  RECALL_STALE_THRESHOLD_DEFAULT,
-  parseThreshold,
-  getStaleThresholdMs,
-  judgeIndexFreshness,
-  describeMs,
-  describeFreshness,
-  INDEX_FRESHNESS_ROOT,
-  type IndexFreshness,
-  type RefreshResult,
-} from "./staleness"
-import { describeFreshness, judgeIndexFreshness, type RefreshResult } from "./staleness"
+import { describeFreshness, judgeIndexFreshness } from "./staleness"
 
 /** Read `last_rebuild` index meta — returns null if missing, throws on DB access errors. */
 function readLastRebuild(): string | null {
@@ -125,20 +110,8 @@ function readLastRebuild(): string | null {
   return getIndexMeta(db, "last_rebuild") ?? null
 }
 
-import { refreshIndexIfStaleWithDeps, makeRefreshDeps, type RefreshDeps } from "./refresh"
-export { refreshIndexIfStaleWithDeps, type RefreshDeps } from "./refresh"
 /** The call-line vault binding (`--vault-db`), for hosts that load this engine by path (25149 a3). */
 export { bindVaultDb }
-
-/** Compatibility surface for direct callers. Search no longer invokes it. */
-export async function refreshIndexIfStale(
-  options: { refresh?: boolean },
-  /** Test seam — override deps for unit testing. Production callers omit. */
-  deps?: Partial<RefreshDeps>,
-): Promise<RefreshResult> {
-  const merged = { ...makeRefreshDeps(readLastRebuild), ...deps }
-  return refreshIndexIfStaleWithDeps(options, merged)
-}
 
 /**
  * The ONE freshness verdict for this process, judged by staleness.ts's
@@ -198,6 +171,52 @@ function reportSearchSkips(result: RecallResult, json: boolean | undefined): voi
   }
 }
 
+/**
+ * The leg's spans as the search prints them (CTO 3a638efb D1), after its line or its degradation. Kept here so the CLI
+ * never loads the leg's module (and qmd) just to print.
+ */
+export function formatVaultSemanticSpans(spans: VaultSemanticSpans): string {
+  const ms = (value: number) => Math.round(value)
+  return (
+    `ms: lexical ${ms(spans.lexicalMs)}, module ${ms(spans.moduleMs)}, ` +
+    (spans.preLexical === null
+      ? ""
+      : `pre-lexical wait ${ms(spans.preLexical.waitMs)} (bound ${spans.preLexical.boundMs}, ` +
+        `${spans.preLexical.hit ? "HIT: lexical started before the load was called" : "not hit"}), `) +
+    `load ${ms(spans.loadMs)} (raw ${ms(spans.rawLoadMs)}), ` +
+    `embed ${ms(spans.embedMs)}, scan ${ms(spans.scanMs)} (${spans.chunksScanned} chunks), ` +
+    `merge ${ms(spans.mergeMs)}, total ${ms(spans.totalMs)}` +
+    (spans.loadSteps.length === 0
+      ? ""
+      : `; load steps, ms from load start: ${spans.loadSteps
+          .map(
+            (s) =>
+              `${s.step} ${ms(s.startMs)}-${s.endMs === null ? "unfinished" : ms(s.endMs)} ` + `(started ${s.started})`,
+          )
+          .join(", ")}`)
+  )
+}
+
+/** The semantic leg's coverage, or its degradation: lexical vault hits are kept and the run exits 3. */
+function reportVaultSemantic(result: RecallResult, json: boolean | undefined): void {
+  const leg = result.vaultSemantic
+  if (!leg) return
+  if (leg.state === "degraded") {
+    process.exitCode = 3
+    if (!json) {
+      console.log(`${YELLOW}⚠ vault semantic leg degraded, lexical vault hits kept: ${leg.cause}${RESET}`)
+      if (leg.spans) console.error(`vault semantic: ${formatVaultSemanticSpans(leg.spans)}`)
+    }
+    return
+  }
+  if (!json && leg.coverage) {
+    console.error(
+      `vault semantic: generation ${leg.generation}, ${leg.coverage.embedded} of ${leg.coverage.documents} documents embedded, ${leg.added} added` +
+        (leg.spans ? `; ${formatVaultSemanticSpans(leg.spans)}` : ""),
+    )
+  }
+}
+
 // ============================================================================
 // Main search command
 // ============================================================================
@@ -217,10 +236,11 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     include,
   } = options
   const project = resolveProjectScope(options.project)
+  // Power-user flags imply raw mode.
+  const indexedRaw = raw || !!question || !!response || !!tool || !!session || !!include
 
   if (options.until !== undefined) {
     resolveSearchWindow(since, options.until)
-    const indexedRaw = raw || !!options.snippets || !!question || !!response || !!tool || !!session || !!include
     if (!indexedRaw || regexMode || options.agent || options.debugPlan) {
       throw new Error("--until supports indexed raw search, not --grep, agent, debug-plan or synthesis")
     }
@@ -229,7 +249,6 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
 
   // Snapshot searches must not add live transcripts, vault rows, or model context.
   if (getSnapshotPath() !== null) {
-    const indexedRaw = raw || !!options.snippets || !!question || !!response || !!tool || !!session || !!include
     if (!indexedRaw || regexMode || options.agent || options.debugPlan || getVaultDbPath() !== null) {
       throw new Error(
         `Recall snapshot ${getSnapshotPath()} supports raw indexed search only; use --raw without --grep, --agent, --debug-plan or --vault-db`,
@@ -248,12 +267,6 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   const freshness = readIndexFreshness(options)
   const provenance = freshness.provenance
   if (!regexMode && provenance !== "complete" && provenance !== "snapshot") process.exitCode = 3
-
-  // Power-user flags imply raw mode. --snippets is an explicit alias for
-  // --raw — surfaces the vocabulary used by the accountly side ("snippet vs
-  // pointer" mode) for users who learned that distinction first.
-  const impliedRaw =
-    raw || !!options.snippets || !!question || !!response || !!tool || !!session || !!include || !!regexMode
 
   // Regex mode delegates to grep
   if (regexMode) {
@@ -275,7 +288,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   }
 
   // If raw/implied-raw with query → direct FTS5 search (old `bun history` behavior)
-  if (impliedRaw) {
+  if (indexedRaw) {
     rawSearch(query, {
       ...options,
       project,
@@ -311,12 +324,25 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     return
   }
 
-  const result = await recall(query, recallOpts)
+  // Normal search adds the vault semantic leg only with an explicit vault (rev23 P:70); raw, regex and agent stay FTS.
+  const result = await recall(query, { ...recallOpts, vaultSemantic: vaultDb !== null })
+  reportVaultSemantic(result, json)
   // The CLI's own verdict names its root and window on the result it prints, so a
   // stale answer says what it judged without the caller running a second tool.
   result.provenanceDetail = freshness
   reportSearchSkips(result, json)
   await formatRecallOutput(result, { json })
+  // A timed-out query model may still be loading natively, and agents wait for the process, not the output: once the
+  // output is flushed, a degraded leg ends the process (CTO 0edff0e3 fix 2).
+  if (result.vaultSemantic?.state === "degraded") {
+    await new Promise<void>((resolve) => {
+      process.stdout.write("", () => resolve())
+    })
+    await new Promise<void>((resolve) => {
+      process.stderr.write("", () => resolve())
+    })
+    process.exit()
+  }
 }
 
 async function runAgentSearch(query: string, options: SearchOptions, base: RecallOptions): Promise<void> {
@@ -555,21 +581,6 @@ function printAgentTrace(result: AgentRecallResult, debugPlan: boolean): void {
 // Recall output (synthesis mode)
 // ============================================================================
 
-/** Compatibility surface for direct refresh callers. Search no longer emits refresh notes. */
-export function emitRefreshNote(r: RefreshResult): void {
-  if (r.refreshed) {
-    const staleMin = Math.max(1, Math.round(r.staleMs / 60_000))
-    console.error(`${DIM}[recall] index was ${staleMin}m stale — refreshed (${r.refreshMs}ms) before search${RESET}`)
-    return
-  }
-  if (r.reason === "error") {
-    console.error(
-      `${YELLOW}⚠ recall: auto-refresh failed (${r.error}) — proceeding with possibly-stale index.${RESET}\n` +
-        `  Pass \`--no-refresh\` to skip this attempt, or run \`bun recall index --incremental\` manually.`,
-    )
-  }
-}
-
 async function formatRecallCost(result: RecallResult): Promise<string | undefined> {
   if (result.list_equivalent_basis !== undefined) {
     const { requireLlm } = await import("./llm-backend.ts")
@@ -757,8 +768,9 @@ function renderSynthesisFailure(result: RecallResult, diag: SynthesisDiagnostics
 
   // What DID work — never let a synthesis failure imply the search failed too.
   const searchMs = result.timing?.searchMs
+  const lexicalMs = result.timing?.lexicalMs
   console.log(
-    `${GREEN}Lexical search: OK${RESET} — found ${result.results.length} result(s)${searchMs !== undefined ? ` in ${searchMs}ms` : ""} (shown below).`,
+    `${GREEN}Lexical search: OK${RESET} — found ${result.results.length} result(s)${searchMs !== undefined ? ` in ${searchMs}ms` : ""}${lexicalMs !== undefined ? ` (lexical ${Math.round(lexicalMs)}ms)` : ""} (shown below).`,
   )
   console.log()
 

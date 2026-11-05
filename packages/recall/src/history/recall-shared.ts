@@ -6,6 +6,7 @@ import { createLogger } from "loggily"
 import type { ContentType } from "./types.ts"
 import type { IndexFreshness } from "../lib/staleness.ts"
 import type { VaultQuery } from "./vault-fts.ts"
+import type { VaultLoadStepRecorder, VaultQueryModel, VaultSemanticReceipt } from "./vault-semantic.ts"
 import type { LlmBackend, LlmCostCall, LlmCostFields } from "../lib/llm-backend.ts"
 
 // ============================================================================
@@ -73,7 +74,17 @@ export type IndexProvenanceDetail =
 
 export interface RecallOptions {
   /** Existing host backend, also forwarded by the agent's fallback path. */
-  deps?: { llm?: LlmBackend }
+  deps?: {
+    llm?: LlmBackend
+    /** The vault semantic leg's query model; production loads node-llama-cpp on RECALL_EMBED_MODEL (rev23). */
+    vaultQueryModel?: (modelPath: string, contextTokens: number, record?: VaultLoadStepRecorder) => VaultQueryModel
+    /** The query embedding's cap; absent, VAULT_SEMANTIC_TIMEOUT_MS. */
+    vaultQueryTimeoutMs?: number
+    /** The pre-lexical wait's bound in ms (default VAULT_PRE_LEXICAL_BOUND_MS); a test shortens it. */
+    vaultPreLexicalBoundMs?: number
+    /** The clock the vault leg's spans read (CTO 3a638efb D1); absent, performance.now. */
+    clock?: () => number
+  }
   limit?: number // Max results to include (default 10)
   raw?: boolean // Return raw results without LLM synthesis
   since?: string // Time filter (1h, 1d, 1w, etc.)
@@ -109,6 +120,11 @@ export interface RecallOptions {
    * Worker the binding never reached (the prompt hook's) still searches the vault.
    */
   vaultDb?: string | null
+  /**
+   * Add the vault semantic leg (@ag/recall/three-dark-search-paths): default false. Normal CLI search turns it on only
+   * with a bound vault; raw, regex and the prompt hook never do, and hook mode ignores it.
+   */
+  vaultSemantic?: boolean
 }
 
 /** A search phase one recall call may run (Phase 3). */
@@ -163,6 +179,8 @@ export interface RecallResult extends Partial<LlmCostFields> {
   calls?: LlmCostCall[]
   timing?: {
     searchMs: number
+    /** The lexical search and its synonym variants, without the vault semantic leg's wait, scan and merge. */
+    lexicalMs?: number
     llmMs?: number
     /** Each search phase's wall time in ms, so a slow run names the slow phase (@ag/tribe/25071). */
     phases?: Record<string, number>
@@ -171,6 +189,8 @@ export interface RecallResult extends Partial<LlmCostFields> {
   hookSearch?: HookSearchSummary
   /** How the vault was searched, when it was: the form that ran, its terms, and the terms no node holds (29487). */
   vaultQuery?: VaultQuery
+  /** What the vault semantic leg did, when it was asked for: degraded with its cause, or its generation and coverage. */
+  vaultSemantic?: VaultSemanticReceipt
   /** Each phase skipped rather than run, or cut short (the hook's capped window); absent when none was. */
   skipped?: RecallSkip[]
   /**

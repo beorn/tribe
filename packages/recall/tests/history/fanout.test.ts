@@ -12,7 +12,8 @@ import { Database } from "bun:sqlite"
 import { assertSingleStatement } from "@bearly/sqlite"
 import { initSchema } from "../../src/history/db-schema"
 import { searchAll, toFts5Query, type ContentSearchOptions } from "../../src/history/db-queries"
-import { fanoutSearch, mergeFanouts } from "../../src/lib/fanout"
+import { fanoutSearch, mergeFanouts, type FanoutResult } from "../../src/lib/fanout"
+import { boostedRank, retrieveCandidates } from "../../src/history/search"
 
 // ============================================================================
 // Test DB setup
@@ -479,5 +480,135 @@ describe("mergeFanouts", () => {
     expect(merged.variants).toContain("gamma")
 
     expect(merged.stats.uniqueDocs).toBeGreaterThanOrEqual(2)
+  })
+
+  // Pins: mergeFanouts' resulting rank values — best input rank per doc, re-boosted by recency, coverage first —
+  // for a small two-result-set fixture (S2 refactor guard; the test above asserts only order and hit counts).
+  test("pins merged rank values: best input rank per doc, boosted again by recency", () => {
+    const NOW = Date.parse("2026-10-20T12:00:00.000Z")
+    const now = vi.spyOn(Date, "now").mockReturnValue(NOW)
+    try {
+      const weekOld = NOW - 7 * 24 * 3600_000
+      const stats = { totalQueries: 1, rawHits: 1, uniqueDocs: 1, topCoverage: 1, medianCoverage: 1, msTotal: 0 }
+      const a: FanoutResult = {
+        variants: ["va"],
+        results: [
+          { type: "message", sessionId: "s1", sessionTitle: "S1", timestamp: weekOld, snippet: "a-s1", rank: -10 },
+          { type: "message", sessionId: "s2", sessionTitle: "S2", timestamp: NOW, snippet: "a-s2", rank: -4 },
+        ],
+        hitCounts: new Map([
+          ["message:s1", 1],
+          ["message:s2", 2],
+        ]),
+        variantHits: new Map([["va", ["message:s1", "message:s2"]]]),
+        stats,
+      }
+      const b: FanoutResult = {
+        variants: ["vb"],
+        results: [
+          { type: "message", sessionId: "s1", sessionTitle: "S1", timestamp: weekOld, snippet: "b-s1", rank: -12 },
+        ],
+        hitCounts: new Map([["message:s1", 1]]),
+        variantHits: new Map([["vb", ["message:s1"]]]),
+        stats,
+      }
+
+      const merged = mergeFanouts(a, b, 10)
+
+      // s1: best input rank -12 (from b, with b's snippet), a week old → recency factor 1/2 → -6.
+      // s2: -4, current → factor 1 → -4. Both have coverage 2, so the boosted rank orders them.
+      expect(merged.results).toEqual([
+        { type: "message", sessionId: "s1", sessionTitle: "S1", timestamp: weekOld, snippet: "b-s1", rank: -6 },
+        { type: "message", sessionId: "s2", sessionTitle: "S2", timestamp: NOW, snippet: "a-s2", rank: -4 },
+      ])
+      expect(merged.hitCounts).toEqual(
+        new Map([
+          ["message:s1", 2],
+          ["message:s2", 2],
+        ]),
+      )
+    } finally {
+      now.mockRestore()
+    }
+  })
+
+  // Pins: the existing double boost — fanoutSearch already returns recency-boosted ranks and mergeFanouts boosts
+  // them again, so a week-old doc's merged rank is a quarter of its raw rank, not a half (S2 refactor guard: keep
+  // this quirk through the rankRows consolidation; no existing test reads a merged rank value).
+  test("re-boosts already-boosted fanout ranks (existing double-boost quirk)", () => {
+    const NOW = Date.parse("2026-10-20T12:00:00.000Z")
+    const now = vi.spyOn(Date, "now").mockReturnValue(NOW)
+    try {
+      const weekOld = NOW - 7 * 24 * 3600_000
+      const db = makeDb()
+      insertSession(db, "sess-old", "Old", weekOld)
+      insertSession(db, "sess-filler", "Filler", NOW)
+      insertMessage(db, "sess-old", "doubleboostneedle once", weekOld)
+      insertMessage(db, "sess-filler", "unrelated filler words", NOW)
+
+      const round = fanoutSearch(db, ["doubleboostneedle"], { limit: 10, sinceTime: 0 })
+      const raw = retrieveCandidates({
+        db,
+        query: "doubleboostneedle",
+        messages: { limit: 5, sinceTime: 0, snippetTokens: 200, mode: "hook" },
+      }).messages.results[0]!.rank
+      const empty: FanoutResult = {
+        variants: [],
+        results: [],
+        hitCounts: new Map(),
+        variantHits: new Map(),
+        stats: { totalQueries: 0, rawHits: 0, uniqueDocs: 0, topCoverage: 0, medianCoverage: 0, msTotal: 0 },
+      }
+      const merged = mergeFanouts(round, empty, 10)
+
+      expect(raw).toBeLessThan(0)
+      expect(round.results[0]).toMatchObject({ sessionId: "sess-old", rank: raw / 2 })
+      expect(merged.results[0]).toMatchObject({ sessionId: "sess-old", rank: raw / 2 / 2 })
+    } finally {
+      now.mockRestore()
+    }
+  })
+})
+
+describe("fanoutSearch best-rank aggregation", () => {
+  // Pins: when several variants hit the same doc, the kept snippet and timestamp come from the hit with the best
+  // (lowest) RAW rank — not the first, last, or best recency-boosted hit — and the result rank is that raw rank
+  // boosted by its own timestamp (S2 refactor guard; fanout tests above assert only coverage counts and order).
+  test.each([
+    ["strong variant first", ["bestrankstrong", "bestrankweak"]],
+    ["weak variant first", ["bestrankweak", "bestrankstrong"]],
+  ])("keeps the best raw-rank hit's snippet and timestamp (%s)", (_label, variants) => {
+    const db = makeDb()
+    const now = Date.now()
+    const monthOld = now - 30 * 24 * 3600_000
+    insertSession(db, "sess-x", "X", now)
+    // Strong raw match, but a month old: recency boost would prefer the weak, current hit.
+    insertMessage(db, "sess-x", "bestrankstrong bestrankstrong bestrankstrong", monthOld)
+    insertMessage(
+      db,
+      "sess-x",
+      "bestrankweak buried in a much longer message with many other ordinary words around it today",
+      now,
+    )
+    for (let i = 0; i < 6; i++) {
+      insertSession(db, `filler-${i}`, "F", now)
+      insertMessage(db, `filler-${i}`, `ordinary filler text number ${i}`, now)
+    }
+    const rawRank = (query: string) =>
+      retrieveCandidates({ db, query, messages: { limit: 5, sinceTime: 0, snippetTokens: 200, mode: "hook" } }).messages
+        .results[0]!.rank
+    const strong = rawRank("bestrankstrong")
+    const weak = rawRank("bestrankweak")
+    // Fixture guard: raw and boosted orders disagree, so the pin can tell them apart.
+    expect(strong).toBeLessThan(weak)
+    expect(boostedRank(strong, monthOld)).toBeGreaterThan(boostedRank(weak, now))
+
+    const result = fanoutSearch(db, variants, { limit: 10, sinceTime: 0 })
+
+    expect(result.hitCounts.get("message:sess-x")).toBe(2)
+    const doc = result.results.find((r) => r.sessionId === "sess-x")!
+    expect(doc.snippet).toContain("bestrankstrong")
+    expect(doc.timestamp).toBe(monthOld)
+    expect(doc.rank).toBeCloseTo(boostedRank(strong, monthOld), 6)
   })
 })

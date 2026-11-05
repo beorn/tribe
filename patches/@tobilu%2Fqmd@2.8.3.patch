@@ -1,3 +1,21 @@
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,14 @@
+     ".": {
+       "import": "./dist/index.js",
+       "types": "./dist/index.d.ts"
++    },
++    "./store": {
++      "import": "./dist/store.js",
++      "types": "./dist/store.d.ts"
++    },
++    "./llm": {
++      "import": "./dist/llm.js",
++      "types": "./dist/llm.d.ts"
+     }
+   },
+   "bin": {
 diff --git a/dist/store.js b/dist/store.js
 --- a/dist/store.js
 +++ b/dist/store.js

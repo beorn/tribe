@@ -144,6 +144,10 @@ program
   .option("--path <file>", "Index specific transcript file")
   .option("--project-root <path>", "Project root for indexing project sources (beads, docs, memory)")
   .option("--migrate", "Run pending database schema migrations")
+  .option(
+    "--vault-seed-qmd <index>",
+    "One-time: copy complete, hash-current vault vectors from qmd's index.sqlite (needs --vault-db and RECALL_EMBED_MODEL)",
+  )
   .action(
     async (opts: {
       incremental?: boolean
@@ -154,6 +158,7 @@ program
       path?: string
       projectRoot?: string
       migrate?: boolean
+      vaultSeedQmd?: string
     }) => {
       await cmdIndex({
         ...opts,

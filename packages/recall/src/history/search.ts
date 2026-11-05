@@ -41,6 +41,7 @@ import { resolve } from "node:path"
 import type { Database } from "bun:sqlite"
 import { assertSingleStatement } from "@bearly/sqlite"
 import { searchVault, type VaultQuery } from "./vault-fts.ts"
+import type { VaultSemanticReceipt, VaultSemanticSpans } from "./vault-semantic.ts"
 
 // Re-export shared items so existing internal imports continue to work
 export { setRecallLogging, log, ONE_HOUR_MS, ONE_DAY_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
@@ -424,6 +425,37 @@ export function retrieveCandidates(request: CandidateRequest) {
 
 export type CandidateSet = ReturnType<typeof retrieveCandidates>
 
+/** One event-loop turn: timers, I/O and a started native call's completion all get to run. */
+const nextTurn = () =>
+  new Promise<void>((resolve) => {
+    setImmediate(resolve)
+  })
+
+/**
+ * The same reads as retrieveCandidates, one at a time with an event-loop turn before each, so a query-model load
+ * started before them reaches its native work and runs while they do (CTO 1082ad46). Same results, same legs order.
+ */
+export async function retrieveCandidatesYielding(
+  request: CandidateRequest,
+  turn: () => Promise<void> = nextTurn,
+): Promise<CandidateSet> {
+  const { messages, projectContent, vault, titles, ...shared } = request
+  await turn()
+  const m = retrieveCandidates({ ...shared, ...(messages ? { messages } : {}) })
+  await turn()
+  const p = retrieveCandidates({ ...shared, ...(projectContent ? { projectContent } : {}) })
+  await turn()
+  const v = retrieveCandidates({ ...shared, ...(vault ? { vault } : {}) })
+  const t = titles ? retrieveCandidates({ ...shared, titles }) : null
+  return {
+    messages: m.messages,
+    projectContent: p.projectContent,
+    vault: v.vault,
+    titles: t?.titles ?? new Map<string, string>(),
+    legs: [...m.legs, ...p.legs, ...v.legs, ...(t?.legs ?? [])],
+  }
+}
+
 // ============================================================================
 // Core recall function
 // ============================================================================
@@ -480,7 +512,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
   }
   let hookSearch: HookMessageSearch | undefined
   let vaultQuery: VaultQuery | undefined
-  const said = (): Pick<RecallResult, "hookSearch" | "skipped" | "vaultQuery"> => ({
+  let vaultSemantic: VaultSemanticReceipt | undefined
+  const said = (): Pick<RecallResult, "hookSearch" | "skipped" | "vaultQuery" | "vaultSemantic"> => ({
     ...(hookSearch === undefined
       ? {}
       : {
@@ -491,6 +524,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         }),
     ...(skipped.length === 0 ? {} : { skipped }),
     ...(vaultQuery === undefined ? {} : { vaultQuery }),
+    ...(vaultSemantic === undefined ? {} : { vaultSemantic }),
   })
 
   const db = getDb()
@@ -517,19 +551,63 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       mode,
     }
     const vaultDb = options.vaultDb ?? null
+    // The vault semantic leg (@ag/recall/three-dark-search-paths slice 3): opt-in, never in hook mode. Its module
+    // (no qmd store, no model) is loaded and its one query embedding is started here, before the synchronous lexical
+    // work (CTO 0edff0e3 fix 1); its cap is armed after that work (r2 change 1). A module that fails to load degrades
+    // the leg like any other failure, keeping the lexical hits (r2 change 2).
+    const semanticWanted = options.vaultSemantic === true && !hook && vaultDb !== null && runs("vault")
+    let semantic:
+      | {
+          ok: true
+          leg: typeof import("./vault-semantic.ts")
+          embedding: import("./vault-semantic.ts").VaultQueryEmbedding
+        }
+      | { ok: false; cause: string }
+      | null = null
+    // One clock for the leg's spans (CTO 3a638efb D1); a test passes a fake one.
+    const clock = options.deps?.clock ?? (() => performance.now())
+    const semanticStarted = clock()
+    if (semanticWanted) {
+      try {
+        const leg = await import("./vault-semantic.ts")
+        semantic = {
+          ok: true,
+          leg,
+          embedding: leg.startVaultQueryEmbedding(query, { open: options.deps?.vaultQueryModel, clock }),
+        }
+      } catch (error) {
+        semantic = {
+          ok: false,
+          cause: `the vault semantic module failed to load: ${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+    }
+    // (b), CTO 981cb56b: D5 showed loadModel and context always starting after the lexical search, whose synchronous
+    // reads hold the main thread the load's JS steps (import, getLlama) need. Wait, bounded, until the native load is
+    // called, so it runs during the search; the wait and any bound hit are in the spans. Results are unchanged.
+    const preLexicalStart = clock()
+    const preLexical =
+      semantic?.ok === true ? await semantic.embedding.untilLoadCalled(options.deps?.vaultPreLexicalBoundMs) : null
     const searchStart = Date.now()
-    const candidates = retrieveCandidates({
+    const lexicalStart = clock()
+    const candidateRequest: CandidateRequest = {
       db,
       query,
       ...(runs("messages") ? { messages: messageOpts } : {}),
       ...(!hook && options.phases === undefined ? { projectContent: projectContentOpts } : {}),
       ...(runs("vault") ? { vault: { limit: limit * 2, dbPath: vaultDb } } : {}),
       measure: phase,
-    })
+    }
+    // While the leg's query embedding is started, the lexical reads yield an event-loop turn before each, so the model
+    // load runs during them instead of after (CTO 1082ad46). With the leg off, one synchronous call as before.
+    const legStarted = semantic?.ok === true
+    const candidates = legStarted
+      ? await retrieveCandidatesYielding(candidateRequest)
+      : retrieveCandidates(candidateRequest)
     const messageResults = candidates.messages
     const projectContentResults = candidates.projectContent
     const vault = candidates.vault
-    const vaultMatches = vault?.matches ?? []
+    let vaultMatches = vault?.matches ?? []
     const msgMs = phases.messages ?? 0
     hookSearch = messageResults.hook
     if (hookSearch?.capped) skipped.push(hookSearch.capped)
@@ -574,7 +652,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       const seenContentIds = new Set(projectContentResults.results.map((r) => r.id))
 
       for (const variant of queryVariants.slice(0, 4)) {
-        const began = performance.now()
+        if (legStarted) await nextTurn()
+        const began = clock()
         try {
           try {
             const varMsgs = retrieveCandidates({ db, query: variant, messages: { ...messageOpts, limit } }).messages
@@ -610,7 +689,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
             skipped.push(rejectedQuerySkip("synonym_project_content", variant, error))
           }
         } finally {
-          phases.synonyms = (phases.synonyms ?? 0) + performance.now() - began
+          phases.synonyms = (phases.synonyms ?? 0) + clock() - began
         }
       }
 
@@ -619,8 +698,88 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       }
     }
 
+    // The lexical search ends after the synonym variants; the leg settles only then, so its load can run during
+    // every lexical read (CTO 1082ad46). A span that throws keeps the time it took.
+    const lexicalEnd = clock()
+    let legSpans: ((lexicalMs: number, totalMs: number) => VaultSemanticSpans) | undefined
+    if (semantic !== null && vaultDb !== null) {
+      let settleEnd: number | undefined
+      let scanMs = 0
+      let mergeMs = 0
+      let chunksScanned = 0
+      const timed = <T>(run: () => T, took: (ms: number) => void): T => {
+        const began = clock()
+        try {
+          return run()
+        } finally {
+          took(clock() - began)
+        }
+      }
+      try {
+        if (!semantic.ok) throw new Error(semantic.cause)
+        const embedding = semantic.embedding
+        const leg = semantic.leg
+        const vector = await embedding.settle(options.deps?.vaultQueryTimeoutMs).finally(() => {
+          settleEnd = clock()
+        })
+        const ranked = timed(
+          () => leg.rankVaultSemantic(db, vaultDb, vector, limit * 2),
+          (ms) => (scanMs = ms),
+        )
+        chunksScanned = ranked.scanned
+        const fused = timed(
+          () => leg.fuseVaultMatches(vaultMatches, ranked.hits),
+          (ms) => (mergeMs = ms),
+        )
+        vaultMatches = fused.matches
+        vaultSemantic = {
+          state: "ok",
+          generation: ranked.generation,
+          coverage: { documents: ranked.documents, embedded: ranked.embedded },
+          added: fused.added,
+        }
+      } catch (error) {
+        vaultSemantic = { state: "degraded", cause: error instanceof Error ? error.message : String(error) }
+      }
+      const marks = semantic.ok ? semantic.embedding.marks : {}
+      const end = settleEnd ?? lexicalEnd
+      // Load and embed count only the wait after the lexical search; work done during it is not shown here, and D2's
+      // leg-off run measures any slowdown it causes (CTO fa3cf2f1).
+      const after = (start: number | undefined, stop: number | undefined) =>
+        start === undefined ? 0 : Math.max(0, Math.min(stop ?? end, end) - Math.max(start, lexicalEnd))
+      legSpans = (lexicalMs, totalMs) => ({
+        moduleMs: preLexicalStart - semanticStarted,
+        preLexical,
+        lexicalMs,
+        loadMs: after(marks.loadStart, marks.loadEnd),
+        rawLoadMs: marks.loadStart === undefined ? 0 : (marks.loadEnd ?? end) - marks.loadStart,
+        embedMs: after(marks.embedStart, marks.embedEnd),
+        scanMs,
+        chunksScanned,
+        mergeMs,
+        totalMs,
+        loadSteps: (marks.steps ?? []).map((entry) => ({
+          step: entry.step,
+          startMs: entry.start - (marks.loadStart ?? entry.start),
+          endMs: entry.end === undefined ? null : entry.end - (marks.loadStart ?? entry.start),
+          started:
+            entry.start < lexicalStart
+              ? "before lexical"
+              : entry.start < lexicalEnd
+                ? "during lexical"
+                : "after lexical",
+        })),
+      })
+      phases.vault_semantic = clock() - semanticStarted
+      log(`vault semantic: ${JSON.stringify(vaultSemantic)}`)
+    }
+
     const searchMs = Date.now() - searchStart
     log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms project=${projectMs}ms)`)
+    const lexicalMs = lexicalEnd - lexicalStart
+    if (legSpans !== undefined && vaultSemantic !== undefined) {
+      vaultSemantic = { ...vaultSemantic, spans: legSpans(lexicalMs, clock() - semanticStarted) }
+    }
 
     // Title enrichment follows the lexical and synonym reads, as before.
     const sessionTitles = retrieveCandidates({ db, query: "", titles: runs("titles"), measure: phase }).titles
@@ -630,7 +789,6 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // Hook mode reads each session's depth from its candidate set, since this GROUP BY scans every all-time match
     // (14.5 s on tribe*); that depth is within the candidates, not all-time (@cto 9665a0ec). Hook mode never runs
     // the scan, even when its messages phase did not run and left no candidate set (Phase 3).
-    const corroborationStart = Date.now()
     const corroborationBegan = performance.now()
     const ftsQuery = toFts5Query(query)
     const sessionDepths = hookSearch ? new Map(hookSearch.sessionDepths) : new Map<string, number>()
@@ -640,7 +798,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
           .prepare(
             assertSingleStatement(`SELECT m.session_id, COUNT(*) as depth
            FROM messages_fts f
-           JOIN messages m ON f.rowid = m.id
+           JOIN messages m INDEXED BY idx_messages_id_session_ts ON f.rowid = m.id
            WHERE messages_fts MATCH ?
            ${untilTime === undefined ? "" : "AND m.timestamp <= ?"}
            GROUP BY m.session_id
@@ -659,10 +817,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       }
     }
     phases.corroboration = performance.now() - corroborationBegan
-    const corroborationMs = Date.now() - corroborationStart
     if (sessionDepths.size > 0) {
       const maxDepth = Math.max(...sessionDepths.values())
-      log(`corroboration: ${sessionDepths.size} sessions, max depth=${maxDepth} (${corroborationMs}ms)`)
+      log(`corroboration: ${sessionDepths.size} sessions, max depth=${maxDepth}`)
     }
 
     // Search current (live) session — not yet indexed.
@@ -791,7 +948,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         synthesis: null,
         results: [],
         durationMs: Date.now() - startTime,
-        timing: { searchMs, phases },
+        timing: { searchMs, lexicalMs, phases },
         ...said(),
       }
     }
@@ -805,7 +962,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         synthesis: null,
         results: deduped,
         durationMs: Date.now() - startTime,
-        timing: { searchMs, phases },
+        timing: { searchMs, lexicalMs, phases },
         ...said(),
       }
     }
@@ -834,7 +991,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         synthesis: null,
         results: deduped,
         durationMs: totalMs,
-        timing: { searchMs, llmMs, phases },
+        timing: { searchMs, lexicalMs, llmMs, phases },
         synthesisFailure: failure,
         calls: failure.calls ?? [],
         ...(llm ? llm.serializeCost(llm.deserializeCost(failure)) : {}),
@@ -856,7 +1013,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       durationMs: totalMs,
       calls: synthesis.calls,
       ...(llm ? llm.serializeCost(llm.deserializeCost(synthesis)) : {}),
-      timing: { searchMs, llmMs, phases },
+      timing: { searchMs, lexicalMs, llmMs, phases },
       ...said(),
     }
   } finally {

@@ -464,3 +464,39 @@ test("agent carries both rounds' bounded-search receipts in its result and trace
   expect(result.trace.rounds[1]?.variants).toEqual(["roundtwocap"])
   expect(result.results[0]?.sessionId).toBe("dense-receipt")
 })
+
+// Pins: agent results (the rows `recall --agent --json` serialises) carry only the base fields — no `line`, no
+// duplicateLine and no collapsed-copy fields — even when the indexed rows have line numbers and uuid-NULL copies
+// (S1/S2 refactor guard, the "29981" omissions in lib/fanout.ts; agent tests assert only order, receipts and trace).
+test("agent results carry no line or collapsed-copy fields", async () => {
+  mockHolder.fn = buildMockQueryModel([
+    { match: /query planner/i, content: buildPlanJson({ keywords: ["linefieldneedle"] }) },
+    { content: "synthesized" },
+  ])
+  seedCorpus({
+    sessions: [
+      { id: "line-a", title: "A", messages: ["linefieldneedle first row", "linefieldneedle second row"] },
+      { id: "line-b", title: "B", messages: [] },
+    ],
+    beads: [{ id: "line-bead", title: "Bead", content: "linefieldneedle in a bead" }],
+  })
+  const db = getDb()
+  db.prepare("UPDATE messages SET line = 40 + id").run()
+  // uuid-NULL copies of one text at one line: the shape the exact path collapses and annotates (29981).
+  for (const session of ["line-a", "line-b"]) {
+    db.prepare(
+      `INSERT INTO messages (uuid, session_id, type, content, timestamp, line) VALUES (NULL, ?, 'user', ?, ?, 9)`,
+    ).run(session, "linefieldneedle forked copy", Date.now())
+  }
+
+  const result = await recallAgent("linefieldneedle", { limit: 10, round2: "off" })
+
+  // line-b's only row is a uuid-NULL copy, so it may fold into line-a's survivor; both kinds of row must be present.
+  expect(result.results.map((r) => `${r.type}:${r.sessionId}`)).toEqual(
+    expect.arrayContaining(["bead:line-bead", "message:line-a"]),
+  )
+  for (const row of result.results) {
+    expect(Object.keys(row).sort()).toEqual(["rank", "sessionId", "sessionTitle", "snippet", "timestamp", "type"])
+  }
+  expect(JSON.stringify(result.results)).not.toMatch(/"(line|duplicateLine|collapsedCopy\w*)"/)
+})

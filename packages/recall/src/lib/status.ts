@@ -9,6 +9,11 @@ import type { Database } from "bun:sqlite"
 import { getDb, closeDb, DB_PATH, getActiveSessionsInWindow, getActivitySummary, getIndexMeta } from "../history/db"
 import { reviewMemorySystem } from "../history/recall"
 import { getVaultDbPath } from "../history/vault-fts.ts"
+import {
+  readVaultSemanticCensus,
+  vaultSemanticCensusLines,
+  type VaultSemanticCensusReading,
+} from "./vault-semantic-status.ts"
 import { requireLlm } from "./llm-backend.ts"
 import { discoverActiveSession, renderDiscoveryDiagnostics } from "./session-discovery.ts"
 import { resolveHostProjectRoot } from "./project-root.ts"
@@ -73,8 +78,16 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   const sessionDiscovery = discoverActiveSession({ cwd: process.cwd() }).diagnostics
 
   if (opts.json) {
+    let vaultSemantic: VaultSemanticCensusReading | undefined
+    if (vaultDb !== null) {
+      try {
+        vaultSemantic = await readVaultSemanticCensus(getDb(), vaultDb)
+      } finally {
+        closeDb()
+      }
+    }
     const review = await reviewMemorySystem(projectRoot, { skipLlm, skipSearchBenchmarks, vaultDb })
-    console.log(JSON.stringify({ ...review, sessionDiscovery }, null, 2))
+    console.log(JSON.stringify({ ...review, sessionDiscovery, ...(vaultSemantic ? { vaultSemantic } : {}) }, null, 2))
     return
   }
 
@@ -298,6 +311,12 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
         const shortPath = f.file_path.replace(os.homedir(), "~")
         console.log(`  ${f.count.toString().padStart(4)}x  ${shortPath}`)
       }
+      console.log()
+    }
+
+    // ── Vault semantic census (AC1: U = A + X, and I) ─────────────────────
+    if (vaultDb !== null) {
+      for (const line of vaultSemanticCensusLines(await readVaultSemanticCensus(db, vaultDb))) console.log(line)
       console.log()
     }
   } finally {
