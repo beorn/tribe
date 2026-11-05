@@ -45,7 +45,10 @@ const TERMINAL_OUTCOMES = new Set([
  * The producer's own non-terminal narration (recall/src/lib/hooks.ts `warnSkippedSteps`). Inert by contract: it
  * never closes a start, never contributes steps, and is not an unrecognized outcome.
  */
-const NON_TERMINAL_OUTCOMES = new Set(["step skipped rather than waited on"])
+const NON_TERMINAL_OUTCOMES = new Set([
+  "step skipped rather than waited on",
+  "cmdHook: no prompt in stdin — naming the event rather than exiting 0 silently",
+])
 
 export interface KilledRun {
   session: string

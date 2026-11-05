@@ -13,10 +13,11 @@
 
 import { describe, expect, test } from "vitest"
 import { spawn, spawnSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
 import { tryAcquireFlock } from "@bearly/flock"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { readHookLatencyStats } from "./hook-latency-reader.ts"
 
 const DAEMON = resolve(import.meta.dirname, "../daemon.ts")
 
@@ -35,6 +36,8 @@ function hermeticEnv(base: string): NodeJS.ProcessEnv {
     TRIBE_RECALL_ENGINE_DIR: undefined,
     DEBUG: undefined,
     DEBUG_LOG: undefined,
+    // The latency cohort needs info-level starts and terminals, independent of the test runner's threshold.
+    LOG_LEVEL: "info",
   } as NodeJS.ProcessEnv
 }
 
@@ -150,6 +153,13 @@ describe("daemon.ts hook entry", () => {
       encoding: "utf8",
     })
     expect(res.status).toBe(0)
+    // 25304: the real successful child must close its logged start, not become a false kill.
+    const stats = readHookLatencyStats(join(base, "injection-debug.jsonl"), {
+      windowStartMs: Date.now() - 60_000,
+      windowEndMs: Date.now() + 60_000,
+    })
+    expect(stats.completedRuns, readFileSync(join(base, "injection-debug.jsonl"), "utf8")).toBe(1)
+    expect(stats.killCount).toBe(0)
     // No broker boot: the hermetic runtime dir gained no tribe socket.
     let entries: string[] = []
     try {

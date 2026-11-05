@@ -18,6 +18,7 @@ const fake = vi.hoisted(() => ({
   rows: [] as Row[],
   recallResult: {} as Record<string, unknown>,
   daemonCallCount: 0,
+  drain: async (): Promise<void> => {},
 }))
 fake.home = mkdtempSync(join(realpathSync(tmpdir()), "recall-hook-daemon-"))
 
@@ -39,7 +40,7 @@ vi.mock("loggily", async (original) => {
       },
     )
   // drainOutput ends the process's stdout and stderr before the hook exits; a test must keep them open.
-  return { ...actual, createLogger: recorder, drainOutput: async () => {} }
+  return { ...actual, createLogger: recorder, drainOutput: () => fake.drain() }
 })
 vi.mock("../../../../plugins/claude/recall/lib/socket.ts", async (original) => ({
   ...(await original<typeof import("../../../../plugins/claude/recall/lib/socket.ts")>()),
@@ -63,6 +64,7 @@ afterEach(() => {
   vi.unstubAllEnvs()
   fake.rows = []
   fake.daemonCallCount = 0
+  fake.drain = async () => {}
 })
 afterAll(() => safeRemoveSync(fake.home, { within: realpathSync(tmpdir()) }))
 
@@ -189,6 +191,46 @@ describe("prompt hook executes in-process recall without daemon dial (25298)", (
     })
     return { stats, readerRows: [...fake.rows] }
   }
+
+  // 25304: a diagnostic before drain is not completion; existing seams never held the drain pending.
+  test("25304 no-prompt terminal closes its start only after output drain", async () => {
+    let release: () => void = () => {
+      throw new Error("drain was not initialized")
+    }
+    const drained = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    fake.drain = () => drained
+    vi.spyOn(process.stdin, Symbol.asyncIterator).mockImplementation(async function* () {
+      yield Buffer.from(JSON.stringify({ session_id: "no-prompt-drain", hook_event_name: "UserPromptSubmit" }))
+      return undefined
+    })
+    const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never)
+    const completion = cmdHook()
+    try {
+      await vi.waitFor(() =>
+        expect(fake.rows.some((row) => String(row.msg).startsWith("cmdHook: no prompt"))).toBe(true),
+      )
+      expect(exit).not.toHaveBeenCalled()
+      const pendingRows = fake.rows.filter((row) => row.namespace === "recall:hook:prompt")
+      expect(pendingRows.some((row) => row.msg === "no prompt in stdin")).toBe(false)
+      writeFileSync(seamLogPath, pendingRows.map(serializeProducerRow).join("\n") + "\n")
+      const pending = readHookLatencyStats(seamLogPath, {
+        windowStartMs: Date.now() - 60_000,
+        windowEndMs: Date.now() + 60_000,
+      })
+      expect(pending.completedRuns).toBe(0)
+      expect(pending.killCount).toBe(1)
+    } finally {
+      release()
+      await completion
+    }
+    expect(exit).toHaveBeenCalledWith(0)
+    const { stats, readerRows } = feedProducerRowsToReader()
+    expect(stats.completedRuns).toBe(1)
+    expect(stats.killCount).toBe(0)
+    expect(readerRows.some((row) => String(row.msg).includes("unrecognized terminal"))).toBe(false)
+  })
 
   test("27712 seam: a real success admits exactly ONE completion and no warning row", async () => {
     fake.recallResult = {

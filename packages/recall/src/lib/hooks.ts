@@ -387,7 +387,17 @@ export async function cmdHook(): Promise<void> {
         steps: roundSteps(steps),
       })
       // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
-      return drainOutput().then(() => process.exit(0))
+      return drainOutput().then(() => {
+        // The diagnostic precedes drain and cannot close a started run (25304).
+        hookLog.info?.("no prompt in stdin", {
+          event: input.hook_event_name ?? "unknown",
+          session: sessionId,
+          elapsed_ms: Date.now() - startTime,
+          steps: roundSteps(steps),
+        })
+        flushInjectionFileWriters()
+        process.exit(0)
+      })
     }
 
     // 25298: No daemon serves prompt hooks — a persistent wire loop must not
