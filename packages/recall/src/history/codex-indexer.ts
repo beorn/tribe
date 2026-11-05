@@ -556,12 +556,12 @@ export async function indexCodexTranscripts(
     .map((row) => row.id)
 
   // Filter which transcripts need export
-  const pathsToExport: { sessionId: string; paths: string[] }[] = []
+  const pathsToExport: string[][] = []
   const skippedSessionIds: string[] = []
   let skipped = 0
 
   if (options.path) {
-    pathsToExport.push({ sessionId: options.path, paths: [options.path] })
+    pathsToExport.push([options.path])
   } else {
     const storedCodexMap = new Map<string, SessionRecord>()
     if (options.incremental) {
@@ -574,7 +574,6 @@ export async function indexCodexTranscripts(
     }
 
     for (const session of catalogSessions) {
-      const sessionId = `${session.provider}:${session.nativeId}`
       if (options.full) {
         const paths: string[] = []
         if (session.status === "ambiguous") {
@@ -586,7 +585,7 @@ export async function indexCodexTranscripts(
         } else if (session.copies[0]?.path) {
           paths.push(session.copies[0].path)
         }
-        if (paths.length) pathsToExport.push({ sessionId, paths })
+        if (paths.length) pathsToExport.push(paths)
         continue
       }
 
@@ -658,7 +657,7 @@ export async function indexCodexTranscripts(
         if (allCopiesSkipped) {
           skipped++
         } else {
-          pathsToExport.push({ sessionId, paths })
+          pathsToExport.push(paths)
         }
       } else {
         const targetPath = session.canonicalPath ?? copy.path
@@ -670,7 +669,7 @@ export async function indexCodexTranscripts(
           continue
         }
         if (targetPath) {
-          pathsToExport.push({ sessionId, paths: [targetPath] })
+          pathsToExport.push([targetPath])
         }
       }
     }
@@ -694,7 +693,8 @@ export async function indexCodexTranscripts(
     }
   }
 
-  // One call per bounded batch (CTO 2026-11-05); a session's copies must stay together.
+  // Group calls toward 64 KiB (CTO 2026-11-05); a session's copies must stay together.
+  // An oversized session goes alone, retaining the existing loud OS spawn limit.
   // Count UTF-8 arguments and NULs, leaving ample kernel/environment headroom.
   const argvBudget = 64 * 1024
   const fixedArgs = ["transcript", "export", "--provider", "all", "--json"]
@@ -703,16 +703,13 @@ export async function indexCodexTranscripts(
   let exportArgs = [...fixedArgs]
   let argvBytes = fixedBytes
   for (const group of pathsToExport) {
-    const groupBytes = group.paths.reduce((bytes, p) => bytes + Buffer.byteLength(p) + 1 + 7, 0)
-    if (fixedBytes + groupBytes > argvBudget) {
-      throw new Error(`ag transcript export session ${group.sessionId} exceeds the ${argvBudget}-byte argv budget`)
-    }
-    if (argvBytes + groupBytes > argvBudget) {
+    const groupBytes = group.reduce((bytes, p) => bytes + Buffer.byteLength(p) + 1 + 7, 0)
+    if (exportArgs.length > fixedArgs.length && argvBytes + groupBytes > argvBudget) {
       exportBatches.push(exportArgs)
       exportArgs = [...fixedArgs]
       argvBytes = fixedBytes
     }
-    for (const p of group.paths) exportArgs.push("--path", p)
+    for (const p of group) exportArgs.push("--path", p)
     argvBytes += groupBytes
   }
   exportBatches.push(exportArgs)

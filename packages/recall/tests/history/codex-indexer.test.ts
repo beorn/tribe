@@ -1208,10 +1208,22 @@ console.log(JSON.stringify({ kind: "done", sessions, rows, errors: 0 }))
       }
     }, 30_000)
 
-    test("fails loud by session name when one session exceeds the argv budget", async () => {
-      const fixture = batchFixture([Array.from({ length: 80 }, (_, i) => `/fixture/${"x".repeat(1000)}/${i}.jsonl`)])
-      await expect(indexCodexTranscripts(db, fixture)).rejects.toThrow(/batch-0.*argv.*budget/i)
-      expect(existsSync(fixture.invocationsFile)).toBe(false)
+    test("exports an oversized session alone without rejecting or splitting its copies", async () => {
+      const groups = [
+        ["/fixture/before.jsonl"],
+        Array.from({ length: 80 }, (_, i) => `/fixture/${"x".repeat(1000)}/${i}.jsonl`),
+        ["/fixture/after.jsonl"],
+      ]
+      const fixture = batchFixture(groups)
+      const result = await indexCodexTranscripts(db, fixture)
+      const invocations = readFileSync(fixture.invocationsFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[])
+      expect(invocations.map((args) => args.filter((_, i) => args[i - 1] === "--path"))).toEqual(groups)
+      expect(result.sessions).toBe(3)
+      expect(result.rows).toBe(groups.flat().length * 2)
+      expect(result.indexedSessionIds).toEqual(fixture.catalog.sessions.flatMap((s) => s.copies.map((c) => c.key)))
     })
 
     test("a later batch failure aborts loudly and reports earlier committed sessions", async () => {
