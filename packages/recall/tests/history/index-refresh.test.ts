@@ -77,8 +77,13 @@ describe("Recall refresh completion", () => {
     async (key) => {
       const prior = "2000-01-01T00:00:00.000Z"
       setIndexMeta(db, "last_rebuild", prior)
-      db.exec(`CREATE TRIGGER refuse_diagnostic_metadata BEFORE INSERT ON index_meta
-        WHEN NEW.key = '${key}' BEGIN SELECT RAISE(ABORT, 'diagnostic metadata write failed'); END`)
+      if (key === "last_codex_failures") {
+        db.exec(`CREATE TRIGGER refuse_diagnostic_metadata BEFORE INSERT ON index_meta
+          WHEN NEW.key = 'last_codex_failures' BEGIN SELECT RAISE(ABORT, 'diagnostic metadata write failed'); END`)
+      } else {
+        db.exec(`CREATE TRIGGER refuse_diagnostic_metadata BEFORE INSERT ON index_meta
+          WHEN NEW.key = 'last_codex_reason_counts' BEGIN SELECT RAISE(ABORT, 'diagnostic metadata write failed'); END`)
+      }
 
       await expect(rebuildIndex(db, { incremental: true })).rejects.toThrow("diagnostic metadata write failed")
       expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
