@@ -1,7 +1,3 @@
-// Resolved by the hh-dev workspace, not a declared dependency: this file sits at the repo root,
-// outside tribe's own tsconfig and CI typecheck, so only the dev workspace run checks it (@cto).
-import type { HabModule } from "@hab/config"
-
 export default {
   name: "tribe",
   habitants: {
@@ -66,4 +62,4 @@ export default {
       sourceDigest: "bun-closure" as const,
     },
   },
-} satisfies HabModule
+}
