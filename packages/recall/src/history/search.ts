@@ -789,7 +789,6 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // Hook mode reads each session's depth from its candidate set, since this GROUP BY scans every all-time match
     // (14.5 s on tribe*); that depth is within the candidates, not all-time (@cto 9665a0ec). Hook mode never runs
     // the scan, even when its messages phase did not run and left no candidate set (Phase 3).
-    const corroborationStart = Date.now()
     const corroborationBegan = performance.now()
     const ftsQuery = toFts5Query(query)
     const sessionDepths = hookSearch ? new Map(hookSearch.sessionDepths) : new Map<string, number>()
@@ -818,10 +817,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       }
     }
     phases.corroboration = performance.now() - corroborationBegan
-    const corroborationMs = Date.now() - corroborationStart
     if (sessionDepths.size > 0) {
       const maxDepth = Math.max(...sessionDepths.values())
-      log(`corroboration: ${sessionDepths.size} sessions, max depth=${maxDepth} (${corroborationMs}ms)`)
+      log(`corroboration: ${sessionDepths.size} sessions, max depth=${maxDepth} (${Math.round(phases.corroboration)}ms)`)
     }
 
     // Search current (live) session — not yet indexed.
