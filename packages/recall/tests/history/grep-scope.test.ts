@@ -47,6 +47,8 @@ describe("recall regex mode scope", () => {
   let errSpy: ReturnType<typeof vi.spyOn>
 
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(new Date(2026, 9, 10, 12))
     previousClaudeDir = process.env.CLAUDE_DIR
     previousExitCode = process.exitCode
     process.exitCode = undefined
@@ -59,6 +61,7 @@ describe("recall regex mode scope", () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     logSpy.mockRestore()
     errSpy.mockRestore()
     if (previousClaudeDir === undefined) delete process.env.CLAUDE_DIR
@@ -69,6 +72,43 @@ describe("recall regex mode scope", () => {
 
   const stdout = () => logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n")
   const stderr = () => errSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n")
+
+  test.each([false, true])("filters message timestamps before the cap (raw=%s)", async (raw) => {
+    // Both aliases share the same window contract. Older matching records must
+    // not hide the inclusive boundary when the result limit is one.
+    const day = 24 * 60 * 60 * 1000
+    for (const since of ["2026-09-20T12:00:00.000Z", "today", "24h", undefined, "all"]) {
+      const boundary =
+        since === "today"
+          ? new Date(2026, 9, 10).getTime()
+          : since === undefined
+            ? Date.now() - 30 * day
+            : since === "24h"
+              ? Date.now() - day
+              : Date.parse("2026-09-20T12:00:00.000Z")
+      const file = writeTranscript(claudeDir, "proj-alpha", SESSION_A, "replaced")
+      writeFileSync(
+        file,
+        [-1, 0, 1]
+          .map((offset) =>
+            JSON.stringify({
+              type: "user",
+              timestamp: new Date(boundary + offset).toISOString(),
+              message: { role: "user", content: `${TOKEN} offset ${offset}` },
+            }),
+          )
+          .join("\n") + "\n",
+      )
+      logSpy.mockClear()
+      await cmdSearch(TOKEN, { grep: true, raw, since, session: SESSION_A, json: true, limit: "1", refresh: false })
+      const envelope = JSON.parse(stdout()) as { total: number; results: { timestamp: string }[] }
+      expect(envelope.total, `since=${since}`).toBe(1)
+      expect(
+        envelope.results.map((r) => r.timestamp),
+        `since=${since}`,
+      ).toEqual([new Date(boundary + (since === "all" ? -1 : 0)).toISOString()])
+    }
+  })
 
   test("honours --session in regex mode: a scoped query never answers wider than asked", async () => {
     await cmdSearch(TOKEN, { grep: true, raw: true, session: SESSION_A, limit: "50", refresh: false })
