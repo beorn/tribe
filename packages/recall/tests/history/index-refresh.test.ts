@@ -71,6 +71,20 @@ afterEach(() => {
 })
 
 describe("Recall refresh completion", () => {
+  /** @failure Diagnostic metadata failed after publishing a fresh success marker. */
+  test.each(["last_codex_failures", "last_codex_reason_counts"])(
+    "%s write failure preserves the prior successful rebuild marker",
+    async (key) => {
+      const prior = "2000-01-01T00:00:00.000Z"
+      setIndexMeta(db, "last_rebuild", prior)
+      db.exec(`CREATE TRIGGER refuse_diagnostic_metadata BEFORE INSERT ON index_meta
+        WHEN NEW.key = '${key}' BEGIN SELECT RAISE(ABORT, 'diagnostic metadata write failed'); END`)
+
+      await expect(rebuildIndex(db, { incremental: true })).rejects.toThrow("diagnostic metadata write failed")
+      expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
+    },
+  )
+
   /** @failure Explicit Claude-only rebuilds required Ag and could prune excluded provider history (26469). */
   test.each(["full", "incremental"] as const)(
     "explicit provider exclusion needs no Ag and retains all provider rows in %s mode",

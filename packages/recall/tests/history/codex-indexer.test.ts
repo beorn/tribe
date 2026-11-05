@@ -1057,6 +1057,80 @@ if (args.includes("list")) {
   })
 
   describe("Batching & Multi-Session Atomic Transactions", () => {
+    // Intentional per-record skips must stay counted without a retained object per record.
+    // The second export exits 1 without its own skips: compatibility depends on the shared count.
+    test.each([false, true])(
+      "skip-only exit 1 retains counts without failure rows across byte batches=%s",
+      async (separateBatches) => {
+        const paths = [0, 1].map((i) => `/fixture/skip-${i}-${"x".repeat(separateBatches ? 35_000 : 1)}.jsonl`)
+        const skippedRecords = 512
+        const catalog: CodexCatalog = {
+          sessions: paths.map((path, i) => ({
+            kind: "session",
+            provider: "codex",
+            nativeId: `skip-${i}`,
+            key: `codex:skip-${i}`,
+            canonicalPath: path,
+            status: "canonical",
+            copies: [
+              {
+                path,
+                key: `codex:skip-${i}`,
+                account: null,
+                sizeBytes: 100,
+                mtimeMs: 1000,
+                lastEventAtMs: 2000,
+                decision: "canonical",
+              },
+            ],
+          })),
+          discovered: 2,
+          canonical: 2,
+          ambiguous: 0,
+          stale: 0,
+          invalid: 0,
+          failures: [],
+        }
+        const catalogFile = join(tempDir, "skipped-record-catalog.json")
+        const invocationsFile = join(tempDir, "skipped-record-invocations.jsonl")
+        writeFileSync(catalogFile, JSON.stringify(catalog))
+        const agBin = makeMockAg(`
+import { appendFileSync, readFileSync } from "node:fs"
+const catalog = JSON.parse(readFileSync(${JSON.stringify(catalogFile)}, "utf8"))
+const args = process.argv.slice(2)
+const paths = new Set(args.filter((_, i) => args[i - 1] === "--path"))
+appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify([...paths]) + "\\n")
+console.log(JSON.stringify({ kind: "schema", version: 1 }))
+let sessions = 0
+for (const session of catalog.sessions) {
+  if (!paths.has(session.canonicalPath)) continue
+  const keys = session.copies.map(copy => copy.key)
+  console.log(JSON.stringify({ kind: "session", provider: "codex", nativeId: session.nativeId,
+    path: session.canonicalPath, copies: session.copies, keys, sizeBytes: 100, mtimeMs: 1000, lastEventAtMs: 2000 }))
+  const skipped = session.nativeId === "skip-0" ? ${skippedRecords} : 0
+  for (let line = 1; line <= skipped; line++) {
+    console.log(JSON.stringify({ kind: "skipped", reason: "unprojected-type", line }))
+  }
+  console.log(JSON.stringify({ kind: "end", nativeId: session.nativeId, keys, status: "complete", rows: 0, skipped }))
+  sessions++
+}
+console.log(JSON.stringify({ kind: "done", sessions, rows: 0, errors: 0 }))
+process.exitCode = 1
+`)
+
+        const result = await indexCodexTranscripts(db, { agBin, catalog })
+        expect(result.reasonCounts["unprojected-type"]).toBe(skippedRecords)
+        expect(result.failures.length).toBe(0)
+        expect(result.sessions).toBe(2)
+        const calls = readFileSync(invocationsFile, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as string[])
+        expect(calls).toHaveLength(separateBatches ? 2 : 1)
+        expect(calls.flat()).toEqual(paths)
+      },
+    )
+
     function batchFixture(groups: string[][], failSecondBatch = false) {
       const invocationsFile = join(tempDir, "batch-invocations.jsonl")
       const catalog: CodexCatalog = {
@@ -2043,7 +2117,10 @@ if (args.includes("list")) {
 `)
 
       const res = await indexCodexTranscripts(db, { agBin: mock })
-      expect(res.failures).toHaveLength(3)
+      expect(res.failures.map(({ kind, reason }) => ({ kind, reason }))).toEqual([
+        { kind: "unreadable", reason: "bad-decompression" },
+        { kind: "error", reason: "network-timeout" },
+      ])
       expect(res.reasonCounts["no-text"]).toBe(1)
       expect(res.reasonCounts["bad-decompression"]).toBe(1)
       expect(res.reasonCounts["network-timeout"]).toBe(1)

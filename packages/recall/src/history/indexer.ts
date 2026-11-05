@@ -1460,8 +1460,6 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     if (prunedCount > 0) {
       setIndexMeta(db, "total_pruned", String(prunedCount))
     }
-    // Publish success last, including after completion metadata writes.
-    setIndexMeta(db, "last_rebuild", new Date().toISOString())
   }
 
   setIndexMeta(db, "last_codex_failures", JSON.stringify(codexFailures))
@@ -1469,6 +1467,9 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
 
   // A7: Optimize SQLite query planner stats after indexing completes
   db.run("PRAGMA optimize;")
+
+  // Publish success only after all completion and diagnostic writes have succeeded.
+  if (!options.path) setIndexMeta(db, "last_rebuild", new Date().toISOString())
 
   return {
     files: totalFiles,

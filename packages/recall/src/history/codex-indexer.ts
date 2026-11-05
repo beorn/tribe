@@ -525,6 +525,7 @@ export async function indexCodexTranscripts(
   let ambiguous = 0
   const failures: CodexFailureRecord[] = []
   const reasonCounts: Record<string, number> = {}
+  let skippedRecordCount = 0
   let failedProviders: ("codex" | "grok" | "agy")[] = []
 
   if (!options.path) {
@@ -1032,13 +1033,7 @@ export async function indexCodexTranscripts(
         } else if (record.kind === "skipped") {
           const reason = String(record.reason ?? "unknown-skip")
           reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
-          failures.push({
-            kind: "skipped",
-            path: (record.path as string) || (currentSession?.path ?? ""),
-            reason,
-            line: typeof record.line === "number" ? record.line : undefined,
-            timestamp: Date.now(),
-          })
+          skippedRecordCount++
         } else if (record.kind === "unreadable") {
           const reason = String(record.reason ?? "unknown-unreadable")
           reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
@@ -1337,7 +1332,8 @@ export async function indexCodexTranscripts(
           reject(err)
           return
         }
-        const hasLedgeredIssues = failures.length > 0 || batchUnreadableCount > 0 || batchErrorCount > 0
+        const hasLedgeredIssues =
+          failures.length > 0 || skippedRecordCount > 0 || batchUnreadableCount > 0 || batchErrorCount > 0
         if (code !== 0 && !(code === 1 && hasLedgeredIssues)) {
           const failureDetails =
             failures.length > 0
