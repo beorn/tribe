@@ -1144,7 +1144,7 @@ console.log(JSON.stringify({ kind: "done", sessions, rows, errors: 0 }))
       const result = await indexCodexTranscripts(db, { ...fixture, incremental: true })
       expect(result.skipped).toBe(2)
       expect(result.sessions).toBe(4)
-      const args: string[] = JSON.parse(readFileSync(fixture.invocationsFile, "utf8").trim())
+      const args = JSON.parse(readFileSync(fixture.invocationsFile, "utf8").trim()) as string[]
       expect(args.filter((_, i) => args[i - 1] === "--path")).toEqual(
         fixture.catalog.sessions.slice(2).map((s) => s.copies[0]!.path),
       )
