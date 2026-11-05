@@ -1270,7 +1270,7 @@ console.log(JSON.stringify({ kind: "done", sessions, rows, errors: 0 }))
         "fixture catalog issue": 1,
         "fixture skipped event": invocations.length,
       })
-      expect(result.failures).toHaveLength(invocations.length + 1)
+      expect(result.failures).toEqual(fixture.catalog.failures)
       expect(result.retainedSessionIds).toEqual(["grok:retained"])
       expect(result.indexedSessionIds).toEqual(fixture.catalog.sessions.flatMap((s) => s.copies.map((c) => c.key)))
       expect(progress).toEqual(Array.from({ length: groups.length }, (_, i) => i + 1))
