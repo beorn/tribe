@@ -1254,7 +1254,10 @@ console.log(JSON.stringify({ kind: "done", sessions, rows, errors: 0 }))
       expect(result.rows).toBe(4) // Each copy contributes one text row and one tool row.
       expect(result.indexedSessionIds.sort()).toEqual(session.copies.map((copy) => copy.key).sort())
       expect(db.prepare("SELECT id FROM sessions ORDER BY id").all()).toEqual(
-        session.copies.map((copy) => copy.key).sort().map((id) => ({ id })),
+        session.copies
+          .map((copy) => copy.key)
+          .sort()
+          .map((id) => ({ id })),
       )
       expect(getSession(db, "codex:batch-0")).toBeNull()
 
