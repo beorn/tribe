@@ -122,8 +122,8 @@ type OneShotRpcOutcome = { result: unknown } | { error: { code: number; message:
 const MANAGED_PENDING_TOKEN = launchToken("sid-dev2", "@dev/2")
 
 async function runManagedPendingCliAgainst(
-  outcomeFor: (request: OneShotRpcRequest) => OneShotRpcOutcome,
-  options: { args?: string[]; token?: string } = {},
+  outcomeFor: (request: OneShotRpcRequest) => OneShotRpcOutcome | undefined,
+  options: { args?: string[]; token?: string; timeoutMs?: number } = {},
 ): Promise<{
   result: Awaited<ReturnType<typeof runCliAsync>>
   calls: Array<{ method: string; params?: Record<string, unknown> }>
@@ -140,7 +140,7 @@ async function runManagedPendingCliAgainst(
         const request = JSON.parse(buffer.slice(0, newline)) as OneShotRpcRequest
         buffer = buffer.slice(newline + 1)
         calls.push({ method: request.method, params: request.params })
-        let outcome: OneShotRpcOutcome
+        let outcome: OneShotRpcOutcome | undefined
         if (options.token !== undefined && request.method === "register") {
           serviceRegistration = request.params
           outcome = {
@@ -174,6 +174,7 @@ async function runManagedPendingCliAgainst(
             },
           }
         } else outcome = outcomeFor(request)
+        if (outcome === undefined) continue // Deliberately unanswered business request.
         socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, ...outcome })}\n`)
       }
     })
@@ -187,12 +188,16 @@ async function runManagedPendingCliAgainst(
         resolveListen()
       })
     })
-    const result = await runCliAsync(options.args ?? ["pending", "--json"], {
-      ...process.env,
-      TRIBE_SOCKET: socketPath,
-      TRIBE_NO_AUTOSTART: "1",
-      HAB_ID_TOKEN: options.token ?? MANAGED_PENDING_TOKEN,
-    })
+    const result = await runCliAsync(
+      options.args ?? ["pending", "--json"],
+      {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NO_AUTOSTART: "1",
+        HAB_ID_TOKEN: options.token ?? MANAGED_PENDING_TOKEN,
+      },
+      { timeoutMs: options.timeoutMs },
+    )
     return { result, calls }
   } finally {
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
@@ -789,6 +794,61 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  /** @failure A later managed business-call deadline must not become a successful empty logical timeout.
+   * The silent-daemon case below stops at cli_protocol and never exercises chunk baseline or business expiry.
+   * @level l1
+   * @consumer managed inbox-wait CLI callers (21739); test-only fake socket, no production seam.
+   */
+  it("fails loudly when a managed business chunk goes silent after a completed chunk", async () => {
+    let chunks = 0
+    const { result, calls } = await runManagedPendingCliAgainst(
+      (request) => {
+        if (request.method === "cli_protocol") return { result: { protocol_version: TRIBE_PROTOCOL_VERSION } }
+        if (request.method !== "cli_inbox_wait_by_launch_v1") {
+          return { error: { code: -32601, message: `unexpected method ${request.method}` } }
+        }
+        if (++chunks > 1) return undefined
+        return {
+          result: {
+            status: "timeout",
+            session: "@dev/2",
+            unread_count: 0,
+            oldest_unread_age_min: 0,
+            oldest_unread_ts: 0,
+            waited_ms: 30_000,
+            effective_timeout_ms: 30_000,
+            timed_out: true,
+            aborted: false,
+            baseline_seq: 37,
+            attention: {
+              actionable_unread: [],
+              pending_balls: [],
+              pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
+            },
+          },
+        }
+      },
+      { args: ["inbox-wait", "--timeout", "5m", "--json"], timeoutMs: 60_000 },
+    )
+
+    expect(result.signal).toBeNull()
+    expect(result.code).toBe(1)
+    expect(result.stdout).toBe("")
+    expect(result.stderr).toContain("Request cli_inbox_wait_by_launch_v1 timed out after 35000ms")
+    expect(result.stderr).toContain("TRIBE_DAEMON_CALL_TIMEOUT")
+    expect(calls.map((call) => call.method)).toEqual([
+      "cli_protocol",
+      "cli_inbox_wait_by_launch_v1",
+      "cli_protocol",
+      "cli_inbox_wait_by_launch_v1",
+    ])
+    const waits = calls.filter((call) => call.method === "cli_inbox_wait_by_launch_v1")
+    expect(waits[0]?.params).toMatchObject({ timeout_ms: 30_000 })
+    expect(waits[0]?.params).not.toHaveProperty("after_seq")
+    expect(waits[1]?.params).toMatchObject({ timeout_ms: 30_000, after_seq: 37 })
+    // The helper's awaited server.close also proves both chunk connections were closed.
+  }, 90_000)
 
   it("fails loudly by the client deadline when the inbox-wait daemon stays silent", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-silent-"))

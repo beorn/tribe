@@ -3964,6 +3964,104 @@ describe("24284 — a transport that closes while the read is in flight must not
     } as JsonRpcRequest
   }
 
+  /** @failure A deferred identity verdict is not an armed inbox waiter (21739).
+   * Existing in-flight read tests use the raw pausable verifier and cannot establish the production wait bound.
+   * @level l3
+   * @consumer managed CLI wait through the actual dispatcher, bounded verifier and mailbox store.
+   */
+  it("refuses deferred managed wait admission at the production verifier bound without a timeout receipt", async () => {
+    vi.useFakeTimers()
+    const gate = pausableVerifier()
+    const harness = createDispatcherHarness({ identityVerifier: boundedIdentityVerifier(gate.verifier) })
+    cleanup = harness.dispose
+    try {
+      const client = harness.connectClient()
+      await registerSeat(harness, client.connId)
+      await vi.advanceTimersByTimeAsync(30_001) // Expire the production verifier cache.
+      gate.pause()
+      const startedAt = Date.now()
+      const pending = harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "wait-deferred-admission",
+          method: "cli_inbox_wait_by_launch_v1",
+          params: { launch_id: "sid-dev7", id_token: token, timeout_ms: 30_000 },
+        },
+        client.connId,
+      )
+      await vi.advanceTimersByTimeAsync(1_000)
+      const response = JSON.parse(await pending)
+      expect(Date.now() - startedAt).toBe(1_000)
+      expect(response).toMatchObject({
+        error: { code: -32003, data: { kind: "unauthenticated", reason: "identity-undecided" } },
+      })
+      expect(response).not.toHaveProperty("result")
+      expect(harness.mailboxAttentionReadAt("@dev/7")).toBeNull()
+    } finally {
+      gate.resume()
+      await vi.advanceTimersByTimeAsync(0)
+      vi.useRealTimers()
+    }
+  })
+
+  /** @failure The armed waiter's timeout starts after verified admission, not at RPC entry (21739).
+   * A silent fake socket cannot establish either daemon phase or the mailbox receipt's timing.
+   * @level l3
+   * @consumer managed CLI wait through the actual dispatcher and inbox wait manager.
+   */
+  it("arms the managed wait duration only after deferred admission completes", async () => {
+    vi.useFakeTimers()
+    const gate = pausableVerifier()
+    const harness = createDispatcherHarness({ identityVerifier: boundedIdentityVerifier(gate.verifier) })
+    cleanup = harness.dispose
+    try {
+      const client = harness.connectClient()
+      await registerSeat(harness, client.connId)
+      await vi.advanceTimersByTimeAsync(30_001)
+      gate.pause()
+      const startedAt = Date.now()
+      let completed = false
+      const pending = harness.dispatcher
+        .handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: "wait-after-admission",
+            method: "cli_inbox_wait_by_launch_v1",
+            params: { launch_id: "sid-dev7", id_token: token, timeout_ms: 30_000 },
+          },
+          client.connId,
+        )
+        .then((response) => {
+          completed = true
+          return response
+        })
+      await vi.advanceTimersByTimeAsync(500)
+      expect(completed).toBe(false)
+      expect(harness.mailboxAttentionReadAt("@dev/7")).toBeNull()
+      gate.resume()
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(29_999)
+      expect(completed).toBe(false)
+      expect(harness.mailboxAttentionReadAt("@dev/7")).toBeNull()
+      await vi.advanceTimersByTimeAsync(1)
+      const result = parseResult<InboxWaitResult & { baseline_seq: number }>(await pending)
+      expect(result).toMatchObject({
+        session: "@dev/7",
+        timed_out: true,
+        aborted: false,
+        waited_ms: 30_000,
+        effective_timeout_ms: 30_000,
+        baseline_seq: 0,
+      })
+      expect(Date.now() - startedAt).toBe(30_500)
+      expect(harness.mailboxAttentionReadAt("@dev/7")).toBe(Date.now())
+    } finally {
+      gate.resume()
+      await vi.advanceTimersByTimeAsync(0)
+      vi.useRealTimers()
+    }
+  })
+
   it("leaves the cursor parked when the socket closes while the one-shot read is in flight", async () => {
     const gate = pausableVerifier()
     const harness = createDispatcherHarness({ identityVerifier: gate.verifier })
