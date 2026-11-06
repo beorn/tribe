@@ -11,6 +11,7 @@ export interface VaultNode {
   fsPath: string
   title: string
   content: string
+  fstype?: string
 }
 
 /** Write a vault store holding `nodes` at `<dir>/state.db` and return its path. */
@@ -19,15 +20,22 @@ export function makeKmVault(dir: string, nodes: VaultNode[]): string {
   const db = new Database(path)
   try {
     for (const sql of [
-      "CREATE TABLE nodes (rowid INTEGER PRIMARY KEY, id TEXT, parent_id TEXT, fs_path TEXT, name TEXT, title TEXT, content TEXT)",
+      "CREATE TABLE nodes (rowid INTEGER PRIMARY KEY, id TEXT, parent_id TEXT, fstype TEXT, fs_path TEXT, name TEXT, title TEXT, content TEXT)",
       "CREATE VIRTUAL TABLE nodes_fts USING fts5(id, name, title, content, content='nodes', content_rowid='rowid', prefix='2,3,4', tokenize='unicode61 tokenchars ''@#+~''')",
       "CREATE TRIGGER nodes_ai AFTER INSERT ON nodes BEGIN INSERT INTO nodes_fts(rowid, id, name, title, content) VALUES (new.rowid, new.id, new.name, new.title, new.content); END",
     ]) {
       db.exec(assertSingleStatement(sql))
     }
-    const insert = db.prepare("INSERT INTO nodes (id, fs_path, name, title, content) VALUES (?, ?, ?, ?, ?)")
+    const insert = db.prepare("INSERT INTO nodes (id, fstype, fs_path, name, title, content) VALUES (?, ?, ?, ?, ?, ?)")
     for (const node of nodes) {
-      insert.run(node.id, node.fsPath, node.id.split("/").at(-1) ?? node.id, node.title, node.content)
+      insert.run(
+        node.id,
+        node.fstype ?? "mdfile",
+        node.fsPath,
+        node.id.split("/").at(-1) ?? node.id,
+        node.title,
+        node.content,
+      )
     }
   } finally {
     db.close()

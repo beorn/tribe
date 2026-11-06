@@ -716,7 +716,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       try {
         if (!semantic.ok) throw new Error(semantic.cause)
         const embedding = semantic.embedding
-        const leg = semantic.leg
+        const leg: typeof import("./vault-semantic.ts") = semantic.leg
         const vector = await embedding.settle(options.deps?.vaultQueryTimeoutMs).finally(() => {
           settleEnd = clock()
         })
@@ -726,7 +726,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         )
         chunksScanned = ranked.scanned
         const fused = timed(
-          () => leg.fuseVaultMatches(vaultMatches, ranked.hits),
+          () => leg.fuseVaultMatches(vaultMatches, ranked.hits, leg.readVaultPhraseHolds(vaultDb, query, vaultMatches)),
           (ms) => (mergeMs = ms),
         )
         vaultMatches = fused.matches

@@ -10,6 +10,8 @@
  * vault candidate exists; any failure keeps the lexical hits and names its cause; the hook and an unset option never
  * load a model. CTO r2 (b7e7f718) changes 1-2: the 5 s cap is the latency the leg adds after the lexical search, so it
  * is armed after that search; a leg module that fails to load degrades, never failing the search.
+ * 32520 (rev23 P:72 revised, @cto arm E ruling): a lexical document holding the query as a phrase keeps its better rank
+ * and the window never cuts it; an empty held set gives the old output; a failed phrase read degrades with its cause.
  * Gap: no test reads vault_doc_embed at query time or composes a second vault ranking in recall().
  * Fixtures: a private km vault (nodes + nodes_fts) and an in-memory index; the query model is a fixture.
  */
@@ -178,6 +180,31 @@ describe("the vault semantic leg in recall()", () => {
     const types = fused.results.map((r) => r.type)
     expect(types.indexOf("message")).toBeGreaterThan(types.indexOf("vault"))
     expect(types.indexOf("message")).toBeLessThan(types.lastIndexOf("vault"))
+  })
+
+  test("a phrase query runs the hold and stays ok; a failed hold read degrades with its cause and the lexical list stands", async () => {
+    await publish()
+    const held = await run({ query: "zebracorn gamma" })
+    expect(held.vaultSemantic).toMatchObject({ state: "ok" })
+    expect(vaultHits(held)).toContain("c.md")
+
+    await publish()
+    const lexical = await run({ query: "zebracorn gamma", vaultSemantic: false })
+    vi.resetModules()
+    vi.doMock("../../src/history/vault-semantic", async (actual) => ({
+      ...(await actual<typeof import("../../src/history/vault-semantic")>()),
+      readVaultPhraseHolds: () => {
+        throw new Error("phrase read failed")
+      },
+    }))
+    try {
+      await publish()
+      const failed = await run({ query: "zebracorn gamma" })
+      expect(failed.vaultSemantic).toMatchObject({ state: "degraded", cause: "phrase read failed" })
+      expect(vaultHits(failed)).toEqual(vaultHits(lexical))
+    } finally {
+      vi.doUnmock("../../src/history/vault-semantic")
+    }
   })
 
   test("no lexical vault candidate means the semantic leg adds nothing", async () => {
@@ -594,5 +621,79 @@ describe("the vault semantic leg in recall()", () => {
     // The hook shape: no project content.
     const hook = { db, query: "zebracorn", messages, vault }
     expect(await retrieveCandidatesYielding(hook)).toEqual(retrieveCandidates(hook))
+  })
+})
+
+describe("the phrase hold (32520, rev23 P:72)", () => {
+  const match = (id: string, rank: number) => ({ id, fsPath: id, name: null, title: id, snippet: id, rank })
+  const lexical = [
+    match("first", -30),
+    match("exact", -19),
+    match("third", -2.3),
+    match("fourth", -2.2),
+    match("both", -1.9),
+    match("sixth", -1.8),
+  ]
+  const semantic = ["S1", "S2", "both"].map((fsPath, i) => ({ fsPath, title: fsPath, score: 0.5 - i / 10 }))
+  const shape = (matches: { id: string; rank: number }[]) => matches.map((m) => [m.id, m.rank])
+
+  test("a held document keeps its own better rank, a held document past the window is not cut, others keep the slot", async () => {
+    const { fuseVaultMatches } = await import("../../src/history/vault-semantic")
+    const fused = fuseVaultMatches(lexical, semantic, new Set(["exact", "sixth"]))
+    expect(shape(fused.matches)).toEqual([
+      ["both", -30],
+      ["first", -19],
+      ["S1", -2.3],
+      ["exact", -19],
+      ["S2", -1.9],
+      ["third", -1.8],
+      ["sixth", -1.8],
+    ])
+  })
+
+  test("an empty held set gives the plain fusion, and a semantic-only document never holds", async () => {
+    const { fuseVaultMatches } = await import("../../src/history/vault-semantic")
+    const plain = fuseVaultMatches(lexical, semantic)
+    expect(shape(plain.matches)).toEqual([
+      ["both", -30],
+      ["first", -19],
+      ["S1", -2.3],
+      ["exact", -2.2],
+      ["S2", -1.9],
+      ["third", -1.8],
+    ])
+    expect(fuseVaultMatches(lexical, semantic, new Set())).toEqual(plain)
+    expect(fuseVaultMatches(lexical, semantic, new Set(["S1"]))).toEqual(plain)
+  })
+
+  test("added counts the semantic-only documents in the returned list", async () => {
+    const { fuseVaultMatches } = await import("../../src/history/vault-semantic")
+    const fused = fuseVaultMatches(lexical, semantic, new Set(["exact", "sixth"]))
+    const returned = fused.matches.filter((m) => !lexical.some((l) => l.id === m.id))
+    expect(fused.added).toBe(returned.length)
+    expect(fused.added).toBe(2)
+  })
+
+  test("the statement holds index-token phrases only, inside the pool, never a folder", async () => {
+    const { makeKmVault } = await import("../helpers/km-vault")
+    const { readVaultPhraseHolds } = await import("../../src/history/vault-semantic")
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "recall-vault-hold-")))
+    try {
+      const nodes = [
+        { id: "hyphen", fsPath: "hyphen.md", title: "t", content: "the Fast-Track route" },
+        { id: "plural", fsPath: "plural.md", title: "t", content: "task list items and fast road track" },
+        { id: "folder", fsPath: "fast track notes", title: "fast track", content: "fast track", fstype: "folder" },
+        { id: "outside", fsPath: "outside.md", title: "t", content: "fast track" },
+      ]
+      const vault = makeKmVault(root, nodes)
+      const pool = ["hyphen", "plural", "folder"].map((id) => match(id, -1))
+      expect([...readVaultPhraseHolds(vault, "fast track", pool)]).toEqual(["hyphen"])
+      expect([...readVaultPhraseHolds(vault, "task list item", pool)]).toEqual([])
+      expect([...readVaultPhraseHolds(vault, "task list items", pool)]).toEqual(["plural"])
+      expect([...readVaultPhraseHolds(vault, "fast", pool)]).toEqual([])
+      expect([...readVaultPhraseHolds(vault, 'fast "track', pool)]).toEqual(["hyphen"])
+    } finally {
+      safeRemoveSync(root, { within: tmpdir() })
+    }
   })
 })
