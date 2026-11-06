@@ -800,55 +800,73 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
    * @level l1
    * @consumer managed inbox-wait CLI callers (21739); test-only fake socket, no production seam.
    */
-  it("fails loudly when a managed business chunk goes silent after a completed chunk", async () => {
-    let chunks = 0
-    const { result, calls } = await runManagedPendingCliAgainst(
-      (request) => {
-        if (request.method === "cli_protocol") return { result: { protocol_version: TRIBE_PROTOCOL_VERSION } }
-        if (request.method !== "cli_inbox_wait_by_launch_v1") {
-          return { error: { code: -32601, message: `unexpected method ${request.method}` } }
-        }
-        if (++chunks > 1) return undefined
-        return {
-          result: {
-            status: "timeout",
-            session: "@dev/2",
-            unread_count: 0,
-            oldest_unread_age_min: 0,
-            oldest_unread_ts: 0,
-            waited_ms: 30_000,
-            effective_timeout_ms: 30_000,
-            timed_out: true,
-            aborted: false,
-            baseline_seq: 37,
-            attention: {
-              actionable_unread: [],
-              pending_balls: [],
-              pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
+  it.each(["recovered", "silent"])(
+    "keeps a later managed business gap %s after a completed chunk",
+    async (mode) => {
+      let chunks = 0
+      const { result, calls } = await runManagedPendingCliAgainst(
+        (request) => {
+          if (request.method === "cli_protocol") return { result: { protocol_version: TRIBE_PROTOCOL_VERSION } }
+          if (request.method !== "cli_inbox_wait_by_launch_v1") {
+            return { error: { code: -32601, message: `unexpected method ${request.method}` } }
+          }
+          ++chunks
+          if (chunks > 1 && mode === "silent") return undefined
+          if (chunks === 2) {
+            return { error: { code: -32000, message: "Request cli_inbox_wait_by_launch_v1 timed out after 35000ms" } }
+          }
+          return {
+            result: {
+              status: chunks > 1 ? "woken" : "timeout",
+              session: "@dev/2",
+              unread_count: 0,
+              oldest_unread_age_min: 0,
+              oldest_unread_ts: 0,
+              waited_ms: 30_000,
+              effective_timeout_ms: 30_000,
+              timed_out: chunks === 1,
+              aborted: false,
+              baseline_seq: 37,
+              attention: {
+                actionable_unread: [],
+                pending_balls: [],
+                pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
+              },
             },
-          },
-        }
-      },
-      { args: ["inbox-wait", "--timeout", "5m", "--json"], timeoutMs: 60_000 },
-    )
+          }
+        },
+        { args: ["inbox-wait", "--timeout", "40s", "--json"], timeoutMs: 60_000 },
+      )
 
-    expect(result.signal).toBeNull()
-    expect(result.code).toBe(1)
-    expect(result.stdout).toBe("")
-    expect(result.stderr).toContain("Request cli_inbox_wait_by_launch_v1 timed out after 35000ms")
-    expect(result.stderr).toContain("TRIBE_DAEMON_CALL_TIMEOUT")
-    expect(calls.map((call) => call.method)).toEqual([
-      "cli_protocol",
-      "cli_inbox_wait_by_launch_v1",
-      "cli_protocol",
-      "cli_inbox_wait_by_launch_v1",
-    ])
-    const waits = calls.filter((call) => call.method === "cli_inbox_wait_by_launch_v1")
-    expect(waits[0]?.params).toMatchObject({ timeout_ms: 30_000 })
-    expect(waits[0]?.params).not.toHaveProperty("after_seq")
-    expect(waits[1]?.params).toMatchObject({ timeout_ms: 30_000, after_seq: 37 })
-    // The helper's awaited server.close also proves both chunk connections were closed.
-  }, 90_000)
+      expect(result.signal).toBeNull()
+      if (mode === "recovered") {
+        expect(result.code).toBe(0)
+        expect(JSON.parse(result.stdout)).toMatchObject({ status: "woken", timed_out: false })
+        expect(result.stderr).not.toContain("TRIBE_DAEMON_CALL_TIMEOUT")
+      } else {
+        expect(result.code).toBe(1)
+        expect(result.stdout).toBe("")
+        expect(result.stderr).toMatch(/Request cli_inbox_wait_by_launch_v1 timed out after \d+ms/)
+        expect(result.stderr).toContain("TRIBE_DAEMON_CALL_TIMEOUT")
+      }
+      expect(calls.map((call) => call.method)).toEqual([
+        "cli_protocol",
+        "cli_inbox_wait_by_launch_v1",
+        "cli_protocol",
+        "cli_inbox_wait_by_launch_v1",
+        "cli_protocol",
+        "cli_inbox_wait_by_launch_v1",
+      ])
+      const waits = calls.filter((call) => call.method === "cli_inbox_wait_by_launch_v1")
+      expect(waits[0]?.params).toMatchObject({ timeout_ms: 30_000 })
+      expect(waits[0]?.params).not.toHaveProperty("after_seq")
+      expect(waits[1]?.params).toMatchObject({ timeout_ms: 30_000, after_seq: 37 })
+      expect(waits[2]?.params).toMatchObject({ after_seq: 37 })
+      expect(waits[2]?.params?.timeout_ms).toBeLessThan(mode === "silent" ? 5_000 : 40_000)
+      // The helper's awaited server.close also proves both chunk connections were closed.
+    },
+    90_000,
+  )
 
   it("fails loudly by the client deadline when the inbox-wait daemon stays silent", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-silent-"))

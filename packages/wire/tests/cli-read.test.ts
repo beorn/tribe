@@ -706,44 +706,48 @@ describe("waitForInboxWithReconnect", () => {
     ).rejects.toBe(missing)
   })
 
-  test("retries lost wait RPC timeouts caused by daemon reload", async () => {
-    let now = 0
-    const chunkCalls: number[] = []
-    const result = await waitForInboxWithReconnect({
-      session: "@ci",
-      timeoutMs: 45_000,
-      maxChunkMs: 30_000,
-      retryDelayMs: 100,
-      now: () => now,
-      sleep: async (ms) => {
-        now += ms
-      },
-      call: async ({ timeoutMs }) => {
-        chunkCalls.push(timeoutMs)
-        if (chunkCalls.length === 1) {
-          now += 35_000
-          throw new Error("Request cli_inbox_wait timed out")
-        }
-        now += 500
-        return {
-          status: "woken",
-          session: "@ci",
-          unread_count: 1,
-          oldest_unread_age_min: 0,
-          oldest_unread_ts: now,
-          waited_ms: 500,
-          effective_timeout_ms: timeoutMs,
-          timed_out: false,
-          aborted: false,
-          attention: EMPTY_ATTENTION,
-        }
-      },
-    })
+  // Both public wait methods must recover; the old legacy case missed launch identity.
+  test.each(["cli_inbox_wait", "cli_inbox_wait_by_launch_v1"])(
+    "retries lost %s RPC timeouts caused by daemon reload",
+    async (method) => {
+      let now = 0
+      const chunkCalls: number[] = []
+      const result = await waitForInboxWithReconnect({
+        session: "@ci",
+        timeoutMs: 45_000,
+        maxChunkMs: 30_000,
+        retryDelayMs: 100,
+        now: () => now,
+        sleep: async (ms) => {
+          now += ms
+        },
+        call: async ({ timeoutMs }) => {
+          chunkCalls.push(timeoutMs)
+          if (chunkCalls.length === 1) {
+            now += 35_000
+            throw new Error(`Request ${method} timed out after 35000ms`)
+          }
+          now += 500
+          return {
+            status: "woken",
+            session: "@ci",
+            unread_count: 1,
+            oldest_unread_age_min: 0,
+            oldest_unread_ts: now,
+            waited_ms: 500,
+            effective_timeout_ms: timeoutMs,
+            timed_out: false,
+            aborted: false,
+            attention: EMPTY_ATTENTION,
+          }
+        },
+      })
 
-    expect(chunkCalls).toEqual([30_000, 9_900])
-    expect(result.unread_count).toBe(1)
-    expect(result.waited_ms).toBe(35_600)
-  })
+      expect(chunkCalls).toEqual([30_000, 9_900])
+      expect(result.unread_count).toBe(1)
+      expect(result.waited_ms).toBe(35_600)
+    },
+  )
 
   test("redials immediately when the daemon answers a GOAWAY reconnect signal", async () => {
     let now = 0
@@ -1043,55 +1047,58 @@ describe("waitForInboxWithReconnect", () => {
     })
   })
 
-  test("keeps preserved attention visible without fabricating a wake when the daemon becomes unavailable", async () => {
-    let now = 0
-    let calls = 0
-    const attention = {
-      actionable_unread: [{ id: "request-before-reload" }],
-      pending_balls: [{ request_id: "request-before-reload" }],
-      pending_balls_summary: { total: 1, oldest_age_ms: 750, truncated: false },
-    }
-    const result = await waitForInboxWithReconnect({
-      session: "@ci",
-      timeoutMs: 35_000,
-      maxChunkMs: 30_000,
-      retryDelayMs: 5_000,
-      unavailableGraceMs: 2_000,
-      now: () => now,
-      sleep: async (ms) => {
-        now += ms
-      },
-      call: async ({ timeoutMs }) => {
-        calls += 1
-        if (calls > 1) {
-          throw Object.assign(new Error("connect ENOENT /tmp/tribe.sock"), { code: "ENOENT" })
-        }
-        now += timeoutMs
-        return {
-          status: "timeout",
-          session: "@ci",
-          unread_count: 0,
-          oldest_unread_age_min: 0,
-          oldest_unread_ts: 0,
-          waited_ms: timeoutMs,
-          effective_timeout_ms: timeoutMs,
-          timed_out: true,
-          aborted: false,
-          attention,
-        }
-      },
-    })
+  // A prior result is stale once a later transport gap remains open at the deadline (22934).
+  test.each(["absent", "launch-backoff", "launch-call"])(
+    "keeps unresolved %s loud after an earlier authoritative chunk",
+    async (kind) => {
+      let now = 0
+      let calls = 0
+      const attention = {
+        actionable_unread: [{ id: "request-before-reload" }],
+        pending_balls: [{ request_id: "request-before-reload" }],
+        pending_balls_summary: { total: 1, oldest_age_ms: 750, truncated: false },
+      }
+      const failure =
+        kind === "absent"
+          ? Object.assign(new Error("connect ENOENT /tmp/tribe.sock"), { code: "ENOENT" })
+          : new Error("Request cli_inbox_wait_by_launch_v1 timed out after 35000ms")
+      const wait = waitForInboxWithReconnect({
+        session: "@ci",
+        timeoutMs: 35_000,
+        maxChunkMs: 30_000,
+        retryDelayMs: 5_000,
+        unavailableGraceMs: 2_000,
+        now: () => now,
+        sleep: async (ms) => {
+          now += ms
+        },
+        call: async ({ timeoutMs }) => {
+          calls += 1
+          if (calls > 1) {
+            if (kind === "launch-call") now += timeoutMs
+            throw failure
+          }
+          now += timeoutMs
+          return {
+            status: "timeout",
+            session: "@ci",
+            unread_count: 0,
+            oldest_unread_age_min: 0,
+            oldest_unread_ts: 0,
+            waited_ms: timeoutMs,
+            effective_timeout_ms: timeoutMs,
+            timed_out: true,
+            aborted: false,
+            attention,
+          }
+        },
+      })
 
-    expect(calls).toBe(2)
-    expect(result).toMatchObject({
-      status: "timeout",
-      waited_ms: 35_000,
-      effective_timeout_ms: 35_000,
-      timed_out: true,
-      aborted: false,
-      attention,
-    })
-  })
+      await expect(wait).rejects.toBe(failure)
+      expect(calls).toBe(2)
+      expect(now).toBe(35_000)
+    },
+  )
 })
 
 // 27537: `tribe log` must never report its own window as the world. A saturated bounded read says older messages

@@ -2416,8 +2416,9 @@ function logicalTimeoutInboxWaitResult(
   now: () => number,
   effectiveTimeoutMs: number,
 ): InboxWaitResult {
+  // A successful earlier chunk is stale while a later transport gap is unresolved.
+  if (lastRetryableError !== undefined) throw lastRetryableError
   if (latest === undefined) {
-    if (lastRetryableError !== undefined) throw lastRetryableError
     throw new Error("Inbox wait ended without an authoritative daemon result")
   }
   if (latest.aborted) {
@@ -2513,7 +2514,7 @@ export async function waitForInboxWithReconnect(opts: {
       lastRetryableError = err
       if (action.action === "terminal") {
         // The CLI fails loud on the absent-daemon grace and otherwise collapses
-        // the deadline into a logical timeout, exactly as before.
+        // the deadline into a logical timeout only when no transport gap remains.
         if (action.reason === "unavailable-grace") throw err
         return logicalTimeoutInboxWaitResult(latestResult, lastRetryableError, startedAt, now, controls.timeoutMs)
       }
