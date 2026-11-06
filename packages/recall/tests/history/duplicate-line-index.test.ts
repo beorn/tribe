@@ -120,7 +120,9 @@ describe("migration to v8", () => {
     db.close()
     process.env.RECALL_DB_PATH = file
 
-    expect(() => getDb()).toThrow(/schema version 7 requires migration to 8/)
+    expect(() => getDb()).toThrow(
+      new RegExp(`schema version 7 requires migration to ${String(CURRENT_SCHEMA_VERSION)}`),
+    )
 
     const migrated = getDb({ allowMigration: true })
     const index = migrated.prepare("SELECT sql FROM sqlite_master WHERE name = ?").get(INDEX) as { sql: string }

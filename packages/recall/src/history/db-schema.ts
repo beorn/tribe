@@ -19,6 +19,55 @@ export const MAX_CONTENT_SIZE = 1024 * 1024 // 1MB - store content for files sma
 // 2. New sessions table for session metadata
 // 3. New messages table for all message types
 // 4. FTS5 virtual table for fast full-text search
+/**
+ * `duplicate_of` means "this row is a copy of line N in its session". This value is a uuid copy whose line is not known:
+ * lines start at 1, so `d.duplicate_of = m.line` never matches it and a flagged row never answers duplicate_line.
+ */
+export const UUID_COPY_FLAG = 0
+
+/** The one copy rule: of the rows sharing a uuid, the root session's wins, then the lowest id. */
+export function uuidWinnerSql(uuid: string): string {
+  return `(SELECT m2.id FROM messages m2 JOIN sessions s2 ON m2.session_id = s2.id WHERE m2.uuid = ${uuid}
+    ORDER BY CASE WHEN s2.parent_session_id IS NULL THEN 0 ELSE 1 END, m2.id ASC LIMIT 1)`
+}
+
+const uuidCopyValueSql = (uuid: string) =>
+  `CASE WHEN messages.id = ${uuidWinnerSql(uuid)} THEN NULL ELSE ${UUID_COPY_FLAG} END`
+/** Writes only NULL or the flag, only on rows holding one of those, so a Codex line number is never touched. */
+const flagUuidCopiesSql = (where: string, uuid: string) => `UPDATE messages SET duplicate_of = ${uuidCopyValueSql(uuid)}
+    WHERE ${where}
+      AND (messages.duplicate_of IS NULL OR messages.duplicate_of = ${UUID_COPY_FLAG})
+      AND messages.duplicate_of IS NOT ${uuidCopyValueSql(uuid)};`
+const flagSessionCopiesSql = (session: string) =>
+  flagUuidCopiesSql(
+    `uuid IN (SELECT uuid FROM messages WHERE session_id = ${session} AND uuid IS NOT NULL)`,
+    "messages.uuid",
+  )
+
+/** Keeps the flag true on every event that moves the winner. A session row can arrive after its messages (indexer.ts). */
+export const UUID_COPY_TRIGGERS = [
+  `CREATE TRIGGER IF NOT EXISTS messages_copy_ai AFTER INSERT ON messages WHEN new.uuid IS NOT NULL BEGIN
+    ${flagUuidCopiesSql("uuid = new.uuid", "new.uuid")}
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS messages_copy_ad AFTER DELETE ON messages WHEN old.uuid IS NOT NULL BEGIN
+    ${flagUuidCopiesSql("uuid = old.uuid", "old.uuid")}
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS sessions_copy_ai AFTER INSERT ON sessions BEGIN
+    ${flagSessionCopiesSql("new.id")}
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS sessions_copy_au AFTER UPDATE OF parent_session_id ON sessions WHEN old.parent_session_id IS NOT new.parent_session_id BEGIN
+    ${flagSessionCopiesSql("new.id")}
+  END`,
+]
+
+/** Only the columns the index holds: a flag write costs no FTS delete and insert. */
+const MESSAGES_AU_BODY = `AFTER UPDATE OF content, tool_name, file_paths ON messages BEGIN
+  INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
+  VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
+  INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
+  VALUES (new.id, new.content, new.tool_name, new.file_paths);
+END;`
+
 export const SCHEMA: readonly string[] = [
   `
 -- Original writes table (backwards compatible)
@@ -109,12 +158,7 @@ CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
   VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
 END;`,
   `
-CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-  INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
-  VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
-  INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
-  VALUES (new.id, new.content, new.tool_name, new.file_paths);
-END;`,
+CREATE TRIGGER IF NOT EXISTS messages_au ${MESSAGES_AU_BODY}`,
   `
 -- Metadata table
 CREATE TABLE IF NOT EXISTS index_meta (
@@ -587,6 +631,24 @@ export const MIGRATION_STEPS: MigrationStep[] = [
     up: (db: Database) => {
       db.exec(
         "CREATE INDEX IF NOT EXISTS idx_messages_duplicate ON messages(session_id, duplicate_of, line) WHERE duplicate_of IS NOT NULL",
+      )
+    },
+  },
+  {
+    // Stored copy flag and the index that reads it (CTO 2de1a8ca): count and phase A stop reading message rows, and the
+    // per-hit canonical lookup goes. Triggers, as the FTS ones, so no writer can forget them. Versioned, never in SCHEMA.
+    version: 9,
+    name: "messages-uuid-copy-flag-and-window-index",
+    up: (db: Database) => {
+      db.exec("CREATE INDEX IF NOT EXISTS idx_messages_window ON messages(id, timestamp, duplicate_of, tool_name)")
+      db.exec("DROP TRIGGER IF EXISTS messages_au")
+      db.exec(assertSingleStatement(`CREATE TRIGGER messages_au ${MESSAGES_AU_BODY}`))
+      for (const sql of UUID_COPY_TRIGGERS) db.exec(assertSingleStatement(sql))
+      db.exec(
+        assertSingleStatement(`UPDATE messages SET duplicate_of = ${UUID_COPY_FLAG}
+          WHERE uuid IN (SELECT uuid FROM messages WHERE uuid IS NOT NULL GROUP BY uuid HAVING COUNT(*) > 1)
+            AND duplicate_of IS NULL
+            AND id <> ${uuidWinnerSql("messages.uuid")}`),
       )
     },
   },
