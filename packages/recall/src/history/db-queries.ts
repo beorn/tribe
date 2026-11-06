@@ -224,7 +224,6 @@ const INSERT_MESSAGE_SQL = `
       tool_name = excluded.tool_name,
       file_paths = excluded.file_paths,
       timestamp = excluded.timestamp,
-      duplicate_of = excluded.duplicate_of,
       line = excluded.line
 `
 
@@ -397,10 +396,16 @@ export interface HookMessageSearch extends HookSearchSummary {
 }
 
 /**
- * The conditions a message must meet besides MATCH: not a duplicate, the canonical copy of its uuid, and the caller's
- * window, project, type, tool and session. Both modes use this one statement of them.
+ * The conditions a message must meet besides MATCH: not a duplicate or uuid copy, and the caller's window, project,
+ * type, tool and session. Both modes use this one statement of them. `countFrom` is the join count and phase A read:
+ * with no project, session or type asked, the window index answers them and no message row or session is read. No
+ * message lacks a session (0 orphans, 2026-11-06, and every delete removes messages first), so the join drops nothing.
  */
-function messageFilterSql(options: MessageSearchOptions): { sql: string; params: (string | number)[] } {
+function messageFilterSql(options: MessageSearchOptions): {
+  sql: string
+  params: (string | number)[]
+  countFrom: string
+} {
   const { projectFilter, sinceTime, untilTime, messageType, toolName, session } = options
   if (untilTime !== undefined && !Number.isSafeInteger(untilTime)) {
     throw new Error(`Invalid --until timestamp ${String(untilTime)}; expected integer milliseconds`)
@@ -444,16 +449,15 @@ function messageFilterSql(options: MessageSearchOptions): { sql: string; params:
       params.push(session.id, session.id)
     }
   }
-  // Last, so the cheap tests above drop out-of-window matches before this per-match lookup runs (CTO e6b99892 C1).
-  clauses.push(`(m.uuid IS NULL OR m.id = (
-      SELECT m2.id FROM messages m2
-      JOIN sessions s2 ON m2.session_id = s2.id
-      WHERE m2.uuid = m.uuid
-      ORDER BY CASE WHEN s2.parent_session_id IS NULL THEN 0 ELSE 1 END, m2.id ASC
-      LIMIT 1
-    ))`)
-  return { sql: clauses.join(" AND "), params }
+  const narrow = !projectFilter && !messageType && session === undefined
+  return { sql: clauses.join(" AND "), params, countFrom: narrow ? MESSAGE_WINDOW_FROM_SQL : MESSAGE_SESSION_FROM_SQL }
 }
+
+const MESSAGE_SESSION_FROM_SQL = `FROM messages_fts f
+    JOIN messages m ON f.rowid = m.id
+    JOIN sessions s ON m.session_id = s.id`
+const MESSAGE_WINDOW_FROM_SQL = `FROM messages_fts f
+    JOIN messages m INDEXED BY idx_messages_window ON f.rowid = m.id`
 
 /** The columns a hit carries beside its snippet and rank, for `m` joined to its session `s`. */
 const MESSAGE_HIT_COLUMNS_SQL = `m.*, s.project_path, s.cwd, s.parent_session_id, s.agent_id,
@@ -531,12 +535,12 @@ export function ftsSearchWithSnippet(
   // Phase A ranks ids (same MATCH, filter, ORDER BY rank, m.id); phase B builds hit columns for exactly those ids, so
   // bm25 scores and order are unchanged. One read transaction holds both; a phase B that differs is a named error.
   const fromWhere = `
-    FROM messages_fts f
-    JOIN messages m ON f.rowid = m.id
-    JOIN sessions s ON m.session_id = s.id
+    ${MESSAGE_SESSION_FROM_SQL}
     ${where}`
   const idsQuery = `
-    SELECT m.id AS id, ${MESSAGE_RANK_SQL} as rank${fromWhere}
+    SELECT m.id AS id, ${MESSAGE_RANK_SQL} as rank
+    ${filter.countFrom}
+    ${where}
     ORDER BY rank, m.id ASC LIMIT ? OFFSET ?
   `
   // Unary + keeps one MATCH cursor (as hookMessageSearch): a bare rowid IN would re-run the MATCH per id.
@@ -588,13 +592,15 @@ export function ftsSearchWithSnippet(
 }
 
 /** Every match that meets the filter, counted: exact mode's total, and hook mode's only when asked for. */
-function countMessages(db: Database, ftsQuery: string, filter: { sql: string; params: (string | number)[] }): number {
+function countMessages(
+  db: Database,
+  ftsQuery: string,
+  filter: { sql: string; params: (string | number)[]; countFrom: string },
+): number {
   const row = db
     .prepare(
       assertSingleStatement(`SELECT COUNT(*) as total
-       FROM messages_fts f
-       JOIN messages m ON f.rowid = m.id
-       JOIN sessions s ON m.session_id = s.id
+       ${filter.countFrom}
        WHERE messages_fts MATCH ? AND ${filter.sql}`),
     )
     .get(ftsQuery, ...filter.params) as { total: number }
