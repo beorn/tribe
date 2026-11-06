@@ -563,7 +563,9 @@ export async function indexCodexTranscripts(
 
   if (options.path) {
     if (failedProviders.length > 0) {
-      throw new Error(`Cannot resolve transcript copy group from incomplete ag catalog: ${failures.map((failure) => failure.reason).join("; ") || failedProviders.join(", ")}`)
+      throw new Error(
+        `Cannot resolve transcript copy group from incomplete ag catalog: ${failures.map((failure) => failure.reason).join("; ") || failedProviders.join(", ")}`,
+      )
     }
     const selectedPath = path.resolve(options.path)
     const group = catalogSessions.find((session) =>
