@@ -110,10 +110,8 @@ afterEach(() => {
 test.each([
   { phase: "synonym_messages", failure: "database", table: "messages_fts", anchor: "authentication" },
   { phase: "synonym_project_content", failure: "database", table: "content_fts", anchor: "authentication" },
-  { phase: "corroboration", failure: "database", table: "messages_fts", anchor: "auth" },
   { phase: "synonym_messages", failure: "syntax", table: "messages_fts", anchor: "authentication" },
   { phase: "synonym_project_content", failure: "syntax", table: "content_fts", anchor: "authentication" },
-  { phase: "corroboration", failure: "syntax", table: "messages_fts", anchor: "auth" },
 ])("late $phase $failure preserves the public failure contract", async ({ phase, failure, table, anchor }) => {
   seed([{ session: "kept", content: "auth authentication evidence", ageDays: 0 }])
   const db = getDb()
@@ -130,9 +128,7 @@ test.each([
     const execute = statement.all.bind(statement)
     statement.all = ((...params: Parameters<typeof statement.all>) => {
       const target =
-        phase === "corroboration"
-          ? sql.includes("GROUP BY m.session_id")
-          : sql.includes(table) && !sql.includes("GROUP BY") && params.some((param) => param === '"authentication"')
+        sql.includes(table) && !sql.includes("GROUP BY") && params.some((param) => param === '"authentication"')
       const bindings = [...params]
       if (target && !injected) {
         injected = true
@@ -411,11 +407,11 @@ describe("Phase 3: hook mode runs the phases its caller names (@ag/recall/three-
     const hook = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
 
     expect(Object.keys(hook.timing?.phases ?? {}).sort()).toEqual(
-      ["corroboration", "live_session", "messages", "proximity", "titles", "vault"].sort(),
+      ["live_session", "messages", "proximity", "titles", "vault"].sort(),
     )
   })
 
-  test("a vault-only call runs no statement on the message index, not even the corroboration scan", async () => {
+  test("a vault-only call runs no statement on the message index", async () => {
     seed(recentWeak(20))
 
     const sql = await preparedSql(() => recall(ANCHOR, { mode: "hook", raw: true, limit: 5, phases: ["vault"] }))
@@ -424,9 +420,7 @@ describe("Phase 3: hook mode runs the phases its caller names (@ag/recall/three-
 
     expect(sql.filter((q) => /messages_fts/i.test(q))).toEqual([])
     expect(vaultOnly.results).toEqual([])
-    expect(Object.keys(vaultOnly.timing?.phases ?? {}).sort()).toEqual(
-      ["corroboration", "live_session", "proximity", "vault"].sort(),
-    )
+    expect(Object.keys(vaultOnly.timing?.phases ?? {}).sort()).toEqual(["live_session", "proximity", "vault"].sort())
   })
 
   test("hook mode runs no synonym variant; exact mode still does (the control)", async () => {

@@ -9,7 +9,6 @@ import {
   searchAll,
   getAllSessionTitles,
   getSessionContext,
-  toFts5Query,
   type MessageSearchOptions,
   type ContentSearchOptions,
   type HookMessageSearch,
@@ -39,7 +38,6 @@ import type {
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import type { Database } from "bun:sqlite"
-import { assertSingleStatement } from "@bearly/sqlite"
 import { searchVault, type VaultQuery } from "./vault-fts.ts"
 import type { VaultSemanticReceipt, VaultSemanticSpans } from "./vault-semantic.ts"
 
@@ -786,37 +784,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
 
     // Session depth corroboration: sessions with more matching messages are more relevant.
     // A session with 10 messages about the topic is more authoritative than one with 1 passing mention.
-    // Hook mode reads each session's depth from its candidate set, since this GROUP BY scans every all-time match
-    // (14.5 s on tribe*); that depth is within the candidates, not all-time (@cto 9665a0ec). Hook mode never runs
-    // the scan, even when its messages phase did not run and left no candidate set (Phase 3).
-    const corroborationBegan = performance.now()
-    const ftsQuery = toFts5Query(query)
-    const sessionDepths = hookSearch ? new Map(hookSearch.sessionDepths) : new Map<string, number>()
-    if (!hook && runs("messages")) {
-      try {
-        const depthRows = db
-          .prepare(
-            assertSingleStatement(`SELECT m.session_id, COUNT(*) as depth
-           FROM messages_fts f
-           JOIN messages m INDEXED BY idx_messages_id_session_ts ON f.rowid = m.id
-           WHERE messages_fts MATCH ?
-           ${untilTime === undefined ? "" : "AND m.timestamp <= ?"}
-           GROUP BY m.session_id
-           ORDER BY depth DESC
-           LIMIT 100`),
-          )
-          .all(...(untilTime === undefined ? [ftsQuery] : [ftsQuery, untilTime])) as {
-          session_id: string
-          depth: number
-        }[]
-        for (const r of depthRows) {
-          sessionDepths.set(r.session_id, r.depth)
-        }
-      } catch (error) {
-        skipped.push(rejectedQuerySkip("corroboration", query, error))
-      }
-    }
-    phases.corroboration = performance.now() - corroborationBegan
+    // Both modes count the rows their message search holds: exact the best-ranked over-fetch, hook the newest 1000.
+    const sessionDepths = hookSearch?.sessionDepths ?? messageResults.sessionDepths ?? new Map<string, number>()
     if (sessionDepths.size > 0) {
       const maxDepth = Math.max(...sessionDepths.values())
       log(`corroboration: ${sessionDepths.size} sessions, max depth=${maxDepth}`)
@@ -837,6 +806,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
 
     // Merge results into a unified list
     const merged: RecallSearchResult[] = []
+    // Each indexed hit's row, kept beside the result so its public shape stays. A live-session result has no row.
+    const hitRows = new Map<RecallSearchResult, number>()
 
     // Live session results get top priority (rank = -100, very negative = best)
     for (const r of liveResults) {
@@ -854,7 +825,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       const depth = sessionDepths.get(r.session_id) ?? 1
       const corroborationBoost = depth > 1 ? Math.log2(depth + 1) : 1
 
-      merged.push({
+      const hit: RecallSearchResult = {
         type: "message",
         sessionId: r.session_id,
         sessionTitle: sessionTitles.get(r.session_id) ?? null,
@@ -867,7 +838,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         collapsedCopyLocations: r.collapsedCopyLocations ?? null,
         parentSessionId: r.parent_session_id ?? null,
         agentId: r.agent_id ?? null,
-      })
+      }
+      hitRows.set(hit, r.id)
+      merged.push(hit)
     }
 
     for (const r of projectContentResults.results) {
@@ -912,9 +885,10 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     for (let i = 0; i < TOP_N; i++) {
       const result = deduped[i]
       if (result === undefined) continue
-      if (result.type !== "message") continue
+      const hitRow = hitRows.get(result)
+      if (hitRow === undefined) continue
 
-      const neighbors = getSessionContext(db, result.sessionId, result.timestamp, 5)
+      const neighbors = getSessionContext(db, result.sessionId, hitRow, 5)
       if (neighbors.length > 1) {
         // Build expanded snippet from neighboring messages
         const contextParts: string[] = []
