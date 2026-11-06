@@ -58,7 +58,7 @@ import { writeJsonStdout } from "./json-output.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
 import { warnIfSelfTransportDown } from "./self-transport-warning.ts"
 import { oversizedMessageError } from "../lib/send-validation.ts"
-import { TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV } from "../launch-environment.ts"
+import { TRIBE_LAUNCH_PARENT_PID_ENV, TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV } from "../launch-environment.ts"
 import { launchSender, registerLaunchSender, type LaunchSender } from "../service-send.ts"
 import { resolveSocketPath } from "../paths.ts"
 
@@ -445,14 +445,17 @@ async function resolveSendCaller(reply?: string, anonymous = false): Promise<Sen
   if (anonymous) return null
   let launchId: string | null
   try {
-    const idToken = readIdentityTokenFromEnvironment(process.env)
-    if (idToken !== null && readUnverifiedTokenClaims(idToken).kind === "service") {
-      const sender = launchSender("tribe.send", process.env)
-      if (sender.kind === "service") {
-        if (reply) {
-          throw new Error("a service cannot send a tracked reply; a tracked reply must be sent by the ball's owner")
+    // A resident's child keeps the existing daemon-resolved attachment below. The hint is never PID authority.
+    if (process.env[TRIBE_LAUNCH_PARENT_PID_ENV] === undefined) {
+      const idToken = readIdentityTokenFromEnvironment(process.env)
+      if (idToken !== null && readUnverifiedTokenClaims(idToken).kind === "service") {
+        const sender = launchSender("tribe.send", process.env)
+        if (sender.kind === "service") {
+          if (reply) {
+            throw new Error("a service cannot send a tracked reply; a tracked reply must be sent by the ball's owner")
+          }
+          return sender
         }
-        return sender
       }
     }
     launchId = readLaunchIdFromToken(process.env)

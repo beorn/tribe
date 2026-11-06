@@ -33,6 +33,8 @@ import { launchEnvironment, launchToken } from "./launch-token.ts"
 import { generateKeyPairSync, sign } from "node:crypto"
 import { Database } from "bun:sqlite"
 import { connectToDaemon } from "../src/client.ts"
+import { connectTribeLaunch } from "../src/launch-registration.ts"
+import { mcpJsonContent } from "../src/cli/mcp-json-content.ts"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
 const DAEMON = resolve(dirname(fileURLToPath(import.meta.url)), "../../daemon/src/daemon.ts")
@@ -464,6 +466,106 @@ export async function verifyIdentity(token) {
         expect(
           db.query("SELECT sender, sender_authority FROM messages WHERE content = ?").get("anonymous service notice"),
         ).toEqual({ sender: expect.stringMatching(/^pending-/), sender_authority: "claimed" })
+
+        // A resident's child attaches to its existing service; the inherited PID is only a path selector.
+        const heldUnsigned = launchToken("telegram-poller", "telegram", "service").split(".").slice(0, 2).join(".")
+        const heldToken = `${heldUnsigned}.${sign(null, Buffer.from(heldUnsigned), privateKey).toString("base64url")}`
+        const owner = await connectTribeLaunch(
+          {
+            name: "telegram",
+            principalClass: "service",
+            idToken: heldToken,
+            cwd: dir,
+            domains: ["service"],
+            takeover: false,
+          },
+          {
+            connect: connectToDaemon,
+            socketPath: () => socketPath,
+            processId: () => process.pid,
+            sleep: async () => {},
+          },
+        )
+        try {
+          const childEnv = {
+            ...env,
+            ...owner.environment,
+            HAB_ID_TOKEN: heldToken,
+            TRIBE_LAUNCH_PARENT_PID: "not-authority",
+          }
+          const attached = await runCliAsync(
+            ["send", "receiver", "held service heartbeat", "--type", "request", "--summary", "held", "--json"],
+            childEnv,
+          )
+          expect(attached.code, attached.stderr).toBe(0)
+          expect(
+            db.query("SELECT sender, sender_authority FROM messages WHERE content = ?").all("held service heartbeat"),
+          ).toEqual([{ sender: "telegram", sender_authority: "verified" }])
+          expect(
+            db.query("SELECT principal_class, launch_parent_pid FROM sessions WHERE name = ?").get("telegram"),
+          ).toEqual({ principal_class: "service", launch_parent_pid: process.pid })
+          expect(owner.isConnected()).toBe(true)
+
+          const unhinted = await runCliAsync(
+            ["send", "receiver", "competing service owner", "--type", "request", "--summary", "competing"],
+            { ...env, HAB_ID_TOKEN: heldToken },
+          )
+          expect(unhinted.code).not.toBe(0)
+          expect(unhinted.stderr).toContain('Name "telegram" is already taken')
+          expect(db.query("SELECT id FROM messages WHERE content = ?").all("competing service owner")).toEqual([])
+
+          const own = mcpJsonContent(
+            await receiver.call("tribe.send", {
+              to: "telegram",
+              message: "service owned ball",
+              type: "request",
+              summary: "owned",
+            }),
+          ) as { request_id: string }
+          expect(typeof own.request_id).toBe("string")
+          const settled = await runCliAsync(
+            ["send", "receiver", "service owned reply", "--type", "response", "--reply", own.request_id, "--json"],
+            childEnv,
+          )
+          expect(settled.code, settled.stderr).toBe(0)
+          const ownedPending = mcpJsonContent(await receiver.call("tribe.pending", { owner: "telegram" })) as {
+            pending: { request_id: string }[]
+          }
+          expect(ownedPending.pending).toEqual([])
+          expect(db.query("SELECT sender, reply FROM messages WHERE content = ?").all("service owned reply")).toEqual([
+            { sender: "telegram", reply: own.request_id },
+          ])
+
+          const foreign = sent // The original standalone heartbeat is owned by receiver, not telegram.
+          const rejected = await runCliAsync(
+            ["send", "receiver", "foreign service reply", "--type", "response", "--reply", foreign.request_id],
+            childEnv,
+          )
+          expect(rejected.code).not.toBe(0)
+          const pending = mcpJsonContent(await receiver.call("tribe.pending", { owner: "receiver" })) as {
+            pending: { request_id: string }[]
+          }
+          expect(pending.pending).toContainEqual(expect.objectContaining({ request_id: foreign.request_id }))
+
+          owner.close()
+          await expect
+            .poll(async () => {
+              const members = mcpJsonContent(await receiver.call("tribe.members", { all: true })) as {
+                sessions: { name: string; transport_state: string }[]
+              }
+              return members.sessions.find((row) => row.name === "telegram")?.transport_state
+            })
+            .not.toBe("connected")
+          const orphaned = await runCliAsync(
+            ["send", "receiver", "orphaned service child", "--type", "request", "--summary", "orphaned"],
+            childEnv,
+          )
+          expect(orphaned.code, orphaned.stderr).toBe(75)
+          expect(orphaned.stderr).toContain("[launch-unroutable]")
+          expect(db.query("SELECT id FROM messages WHERE content = ?").all("orphaned service child")).toEqual([])
+        } finally {
+          owner.close()
+        }
       } finally {
         db.close()
         receiver.close()
