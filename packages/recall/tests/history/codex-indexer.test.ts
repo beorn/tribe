@@ -1057,6 +1057,32 @@ if (args.includes("list")) {
   })
 
   describe("Batching & Multi-Session Atomic Transactions", () => {
+    // Acceptance: a ledgered missing path and exit 1 retain the good session in the same done batch.
+    // Skip-only exit-1 coverage has no unreadable record or searchable good message.
+    test("keeps good rows from a completed export batch beside a missing path and exit 1", async () => {
+      const agBin = makeMockAg(`
+const args = process.argv.slice(2)
+console.log(JSON.stringify({ kind: "schema", version: args.includes("list") ? 1 : 2 }))
+if (args.includes("list")) {
+  console.log(JSON.stringify({ kind: "session", provider: "codex", nativeId: "good-batch", canonicalPath: "/fixture/good.jsonl", key: "codex:good-batch", status: "canonical",
+    copies: [{ path: "/fixture/good.jsonl", key: "codex:good-batch", sizeBytes: 100, mtimeMs: 1000, lastEventAtMs: 1000, account: null, decision: "canonical" }] }))
+  console.log(JSON.stringify({ kind: "done", discovered: 1, canonical: 1 }))
+} else {
+  console.log(JSON.stringify({ kind: "unreadable", path: "/fixture/missing.jsonl", reason: "ENOENT: supplied file missing" }))
+  console.log(JSON.stringify({ kind: "session", provider: "codex", nativeId: "good-batch", sessionKey: "codex:good-batch", path: "/fixture/good.jsonl", keys: ["codex:good-batch"] }))
+  console.log(JSON.stringify({ kind: "row", sessionKey: "codex:good-batch", line: 2, role: "user", text: "retainedgoodbatch", timestamp: null }))
+  console.log(JSON.stringify({ kind: "end", nativeId: "good-batch", keys: ["codex:good-batch"], status: "complete", rows: 1, tools: 0, meta: 0, skipped: 0 }))
+  console.log(JSON.stringify({ kind: "done", sessions: 1, rows: 1, tools: 0, meta: 0, unreadable: 1, errors: 0 }))
+  process.exitCode = 1
+}
+`)
+      const result = await indexCodexTranscripts(db, { agBin })
+      expect(result).toMatchObject({ sessions: 1, rows: 1, unreadable: 1, errors: 0 })
+      expect(result.failures).toMatchObject([{ kind: "unreadable", path: "/fixture/missing.jsonl" }])
+      expect(getSession(db, "codex:good-batch")?.status).toBe("complete")
+      expect(ftsSearchWithSnippet(db, "retainedgoodbatch").results).toHaveLength(1)
+    })
+
     // Intentional per-record skips must stay counted without a retained object per record.
     // The second export exits 1 without its own skips: compatibility depends on the shared count.
     test.each([false, true])(
@@ -1195,6 +1221,72 @@ console.log(JSON.stringify({ kind: "done", sessions, rows, errors: 0 }))
 `)
       return { agBin, catalog, invocationsFile }
     }
+
+    // Acceptance: strict export must receive the complete ambiguous group on both routes.
+    // Existing full-group tests never change just one fork or select one path.
+    test.each(["incremental", "path"] as const)("refreshes both ambiguous copies through %s", async (route) => {
+      const paths = ["/fixture/fork-a.jsonl", "/fixture/fork-b.jsonl"]
+      const fixture = batchFixture([paths])
+      const session = fixture.catalog.sessions[0]!
+      for (const copy of session.copies) {
+        copy.key = `codex:batch-0@${createHash("sha256").update(copy.path).digest("hex")}`
+      }
+      writeFileSync(join(tempDir, "batch-catalog.json"), JSON.stringify(fixture.catalog))
+      await indexCodexTranscripts(db, fixture)
+      const changed = session.copies[0]!
+      const updatedCatalog: CodexCatalog = {
+        ...fixture.catalog,
+        sessions: [{ ...session, copies: [{ ...changed, mtimeMs: 2000 }, session.copies[1]!] }],
+      }
+      writeFileSync(join(tempDir, "batch-catalog.json"), JSON.stringify(updatedCatalog))
+
+      const result = await indexCodexTranscripts(db, {
+        agBin: fixture.agBin,
+        catalog: updatedCatalog,
+        ...(route === "path" ? { path: paths[0] } : { incremental: true }),
+      })
+      const calls = readFileSync(fixture.invocationsFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[])
+      const args = calls[1]!
+      expect(args.filter((_, i) => args[i - 1] === "--path")).toEqual(paths)
+      expect(result.rows).toBe(4) // Each copy contributes one text row and one tool row.
+      expect(result.indexedSessionIds.sort()).toEqual(session.copies.map((copy) => copy.key).sort())
+      expect(db.prepare("SELECT id FROM sessions ORDER BY id").all()).toEqual(
+        session.copies
+          .map((copy) => copy.key)
+          .sort()
+          .map((id) => ({ id })),
+      )
+      expect(getSession(db, "codex:batch-0")).toBeNull()
+
+      const unchanged = await indexCodexTranscripts(db, {
+        agBin: fixture.agBin,
+        catalog: updatedCatalog,
+        incremental: true,
+      })
+      expect(unchanged.sessions).toBe(0)
+      expect(unchanged.skipped).toBe(1)
+      expect(readFileSync(fixture.invocationsFile, "utf8").trim().split("\n")).toHaveLength(2)
+    })
+
+    // Acceptance: failed group discovery must never silently downgrade a path to one copy.
+    // Existing catalog-failure tests cover broad indexing, not the explicit-path branch.
+    test("refuses explicit path export when catalog group discovery failed", async () => {
+      const fixture = batchFixture([["/fixture/known.jsonl"]])
+      await expect(
+        indexCodexTranscripts(db, {
+          ...fixture,
+          path: "/fixture/unknown.jsonl",
+          catalog: {
+            ...fixture.catalog,
+            failures: [{ kind: "unreadable", reason: "fixture catalog read failed", timestamp: 1000 }],
+          },
+        }),
+      ).rejects.toThrow(/catalog.*fixture catalog read failed/)
+      expect(existsSync(fixture.invocationsFile)).toBe(false)
+    })
 
     // @failure Legacy NULL event metadata must not force unchanged files through export;
     // known event changes and real path/size/mtime changes must still be imported.
@@ -1688,7 +1780,7 @@ if (args.includes("list")) {
   })
 
   describe("29170: codex tool events reach the index", () => {
-    function makeToolProducer(opts: { version: number; tools: boolean }): string {
+    function makeToolProducer(opts: { version: number; tools: boolean; meta?: boolean }): string {
       const toolLines = opts.tools
         ? `
 const cmd = JSON.stringify({ cmd: "herdr pane list", workdir: "/hh" })
@@ -1761,12 +1853,22 @@ if (args.includes("list")) {
     duplicateOf: null
   }))
 ${toolLines}
+if (${Boolean(opts.meta)}) {
+  for (const [line, metaType] of [[5, "token_usage_record"], [6, "task_complete"]]) {
+    console.log(JSON.stringify({ kind: "meta", sessionKey: "codex:tool-test", line, metaType,
+      timestamp: "2026-04-30T19:06:27.100Z", ordinal: line, turnId: "metadata-turn-id", responseId: null,
+      usageKey: metaType === "token_usage_record" ? "codex:metadata-turn-id#5" : null,
+      totalTokens: metaType === "token_usage_record" ? 17 : null,
+      usage: metaType === "token_usage_record" ? { total_tokens: 17 } : null, turnUsage: null, threadUsage: null }))
+  }
+}
   console.log(JSON.stringify({
     kind: "end",
     nativeId: "tool-test",
     keys: ["codex:tool-test"],
     rows: 1,
     tools: ${endTools},
+    meta: ${opts.meta ? 2 : 0},
     skipped: 0,
     status: "complete"
   }))
@@ -1775,8 +1877,10 @@ ${toolLines}
 `)
     }
 
-    test("stores codex tool calls and outputs, and a repeated-command count returns a number", async () => {
-      const res = await indexCodexTranscripts(db, { agBin: makeToolProducer({ version: 2, tools: true }) })
+    // Acceptance: additive metadata never creates prose or changes text/tool counts.
+    // The existing version-2 fixture had only known row/tool kinds.
+    test.each([false, true])("stores text and tools with unchanged counts when metadata=%s", async (meta) => {
+      const res = await indexCodexTranscripts(db, { agBin: makeToolProducer({ version: 2, tools: true, meta }) })
       // rows is every stored message (narration + tool events); tools is the tool subset.
       expect(res.rows).toBe(4)
       expect(res.tools).toBe(3)
@@ -1794,6 +1898,7 @@ ${toolLines}
       expect(rows.filter((r) => r.tool_name === "exec_command")).toHaveLength(3)
       expect(rows[2]!.line).toBe(3)
       expect(rows[3]!.content).toContain("Chunk ID")
+      expect(JSON.stringify(rows)).not.toContain("metadata-turn-id")
 
       const repeated = db
         .prepare("SELECT count(*) AS n FROM messages WHERE session_id = ? AND type = 'tool_use' AND content = ?")
@@ -1832,6 +1937,11 @@ ${toolLines}
       writeFileSync(targetPath, '{"type":"session_meta"}\n')
 
       const mock = makeMockAg(`
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({ kind: "done", discovered: 0, canonical: 0, ambiguous: 0, stale: 0, invalid: 0 }))
+  process.exit(0)
+}
 console.log(JSON.stringify({ kind: "schema", version: 1 }))
 console.log(JSON.stringify({
   kind: "session",
@@ -1890,6 +2000,11 @@ console.log(JSON.stringify({ kind: "done", sessions: 1, rows: 1, errors: 0 }))
       const mock = makeMockAg(`
 import { appendFileSync } from "node:fs"
 appendFileSync(${JSON.stringify(invocationLog)}, JSON.stringify(process.argv.slice(2)) + "\\n")
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({ kind: "done", discovered: 0, canonical: 0, ambiguous: 0, stale: 0, invalid: 0 }))
+  process.exit(0)
+}
 console.log(JSON.stringify({ kind: "schema", version: 1 }))
 console.log(JSON.stringify({
   kind: "session",
@@ -4106,6 +4221,11 @@ if (process.argv.includes("list")) {
     insertMessage(db, "retained", "codex:wal-import", "user", "retained original", null, null, 1000)
     const producer = makeMockAg(`
 import { existsSync } from "node:fs"
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({ kind: "done", discovered: 0, canonical: 0, ambiguous: 0, stale: 0, invalid: 0 }))
+  process.exit(0)
+}
 console.log(JSON.stringify({kind:"schema",version:2}))
 console.log(JSON.stringify({kind:"session",provider:"codex",nativeId:"wal-import",sessionKey:"codex:wal-import",path:${JSON.stringify(transcriptPath)},keys:["codex:wal-import"]}))
 const deadline = Date.now() + 10000
