@@ -1,7 +1,7 @@
 /**
  * The prompt hook's recall runs in hook mode, inside a stated budget (@ag/tribe/25071 row 2, @cto ruling 2026-09-23).
  *
- * B1: hook mode issues no COUNT, not the message total, the content total, or the session-depth corroboration.
+ * B1: hook mode issues no COUNT, not the message total or the content total.
  * B2: hook mode selects eligible matching IDs before ranking; all window filters apply before the candidate cap.
  *     Ranking uses one MATCH cursor so its global phrase-frequency setup is not repeated per held ID (29482).
  * Phase 3 (@ag/recall/three-dark-search-paths): hook mode runs the phases its caller names, and never the project

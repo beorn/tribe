@@ -386,11 +386,6 @@ export type MessageSearchHit = MessageRecord & {
 
 /** Hook mode's account of its candidate search (@ag/tribe/25071 row 2). */
 export interface HookMessageSearch extends HookSearchSummary {
-  /**
-   * Each ranked session's number of ranked window matches: hook mode's session-depth corroboration, read from the rows
-   * it already holds instead of a GROUP BY over every all-time match (14.5 s on tribe*, @cto 9665a0ec).
-   */
-  sessionDepths: Map<string, number>
   /** Present when the cap cut the window: the line the hook says. */
   capped?: RecallSkip
 }
@@ -512,7 +507,7 @@ export function ftsSearchWithSnippet(
   db: Database,
   query: string,
   options?: MessageSearchOptions & { mode?: "exact" },
-): { results: MessageSearchHit[]; total: number; sessionDepths: Map<string, number>; capped?: RecallSkip }
+): { results: MessageSearchHit[]; total: number; capped?: RecallSkip }
 export function ftsSearchWithSnippet(
   db: Database,
   query: string,
@@ -520,7 +515,6 @@ export function ftsSearchWithSnippet(
 ): {
   results: MessageSearchHit[]
   total: number | null
-  sessionDepths?: Map<string, number>
   hook?: HookMessageSearch
   capped?: RecallSkip
 }
@@ -531,7 +525,6 @@ export function ftsSearchWithSnippet(
 ): {
   results: MessageSearchHit[]
   total: number | null
-  sessionDepths?: Map<string, number>
   hook?: HookMessageSearch
   capped?: RecallSkip
 } {
@@ -587,11 +580,6 @@ export function ftsSearchWithSnippet(
   })()
   const distinct = collapseNullUuidCopies(ranked)
   const results = distinct.slice(offset, offset + limit)
-  // Each session's matches among the held rows, before the page cut: the best-ranked over-fetch, where hook mode's
-  // window is its newest 1000 and neither is all time. A GROUP BY over every all-time match probed an index per match:
-  // 7,095 ms cold on 568,104 matches, against 68 ms for the FTS alone (CTO aab6a992, d19-result.md).
-  const sessionDepths = new Map<string, number>()
-  for (const hit of distinct) sessionDepths.set(hit.session_id, (sessionDepths.get(hit.session_id) ?? 0) + 1)
   const capped: RecallSkip | undefined =
     ranked.length === overFetch && distinct.length < pageNeed
       ? {
@@ -605,7 +593,7 @@ export function ftsSearchWithSnippet(
         }
       : undefined
 
-  return { results, total, sessionDepths, ...(capped ? { capped } : {}) }
+  return { results, total, ...(capped ? { capped } : {}) }
 }
 
 /** Every match that meets the filter, counted: exact mode's total, and hook mode's only when asked for. */
@@ -690,12 +678,9 @@ function hookMessageSearch(
   const collapsed = collapseNullUuidCopies(survivors)
   const anchor = query
 
-  const sessionDepths = new Map<string, number>()
-  for (const c of collapsed) sessionDepths.set(c.session_id, (sessionDepths.get(c.session_id) ?? 0) + 1)
   const hook: HookMessageSearch = {
     candidateLimit: HOOK_CANDIDATE_LIMIT,
     survivors: collapsed.length,
-    sessionDepths,
     // Loud, because a cut window is the one case where hook can differ from exact (@cto 4b15f0bc).
     ...(candidates.length > HOOK_CANDIDATE_LIMIT
       ? {

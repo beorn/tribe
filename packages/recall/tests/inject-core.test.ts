@@ -764,7 +764,7 @@ describe("25071 row 2: the hook's recall runs in hook mode, inside the wall's bu
   test("recall's per-phase times join the steps, and a phase recall skipped is said in skippedSteps", async () => {
     recallMock.mockResolvedValue({
       results: [],
-      timing: { searchMs: 20, phases: { messages: 12, corroboration: 3 } },
+      timing: { searchMs: 20, phases: { messages: 12, titles: 3 } },
       skipped: [{ phase: "messages", anchor: "tribe", message: "recall messages skipped: (fixture)" }],
     })
     const steps: Record<string, number> = {}
@@ -772,7 +772,7 @@ describe("25071 row 2: the hook's recall runs in hook mode, inside the wall's bu
     const result = await runInjectDelta(salientPrompt, createMemorySeenStore(), { steps })
 
     expect(steps["recall.messages"]).toBe(12)
-    expect(steps["recall.corroboration"]).toBe(3)
+    expect(steps["recall.titles"]).toBe(3)
     expect(result.skippedSteps).toEqual({ "recall.messages": "recall messages skipped: (fixture)" })
   })
 
