@@ -445,7 +445,8 @@ async function resolveSendCaller(reply?: string, anonymous = false): Promise<Sen
   if (anonymous) return null
   let launchId: string | null
   try {
-    if (readIdentityTokenFromEnvironment(process.env) !== null) {
+    const idToken = readIdentityTokenFromEnvironment(process.env)
+    if (idToken !== null && readUnverifiedTokenClaims(idToken).kind === "service") {
       const sender = launchSender("tribe.send", process.env)
       if (sender.kind === "service") {
         if (reply) {
