@@ -19,7 +19,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./cli": "./src/cli.ts"
+    "./cli": "./src/cli.ts",
+    "./prompt-filter": "./src/lib/prompt-filter.ts"
   },
   "dependencies": {
     "@bearly/durable-file": "0.1.0",
