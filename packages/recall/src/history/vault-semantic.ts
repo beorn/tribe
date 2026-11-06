@@ -12,6 +12,7 @@ import type { Database } from "bun:sqlite"
 import { realpathSync } from "node:fs"
 import { formatQueryForEmbedding } from "@tobilu/qmd/llm"
 import { modelFileStat, recallEmbedContract, requireRecallEmbedModel } from "./vault-embed-model.ts"
+import { assertSingleStatement } from "@bearly/sqlite"
 import {
   decodeVaultVectorInto,
   readPublishedVaultEmbedGeneration,
@@ -366,10 +367,38 @@ export function rankVaultSemantic(
   return { generation: published.id, hits, documents: current.size, embedded: best.size, scanned }
 }
 
-/** Equal RRF60 over vault documents; fused document i takes lexical slot i's rank (rev23 P:72). */
+/**
+ * The lexical candidates holding the query as a phrase: its words adjacent and in order as the index tokenises them, so
+ * Fast-Track holds "fast track" and "items" does not hold "item" (rev23 P:72, @cto 32520 arm E ruling). A folder or repo
+ * node never holds, and a query of one word holds nothing, so it runs no statement. A failure throws: never an empty set.
+ */
+export function readVaultPhraseHolds(
+  vaultDbPath: string,
+  query: string,
+  lexical: readonly VaultMatch[],
+): ReadonlySet<string> {
+  const phrase = query.trim()
+  if (lexical.length === 0 || phrase.split(/\s+/).length < 2) return new Set()
+  const marks = lexical.map(() => "?").join(",")
+  const rows = openVaultDb(vaultDbPath)
+    .prepare(
+      assertSingleStatement(
+        `SELECT n.id AS id FROM nodes_fts JOIN nodes n ON nodes_fts.id = n.id
+         WHERE nodes_fts MATCH ? AND n.id IN (${marks}) AND COALESCE(n.fstype, '') NOT IN ('folder', 'repo')`,
+      ),
+    )
+    .all(`"${phrase.replaceAll('"', '""')}"`, ...lexical.map((match) => match.id)) as { id: string }[]
+  return new Set(rows.map((row) => row.id))
+}
+
+/**
+ * Equal RRF60 over vault documents; fused document i takes lexical slot i's rank. Exception: a lexical document in
+ * `held` keeps the better of its own rank and its slot's rank, and the window never cuts it (rev23 P:72).
+ */
 export function fuseVaultMatches(
   lexical: readonly VaultMatch[],
   semantic: readonly VaultSemanticHit[],
+  held: ReadonlySet<string> = new Set(),
 ): { matches: VaultMatch[]; added: number } {
   const fused = new Map<string, { score: number; match: VaultMatch; lexical: boolean }>()
   lexical.forEach((match, i) => {
@@ -395,9 +424,15 @@ export function fuseVaultMatches(
       },
     })
   })
-  const window = [...fused.values()].sort((a, b) => b.score - a.score).slice(0, lexical.length)
+  const holds = (entry: { lexical: boolean; match: VaultMatch }) => entry.lexical && held.has(entry.match.id)
+  const window = [...fused.values()]
+    .sort((a, b) => b.score - a.score)
+    .filter((entry, i) => i < lexical.length || holds(entry))
   const matches = window.flatMap((entry, i) => {
     const slot = lexical[i]
+    if (holds(entry)) {
+      return [{ ...entry.match, rank: slot ? Math.min(entry.match.rank, slot.rank) : entry.match.rank }]
+    }
     return slot ? [{ ...entry.match, rank: slot.rank }] : []
   })
   return { matches, added: window.filter((entry) => !entry.lexical).length }
