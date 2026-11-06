@@ -528,7 +528,7 @@ export async function indexCodexTranscripts(
   let skippedRecordCount = 0
   let failedProviders: ("codex" | "grok" | "agy")[] = []
 
-  if (!options.path) {
+  {
     const catalog = options.catalog ?? (await fetchCodexCatalog(agBin))
     catalogSessions = catalog.sessions.filter((session) => !excludedProviders.has(session.provider))
     failedProviders = catalog.failedProviders ?? (catalog.failures.length ? ["codex", "grok", "agy"] : [])
@@ -562,7 +562,15 @@ export async function indexCodexTranscripts(
   let skipped = 0
 
   if (options.path) {
-    pathsToExport.push([options.path])
+    if (failedProviders.length > 0) {
+      throw new Error(`Cannot resolve transcript copy group from incomplete ag catalog: ${failures.map((failure) => failure.reason).join("; ") || failedProviders.join(", ")}`)
+    }
+    const selectedPath = path.resolve(options.path)
+    const group = catalogSessions.find((session) =>
+      session.copies.some((copy) => path.resolve(copy.path) === selectedPath),
+    )
+    // Strict exporters only know the supplied set: retain the catalog's copy identity.
+    pathsToExport.push(group ? group.copies.map((copy) => copy.path) : [options.path])
   } else {
     const storedCodexMap = new Map<string, SessionRecord>()
     if (options.incremental) {
@@ -645,18 +653,16 @@ export async function indexCodexTranscripts(
         const paths: string[] = []
         for (const c of session.copies) {
           if (!c.path) continue
+          paths.push(c.path)
           const copyKey = c.key ?? `${session.provider}:${session.nativeId}`
           const stored = options.incremental ? storedCodexMap.get(copyKey) : getSession(db, copyKey)
-          if (isUnchangedStoredCopy(stored, c.path, c)) {
-            // this copy unchanged
-            skippedSessionIds.push(copyKey)
-          } else {
+          if (!isUnchangedStoredCopy(stored, c.path, c)) {
             allCopiesSkipped = false
-            paths.push(c.path)
           }
         }
         if (allCopiesSkipped) {
           skipped++
+          skippedSessionIds.push(...session.copies.filter((copy) => copy.path).map((copy) => copy.key))
         } else {
           pathsToExport.push(paths)
         }
