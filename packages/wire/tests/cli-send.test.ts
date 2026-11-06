@@ -1002,6 +1002,13 @@ describe("registerSendCommands", () => {
             // Mirror the real daemon's grant: the one-shot --reply register gets
             // the requested name back (no live holder in this fixture).
             result = { name: (request.params?.name as string) ?? "@chief", role: "member" }
+          } else if (request.method === "tribe.fetch") {
+            // Existing refs read authoritative snapshot facts, including the holder
+            // whose TAKING must remain silent. This read settles nothing.
+            const ids = request.params?.ids as string[]
+            result = {
+              events: ids.map((id) => ({ id, from: "@agent/3", settlement: "open", owners: ["@chief"] })),
+            }
           } else if (request.method === "tribe.send") {
             const progress = ["status", "notify", "request", "query"].includes(String(request.params?.type))
             if (!progress) pendingOpen = false

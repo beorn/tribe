@@ -723,6 +723,46 @@ async function warnUnreleasedBallToRecipient(
   console.error(`Sending anyway — this is a note, not a refusal; a send to someone you owe is often legitimate.`)
 }
 
+type RefSettlementSnapshot = {
+  events?: Array<{ id: string; from?: string; settlement?: string; owners?: string[] }>
+  settlement_unknown_ids?: string[]
+  settlement_lookup?: { status?: string; detail?: string }
+  error?: string
+}
+
+/** Consume the daemon's snapshot facts; undefined means the lookup could not decide. */
+export function refNamesOwnedOpenBall(
+  ref: string,
+  sender: string,
+  snapshot: RefSettlementSnapshot,
+): boolean | undefined {
+  if (snapshot.error || snapshot.settlement_lookup !== undefined) return undefined
+  if (snapshot.settlement_unknown_ids?.includes(ref)) return false
+  const event = snapshot.events?.find((row) => row.id === ref)
+  if (event?.settlement === undefined || event.settlement === "undecided" || event.from === undefined) return undefined
+  return event.settlement === "open" && (event.from === sender || event.owners?.includes(sender) === true)
+}
+
+/** A correlation is advisory: neither lookup failure nor a stale id refuses delivery. */
+async function warnUnresolvedRef(sender: SendCaller, ref: string): Promise<void> {
+  let detail: string
+  try {
+    // ids is a snapshot read: it never acknowledges the caller's mailbox.
+    const snapshot = mcpJsonContent(await callDaemon("tribe.fetch", { ids: [ref] }, sender)) as RefSettlementSnapshot
+    const ownsOpenBall = refNamesOwnedOpenBall(ref, sender.name, snapshot)
+    if (ownsOpenBall === true) return
+    detail =
+      ownsOpenBall === false
+        ? "names no open ball you sent"
+        : `could not be verified by tribe.fetch ids (${snapshot.error ?? snapshot.settlement_lookup?.detail ?? "no settlement fact returned"})`
+  } catch (error) {
+    detail = `could not be verified by tribe.fetch ids (${error instanceof Error ? error.message : String(error)})`
+  }
+  console.error(
+    `tribe-wire send: unresolved-ref — --ref ${ref} ${detail}; check the reference with tribe fetch --ids ${ref}. Sending anyway; --ref does not settle a ball.`,
+  )
+}
+
 /**
  * Runs strictly AFTER delivery (22844): every branch here reports on the
  * bookkeeping half of an already-sent response, so none may read as a
@@ -818,6 +858,16 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     process.exit(2)
   }
   const caller = await resolveSendCaller(input.reply, input.anonymous)
+  // A new request may mint its own correlation id; it need not exist yet.
+  const createsRequest =
+    (input.request !== undefined && input.request !== false) ||
+    type === "request" ||
+    type === "query" ||
+    type === "assign" ||
+    input.incident !== undefined
+  if (input.ref && !input.reply && caller && !input.anonymous && !createsRequest) {
+    await warnUnresolvedRef(caller, input.ref)
+  }
   // The pre-send read warns when the id is not the caller's to close; the
   // post-send sentence is rendered from the daemon's `ball` fact (30160).
   if (input.reply && caller) await warnPendingReplyOwner(caller.name, input.reply)
