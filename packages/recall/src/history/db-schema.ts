@@ -55,7 +55,7 @@ export const UUID_COPY_TRIGGERS = [
   `CREATE TRIGGER IF NOT EXISTS sessions_copy_ai AFTER INSERT ON sessions BEGIN
     ${flagSessionCopiesSql("new.id")}
   END`,
-  `CREATE TRIGGER IF NOT EXISTS sessions_copy_au AFTER UPDATE OF parent_session_id ON sessions BEGIN
+  `CREATE TRIGGER IF NOT EXISTS sessions_copy_au AFTER UPDATE OF parent_session_id ON sessions WHEN old.parent_session_id IS NOT new.parent_session_id BEGIN
     ${flagSessionCopiesSql("new.id")}
   END`,
 ]
