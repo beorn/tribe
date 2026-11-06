@@ -1,11 +1,12 @@
 /**
  * @failure a search reads a whole session to expand one hit, or probes an index once per all-time match to weigh
- *   sessions, and a common query misses the first-run bar on those two steps alone
+ *   sessions, and a common query misses the first-run bar on those two steps alone; or a session's match count moves
+ *   its rank, which demoted deep sessions (32514)
  * @level l1
  * @consumer @ag/recall/three-dark-search-paths
  * @testonly none
  *
- * CTO aab6a992. Requirement: proximity centres on the hit's own row, and depth comes from rows the search already holds.
+ * CTO aab6a992. Requirement: proximity centres on the hit's own row, and no read weighs sessions by their match count.
  * Gap: existing tests never read which statements enrichment runs, and none has two rows sharing a timestamp.
  */
 import { Database } from "bun:sqlite"
@@ -16,7 +17,6 @@ process.env.RECALL_DB_PATH = ":memory:"
 let closeDb: (typeof import("../../src/history/db"))["closeDb"]
 let getDb: (typeof import("../../src/history/db"))["getDb"]
 let getSessionContext: (typeof import("../../src/history/db"))["getSessionContext"]
-let ftsSearchWithSnippet: (typeof import("../../src/history/db"))["ftsSearchWithSnippet"]
 let recall: (typeof import("../../src/history/search"))["recall"]
 
 const TOKEN = "enrichtoken"
@@ -24,7 +24,7 @@ const FILLER = "plain neighbouring words"
 
 beforeEach(async () => {
   vi.resetModules()
-  ;({ closeDb, getDb, getSessionContext, ftsSearchWithSnippet } = await import("../../src/history/db"))
+  ;({ closeDb, getDb, getSessionContext } = await import("../../src/history/db"))
   ;({ recall } = await import("../../src/history/search"))
 })
 
@@ -67,34 +67,25 @@ async function preparedSql(run: () => Promise<unknown>): Promise<string[]> {
   return sql
 }
 
-describe("depth comes from the rows the exact search holds", () => {
-  test("it counts past the page, up to the over-fetch, per session", () => {
+describe("depth plays no part in rank", () => {
+  const ranksOf = async (deep: number) => {
     const now = Date.now()
-    seed([...matches("deep", 6, now), ...matches("thin", 1, now)])
-    const { results, sessionDepths } = ftsSearchWithSnippet(getDb(), TOKEN, { limit: 2 })
-    expect(results).toHaveLength(2)
-    expect(sessionDepths).toEqual(
-      new Map([
-        ["deep", 6],
-        ["thin", 1],
-      ]),
-    )
-  })
-
-  test("it stops at the over-fetch, four times the page need, never all time", () => {
-    seed(matches("wide", 30, Date.now()))
-    expect(ftsSearchWithSnippet(getDb(), TOKEN, { limit: 2 }).sessionDepths.get("wide")).toBe(8)
-  })
-})
-
-describe("depth never ranks a deeper session below a thinner one", () => {
-  test("identical text at the same time: the session with more matches comes first or ties", async () => {
-    const now = Date.now()
-    seed([...matches("deep", 7, now), ...matches("thin", 1, now)])
-    const { results } = await recall(TOKEN, { raw: true, limit: 5, excludeCurrentSession: true })
+    seed([...matches("deep", deep, now), ...matches("thin", 1, now)])
+    const { results } = await recall(TOKEN, { raw: true, limit: 8, excludeCurrentSession: true })
     const rank = (session: string) => results.find((r) => r.sessionId === session)?.rank ?? 0
-    expect(rank("deep")).toBeLessThan(0)
-    expect(rank("deep")).toBeLessThanOrEqual(rank("thin"))
+    return { deep: rank("deep"), thin: rank("thin") }
+  }
+
+  test("equal text at depth 1 and depth 5 gets equal rank", async () => {
+    const ranks = await ranksOf(5)
+    expect(ranks.deep).toBeLessThan(0)
+    expect(ranks.deep).toBe(ranks.thin)
+  })
+
+  test("depth never ranks a deeper session below a thinner one", async () => {
+    const ranks = await ranksOf(7)
+    expect(ranks.deep).toBeLessThan(0)
+    expect(ranks.deep).toBeLessThanOrEqual(ranks.thin)
   })
 })
 

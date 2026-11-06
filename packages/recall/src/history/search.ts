@@ -782,15 +782,6 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // Title enrichment follows the lexical and synonym reads, as before.
     const sessionTitles = retrieveCandidates({ db, query: "", titles: runs("titles"), measure: phase }).titles
 
-    // Session depth corroboration: sessions with more matching messages are more relevant.
-    // A session with 10 messages about the topic is more authoritative than one with 1 passing mention.
-    // Both modes count the rows their message search holds: exact the best-ranked over-fetch, hook the newest 1000.
-    const sessionDepths = hookSearch?.sessionDepths ?? messageResults.sessionDepths ?? new Map<string, number>()
-    if (sessionDepths.size > 0) {
-      const maxDepth = Math.max(...sessionDepths.values())
-      log(`corroboration: ${sessionDepths.size} sessions, max depth=${maxDepth}`)
-    }
-
     // Search current (live) session — not yet indexed.
     // Skipped when excludeCurrentSession is set (the inject path uses this to
     // break the autocatalytic loop where current-session transcript fragments
@@ -820,18 +811,13 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         droppedCurrent++
         continue
       }
-      // Apply corroboration boost: divide BM25 rank by log2(depth+1)
-      // BM25 is negative (more negative = better), so dividing by >1 makes it more negative = better
-      const depth = sessionDepths.get(r.session_id) ?? 1
-      const corroborationBoost = depth > 1 ? Math.log2(depth + 1) : 1
-
       const hit: RecallSearchResult = {
         type: "message",
         sessionId: r.session_id,
         sessionTitle: sessionTitles.get(r.session_id) ?? null,
         timestamp: Number(r.timestamp),
         snippet: r.snippet || (r.content?.slice(0, 500) ?? ""),
-        rank: r.rank / corroborationBoost,
+        rank: r.rank,
         line: r.line ?? null,
         duplicateLine: (r as { duplicate_line?: number | null }).duplicate_line ?? null,
         collapsedCopyCount: r.collapsedCopyLocations?.length ?? r.collapsedCopyCount ?? null,
