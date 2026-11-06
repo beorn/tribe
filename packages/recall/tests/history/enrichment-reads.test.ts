@@ -87,6 +87,17 @@ describe("depth comes from the rows the exact search holds", () => {
   })
 })
 
+describe("depth never ranks a deeper session below a thinner one", () => {
+  test("identical text at the same time: the session with more matches comes first or ties", async () => {
+    const now = Date.now()
+    seed([...matches("deep", 7, now), ...matches("thin", 1, now)])
+    const { results } = await recall(TOKEN, { raw: true, limit: 5, excludeCurrentSession: true })
+    const rank = (session: string) => results.find((r) => r.sessionId === session)?.rank ?? 0
+    expect(rank("deep")).toBeLessThan(0)
+    expect(rank("deep")).toBeLessThanOrEqual(rank("thin"))
+  })
+})
+
 describe("enrichment runs no statement sized by the session or by every match", () => {
   test("recall prepares no closest-row walk and no per-match depth read", async () => {
     seed(matches("s", 3, Date.now()))
