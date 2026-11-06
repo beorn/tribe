@@ -28,7 +28,7 @@
   "devDependencies": {
     "@bearly/sqlite": "0.1.0",
     "@types/bun": "1.4.3",
-    "oxfmt": "0.38.0",
+    "oxfmt": "0.76.0",
     "removely": "0.4.0",
     "typescript": "6.0.3",
     "vitest": "4.1.11"
@@ -37,10 +37,10 @@
     "bun": ">=1.4.0",
     "node": ">=23.6.0"
   },
-  "trustedDependencies": [
-    "tribe-recall"
-  ],
   "patchedDependencies": {
     "@tobilu/qmd@2.8.3": "patches/@tobilu%2Fqmd@2.8.3.patch"
-  }
+  },
+  "trustedDependencies": [
+    "tribe-recall"
+  ]
 }
