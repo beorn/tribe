@@ -579,6 +579,17 @@ export const MIGRATION_STEPS: MigrationStep[] = [
       db.exec("CREATE INDEX IF NOT EXISTS idx_messages_id_session_ts ON messages(id, session_id, timestamp)")
     },
   },
+  {
+    // A hit's duplicate_line otherwise walks every row of its session, 1 to 4 s per search (CTO fdd015bd). Partial, so
+    // rows without a duplicate add nothing. Versioned, never in SCHEMA, as v7.
+    version: 8,
+    name: "messages-duplicate-line-covering-index",
+    up: (db: Database) => {
+      db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_messages_duplicate ON messages(session_id, duplicate_of, line) WHERE duplicate_of IS NOT NULL",
+      )
+    },
+  },
 ]
 
 export const CURRENT_SCHEMA_VERSION = MIGRATION_STEPS.at(-1)?.version ?? 1
