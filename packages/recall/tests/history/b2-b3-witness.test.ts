@@ -844,7 +844,9 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
         content TEXT,
         tool_name TEXT,
         file_paths TEXT,
-        timestamp INTEGER NOT NULL
+        timestamp INTEGER NOT NULL,
+        duplicate_of INTEGER,
+        line INTEGER
       );`,
     ]) {
       v5Db.exec(assertSingleStatement(sql))
@@ -971,7 +973,9 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
         content TEXT,
         tool_name TEXT,
         file_paths TEXT,
-        timestamp INTEGER NOT NULL
+        timestamp INTEGER NOT NULL,
+        duplicate_of INTEGER,
+        line INTEGER
       );`,
     ]) {
       v3Db.exec(assertSingleStatement(sql))
