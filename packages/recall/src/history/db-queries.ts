@@ -512,17 +512,29 @@ export function ftsSearchWithSnippet(
   db: Database,
   query: string,
   options?: MessageSearchOptions & { mode?: "exact" },
-): { results: MessageSearchHit[]; total: number; capped?: RecallSkip }
+): { results: MessageSearchHit[]; total: number; sessionDepths: Map<string, number>; capped?: RecallSkip }
 export function ftsSearchWithSnippet(
   db: Database,
   query: string,
   options: MessageSearchOptions,
-): { results: MessageSearchHit[]; total: number | null; hook?: HookMessageSearch; capped?: RecallSkip }
+): {
+  results: MessageSearchHit[]
+  total: number | null
+  sessionDepths?: Map<string, number>
+  hook?: HookMessageSearch
+  capped?: RecallSkip
+}
 export function ftsSearchWithSnippet(
   db: Database,
   query: string,
   options: MessageSearchOptions = {},
-): { results: MessageSearchHit[]; total: number | null; hook?: HookMessageSearch; capped?: RecallSkip } {
+): {
+  results: MessageSearchHit[]
+  total: number | null
+  sessionDepths?: Map<string, number>
+  hook?: HookMessageSearch
+  capped?: RecallSkip
+} {
   if (options.mode === "hook") return hookMessageSearch(db, query, options)
   const { limit = 50, offset = 0, snippetTokens = 64 } = options
   const ftsQuery = toFts5Query(query)
@@ -575,6 +587,11 @@ export function ftsSearchWithSnippet(
   })()
   const distinct = collapseNullUuidCopies(ranked)
   const results = distinct.slice(offset, offset + limit)
+  // Each session's matches among the held rows, before the page cut: the best-ranked over-fetch, where hook mode's
+  // window is its newest 1000 and neither is all time. A GROUP BY over every all-time match probed an index per match:
+  // 7,095 ms cold on 568,104 matches, against 68 ms for the FTS alone (CTO aab6a992, d19-result.md).
+  const sessionDepths = new Map<string, number>()
+  for (const hit of distinct) sessionDepths.set(hit.session_id, (sessionDepths.get(hit.session_id) ?? 0) + 1)
   const capped: RecallSkip | undefined =
     ranked.length === overFetch && distinct.length < pageNeed
       ? {
@@ -588,7 +605,7 @@ export function ftsSearchWithSnippet(
         }
       : undefined
 
-  return { results, total, ...(capped ? { capped } : {}) }
+  return { results, total, sessionDepths, ...(capped ? { capped } : {}) }
 }
 
 /** Every match that meets the filter, counted: exact mode's total, and hook mode's only when asked for. */
@@ -1207,27 +1224,14 @@ export function searchAll(
 export function getSessionContext(
   db: Database,
   sessionId: string,
-  timestamp: number,
+  messageId: number,
   radius: number = 5,
 ): MessageRecord[] {
-  // Find the message closest to the timestamp
-  const closest = db
-    .prepare(`
-    SELECT id FROM messages
-    WHERE session_id = ?
-    ORDER BY ABS(timestamp - ?)
-    LIMIT 1
-  `)
-    .get(sessionId, timestamp) as { id: number } | undefined
-
-  if (!closest) return []
-
-  // Get surrounding messages
   return db
     .prepare(`
     SELECT * FROM messages
     WHERE session_id = ? AND id >= ? AND id <= ?
     ORDER BY id
   `)
-    .all(sessionId, closest.id - radius, closest.id + radius) as MessageRecord[]
+    .all(sessionId, messageId - radius, messageId + radius) as MessageRecord[]
 }
