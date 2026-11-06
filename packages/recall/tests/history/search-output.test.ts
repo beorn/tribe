@@ -356,7 +356,7 @@ describe("recall search output", () => {
       expect(reversed.code).not.toBe(0)
       expect(reversed.stderr).toMatch(/--since.*(after|later).*--until/)
       for (const mode of [[], ["--raw"], ["--grep"], ["--agent"], ["--debug-plan"]]) {
-        const rejected = await run(["untilneedle", ...mode, "--until", "2026-10-07T04:42:57.113Z"])
+        const rejected = await run(["untilneedle", ...mode, "--since", "all", "--until", "2026-10-07T04:42:57.113Z"])
         expect(rejected.code).not.toBe(0)
         expect(rejected.stderr).toMatch(/--until.*(raw|indexed|grep|agent|synth)/i)
       }
