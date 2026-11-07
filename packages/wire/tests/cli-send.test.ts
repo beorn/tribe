@@ -2202,6 +2202,7 @@ describe("reply and taking convenience commands (25028)", () => {
     sendAppliedDue?: { request_id: string; previous_expires_at: number | null; expires_at: number }
     sendError?: string
     pendingError?: string
+    pendingRpcError?: string
     fetchLookup?: { status: string; detail: string }
     fleetPendingRows?: Array<{
       request_id?: string
@@ -2241,6 +2242,10 @@ describe("reply and taking convenience commands (25028)", () => {
           newline = buffer.indexOf("\n")
           if (!line.trim()) continue
           const request = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> }
+          if (request.method === "tribe.pending" && opts.pendingRpcError !== undefined) {
+            socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: opts.pendingRpcError } })}\n`)
+            continue
+          }
           let result: unknown
           if (request.method === "cli_inbox_status_by_launch_v1") {
             result = { session: "@dev/8", launch_id: "launch-25028", launch_parent_pid: 1234 }
@@ -2385,6 +2390,7 @@ describe("reply and taking convenience commands (25028)", () => {
       { name: "foreign", rows: [{ ...owned, recipient: "@dev/9" }], ref, warns: true },
       { name: "unavailable", rows: [owned], ref, warns: true, error: "tracker unavailable" },
       { name: "broadcast", rows: [owned], ref, warns: false, to: "*" },
+      { name: "broadcast RPC failure", rows: [owned], ref, warns: true, to: "*", rpcError: "tracker unavailable" },
     ]
     for (const scenario of cases) {
       const res = await runMockDaemon(
@@ -2392,6 +2398,7 @@ describe("reply and taking convenience commands (25028)", () => {
         {
           pendingRows: scenario.rows,
           pendingError: scenario.error,
+          pendingRpcError: scenario.rpcError,
           fetchEvents: Array.from({ length: 50 }, (_, i) => ({ id: `member-${i}`, from: "dark-work" })),
           fetchLookup: { status: "partial", detail: `request ${ref}: 39 of 89 member(s) not returned at limit 50` },
         },

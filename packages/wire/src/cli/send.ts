@@ -690,7 +690,15 @@ async function warnUnreleasedBallToRecipient(
   // facts. Share this read with reference validation before skipping the note.
   if (recipient === "*" && correlatedRef === undefined) return
 
-  const pending = mcpJsonContent(await callDaemon("tribe.pending", { owner: sender })) as PendingListResult
+  let pending: PendingListResult
+  try {
+    pending = mcpJsonContent(await callDaemon("tribe.pending", { owner: sender })) as PendingListResult
+  } catch (error) {
+    // This read is new for correlated broadcasts; its failure must remain an
+    // advisory fact for the existing snapshot fallback, never block delivery.
+    if (recipient !== "*") throw error
+    return { error: error instanceof Error ? error.message : String(error) }
+  }
   if (pending.error !== undefined && pending.error.length > 0) {
     // Stay quiet rather than cry wolf: an unreadable tracker is not evidence
     // of an unreleased ball. The reply path already reports read failures on
