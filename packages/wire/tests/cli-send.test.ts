@@ -2243,7 +2243,9 @@ describe("reply and taking convenience commands (25028)", () => {
           if (!line.trim()) continue
           const request = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> }
           if (request.method === "tribe.pending" && opts.pendingRpcError !== undefined) {
-            socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: opts.pendingRpcError } })}\n`)
+            socket.write(
+              `${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: opts.pendingRpcError } })}\n`,
+            )
             continue
           }
           let result: unknown
