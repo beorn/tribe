@@ -30,6 +30,8 @@ import { slugFromText } from "../src/qmd-export.ts"
  * (@km/tribe/ci-green-round3).
  */
 function realNodeBinary(): string {
+  // Nix names the running Bun `.bun-wrapped`; its identity still excludes the node shim.
+  const currentBunBinary = process.versions.bun === undefined ? undefined : realpathSync(process.execPath)
   const dirs = (process.env.PATH ?? "").split(":").filter(Boolean)
   for (const dir of dirs) {
     const candidate = join(dir, "node")
@@ -40,7 +42,7 @@ function realNodeBinary(): string {
     } catch {
       continue
     }
-    if (basename(resolved) === "bun") continue
+    if (basename(resolved) === "bun" || resolved === currentBunBinary) continue
     return candidate
   }
   throw new Error("no real (non-Bun) node binary found on PATH — qmd's native SQLite binding needs one to load under")
