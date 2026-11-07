@@ -2201,6 +2201,8 @@ describe("reply and taking convenience commands (25028)", () => {
     }>
     sendAppliedDue?: { request_id: string; previous_expires_at: number | null; expires_at: number }
     sendError?: string
+    pendingError?: string
+    fetchLookup?: { status: string; detail: string }
     fleetPendingRows?: Array<{
       request_id?: string
       message_id?: string
@@ -2279,6 +2281,7 @@ describe("reply and taking convenience commands (25028)", () => {
                       owner: (p.owner as string) ?? "@dev/8",
                       count: (opts.pendingRows ?? []).length,
                       pending: opts.pendingRows ?? [],
+                      ...(opts.pendingError === undefined ? {} : { error: opts.pendingError }),
                     }),
                   },
                 ],
@@ -2290,6 +2293,7 @@ describe("reply and taking convenience commands (25028)", () => {
                 {
                   text: JSON.stringify({
                     events: opts.fetchEvents ?? [],
+                    ...(opts.fetchLookup === undefined ? {} : { settlement_lookup: opts.fetchLookup }),
                   }),
                 },
               ],
@@ -2367,6 +2371,38 @@ describe("reply and taking convenience commands (25028)", () => {
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
     }
   }
+
+  // @failure Owned references falsely warn when bounded history omits members (31937).
+  // @level l2 @consumer tribe-wire send CLI
+  test("owned tracker facts verify partial-history references without hiding unknown or unavailable facts", async () => {
+    const ref = "dark-work:Owner4h:@dev/8"
+    const owned = { request_id: ref, message_id: "member-88", recipient: "@dev/8", sender: "dark-work" }
+    const cases = [
+      { name: "active", rows: [{ ...owned, status: "active" }], ref, warns: false },
+      { name: "expired", rows: [{ ...owned, status: "expired" }], ref, warns: false },
+      { name: "message alias", rows: [owned], ref: owned.message_id, warns: false },
+      { name: "unknown", rows: [owned], ref: "unknown-request", warns: true },
+      { name: "foreign", rows: [{ ...owned, recipient: "@dev/9" }], ref, warns: true },
+      { name: "unavailable", rows: [owned], ref, warns: true, error: "tracker unavailable" },
+    ]
+    for (const scenario of cases) {
+      const res = await runMockDaemon(
+        ["send", "dark-work", scenario.name, "--type", "status", "--ref", scenario.ref, "--json"],
+        {
+          pendingRows: scenario.rows,
+          pendingError: scenario.error,
+          fetchEvents: Array.from({ length: 50 }, (_, i) => ({ id: `member-${i}`, from: "dark-work" })),
+          fetchLookup: { status: "partial", detail: `request ${ref}: 39 of 89 member(s) not returned at limit 50` },
+        },
+      )
+      expect(res.code, scenario.name).toBe(0)
+      expect(JSON.parse(res.stdout), scenario.name).toMatchObject({ sent: true })
+      expect(res.sent, scenario.name).toEqual([
+        expect.objectContaining({ to: "dark-work", type: "status", ref: scenario.ref }),
+      ])
+      expect(res.stderr.includes("unresolved-ref"), scenario.name).toBe(scenario.warns)
+    }
+  })
 
   // 29601: these commands share cmdSend with the ordinary send verb. Its argv encoding must not
   // leave JSON punctuation in the recipient passed to the daemon's existing normalizer.

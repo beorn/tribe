@@ -685,7 +685,7 @@ async function warnUnreleasedBallToRecipient(
   recipient: string,
   takingRef?: string,
   correlatedRef?: string,
-): Promise<void> {
+): Promise<PendingListResult | undefined> {
   // A broadcast is not a targeted send; warning on every fan-out would fire
   // constantly once a seat is behind, which is when a warning is least welcome
   // and most likely to be tuned out.
@@ -696,13 +696,13 @@ async function warnUnreleasedBallToRecipient(
     // Stay quiet rather than cry wolf: an unreadable tracker is not evidence
     // of an unreleased ball. The reply path already reports read failures on
     // the branch where the answer depends on them.
-    return
+    return pending
   }
 
   const owed = (pending.pending ?? []).filter((row) => row.sender === recipient && row.recipient === sender)
-  if (owed.length === 0) return
+  if (owed.length === 0) return pending
   if (takingRef !== undefined && owed.some((row) => row.request_id === takingRef || row.message_id === takingRef)) {
-    return
+    return pending
   }
 
   const refNote =
@@ -721,6 +721,7 @@ async function warnUnreleasedBallToRecipient(
     console.error(`    close with: tribe send ${recipient} --type response --reply ${id} <your answer>`)
   }
   console.error(`Sending anyway — this is a note, not a refusal; a send to someone you owe is often legitimate.`)
+  return pending
 }
 
 type RefSettlementSnapshot = {
@@ -744,7 +745,17 @@ export function refNamesOwnedOpenBall(
 }
 
 /** A correlation is advisory: neither lookup failure nor a stale id refuses delivery. */
-async function warnUnresolvedRef(sender: SendCaller, ref: string): Promise<void> {
+async function warnUnresolvedRef(sender: SendCaller, ref: string, ownedPending?: PendingListResult): Promise<void> {
+  // The complete owner read can verify a held ball even when bounded history is
+  // partial. Keep the snapshot fallback for requester-owned and unknown refs.
+  if (
+    !ownedPending?.error &&
+    ownedPending?.pending?.some(
+      (row) => row.recipient === sender.name && (row.request_id === ref || row.message_id === ref),
+    )
+  ) {
+    return
+  }
   let detail: string
   try {
     // ids is a snapshot read: it never acknowledges the caller's mailbox.
@@ -865,14 +876,20 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     type === "query" ||
     type === "assign" ||
     input.incident !== undefined
-  if (input.ref && !input.reply && caller && !input.anonymous && !createsRequest) {
-    await warnUnresolvedRef(caller, input.ref)
-  }
+  let ownedPending: PendingListResult | undefined
   // The pre-send read warns when the id is not the caller's to close; the
   // post-send sentence is rendered from the daemon's `ball` fact (30160).
   if (input.reply && caller) await warnPendingReplyOwner(caller.name, input.reply)
   else if (!input.reply && caller && !input.anonymous) {
-    await warnUnreleasedBallToRecipient(caller.name, input.to, type === "status" ? input.ref : undefined, input.ref)
+    ownedPending = await warnUnreleasedBallToRecipient(
+      caller.name,
+      input.to,
+      type === "status" ? input.ref : undefined,
+      input.ref,
+    )
+  }
+  if (input.ref && !input.reply && caller && !input.anonymous && !createsRequest) {
+    await warnUnresolvedRef(caller, input.ref, ownedPending)
   }
 
   const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller, !input.anonymous)) as {
