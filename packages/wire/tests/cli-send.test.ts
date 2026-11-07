@@ -2384,10 +2384,11 @@ describe("reply and taking convenience commands (25028)", () => {
       { name: "unknown", rows: [owned], ref: "unknown-request", warns: true },
       { name: "foreign", rows: [{ ...owned, recipient: "@dev/9" }], ref, warns: true },
       { name: "unavailable", rows: [owned], ref, warns: true, error: "tracker unavailable" },
+      { name: "broadcast", rows: [owned], ref, warns: false, to: "*" },
     ]
     for (const scenario of cases) {
       const res = await runMockDaemon(
-        ["send", "dark-work", scenario.name, "--type", "status", "--ref", scenario.ref, "--json"],
+        ["send", scenario.to ?? "dark-work", scenario.name, "--type", "status", "--ref", scenario.ref, "--json"],
         {
           pendingRows: scenario.rows,
           pendingError: scenario.error,
@@ -2398,9 +2399,10 @@ describe("reply and taking convenience commands (25028)", () => {
       expect(res.code, scenario.name).toBe(0)
       expect(JSON.parse(res.stdout), scenario.name).toMatchObject({ sent: true })
       expect(res.sent, scenario.name).toEqual([
-        expect.objectContaining({ to: "dark-work", type: "status", ref: scenario.ref }),
+        expect.objectContaining({ to: scenario.to ?? "dark-work", type: "status", ref: scenario.ref }),
       ])
       expect(res.stderr.includes("unresolved-ref"), scenario.name).toBe(scenario.warns)
+      if (scenario.to === "*") expect(res.stderr).not.toContain("open ball(s) from")
     }
   })
 

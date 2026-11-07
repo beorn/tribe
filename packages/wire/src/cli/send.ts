@@ -686,10 +686,9 @@ async function warnUnreleasedBallToRecipient(
   takingRef?: string,
   correlatedRef?: string,
 ): Promise<PendingListResult | undefined> {
-  // A broadcast is not a targeted send; warning on every fan-out would fire
-  // constantly once a seat is behind, which is when a warning is least welcome
-  // and most likely to be tuned out.
-  if (recipient === "*") return
+  // Broadcasts have no owed recipient, but a correlation still needs the owner
+  // facts. Share this read with reference validation before skipping the note.
+  if (recipient === "*" && correlatedRef === undefined) return
 
   const pending = mcpJsonContent(await callDaemon("tribe.pending", { owner: sender })) as PendingListResult
   if (pending.error !== undefined && pending.error.length > 0) {
@@ -699,6 +698,7 @@ async function warnUnreleasedBallToRecipient(
     return pending
   }
 
+  if (recipient === "*") return pending
   const owed = (pending.pending ?? []).filter((row) => row.sender === recipient && row.recipient === sender)
   if (owed.length === 0) return pending
   if (takingRef !== undefined && owed.some((row) => row.request_id === takingRef || row.message_id === takingRef)) {
