@@ -1223,6 +1223,46 @@ console.log(JSON.stringify({ kind: "done", sessions, rows, errors: 0 }))
     }
 
     // Acceptance: strict export must receive the complete ambiguous group on both routes.
+    // Historical failures stay skipped incrementally but recover through the existing path route.
+    // Fresh-index tests cannot catch an unchanged failed row remaining stuck or being duplicated.
+    test.each(["bad-header", "stale-bad-header", "unreadable", "stale-unreadable"])(
+      "recovers an unchanged %s archive through explicit reindex exactly once",
+      async (status) => {
+        const path = "/fixture/archive-rollout.jsonl"
+        const fixture = batchFixture([[path]])
+        fixture.catalog.sessions[0]!.status = "invalid"
+        fixture.catalog.sessions[0]!.canonicalPath = null
+        fixture.catalog.sessions[0]!.copies[0]!.decision = "stale"
+        fixture.catalog.canonical = 0
+        fixture.catalog.invalid = 1
+        db.prepare(`INSERT INTO sessions
+          (id, project_path, jsonl_path, created_at, updated_at, message_count, status, size_bytes, mtime_ms, last_event_at_ms)
+          VALUES ('codex:batch-0', '/fixture', ?, 1000, 1000, 1, ?, 100, 1000, 2000)`).run(path, status)
+        insertMessage(db, null, "codex:batch-0", "user", "old retained archive", null, null, 1000, null, 1)
+
+        expect((await indexCodexTranscripts(db, { ...fixture, incremental: true })).skipped).toBe(1)
+        expect(existsSync(fixture.invocationsFile)).toBe(false)
+        expect(ftsSearchWithSnippet(db, "retained").results).toHaveLength(1)
+
+        // The fixture supplies a valid complete wire; the real DB consumer decides replacement/commit.
+        const recovered = await indexCodexTranscripts(db, { ...fixture, path })
+        expect(recovered.rows).toBe(2)
+        expect(getSession(db, "codex:batch-0")?.status).toBe("complete")
+        const rows = db
+          .prepare("SELECT type, content FROM messages WHERE session_id = ? ORDER BY id")
+          .all("codex:batch-0")
+        expect(rows).toEqual([
+          { type: "user", content: "message codex:batch-0" },
+          { type: "tool_use", content: "{}" },
+        ])
+        expect((await indexCodexTranscripts(db, { ...fixture, incremental: true })).skipped).toBe(1)
+        expect(
+          db.prepare("SELECT type, content FROM messages WHERE session_id = ? ORDER BY id").all("codex:batch-0"),
+        ).toEqual(rows)
+        expect(readFileSync(fixture.invocationsFile, "utf8").trim().split("\n")).toHaveLength(1)
+      },
+    )
+
     // Existing full-group tests never change just one fork or select one path.
     test.each(["incremental", "path"] as const)("refreshes both ambiguous copies through %s", async (route) => {
       const paths = ["/fixture/fork-a.jsonl", "/fixture/fork-b.jsonl"]
