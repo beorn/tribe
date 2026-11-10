@@ -546,4 +546,33 @@ describe("S2: recall() synonym variants", () => {
       db.prepare = originalPrepare
     }
   })
+
+  // Requirement (@cto c1f60e15, design delta A): a leg whose base already returned the caller's limit runs no
+  // synonym variant and says so; a thin leg in the same call still expands. Before A, the full message leg pulled
+  // the synonym-only session in, and nothing reported a skip, so the two tests above cannot see this.
+  test("a full base leg skips its synonym variants out loud; a thin leg still expands", async () => {
+    // Two base messages in one session: the message leg is full at limit 2, yet merges to one result, so the second
+    // slot is open to whichever synonym hit expanded.
+    seed([
+      { session: "base-hit", content: "auth token rotation note", ageDays: 1 },
+      { session: "base-hit", content: "auth header rotation note", ageDays: 1 },
+      { session: "synonym-only", content: "authentication flow rotation note", ageDays: 1 },
+    ])
+    seedDoc("synonym-doc", "authentication guide for the rotation")
+
+    const result = await recall("auth", { raw: true, excludeCurrentSession: true, limit: 2 })
+
+    expect(result.skipped).toEqual([
+      {
+        kind: "base-full",
+        phase: "synonym_messages",
+        anchor: "auth",
+        message: "recall synonym_messages skipped: base returned 2 for limit 2",
+      },
+    ])
+    const keys = result.results.map((r) => `${r.sessionId}:${r.type}`)
+    expect(keys).not.toContain("synonym-only:message")
+    expect(keys).toContain("synonym-doc:doc")
+    expect(result.timing?.phases?.synonyms).toBeGreaterThanOrEqual(0)
+  })
 })
