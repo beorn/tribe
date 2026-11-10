@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { resolveInboxWaitOptions } from "tribe-wire"
 import type { MessageInsertedInfo } from "./lib/context.ts"
 import { createTribeContext } from "./lib/context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./lib/database.ts"
@@ -1292,6 +1293,182 @@ describe("createInboxWaitManager", () => {
       if (!wokenDespiteLag) manager.cancelConnection("conn-race")
       await wait
       expect(wokenDespiteLag, "assign must wake a live waiter even when getUnreadDms lags at insert time").toBe(true)
+    } finally {
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("32353 Step 4 Condition 2: timeout_ms: 0 with wake_on_correlated_reply: true returns immediately with snapshot and baseline_seq without defaulting to 30_000ms", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-zero-poll-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const readStatus = realUnreadReader(stmts)
+    const manager = createInboxWaitManager(
+      readStatus,
+      realAttentionReader(db, stmts),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply, true),
+      (session, seq, wakeOnCorrelatedReply) => readInboxWaitWokenBy(stmts, session, seq, wakeOnCorrelatedReply),
+    )
+    const seat = "@dev/4"
+
+    try {
+      const parsedOpts = resolveInboxWaitOptions({
+        session: seat,
+        timeout_ms: 0,
+        wake_on_correlated_reply: true,
+      })
+      expect(parsedOpts).toEqual({
+        session: seat,
+        timeoutMs: 0,
+        wakeOnCorrelatedReply: true,
+      })
+
+      const pollResult = await manager.wait(seat, "conn-safe-point-poll", parsedOpts.timeoutMs, {
+        wakeOnCorrelatedReply: parsedOpts.wakeOnCorrelatedReply,
+      })
+      expect(pollResult).toMatchObject({
+        status: "timeout",
+        session: seat,
+        unread_count: 0,
+        effective_timeout_ms: 0,
+        timed_out: true,
+        aborted: false,
+        waited_ms: immediateWakeMs,
+        baseline_seq: 0,
+        attention: {
+          actionable_unread: [],
+          pending_balls_summary: { total: 0 },
+        },
+      })
+    } finally {
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("32353 Step 4 Condition 5: request arriving after safe-point baseline_seq that the dying seat fetches (marking it read) still wakes after_seq hold and remains owed in pending_balls_summary.total", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-park-race-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const readStatus = realUnreadReader(stmts)
+    const manager = createInboxWaitManager(
+      readStatus,
+      realAttentionReader(db, stmts),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply, true),
+      (session, seq, wakeOnCorrelatedReply) => readInboxWaitWokenBy(stmts, session, seq, wakeOnCorrelatedReply),
+    )
+    const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
+    const seat = "@dev/4"
+
+    try {
+      // 1. Safe-point poll at T0 observes empty inbox and records baseline_seq B = 0.
+      const safePointPoll = await manager.wait(seat, "conn-safe-point", 0, {
+        wakeOnCorrelatedReply: true,
+      })
+      expect(safePointPoll.status).toBe("timeout")
+      expect(safePointPoll.baseline_seq).toBe(0)
+      expect(safePointPoll.attention.pending_balls_summary.total).toBe(0)
+      const baselineSeq = safePointPoll.baseline_seq
+
+      // 2a. A request arrives for `seat` after B, and the dying seat fetches its inbox before exiting —
+      // advancing its mailbox cursor and recording message_reads, without settling the request ball.
+      const reqMsg = sendMessage(
+        chief,
+        seat,
+        "urgent request during park window",
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { request: "req-during-park" },
+      )
+      expect(reqMsg.rowid).toBeGreaterThan(baselineSeq)
+      stmts.advanceMailboxCursor.run({ $recipient: seat, $seq: reqMsg.rowid, $now: Date.now() })
+      // Tracked untaken request stays visible as a replay across cursor advance:
+      expect(readStatus(seat).unread_count).toBe(1)
+
+      // 3a. The parked hold's cli_inbox_wait(after_seq: B, timeout_ms: 0, wake_on_correlated_reply: true)
+      // wakes immediately by sequence number (reqMsg.rowid > B), and the resumed seat sees the owed ball!
+      const holdWake = await manager.wait(seat, "conn-parked-hold", 0, {
+        afterSeq: baselineSeq,
+        wakeOnCorrelatedReply: true,
+      })
+      expect(holdWake).toMatchObject({
+        status: "woken",
+        session: seat,
+        unread_count: 1,
+        timed_out: false,
+        aborted: false,
+        waited_ms: immediateWakeMs,
+        woken_by: {
+          kind: "message",
+          message_id: reqMsg.id,
+          seq: reqMsg.rowid,
+          type: "request",
+          replay: true,
+        },
+      })
+      expect(holdWake.attention.actionable_unread[0]?.replay).toBe(true)
+      expect(holdWake.attention.pending_balls_summary.total).toBe(1)
+      expect(holdWake.attention.pending_balls[0]?.request_id).toBe("req-during-park")
+
+      // 2b. Settle that ball, take a fresh baseline B2, then deliver an untracked actionable (verdict)
+      // that the dying seat fetches (so unread_count drops to 0) before exiting: after_seq: B2 still wakes!
+      const seatCtx = makeContext(db, stmts, "seat-4", seat, manager.onMessageInserted)
+      sendMessage(
+        seatCtx,
+        "@chief",
+        "settled before second poll",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { reply: "req-during-park" },
+      )
+      const secondPoll = await manager.wait(seat, "conn-safe-point-2", 0, {
+        wakeOnCorrelatedReply: true,
+      })
+      expect(secondPoll.status).toBe("timeout")
+      expect(secondPoll.unread_count).toBe(0)
+      const baselineSeq2 = secondPoll.baseline_seq
+
+      const verdictMsg = sendMessage(
+        chief,
+        seat,
+        "verdict fetched before exit",
+        "verdict",
+        undefined,
+        undefined,
+        "direct",
+      )
+      expect(verdictMsg.rowid).toBeGreaterThan(baselineSeq2)
+      stmts.advanceMailboxCursor.run({ $recipient: seat, $seq: verdictMsg.rowid, $now: Date.now() })
+      expect(readStatus(seat).unread_count).toBe(0)
+
+      const holdWake2 = await manager.wait(seat, "conn-parked-hold-2", 0, {
+        afterSeq: baselineSeq2,
+        wakeOnCorrelatedReply: true,
+      })
+      expect(holdWake2).toMatchObject({
+        status: "woken",
+        session: seat,
+        unread_count: 0,
+        timed_out: false,
+        aborted: false,
+        waited_ms: immediateWakeMs,
+        woken_by: {
+          kind: "message",
+          message_id: verdictMsg.id,
+          seq: verdictMsg.rowid,
+          type: "verdict",
+          replay: true,
+        },
+      })
     } finally {
       db.close()
       rmSync(tmpDir, { recursive: true, force: true })
