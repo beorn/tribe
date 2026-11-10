@@ -1628,7 +1628,7 @@ describe("recall search output", () => {
         const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, RECALL_DB_PATH: ":memory:", RECALL_AGENT: "0" }
         delete env.CLAUDE_DIR
 
-        const result = await runRecallCli([token, "--grep"], env)
+        const result = await runRecallCli([token, "--grep", "--since", "all"], env)
 
         expect(result.code, result.stderr).toBe(0)
         const time = (iso: string) => new Date(iso).toLocaleTimeString()
