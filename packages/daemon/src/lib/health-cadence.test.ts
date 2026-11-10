@@ -307,6 +307,8 @@ describe("20876 Tribe health cadence", () => {
         oldest_age_ms: 8 * DAY,
         actionable_rows: 0,
         actionable_oldest_age_ms: 0,
+        actionable_held_rows: 0,
+        actionable_causes: [],
         waking_rows: 0,
         waking_oldest_age_ms: 0,
         tracking_since_ms: now,
