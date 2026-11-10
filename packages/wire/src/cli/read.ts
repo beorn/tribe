@@ -6,10 +6,10 @@ import { inspect } from "node:util"
 import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
 import {
+  DEFAULT_INBOX_WAIT_TIMEOUT_MS,
   DEFAULT_WAIT_TIMEOUT_MS,
   deriveInboxWaitCallTimeoutMs,
   parseInboxWaitResult,
-  resolveInboxWaitControls,
   type InboxWaitResult,
 } from "../lib/inbox-wait-options.ts"
 import { InboxWaitGapController } from "../lib/inbox-wait-gap.ts"
@@ -2436,6 +2436,19 @@ function logicalTimeoutInboxWaitResult(
   )
 }
 
+/** 30526: the CLI's whole wait honours the requested time. Each daemon call stays bounded (`maxChunkMs`,
+ *  and the daemon's own per-call cap, MAX_INBOX_WAIT_TIMEOUT_MS), so capping the deadline here only cut
+ *  the caller's wait silently. A non-finite or negative request is a caller bug: refuse it, never wait
+ *  a default or nothing instead. */
+function requireWholeWaitMs(timeoutMs: number): number {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new RangeError(
+      `inbox wait timeout must be a finite, non-negative number of milliseconds (got ${String(timeoutMs)})`,
+    )
+  }
+  return timeoutMs
+}
+
 export async function waitForInboxWithReconnect(opts: {
   session?: string
   timeoutMs: number
@@ -2459,10 +2472,10 @@ export async function waitForInboxWithReconnect(opts: {
   const maxChunkMs = opts.maxChunkMs ?? INBOX_WAIT_CHUNK_MS
   const retryDelayMs = Math.max(0, opts.retryDelayMs ?? INBOX_WAIT_RETRY_DELAY_MS)
   const unavailableGraceMs = opts.unavailableGraceMs ?? INBOX_WAIT_UNAVAILABLE_GRACE_MS
-  const controls = resolveInboxWaitControls({
-    timeout_ms: opts.timeoutMs,
-    wake_on_correlated_reply: opts.wakeOnCorrelatedReply,
-  })
+  const controls = {
+    timeoutMs: requireWholeWaitMs(opts.timeoutMs),
+    wakeOnCorrelatedReply: opts.wakeOnCorrelatedReply === true,
+  }
   const startedAt = now()
   const deadline = startedAt + controls.timeoutMs
   const gap = new InboxWaitGapController({
@@ -2589,10 +2602,11 @@ async function cmdInboxWait(opts: {
   verb?: string
 }): Promise<void> {
   const verb = opts.verb ?? "inbox-wait"
-  const controls = resolveInboxWaitControls({
-    timeout_ms: opts.timeoutMs,
-    wake_on_correlated_reply: opts.wakeOnCorrelatedReply,
-  })
+  // The whole requested time, not the per-call cap (30526); waitForInboxWithReconnect refuses a bad value.
+  const controls = {
+    timeoutMs: opts.timeoutMs ?? DEFAULT_INBOX_WAIT_TIMEOUT_MS,
+    wakeOnCorrelatedReply: opts.wakeOnCorrelatedReply === true,
+  }
   const target = cliInboxTargetParams(verb, opts.session)
   let result: InboxWaitResult
   try {

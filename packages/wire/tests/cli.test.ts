@@ -2599,7 +2599,9 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       [["--timeout", "bad", "--timeout-ms", "7"], 7],
       [["--timeout", "2s"], 2_000],
       [["--timeout", "2m"], 120_000],
-      [["--timeout", "1h"], 1_800_000],
+      // 30526: the whole requested time is the deadline; only each RPC stays at 30 s.
+      [["--timeout", "54m"], 3_240_000],
+      [["--timeout", "1h"], 3_600_000],
     ]
     for (const [flags, timeoutMs] of cases) {
       const { result, calls } = await runManagedPendingCliAgainst(

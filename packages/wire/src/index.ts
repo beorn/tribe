@@ -177,7 +177,6 @@ export {
   parseInboxWaitResult,
   parseInboxWaitTimeoutMs,
   resolveInboxWaitOptions,
-  resolveWaitOptions,
 } from "./barrels/records.ts"
 
 // Command descriptors - source of truth for MCP/CLI/help/future UI projection.

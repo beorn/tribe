@@ -4,6 +4,13 @@
 
 ### Changed
 
+- **`inbox-wait` and `wait` wait the whole `--timeout`, also past 30 minutes (30526).** The CLI capped
+  the whole wait at the 30-minute bound meant for one daemon call, and reported the cut value as
+  `effective_timeout_ms` with no warning. It now re-arms 30-second daemon calls until the requested
+  time has passed, and `effective_timeout_ms` is the time actually waited. The daemon's per-call bound
+  (`MAX_INBOX_WAIT_TIMEOUT_MS`) and the MCP host ceiling are unchanged. `waitForInboxWithReconnect`
+  refuses a non-finite or negative timeout with a `RangeError` instead of waiting a default.
+  `resolveWaitOptions`, an export with no callers, is removed.
 - **A deadline with actionable attention that arrived during the wait settles `woken`, not `timeout` (30414).**
   `inbox.wait` reports `status: "woken"` with `woken_by` naming the newest retained `actionable_unread` row whose
   sequence is past the wait baseline (a direct response wakes nothing live unless correlated, yet it is

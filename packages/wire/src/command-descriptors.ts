@@ -705,7 +705,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "timeout",
           flags: "--timeout <duration>",
-          description: "Wait limit: integer milliseconds or NNs|NNm|NNh (e.g. 480000, 30s, 5m)",
+          description:
+            "Wait limit: integer milliseconds or NNs|NNm|NNh (e.g. 480000, 30s, 5m, 2h); the whole time is waited, in 30-second daemon calls",
           default: "30s",
           mapsTo: "timeout_ms",
           transform: "duration-ms",
@@ -713,7 +714,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "timeout-ms",
           flags: "--timeout-ms <milliseconds>",
-          description: "Wait limit in integer milliseconds; takes precedence over --timeout",
+          description:
+            "Wait limit in integer milliseconds, waited whole like --timeout; takes precedence over --timeout",
           mapsTo: "timeout_ms",
         },
         {

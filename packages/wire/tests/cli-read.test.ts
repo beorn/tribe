@@ -28,8 +28,9 @@ import {
 import {
   deriveInboxWaitCallTimeoutMs,
   MAX_INBOX_WAIT_TIMEOUT_MS,
+  MCP_INBOX_WAIT_HOST_CEILING_MS,
+  resolveInboxWaitControls,
   resolveInboxWaitOptions,
-  resolveWaitOptions,
   type InboxWaitResult,
 } from "../src/lib/inbox-wait-options.ts"
 
@@ -484,49 +485,17 @@ describe("resolveInboxWaitOptions", () => {
     })
   })
 
-  test("caps one logical wait and sizes its daemon RPC beyond that full window", () => {
+  // 30526: this bound is per daemon call. The daemon resolves every cli_inbox_wait through it, and an MCP
+  // wait stops at the host ceiling before it. The CLI's whole wait is not capped: it re-arms 30-second
+  // calls up to the requested deadline (see waitForInboxWithReconnect below).
+  test("caps one daemon call for the daemon and MCP alike, and sizes its RPC beyond that window", () => {
     const resolved = resolveInboxWaitOptions({ timeout_ms: 24 * 60 * 60_000 })
     expect(resolved.timeoutMs).toBe(MAX_INBOX_WAIT_TIMEOUT_MS)
+    expect(resolveInboxWaitControls({ timeout_ms: 54 * 60_000 }).timeoutMs).toBe(MAX_INBOX_WAIT_TIMEOUT_MS)
+    expect(MAX_INBOX_WAIT_TIMEOUT_MS).toBe(30 * 60_000)
+    expect(MCP_INBOX_WAIT_HOST_CEILING_MS).toBe(10_000)
     expect(deriveInboxWaitCallTimeoutMs(resolved.timeoutMs)).toBe(MAX_INBOX_WAIT_TIMEOUT_MS + 5_000)
     expect(deriveInboxWaitCallTimeoutMs(24 * 60 * 60_000)).toBe(MAX_INBOX_WAIT_TIMEOUT_MS + 5_000)
-  })
-})
-
-describe("resolveWaitOptions", () => {
-  test("defaults to 5m timeout, wakes on correlated reply, and JSON when stdout is not TTY", () => {
-    const nonTty = resolveWaitOptions({}, { defaultSession: "@agent/5", isTTY: false })
-    expect(nonTty).toEqual({
-      session: "@agent/5",
-      timeoutMs: 300_000,
-      wakeOnCorrelatedReply: true,
-      json: true,
-    })
-
-    const tty = resolveWaitOptions({}, { defaultSession: "@agent/5", isTTY: true })
-    expect(tty).toEqual({
-      session: "@agent/5",
-      timeoutMs: 300_000,
-      wakeOnCorrelatedReply: true,
-      json: false,
-    })
-  })
-
-  test("honors explicit flags over defaults", () => {
-    const resolved = resolveWaitOptions(
-      {
-        session: "@dev/8",
-        timeout_ms: "60000",
-        wake_on_correlated_reply: false,
-        json: true,
-      },
-      { defaultSession: "@agent/5", isTTY: true },
-    )
-    expect(resolved).toEqual({
-      session: "@dev/8",
-      timeoutMs: 60_000,
-      wakeOnCorrelatedReply: false,
-      json: true,
-    })
   })
 })
 
@@ -536,6 +505,56 @@ describe("waitForInboxWithReconnect", () => {
     pending_balls: [],
     pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
   }
+
+  // 30526: a 54-minute request used to come back at 30 minutes with no notice, because the per-call
+  // bound was applied to the whole wait. The deadline is now the requested time; each call stays 30 s.
+  test("waits the whole requested time past 30 minutes, in 30-second calls", async () => {
+    const requestedMs = 54 * 60_000
+    let now = 0
+    const sent: number[] = []
+    const result = await waitForInboxWithReconnect({
+      session: "@ci",
+      timeoutMs: requestedMs,
+      maxChunkMs: 30_000,
+      now: () => now,
+      sleep: async (ms) => {
+        now += ms
+      },
+      call: async ({ timeoutMs }) => {
+        sent.push(timeoutMs)
+        now += timeoutMs
+        return {
+          status: "timeout",
+          session: "@ci",
+          unread_count: 0,
+          oldest_unread_age_min: 0,
+          oldest_unread_ts: 0,
+          waited_ms: timeoutMs,
+          effective_timeout_ms: timeoutMs,
+          timed_out: true,
+          aborted: false,
+          attention: EMPTY_ATTENTION,
+        }
+      },
+    })
+
+    expect(sent).toHaveLength(requestedMs / 30_000)
+    expect(Math.max(...sent)).toBe(30_000)
+    expect(result.timed_out).toBe(true)
+    expect(result.effective_timeout_ms).toBe(requestedMs)
+    expect(result.waited_ms).toBe(requestedMs)
+  })
+
+  test.each([Number.NaN, -1, Number.POSITIVE_INFINITY])(
+    "refuses a timeout of %s loudly instead of waiting a default or nothing",
+    async (timeoutMs) => {
+      const call = vi.fn()
+      await expect(waitForInboxWithReconnect({ session: "@ci", timeoutMs, call })).rejects.toThrow(
+        /finite, non-negative number of milliseconds/,
+      )
+      expect(call).not.toHaveBeenCalled()
+    },
+  )
 
   test.each([false, true])(
     "retries transport close without losing the absolute deadline (restart socket gap: %s)",

@@ -75,7 +75,6 @@ export {
   parseInboxWaitResult,
   parseInboxWaitTimeoutMs,
   resolveInboxWaitOptions,
-  resolveWaitOptions,
 } from "../lib/inbox-wait-options.ts"
 
 // Command descriptors — source of truth for MCP/CLI/help/future UI projection.
