@@ -38,8 +38,11 @@ export default {
         GITHUB_WORKFLOW_INCIDENT_WATCHERS: "@chief",
         TRIBE_DUPLICATE_INCIDENT_OWNER: "@chief",
         TRIBE_DUPLICATE_YIELD_MODE: "observe",
+        // 32959 seat rename Step A: @cpo/update -> @chief/update, @cpo/terminal -> @cpo/term. Bounce rows, never refuse:
+        // both names stay live through the overlap, and a bounce fires only while the old name has no connected,
+        // PID-live transport (delivery-resolution.ts resolveDelivery), so a live @cpo/update keeps its own mail.
         TRIBE_DELIVERY_FALLBACKS:
-          '[{"name":"@fleet","to":"@chief","action":"refuse"},{"name":"@ci","to":"@chief"},{"name":"@yrd","to":"@chief","action":"refuse"},{"name":"@fable/0","to":"@chief","action":"refuse"},{"name":"@fable/1","to":"@chief","action":"refuse"}]',
+          '[{"name":"@fleet","to":"@chief","action":"refuse"},{"name":"@ci","to":"@chief"},{"name":"@yrd","to":"@chief","action":"refuse"},{"name":"@fable/0","to":"@chief","action":"refuse"},{"name":"@fable/1","to":"@chief","action":"refuse"},{"name":"@cpo/update","to":"@chief/update"},{"name":"@cpo/terminal","to":"@cpo/term"}]',
       },
       // oxfmt-ignore
       stateRoots: ["${TRIBE_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/tribe/tribe.db}", "${TRIBE_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.local/share/tribe}/tribe.sock}"],

@@ -90,6 +90,26 @@ describe("generic direct-message delivery resolution", () => {
     })
   })
 
+  // 32959 seat rename Step A: old and new names are both live through the overlap, so each old name's row is a
+  // bounce, never a refuse, and it fires only when the old name has no connected, PID-live transport.
+  it.each([
+    ["@cpo/update", "@chief/update"],
+    ["@cpo/terminal", "@cpo/term"],
+  ])("keeps mail on live renamed seat %s and bounces to %s only when it has no live transport", (old, successor) => {
+    const policy = parseDeliveryFallbackPolicy(tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS)
+    expect(policy?.resolveDelivery({ recipient: old, answerableNames: new Set([old, successor]) })).toEqual({
+      status: "accepted",
+      state: "online",
+    })
+    expect(policy?.resolveDelivery({ recipient: old, answerableNames: new Set([successor]) })).toEqual({
+      status: "accepted",
+      state: "bounced",
+      to: successor,
+      reason: `no answer-capable transport observed for ${old}; matched exact name ${old}`,
+    })
+    expect(policy?.retiredNames.has(old)).toBe(false)
+  })
+
   // @yrd retired 2026-08-31; the declaration moved from a bounce row to a
   // refuse row alongside @fleet (@ag/tribe/tribe-membership-projection-
   // counts-permanent-history-as-degraded), so it belongs with the other

@@ -321,6 +321,50 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     ).toEqual([{ recipient: "@chief" }, { recipient: "@ci" }])
   })
 
+  it("32959: a live, registered @cpo/update keeps its mail; the hab fallback to @chief/update fires only once it is not live", () => {
+    const resolveDelivery = parseDeliveryFallbackPolicy(
+      tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS,
+    )?.resolveDelivery
+    const pullSeat = { delivery: "pull", connected: true, readableMailbox: true, ownerWaiting: false } as const
+    addSeat({ ...pullSeat, name: "@cpo/update", lastReadAgeMs: MINUTE }, 2)
+    addSeat({ ...pullSeat, name: "@chief/update", lastReadAgeMs: MINUTE }, 3)
+
+    const live = toolJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "@cpo/update", message: "live old name", type: "request", request: "req-cpo-update-live" },
+        opts({ resolveDelivery }),
+      ),
+    )
+    expect(live).toMatchObject({ sent: true, delivery: { state: "online", recipient: "@cpo/update" } })
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'req-cpo-update-live'").get()).toEqual({
+      recipient: "@cpo/update",
+    })
+    expect(db.prepare("SELECT COUNT(*) AS count FROM messages WHERE type = 'dead-letter'").get()).toEqual({ count: 0 })
+
+    // The same registered session with no connected transport is no longer live: now the row bounces.
+    active.splice(
+      active.findIndex((session) => session.name === "@cpo/update"),
+      1,
+    )
+    const bounced = toolJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "@cpo/update", message: "gone old name", type: "request", request: "req-cpo-update-gone" },
+        opts({ resolveDelivery }),
+      ),
+    )
+    expect(bounced).toMatchObject({
+      sent: true,
+      delivery: { state: "bounced", original_target: "@cpo/update", recipient: "@chief/update" },
+    })
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'req-cpo-update-gone'").get()).toEqual({
+      recipient: "@chief/update",
+    })
+  })
+
   /**
    * 24526, 26522 (@cto 8a135bdb + 00:53 PDT correction): sender guidance must
    * describe what the daemon will actually do with the row. A connected push seat in
