@@ -1155,6 +1155,10 @@ describe("stdio adapter delivery modes", () => {
         // push is what emits Claude-only channel notifications (the banner); with
         // no auto-join the first connect still announces the pre-join pull banner.
         TRIBE_DELIVERY: "push",
+        // Pin an unjoined fixture even when the caller auto-joins (a seat carries
+        // TRIBE_REQUIRE_JOIN=0) or resumes joined: either makes the first banner push.
+        TRIBE_REQUIRE_JOIN: "1",
+        TRIBE_PLUGIN_RESUME_JOINED: "0",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },
