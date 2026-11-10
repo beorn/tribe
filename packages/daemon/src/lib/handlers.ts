@@ -1730,21 +1730,21 @@ function maybeDeliveryNote(
     if (name === "*" || name === sender) continue
     const observation = transport.observe(name)
     const age = observation.owner_last_mailbox_read_age_ms
-    if (tracked) {
-      if (
-        observation.owner_transport_live === true &&
-        observation.owner_transport_reason === "connected-no-consumer" &&
-        age !== null &&
-        age > CONNECTED_PULL_READ_CEILING_MS
-      ) {
-        clauses.push(`${name}: not reading (last read ${formatNoteAge(age)} ago); read its pane`)
-      }
-      continue
-    }
     if (
       observation.owner_transport_reason === "connected-pid-live-transport" ||
       observation.owner_transport_reason === "connected-no-consumer"
     ) {
+      if (tracked) {
+        if (
+          observation.owner_transport_live === true &&
+          observation.owner_transport_reason === "connected-no-consumer" &&
+          age !== null &&
+          age > CONNECTED_PULL_READ_CEILING_MS
+        ) {
+          clauses.push(`${name}: not reading (last read ${formatNoteAge(age)} ago); read its pane`)
+        }
+        continue
+      }
       if (attentionRequired || !isExplicitTribePersonaName(sender) || !isExplicitTribePersonaName(name)) continue
       const { consumers, filterMode } = transport.deliveryTarget(name)
       if (!consumers.includes("push-client")) clauses.push(`${name}: queued, no wakeup (no push client)`)

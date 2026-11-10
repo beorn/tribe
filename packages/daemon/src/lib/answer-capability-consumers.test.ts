@@ -535,6 +535,16 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     expect(tracked.sent).toBe(true)
     expect(tracked.request_id).toBeTypeOf("string")
     expect(tracked.warning).toBeUndefined()
+
+    // 7. A request, query or assign into silence names the unreachable seat the same way, without the trailer.
+    for (const type of ["request", "query", "assign"]) {
+      const asked = send("@pull/gone", type)
+      expect(asked.request_id, type).toBeTypeOf("string")
+      expect(asked.warning, type).toBe("delivery note — @pull/gone: unreachable (offline, last read 42s ago)")
+    }
+    // A request to a seat with no session is refused aloud, so it needs no note.
+    expect(send("@pull/absent", "request").error).toContain("not online")
+    expect(send("@push/joined", "request").warning).toBeUndefined()
   })
 
   it("warns for the original target of a bounced untracked send", () => {
