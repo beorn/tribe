@@ -773,7 +773,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     }
 
     const searchMs = Date.now() - searchStart
-    log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms project=${projectMs}ms)`)
+    // The synonym variants' time is part of this span; print it so the lexical sum is attributed (@cto c1f60e15).
+    const synonymMs = phases.synonyms === undefined ? "not run" : `${phases.synonyms}ms`
+    log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms project=${projectMs}ms synonyms=${synonymMs})`)
     const lexicalMs = lexicalEnd - lexicalStart
     if (legSpans !== undefined && vaultSemantic !== undefined) {
       vaultSemantic = { ...vaultSemantic, spans: legSpans(lexicalMs, clock() - semanticStarted) }
