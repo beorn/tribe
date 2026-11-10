@@ -347,13 +347,9 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     // 2. Push recipient in focus mode: push skips wakeup, row stays fetchable in inbox -> focus note.
     db.prepare("UPDATE sessions SET filter_mode = 'focus' WHERE name = '@push/joined'").run()
     const focusNote = send("@push/joined")
-    expect(String(focusNote.warning)).toContain(
-      "delivery note — @push/joined is in focus mode: no wakeup for this notify; it stays in their inbox until they fetch",
-    )
-    expect(String(focusNote.warning)).toContain("--ref <open-request-id>")
-    expect(String(send("@push/joined", "status").warning)).toContain(
-      "@push/joined is in focus mode: no wakeup for this status; it stays in their inbox until they fetch",
-    )
+    const focusText = "delivery note — @push/joined: queued, no wakeup (focus mode). Need an answer? Send type=request."
+    expect(focusNote.warning).toBe(focusText)
+    expect(send("@push/joined", "status").warning).toBe(focusText)
     // Prove the focus-mode wording's claim against getInboxRows in focus mode (@cto 8a135bdb correction, B1).
     const focusDrainedIds = (
       stmts.getInboxRows.all({
@@ -373,14 +369,13 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     // (checked before filter_mode so a pull seat in focus mode still gets the no-live-push-client note).
     db.prepare("UPDATE sessions SET filter_mode = 'focus' WHERE name = '@pull/idle'").run()
     const idleNote = send("@pull/idle")
-    expect(String(idleNote.warning)).toContain(
-      "delivery note — @pull/idle has no live push client: this notify wakes nothing and counts as no attention; it is returned by @pull/idle's next drain",
+    expect(idleNote.warning).toBe(
+      "delivery note — @pull/idle: queued, no wakeup (no push client). Need an answer? Send type=request.",
     )
-    expect(String(idleNote.warning)).toContain("--ref <open-request-id>")
     db.prepare("UPDATE sessions SET filter_mode = 'normal' WHERE name = '@pull/idle'").run()
     const waitingNote = send("@pull/waiting")
-    expect(String(waitingNote.warning)).toContain(
-      "@pull/waiting has no live push client: this notify wakes nothing and counts as no attention; it is returned by @pull/waiting's next drain",
+    expect(waitingNote.warning).toBe(
+      "delivery note — @pull/waiting: queued, no wakeup (no push client). Need an answer? Send type=request.",
     )
     // Prove the wording's claim against getInboxRows in both normal and focus modes (@cto 8a135bdb binding 4 + B1).
     for (const mode of ["normal", "focus"] as const) {
@@ -478,8 +473,8 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     db.prepare("UPDATE sessions SET filter_mode = 'normal', updated_at = ? WHERE id = 'sess-31'").run(NOW)
     expect(send("@multi/seat").warning).toBeUndefined()
     db.prepare("UPDATE sessions SET filter_mode = 'focus' WHERE id = 'sess-31'").run()
-    expect(String(send("@multi/seat").warning)).toContain(
-      "@multi/seat is in focus mode: no wakeup for this notify; it stays in their inbox until they fetch",
+    expect(send("@multi/seat").warning).toBe(
+      "delivery note — @multi/seat: queued, no wakeup (focus mode). Need an answer? Send type=request.",
     )
     // S4: When the single remaining DB row for @multi/seat belongs to the pull sibling (sess-30) in
     // focus mode and live push sibling sess-31 has no DB row, push delivery default-allows
@@ -489,21 +484,21 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     ).run(NOW + 1_000)
     expect(send("@multi/seat").warning).toBeUndefined()
 
-    // 6. Disconnected / deaf recipients retain transport/mailbox diagnostics (including on open-ball refs, S2).
+    // 6. Disconnected, sessionless and deaf recipients are named unreachable with their last read age (including on
+    // open-ball refs, S2), one clause each and one trailer per send.
     stmts.touchMailboxAttentionRead.run({ $recipient: "@pull/gone", $now: NOW - 42_000 })
     const gone = send("@pull/gone")
     expect(gone.sent).toBe(true)
-    expect(String(gone.warning)).toContain("@pull/gone")
-    expect(String(gone.warning)).toContain("opens no obligation")
-    expect(String(gone.warning)).toContain("type=request")
-    expect(String(gone.warning)).toContain("--ref <open-request-id>")
-    expect(String(gone.warning)).toContain("transport=disconnected")
-    expect(String(gone.warning)).toContain("canonical mailbox READ=observed age 42000ms")
-    expect(String(gone.warning)).not.toContain("not answer-capable")
+    const goneText =
+      "delivery note — @pull/gone: unreachable (offline, last read 42s ago). Need an answer? Send type=request."
+    expect(gone.warning).toBe(goneText)
     expect(db.prepare("SELECT COUNT(*) AS count FROM pending_request WHERE recipient = '@pull/gone'").get()).toEqual({
       count: 0,
     })
-    expect(String(send("@pull/gone", "status").warning)).toContain("this status opens no obligation")
+    expect(send("@pull/gone", "status").warning).toBe(goneText)
+    expect(send("@pull/absent", "status").warning).toBe(
+      "delivery note — @pull/absent: unreachable (no session). Need an answer? Send type=request.",
+    )
     stmts.openPendingRequest.run({
       $request_id: "ball-gone",
       $recipient: "@pull/gone",
@@ -513,14 +508,16 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
       $message_id: "ball-gone",
       $fanout: "first",
     })
-    expect(String(send("@pull/gone", "notify", undefined, "ball-gone").warning)).toContain("transport=disconnected")
+    expect(String(send("@pull/gone", "notify", undefined, "ball-gone").warning)).toContain(
+      "@pull/gone: unreachable (offline, last read 42s ago)",
+    )
     stmts.closePendingRequest.run({ $request_id: "ball-gone", $recipient: "@pull/gone" })
 
     const unknown = send("@pull/deaf", "status")
     expect(unknown.sent).toBe(true)
-    expect(String(unknown.warning)).toContain("mailbox authority=unavailable")
-    expect(String(unknown.warning)).toContain("@pull/deaf")
-    expect(String(unknown.warning)).not.toContain("not answer-capable")
+    expect(unknown.warning).toBe(
+      "delivery note — @pull/deaf: unreachable (mailbox unreadable, last read 1m ago). Need an answer? Send type=request.",
+    )
 
     const multi = toolJson(
       handleToolCall(
@@ -531,9 +528,9 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
       ),
     )
     expect(multi.sent).toBe(true)
-    expect(String(multi.warning)).toContain("@pull/idle has no live push client")
-    expect(String(multi.warning)).toContain("@pull/gone: transport=disconnected")
-    expect(String(multi.warning)).not.toContain("@push/joined")
+    expect(multi.warning).toBe(
+      "delivery note — @pull/idle: queued, no wakeup (no push client); @pull/gone: unreachable (offline, last read 42s ago). Need an answer? Send type=request.",
+    )
     const tracked = send("@pull/gone", "status", true)
     expect(tracked.sent).toBe(true)
     expect(tracked.request_id).toBeTypeOf("string")
@@ -582,12 +579,32 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
     expect(String(sent.warning)).not.toContain("@chief")
   })
 
-  it("26523: deliveryReport reports connected-no-consumer online at or below the 10-minute ceiling, offline above or null, and omits note", () => {
+  it("26523: deliveryReport reports connected-no-consumer online at or below the 10-minute ceiling, offline above or null, omits a delivery note key, and warns a tracked sender of a seat read past the ceiling", () => {
     const pullSeat = { delivery: "pull", connected: true, readableMailbox: true, ownerWaiting: false } as const
+    const notReading = (name: string, age: string) =>
+      `delivery note — ${name}: not reading (last read ${age} ago); read its pane`
+    // A null read age has no last read to name, so only a read past the ceiling earns the clause.
     const cases = [
-      { name: "@pull/at-ceiling", lastReadAgeMs: 10 * MINUTE, expectedState: "online" as const },
-      { name: "@pull/over-ceiling", lastReadAgeMs: 10 * MINUTE + 1, expectedState: "offline" as const },
-      { name: "@pull/never-read", lastReadAgeMs: null, expectedState: "offline" as const },
+      { name: "@pull/at-ceiling", lastReadAgeMs: 10 * MINUTE, expectedState: "online" as const, warning: undefined },
+      {
+        name: "@pull/over-ceiling",
+        lastReadAgeMs: 10 * MINUTE + 1,
+        expectedState: "offline" as const,
+        warning: notReading("@pull/over-ceiling", "10m"),
+      },
+      {
+        name: "@pull/stale",
+        lastReadAgeMs: 58 * MINUTE + 20_000,
+        expectedState: "offline" as const,
+        warning: notReading("@pull/stale", "58m"),
+      },
+      {
+        name: "@pull/long-gone",
+        lastReadAgeMs: 130 * MINUTE,
+        expectedState: "offline" as const,
+        warning: notReading("@pull/long-gone", "2h10m"),
+      },
+      { name: "@pull/never-read", lastReadAgeMs: null, expectedState: "offline" as const, warning: undefined },
     ]
     cases.forEach((entry, idx) =>
       addSeat({ ...pullSeat, name: entry.name, lastReadAgeMs: entry.lastReadAgeMs }, idx + 2),
@@ -598,7 +615,13 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
         handleToolCall(
           sender,
           "tribe.send",
-          { to: entry.name, message: `check ${entry.name}`, type: "request", request: `req-${entry.name}` },
+          {
+            to: entry.name,
+            message: `check ${entry.name}`,
+            type: "request",
+            request: `req-${entry.name}`,
+            summary: "check",
+          },
           opts(),
         ),
       )
@@ -609,6 +632,19 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
         last_mailbox_read_age_ms: entry.lastReadAgeMs,
       })
       expect("note" in (sent.delivery as Record<string, unknown>), `${entry.name} delivery note key`).toBe(false)
+      expect(sent.warning, `${entry.name} warning`).toBe(entry.warning)
+    }
+    // Every tracked type gets the clause, and none carries the untracked trailer.
+    for (const type of ["query", "assign"]) {
+      const sent = toolJson(
+        handleToolCall(
+          sender,
+          "tribe.send",
+          { to: "@pull/stale", message: `${type} @pull/stale`, type, summary: type },
+          opts(),
+        ),
+      )
+      expect(sent.warning, type).toBe(notReading("@pull/stale", "58m"))
     }
 
     const pending = toolJson(handleToolCall(sender, "tribe.pending", { all: true }, opts())) as {

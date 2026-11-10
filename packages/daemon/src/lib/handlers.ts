@@ -1220,7 +1220,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     maybeProgressReplyNote(ctx, sender, msgType, replyId, a.ref as string | undefined),
     maybeRefIsOwnOpenBallNote(ctx, sender, msgType, replyId, a.ref as string | undefined),
     replyReport.warning,
-    maybeUntrackedDeliveryNote(
+    maybeDeliveryNote(
       msgType,
       sender,
       [{ name: recipients, attentionRequired: result.attentionRequired === true }],
@@ -1413,7 +1413,7 @@ function handleMultiSend(input: {
       input.args.ref as string | undefined,
     ),
     replyReport.warning,
-    maybeUntrackedDeliveryNote(
+    maybeDeliveryNote(
       input.msgType,
       input.sender,
       results.map((r) => ({ name: r.recipient, attentionRequired: r.attentionRequired === true })),
@@ -1698,63 +1698,72 @@ function maybeTruncationWarning(truncation: SanitizedMessage): string | undefine
   return `message truncated to ${MESSAGE_MAX_LENGTH} chars — ${dropped} of ${truncation.originalLength} were dropped and the recipient did NOT receive them; resend the remainder or link the full text.`
 }
 
-/** 24526, 26522 (@cto 8a135bdb): describe a named untracked send using the existing admission snapshot and classifier verdict. */
-function maybeUntrackedDeliveryNote(
+/** One age style for the delivery note: "45s" under a minute, then "58m", then "2h10m". */
+function formatNoteAge(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1_000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  const rest = minutes % 60
+  return `${Math.floor(minutes / 60)}h${rest === 0 ? "" : `${rest}m`}`
+}
+
+/**
+ * 24526, 26522 (@cto 8a135bdb), 26523: one short clause per named recipient that this send will not wake, on one line,
+ * read from the existing admission snapshot and classifier verdict. The CLI finds the note by its "delivery note — "
+ * prefix. An untracked notify or status names who is queued without a wakeup or unreachable, then one trailer; a
+ * tracked request, query or assign names a connected pull seat whose last read is past the delivery report's
+ * `CONNECTED_PULL_READ_CEILING_MS`.
+ */
+function maybeDeliveryNote(
   msgType: string,
   sender: string,
   recipients: readonly { name: string; attentionRequired: boolean }[],
   willTrack: boolean,
   transport: OwnerTransportProjector,
 ): string | undefined {
-  if (willTrack || (msgType !== "notify" && msgType !== "status")) return undefined
-  const facts: string[] = []
+  const untracked = !willTrack && (msgType === "notify" || msgType === "status")
+  const tracked = willTrack && AUTO_TRACK_TYPES_SET.has(msgType)
+  if (!untracked && !tracked) return undefined
+  const clauses: string[] = []
   for (const { name, attentionRequired } of recipients) {
     if (name === "*" || name === sender) continue
     const observation = transport.observe(name)
+    const age = observation.owner_last_mailbox_read_age_ms
+    if (tracked) {
+      if (
+        observation.owner_transport_live === true &&
+        observation.owner_transport_reason === "connected-no-consumer" &&
+        age !== null &&
+        age > CONNECTED_PULL_READ_CEILING_MS
+      ) {
+        clauses.push(`${name}: not reading (last read ${formatNoteAge(age)} ago); read its pane`)
+      }
+      continue
+    }
     if (
       observation.owner_transport_reason === "connected-pid-live-transport" ||
       observation.owner_transport_reason === "connected-no-consumer"
     ) {
       if (attentionRequired || !isExplicitTribePersonaName(sender) || !isExplicitTribePersonaName(name)) continue
       const { consumers, filterMode } = transport.deliveryTarget(name)
-      if (!consumers.includes("push-client")) {
-        facts.push(
-          `${name} has no live push client: this ${msgType} wakes nothing and counts as no attention; it is returned by ${name}'s next drain`,
-        )
-      } else if (filterMode === "focus") {
-        facts.push(`${name} is in focus mode: no wakeup for this ${msgType}; it stays in their inbox until they fetch`)
-      }
+      if (!consumers.includes("push-client")) clauses.push(`${name}: queued, no wakeup (no push client)`)
+      else if (filterMode === "focus") clauses.push(`${name}: queued, no wakeup (focus mode)`)
       continue
     }
-    const authority = transport.mailboxDeafNames.has(name)
-      ? "unavailable (" + transport.mailboxDeafReasons.get(name) + ")"
-      : observation.owner_transport_reason === "no-session-record" ||
-          observation.owner_transport_reason === "no-transport-source"
+    if (observation.owner_transport_reason === "no-session-record") {
+      clauses.push(`${name}: unreachable (no session)`)
+      continue
+    }
+    const why = transport.mailboxDeafNames.has(name)
+      ? "mailbox unreadable"
+      : observation.owner_transport_state === "unknown"
         ? "unobserved"
-        : "available"
-    const age = observation.owner_last_mailbox_read_age_ms
-    const read = age === null ? "unobserved" : "observed age " + age + "ms"
-    facts.push(
-      name +
-        ": transport=" +
-        observation.owner_transport_state +
-        "; mailbox authority=" +
-        authority +
-        "; canonical mailbox READ=" +
-        read +
-        " (mailbox-name, observed_at=" +
-        observation.owner_transport_observed_at +
-        "); agent process=unobserved",
-    )
+        : "offline"
+    clauses.push(`${name}: unreachable (${why}${age === null ? "" : `, last read ${formatNoteAge(age)} ago`})`)
   }
-  if (facts.length === 0) return undefined
-  return (
-    "delivery note — " +
-    facts.join("; ") +
-    "; this " +
-    msgType +
-    " opens no obligation and pages nobody. Send type=request if you need a reply; it opens a tracked ball for a known readable mailbox, or pass --ref <open-request-id> to attach it to an open ball. Sending anyway."
-  )
+  if (clauses.length === 0) return undefined
+  return "delivery note — " + clauses.join("; ") + (untracked ? ". Need an answer? Send type=request." : "")
 }
 
 function maybeProgressReplyNote(

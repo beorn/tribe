@@ -406,7 +406,7 @@ describe("registerSendCommands", () => {
                         id: "msg-1",
                         warning:
                           "no `summary` provided — derived a one-liner from the message; " +
-                          "delivery note — @ci is not answer-capable; this notify opens no obligation. Send type=request for a tracked reply.",
+                          "delivery note — @ci: unreachable (offline, last read 58m ago). Need an answer? Send type=request.",
                         delivery: { state: "offline", recipient: "@ci" },
                       }
                     : { error: `unexpected call ${request.method}` }
@@ -436,7 +436,7 @@ describe("registerSendCommands", () => {
       })
       expect(sent.code).toBe(0)
       expect(sent.stdout).toContain("Sent message to @ci")
-      expect(sent.stderr).toContain("delivery note — @ci is not answer-capable")
+      expect(sent.stderr).toContain("delivery note — @ci: unreachable (offline, last read 58m ago)")
       expect(sent.stderr).toContain("type=request")
       expect(sent.stderr).not.toContain("no `summary` provided")
 
@@ -457,7 +457,7 @@ describe("registerSendCommands", () => {
         sent: true,
         id: "msg-1",
         to: "@ci",
-        warning: expect.stringContaining("delivery note — @ci is not answer-capable"),
+        warning: expect.stringContaining("delivery note — @ci: unreachable (offline, last read 58m ago)"),
       })
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
