@@ -666,6 +666,49 @@ describe("createWorkflowIncidentRouter — per-branch incident routing on main a
     expect(ballsFor(OWNER)).toEqual([])
   })
 
+  test("an old run whose updated_at GitHub bumps today pages nothing; a rerun that started today still routes (33462)", () => {
+    const { api } = daemonApi()
+    const router = createWorkflowIncidentRouter(api, { incidentOwner: OWNER })
+    const nowMs = Date.parse("2026-11-11T09:30:00Z")
+    // beorn/cloudi run 19518247982: created 2025-11-19, attempt 1, updated_at bumped by GitHub at 09:29:40Z.
+    router.handleRuns(
+      "beorn/cloudi",
+      [
+        makeRun({
+          name: "Deploy to Defang",
+          run_number: 179,
+          conclusion: "failure",
+          head_branch: "main",
+          created_at: "2025-11-19T22:18:44Z",
+          run_started_at: "2025-11-19T22:18:44Z",
+          updated_at: "2026-11-11T09:29:40Z",
+        }),
+      ],
+      nowMs,
+    )
+    expect(openIncidents()).toEqual([])
+    expect(ballsFor(OWNER)).toEqual([])
+
+    // Control: the same old run re-run today (fresh run_started_at, original created_at) is a real completion.
+    router.handleRuns(
+      "beorn/cloudi",
+      [
+        makeRun({
+          name: "Deploy to Defang",
+          run_number: 179,
+          run_attempt: 2,
+          conclusion: "failure",
+          head_branch: "main",
+          created_at: "2025-11-19T22:18:44Z",
+          run_started_at: "2026-11-11T09:25:00Z",
+          updated_at: "2026-11-11T09:29:40Z",
+        }),
+      ],
+      nowMs,
+    )
+    expect(openIncidents()).toEqual([{ subject: "beorn/cloudi/Deploy to Defang@main", recipient: OWNER }])
+  })
+
   test("rerun through the poller seam: same html_url failing on attempt 1 then passing on attempt 2 clears the incident", () => {
     const { api } = daemonApi()
     const router = createWorkflowIncidentRouter(api, { incidentOwner: OWNER })

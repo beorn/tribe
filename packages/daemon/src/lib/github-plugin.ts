@@ -123,6 +123,8 @@ export interface WorkflowRun {
   run_attempt?: number
   created_at: string
   updated_at: string
+  /** When this attempt started; a rerun keeps `created_at` and gets a fresh value here. */
+  run_started_at?: string
   actor: { login: string }
 }
 
@@ -691,6 +693,8 @@ export function formatEvent(event: GitHubEvent, eventTypes: string[]): Formatted
 // Workflow run incident routing
 // ---------------------------------------------------------------------------
 
+/** A completed run is routed only if its attempt started this recently; longer than any job GitHub lets run (6 h). */
+export const WORKFLOW_RUN_START_HORIZON_MS = 24 * 60 * 60 * 1000
 export const GITHUB_WORKFLOW_INCIDENT_EMITTER = "github"
 export const GITHUB_WORKFLOW_INCIDENT_CONDITION = "failing"
 export const GITHUB_WORKFLOW_INCIDENT_OWNER_ENV = "GITHUB_WORKFLOW_INCIDENT_OWNER"
@@ -878,7 +882,15 @@ export function createWorkflowIncidentRouter(
 
     handleRuns(repo, runs, nowMs = Date.now()) {
       const cutoff = nowMs - 5 * 60 * 1000
-      const recent = runs.filter((run) => run.conclusion !== null && new Date(run.updated_at).getTime() > cutoff)
+      // GitHub also bumps `updated_at` on old runs it touches (log expiry did on a year-old run, 33462), so a fresh
+      // `updated_at` alone is no completion: the attempt must also have started within the horizon.
+      const startedCutoff = nowMs - WORKFLOW_RUN_START_HORIZON_MS
+      const recent = runs.filter(
+        (run) =>
+          run.conclusion !== null &&
+          new Date(run.updated_at).getTime() > cutoff &&
+          new Date(run.run_started_at ?? run.created_at).getTime() > startedCutoff,
+      )
       for (const run of recent.slice(0, 5).reverse()) {
         const dedupKey = workflowRunDedupKey(run)
         if (seenWorkflowRuns.has(dedupKey)) continue
