@@ -888,7 +888,9 @@ export function createWorkflowIncidentRouter(
       const cutoff = nowMs - 5 * 60 * 1000
       // GitHub also bumps `updated_at` on old runs it touches (log expiry did on a year-old run, 33462), so a fresh
       // `updated_at` alone is no completion: the attempt must also have started within GitHub's longest run time.
-      const startedCutoff = nowMs - WORKFLOW_RUN_START_HORIZON_MS
+      // Measured from the completion window's own cutoff, so a run that lasted the full limit and completed inside
+      // the window still routes (peer review, 33462).
+      const startedCutoff = cutoff - WORKFLOW_RUN_START_HORIZON_MS
       const recent = runs.filter(
         (run) =>
           run.conclusion !== null &&

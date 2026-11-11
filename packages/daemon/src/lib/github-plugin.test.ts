@@ -35,6 +35,7 @@ import {
   resolveWorkflowIncidentWatchers,
   selectNewEvents,
   summarizePollErrors,
+  WORKFLOW_RUN_START_HORIZON_MS,
   type GitHubEvent,
   type PollError,
   type RateLimitInfo,
@@ -747,6 +748,49 @@ describe("createWorkflowIncidentRouter — per-branch incident routing on main a
       failedAt + 10 * 60 * 1000,
     )
     expect(openIncidents()).toEqual([])
+  })
+
+  test("the start horizon counts from the completion window: a full-limit run completing now routes, one older drops (33462)", () => {
+    const { api } = daemonApi()
+    const router = createWorkflowIncidentRouter(api, { incidentOwner: OWNER })
+    const nowMs = Date.parse("2026-11-11T10:00:00Z")
+    const at = (ms: number) => new Date(ms).toISOString()
+    const window = 5 * 60 * 1000
+    // Lasted 35 days minus 1 s and completed 20 s ago: started 35 days + 19 s before now, inside the window's horizon.
+    router.handleRuns(
+      "beorn/yrd",
+      [
+        makeRun({
+          name: "approval-gated",
+          run_number: 910,
+          conclusion: "failure",
+          head_branch: "main",
+          created_at: at(nowMs - WORKFLOW_RUN_START_HORIZON_MS - 19_000),
+          run_started_at: at(nowMs - WORKFLOW_RUN_START_HORIZON_MS - 19_000),
+          updated_at: at(nowMs - 20_000),
+        }),
+      ],
+      nowMs,
+    )
+    expect(openIncidents()).toEqual([{ subject: "beorn/yrd/approval-gated@main", recipient: OWNER }])
+
+    // One second past the window's horizon: GitHub cannot have run it that long, so a fresh updated_at is a touch.
+    router.handleRuns(
+      "beorn/yrd",
+      [
+        makeRun({
+          name: "touched",
+          run_number: 911,
+          conclusion: "failure",
+          head_branch: "main",
+          created_at: at(nowMs - window - WORKFLOW_RUN_START_HORIZON_MS - 1_000),
+          run_started_at: at(nowMs - window - WORKFLOW_RUN_START_HORIZON_MS - 1_000),
+          updated_at: at(nowMs - 20_000),
+        }),
+      ],
+      nowMs,
+    )
+    expect(openIncidents()).toEqual([{ subject: "beorn/yrd/approval-gated@main", recipient: OWNER }])
   })
 
   test("rerun through the poller seam: same html_url failing on attempt 1 then passing on attempt 2 clears the incident", () => {
