@@ -645,46 +645,66 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
 
     if (queryVariants && options.phases === undefined) {
       log(`query expansion: "${query}" → ${queryVariants.length} variants`)
+      // Synonyms rescue a thin result. A leg whose base already returned the caller's limit skips its variants, said
+      // out loud: on a full base they can only reorder or cost time (@cto c1f60e15, design delta A). The line names
+      // the variants, since searching one directly is how a caller sees its rows: a higher limit raises the base
+      // fetch too, so a broad query still fills it.
+      const variantList = queryVariants.slice(0, 4).join(" | ")
+      const baseFull = (phase: string, returned: number): boolean => {
+        if (returned < limit) return false
+        const message =
+          `recall ${phase} skipped: base returned ${returned} for limit ${limit}; ` +
+          `search a synonym variant directly to see its matches: ${variantList}`
+        skipped.push({ kind: "base-full", phase, anchor: query, message })
+        log(message)
+        return true
+      }
+      const messagesFull = baseFull("synonym_messages", messageResults.results.length)
+      const contentFull = baseFull("synonym_project_content", projectContentResults.results.length)
       // Collect IDs already found to avoid duplicates
       const seenMsgIds = new Set(messageResults.results.map((r) => r.id))
       const seenContentIds = new Set(projectContentResults.results.map((r) => r.id))
 
-      for (const variant of queryVariants.slice(0, 4)) {
+      for (const variant of messagesFull && contentFull ? [] : queryVariants.slice(0, 4)) {
         if (legStarted) await nextTurn()
         const began = clock()
         try {
-          try {
-            const varMsgs = retrieveCandidates({ db, query: variant, messages: { ...messageOpts, limit } }).messages
-            for (const r of varMsgs.results) {
-              if (!seenMsgIds.has(r.id)) {
-                seenMsgIds.add(r.id)
-                r.rank += SYNONYM_RANK_PENALTY
-                messageResults.results.push(r)
-                synonymMsgCount++
+          if (!messagesFull) {
+            try {
+              const varMsgs = retrieveCandidates({ db, query: variant, messages: { ...messageOpts, limit } }).messages
+              for (const r of varMsgs.results) {
+                if (!seenMsgIds.has(r.id)) {
+                  seenMsgIds.add(r.id)
+                  r.rank += SYNONYM_RANK_PENALTY
+                  messageResults.results.push(r)
+                  synonymMsgCount++
+                }
               }
+            } catch (error) {
+              skipped.push(rejectedQuerySkip("synonym_messages", variant, error))
+              continue
             }
-          } catch (error) {
-            skipped.push(rejectedQuerySkip("synonym_messages", variant, error))
-            continue
           }
 
           // Keep messages already found if the content leg rejects this variant.
-          try {
-            const varProject = retrieveCandidates({
-              db,
-              query: variant,
-              projectContent: { ...projectContentOpts, limit },
-            }).projectContent
-            for (const r of varProject.results) {
-              if (!seenContentIds.has(r.id)) {
-                seenContentIds.add(r.id)
-                r.rank += SYNONYM_RANK_PENALTY
-                projectContentResults.results.push(r)
-                synonymContentCount++
+          if (!contentFull) {
+            try {
+              const varProject = retrieveCandidates({
+                db,
+                query: variant,
+                projectContent: { ...projectContentOpts, limit },
+              }).projectContent
+              for (const r of varProject.results) {
+                if (!seenContentIds.has(r.id)) {
+                  seenContentIds.add(r.id)
+                  r.rank += SYNONYM_RANK_PENALTY
+                  projectContentResults.results.push(r)
+                  synonymContentCount++
+                }
               }
+            } catch (error) {
+              skipped.push(rejectedQuerySkip("synonym_project_content", variant, error))
             }
-          } catch (error) {
-            skipped.push(rejectedQuerySkip("synonym_project_content", variant, error))
           }
         } finally {
           phases.synonyms = (phases.synonyms ?? 0) + clock() - began
@@ -773,7 +793,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     }
 
     const searchMs = Date.now() - searchStart
-    log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms project=${projectMs}ms)`)
+    // The synonym variants' time is part of this span; print it so the lexical sum is attributed (@cto c1f60e15).
+    const synonymMs = phases.synonyms === undefined ? "not run" : `${phases.synonyms}ms`
+    log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms project=${projectMs}ms synonyms=${synonymMs})`)
     const lexicalMs = lexicalEnd - lexicalStart
     if (legSpans !== undefined && vaultSemantic !== undefined) {
       vaultSemantic = { ...vaultSemantic, spans: legSpans(lexicalMs, clock() - semanticStarted) }
