@@ -567,7 +567,9 @@ describe("S2: recall() synonym variants", () => {
         kind: "base-full",
         phase: "synonym_messages",
         anchor: "auth",
-        message: "recall synonym_messages skipped: base returned 2 for limit 2",
+        message:
+          "recall synonym_messages skipped: base returned 2 for limit 2; " +
+          "search a synonym variant directly to see its matches: authentication | login | signin",
       },
     ])
     const keys = result.results.map((r) => `${r.sessionId}:${r.type}`)

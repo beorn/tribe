@@ -646,10 +646,15 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     if (queryVariants && options.phases === undefined) {
       log(`query expansion: "${query}" → ${queryVariants.length} variants`)
       // Synonyms rescue a thin result. A leg whose base already returned the caller's limit skips its variants, said
-      // out loud: on a full base they can only reorder or cost time (@cto c1f60e15, design delta A).
+      // out loud: on a full base they can only reorder or cost time (@cto c1f60e15, design delta A). The line names
+      // the variants, since searching one directly is how a caller sees its rows: a higher limit raises the base
+      // fetch too, so a broad query still fills it.
+      const variantList = queryVariants.slice(0, 4).join(" | ")
       const baseFull = (phase: string, returned: number): boolean => {
         if (returned < limit) return false
-        const message = `recall ${phase} skipped: base returned ${returned} for limit ${limit}`
+        const message =
+          `recall ${phase} skipped: base returned ${returned} for limit ${limit}; ` +
+          `search a synonym variant directly to see its matches: ${variantList}`
         skipped.push({ kind: "base-full", phase, anchor: query, message })
         log(message)
         return true
