@@ -693,8 +693,12 @@ export function formatEvent(event: GitHubEvent, eventTypes: string[]): Formatted
 // Workflow run incident routing
 // ---------------------------------------------------------------------------
 
-/** A completed run is routed only if its attempt started this recently; longer than any job GitHub lets run (6 h). */
-export const WORKFLOW_RUN_START_HORIZON_MS = 24 * 60 * 60 * 1000
+/**
+ * A completed run is routed only if its attempt started within GitHub's longest workflow run time: 35 days, waits
+ * and approvals included (https://docs.github.com/en/actions/reference/limits). Any genuine completion fits; a run
+ * GitHub merely touches later (log expiry, 33462) does not once it is older.
+ */
+export const WORKFLOW_RUN_START_HORIZON_MS = 35 * 24 * 60 * 60 * 1000
 export const GITHUB_WORKFLOW_INCIDENT_EMITTER = "github"
 export const GITHUB_WORKFLOW_INCIDENT_CONDITION = "failing"
 export const GITHUB_WORKFLOW_INCIDENT_OWNER_ENV = "GITHUB_WORKFLOW_INCIDENT_OWNER"
@@ -883,7 +887,7 @@ export function createWorkflowIncidentRouter(
     handleRuns(repo, runs, nowMs = Date.now()) {
       const cutoff = nowMs - 5 * 60 * 1000
       // GitHub also bumps `updated_at` on old runs it touches (log expiry did on a year-old run, 33462), so a fresh
-      // `updated_at` alone is no completion: the attempt must also have started within the horizon.
+      // `updated_at` alone is no completion: the attempt must also have started within GitHub's longest run time.
       const startedCutoff = nowMs - WORKFLOW_RUN_START_HORIZON_MS
       const recent = runs.filter(
         (run) =>

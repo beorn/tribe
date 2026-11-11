@@ -709,6 +709,46 @@ describe("createWorkflowIncidentRouter — per-branch incident routing on main a
     expect(openIncidents()).toEqual([{ subject: "beorn/cloudi/Deploy to Defang@main", recipient: OWNER }])
   })
 
+  test("a long workflow that completes now still routes: a 26 h failure opens, its later 30-day success clears (33462)", () => {
+    const { api } = daemonApi()
+    const router = createWorkflowIncidentRouter(api, { incidentOwner: OWNER })
+    const failedAt = Date.parse("2026-11-11T09:30:00Z")
+    router.handleRuns(
+      "beorn/yrd",
+      [
+        makeRun({
+          name: "soak",
+          run_number: 900,
+          conclusion: "failure",
+          head_branch: "main",
+          created_at: "2026-11-10T07:30:00Z",
+          run_started_at: "2026-11-10T07:30:00Z",
+          updated_at: "2026-11-11T09:29:40Z",
+        }),
+      ],
+      failedAt,
+    )
+    expect(openIncidents()).toEqual([{ subject: "beorn/yrd/soak@main", recipient: OWNER }])
+
+    // A run waiting on approvals can take up to GitHub's 35-day limit; a 30-day success still clears.
+    router.handleRuns(
+      "beorn/yrd",
+      [
+        makeRun({
+          name: "soak",
+          run_number: 901,
+          conclusion: "success",
+          head_branch: "main",
+          created_at: "2026-10-12T09:30:00Z",
+          run_started_at: "2026-10-12T09:30:00Z",
+          updated_at: "2026-11-11T09:39:40Z",
+        }),
+      ],
+      failedAt + 10 * 60 * 1000,
+    )
+    expect(openIncidents()).toEqual([])
+  })
+
   test("rerun through the poller seam: same html_url failing on attempt 1 then passing on attempt 2 clears the incident", () => {
     const { api } = daemonApi()
     const router = createWorkflowIncidentRouter(api, { incidentOwner: OWNER })
