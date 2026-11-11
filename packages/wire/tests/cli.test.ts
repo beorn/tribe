@@ -116,7 +116,7 @@ function runCliAsync(
 }
 
 type OneShotRpcRequest = { id: number; method: string; params?: Record<string, unknown> }
-type OneShotRpcOutcome = { result: unknown } | { error: { code: number; message: string } }
+type OneShotRpcOutcome = { result: unknown } | { error: { code: number; message: string; data?: unknown } }
 
 /** The managed launch's identity token a one-shot pending read presents (25074 3d-3: its only self-read credential). */
 const MANAGED_PENDING_TOKEN = launchToken("sid-dev2", "@dev/2")
@@ -795,12 +795,12 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   })
 
-  /** @failure A later managed business-call deadline must not become a successful empty logical timeout.
+  /** @failure A later managed business-call deadline or lost session must not become a successful empty logical timeout.
    * The silent-daemon case below stops at cli_protocol and never exercises chunk baseline or business expiry.
    * @level l1
    * @consumer managed inbox-wait CLI callers (21739); test-only fake socket, no production seam.
    */
-  it.each(["recovered", "silent"])(
+  it.each(["recovered", "silent", "lost-session"])(
     "keeps a later managed business gap %s after a completed chunk",
     async (mode) => {
       let chunks = 0
@@ -812,6 +812,19 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           }
           ++chunks
           if (chunks > 1 && mode === "silent") return undefined
+          if (chunks === 2 && mode === "lost-session") {
+            // 22934 AC7: the daemon rejects authority after this launch completed its first chunk.
+            return {
+              error: {
+                code: -32003,
+                message:
+                  "current session authority was rejected: @dev/2's token is verified, but no session is " +
+                  "registered under its sid sid-dev2 yet; the adapter registers with the token on its next " +
+                  "connect, so retry after it does",
+                data: { kind: "unauthenticated", reason: "identity-not-registered" },
+              },
+            }
+          }
           if (chunks === 2) {
             return { error: { code: -32000, message: "Request cli_inbox_wait_by_launch_v1 timed out after 35000ms" } }
           }
@@ -843,26 +856,44 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         expect(result.code).toBe(0)
         expect(JSON.parse(result.stdout)).toMatchObject({ status: "woken", timed_out: false })
         expect(result.stderr).not.toContain("TRIBE_DAEMON_CALL_TIMEOUT")
+      } else if (mode === "lost-session") {
+        expect(result.code).not.toBeNull()
+        expect(result.code).not.toBe(0)
+        expect(result.stdout).toBe("")
+        expect(result.stderr).toContain("current session authority was rejected")
+        expect(result.stderr).toContain("@dev/2")
+        expect(result.stderr).toContain("no session is registered")
+        expect(result.stderr).toContain("sid-dev2")
       } else {
         expect(result.code).toBe(1)
         expect(result.stdout).toBe("")
         expect(result.stderr).toMatch(/Request cli_inbox_wait_by_launch_v1 timed out after \d+ms/)
         expect(result.stderr).toContain("TRIBE_DAEMON_CALL_TIMEOUT")
       }
-      expect(calls.map((call) => call.method)).toEqual([
-        "cli_protocol",
-        "cli_inbox_wait_by_launch_v1",
-        "cli_protocol",
-        "cli_inbox_wait_by_launch_v1",
-        "cli_protocol",
-        "cli_inbox_wait_by_launch_v1",
-      ])
+      expect(calls.map((call) => call.method)).toEqual(
+        mode === "lost-session"
+          ? ["cli_protocol", "cli_inbox_wait_by_launch_v1", "cli_protocol", "cli_inbox_wait_by_launch_v1"]
+          : [
+              "cli_protocol",
+              "cli_inbox_wait_by_launch_v1",
+              "cli_protocol",
+              "cli_inbox_wait_by_launch_v1",
+              "cli_protocol",
+              "cli_inbox_wait_by_launch_v1",
+            ],
+      )
       const waits = calls.filter((call) => call.method === "cli_inbox_wait_by_launch_v1")
       expect(waits[0]?.params).toMatchObject({ timeout_ms: 30_000 })
       expect(waits[0]?.params).not.toHaveProperty("after_seq")
       expect(waits[1]?.params).toMatchObject({ timeout_ms: 30_000, after_seq: 37 })
-      expect(waits[2]?.params).toMatchObject({ after_seq: 37 })
-      expect(waits[2]?.params?.timeout_ms).toBeLessThan(mode === "silent" ? 5_000 : 40_000)
+      if (mode === "lost-session") {
+        for (const wait of waits) {
+          expect(wait.params).toMatchObject({ launch_id: "sid-dev2", id_token: MANAGED_PENDING_TOKEN })
+        }
+      } else {
+        expect(waits[2]?.params).toMatchObject({ after_seq: 37 })
+        expect(waits[2]?.params?.timeout_ms).toBeLessThan(mode === "silent" ? 5_000 : 40_000)
+      }
       // The helper's awaited server.close also proves both chunk connections were closed.
     },
     90_000,
