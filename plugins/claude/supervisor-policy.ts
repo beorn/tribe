@@ -1,5 +1,4 @@
 import { decorrelatedJitter, type RandomUnit } from "@bearly/pacing"
-import { isAbsolute, join } from "node:path"
 import { HAB_ID_TOKEN_ENV, HAB_ID_TOKEN_FILE_ENV } from "tribe-wire/lib/hab-session-env"
 import { TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV } from "tribe-wire/lib/session-identity-env"
 import type { ParentPidReading } from "tribe-wire/lib/process-parent"
@@ -91,19 +90,8 @@ export function evaluateCodeRootWait(
   }
 }
 
-/**
- * Where the supervisor spawns its adapter child: the landing root the DAEMON runs from, learned from the daemon.
- * Never the supervisor's own tree (shared main or a stale landing) and never a guessed root.
- */
-export function adapterEntryForRoot(root: string | null): string {
-  if (root === null || root.trim() === "" || !isAbsolute(root)) {
-    throw new Error(
-      "tribe plugin supervisor: refusing to spawn the adapter from a guessed root; " +
-        `the daemon published no landing root (${root === null ? "absent" : `"${root}"`})`,
-    )
-  }
-  return join(root, "plugins", "claude", "server.ts")
-}
+/** Where the supervisor spawns its adapter child; one definition, in tribe-wire (32353 derived child rule). */
+export { adapterEntryForRoot } from "tribe-wire/lib/code-identity"
 
 /**
  * Whether the wrapper restarts its adapter, and after how long. The delay is decorrelated jitter (25663, @cto

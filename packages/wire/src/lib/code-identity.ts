@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { dirname, relative, resolve } from "node:path"
+import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { connectToDaemon } from "./socket.ts"
 
@@ -25,6 +25,21 @@ export function sourceRootFromWireModule(fileUrl: string): string {
 /** The tribe root enclosing `plugins/claude/server.ts` (the plugin entry). */
 export function sourceRootFromPluginEntry(fileUrl: string): string {
   return sourceRootFrom(fileUrl, PLUGIN_ENTRY_SOURCE_ROOT_DEPTH)
+}
+
+/**
+ * Where the supervisor spawns its adapter child: the landing root the DAEMON runs from, learned from the daemon.
+ * Never the supervisor's own tree (shared main or a stale landing) and never a guessed root. Ag's auto-park
+ * evaluator derives the allowed wire-server child from this same function (32353, @cto 3e9eaca3).
+ */
+export function adapterEntryForRoot(root: string | null): string {
+  if (root === null || root.trim() === "" || !isAbsolute(root)) {
+    throw new Error(
+      "tribe plugin supervisor: refusing to spawn the adapter from a guessed root; " +
+        `the daemon published no landing root (${root === null ? "absent" : `"${root}"`})`,
+    )
+  }
+  return join(root, "plugins", "claude", "server.ts")
 }
 
 /** cli_status `daemon.code_identity`: the landing root the daemon runs from and the commit it runs. */
