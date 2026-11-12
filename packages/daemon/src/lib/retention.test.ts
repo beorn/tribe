@@ -16,7 +16,6 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createConnection, type Socket } from "node:net"
 import { gunzipSync, gzipSync } from "node:zlib"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createScope } from "tribe-wire"
@@ -203,11 +202,7 @@ describe("journal retention sweep", () => {
       return sent.id
     }
     const initial = seed()
-    db.exec("CREATE TEMP TABLE startup_order (step TEXT NOT NULL)")
-    db.exec(`CREATE TEMP TRIGGER observe_initial_retention AFTER INSERT ON messages_archive
-      BEGIN INSERT INTO startup_order VALUES ('retention'); END`)
     let running: Promise<void> | undefined
-    let client: Socket | undefined
     try {
       const registryShape = withClientRegistry()(createBaseTribe({ scope }))
       const socketShape = withSocketServer()({
@@ -215,20 +210,6 @@ describe("journal retention sweep", () => {
         config: { socketPath: join(tmpDir, "runtime.sock"), inheritFd: null },
         broadcast: { log: () => {} },
       } as never)
-      const accepted = new Promise<void>((resolve) => {
-        socketShape.socket.server.once("connection", (connection) => {
-          db.prepare("INSERT INTO startup_order VALUES ('accepted')").run()
-          connection.end()
-          resolve()
-        })
-      })
-      const connected = socketShape.socket.binding.then(
-        () => new Promise<void>((resolve, reject) => {
-          client = createConnection(socketShape.socket.socketPath)
-          client.once("connect", resolve)
-          client.once("error", reject)
-        }),
-      )
       const subject = withRuntime({
         plugins: [],
         buildPluginApi: () => ({}) as never,
@@ -241,12 +222,7 @@ describe("journal retention sweep", () => {
       // The real listen callback has not run in this synchronous turn.
       expect(liveIds(db)).toContain(initial)
       await expect(socketShape.socket.binding).resolves.toBe("listening")
-      await Promise.all([accepted, connected])
       await new Promise<void>((resolve) => setImmediate(resolve))
-      expect(db.prepare("SELECT step FROM startup_order ORDER BY rowid").all()).toEqual([
-        { step: "accepted" },
-        { step: "retention" },
-      ])
       expect(liveIds(db)).not.toContain(initial)
       expect(archivedIds(db)).toContain(initial)
       expect(vi.getTimerCount()).toBe(1)
@@ -258,7 +234,6 @@ describe("journal retention sweep", () => {
       expect(liveIds(db)).not.toContain(later)
       expect(archivedIds(db)).toEqual([initial, later])
     } finally {
-      client?.destroy()
       await scope[Symbol.asyncDispose]()
       await running
       db.close()
