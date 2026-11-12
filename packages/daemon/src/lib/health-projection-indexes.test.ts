@@ -209,28 +209,34 @@ describe("health projection reads the archive through an index", () => {
       (seq, id, type, sender, recipient, content, ts, archived_at, kind)
       VALUES (?, ?, 'notify', ?, ?, 'body', ?, ?, ?)`)
     for (const [seq, sender, recipient, kind, age] of [
-      [99, 'other', SEAT, 'direct', 9000],
-      [100, 'other', SEAT, 'direct', 8000],
-      [101, 'other', SEAT, 'direct', 2000],
-      [102, 'other', '*', 'broadcast', 1000],
-      [103, SEAT, '*', 'broadcast', 7000],
-      [104, 'other', SEAT, 'event', 6000],
-      [105, 'other', '@unrelated', 'direct', 5000],
+      [99, "other", SEAT, "direct", 9000],
+      [100, "other", SEAT, "direct", 8000],
+      [101, "other", SEAT, "direct", 2000],
+      [102, "other", "*", "broadcast", 1000],
+      [103, SEAT, "*", "broadcast", 7000],
+      [104, "other", SEAT, "event", 6000],
+      [105, "other", "@unrelated", "direct", 5000],
     ] as const) {
       insert.run(seq, `lag-${seq}`, sender, recipient, NOW - age, NOW, kind)
     }
     const projected = projectHealthCadence(db, {
-      now: NOW, connectedSessionNames: [], requestedSessionNames: [SEAT], slaRole: null,
+      now: NOW,
+      connectedSessionNames: [],
+      requestedSessionNames: [SEAT],
+      slaRole: null,
     })
-    expect(projected.inbox_lag).toEqual([
-      expect.objectContaining({ session: SEAT, rows: 2, oldest_age_ms: 2000 }),
-    ])
-    const archivePlan = plan(db, `SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
+    expect(projected.inbox_lag).toEqual([expect.objectContaining({ session: SEAT, rows: 2, oldest_age_ms: 2000 })])
+    const archivePlan = plan(
+      db,
+      `SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
       FROM messages_archive
       WHERE seq > $cursor AND kind IN ('direct', 'broadcast')
-        AND sender != $session AND recipient IN ($session, '*')`, {
-      $cursor: 100, $session: SEAT,
-    })
+        AND sender != $session AND recipient IN ($session, '*')`,
+      {
+        $cursor: 100,
+        $session: SEAT,
+      },
+    )
     expect(archivePlan).toMatch(/SEARCH messages_archive USING COVERING INDEX .*\(recipient=\? AND seq>\?\)/)
   })
 

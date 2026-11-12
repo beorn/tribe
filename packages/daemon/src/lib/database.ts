@@ -315,6 +315,12 @@ export function openDatabase(path: string): Database {
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room_id, ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_ts ON messages_archive(ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_seq ON messages_archive(seq)")
+  // The all-kind inbox backlog count reads recipient/seq plus scalar fields,
+  // never content. A seq-only seek rereads unrelated archived payloads for an
+  // old disconnected cursor; keep that existing count inside a covering index.
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_messages_archive_inbox_lag ON messages_archive(recipient, seq, kind, sender, ts) WHERE kind IN ('direct', 'broadcast')",
+  )
   // 27882: the health projection's 7d growth window filters messages_archive by
   // `archived_at`; unindexed, both its COUNT and its byte-SUM scanned the whole
   // archive on every health call. The per-session last-message probe ordered by
@@ -1595,6 +1601,18 @@ const MIGRATIONS: readonly Migration[] = [
         const present = tableColumnNames(db, table)
         if (!columns.every((column) => present.has(column))) continue
         db.run(assertSingleStatement(statement))
+      }
+    },
+  },
+  {
+    version: 43,
+    name: "archive-inbox-lag-covering-index",
+    up(db) {
+      const present = tableColumnNames(db, "messages_archive")
+      if (["recipient", "seq", "kind", "sender", "ts"].every((column) => present.has(column))) {
+        db.run(
+          "CREATE INDEX IF NOT EXISTS idx_messages_archive_inbox_lag ON messages_archive(recipient, seq, kind, sender, ts) WHERE kind IN ('direct', 'broadcast')",
+        )
       }
     },
   },
