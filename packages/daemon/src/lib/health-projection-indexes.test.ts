@@ -35,6 +35,8 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import type { Database } from "bun:sqlite"
 
+import { projectHealthCadence } from "./health-cadence.ts"
+
 import {
   ATTENTION_PREDICATE_SQL,
   createStatements,
@@ -194,6 +196,44 @@ afterEach(() => {
 })
 
 describe("health projection reads the archive through an index", () => {
+  // 33650: a requested disconnected seat can have an old cursor. This count
+  // must seek its recipients and read no message payload; the existing archive
+  // attention-index test covers only actionable rows, not this all-kind count.
+  it("covers archived cursor backlog without changing cursor, kind, sender or broadcast semantics", () => {
+    const { db } = fixture()
+    db.exec("DELETE FROM messages_archive")
+    db.prepare(`INSERT INTO sessions
+      (id, name, role, pid, cwd, started_at, updated_at, last_inbox_pull_seq)
+      VALUES ('lag-reader', ?, 'member', 0, '', ?, ?, 100)`).run(SEAT, NOW, NOW)
+    const insert = db.prepare(`INSERT INTO messages_archive
+      (seq, id, type, sender, recipient, content, ts, archived_at, kind)
+      VALUES (?, ?, 'notify', ?, ?, 'body', ?, ?, ?)`)
+    for (const [seq, sender, recipient, kind, age] of [
+      [99, 'other', SEAT, 'direct', 9000],
+      [100, 'other', SEAT, 'direct', 8000],
+      [101, 'other', SEAT, 'direct', 2000],
+      [102, 'other', '*', 'broadcast', 1000],
+      [103, SEAT, '*', 'broadcast', 7000],
+      [104, 'other', SEAT, 'event', 6000],
+      [105, 'other', '@unrelated', 'direct', 5000],
+    ] as const) {
+      insert.run(seq, `lag-${seq}`, sender, recipient, NOW - age, NOW, kind)
+    }
+    const projected = projectHealthCadence(db, {
+      now: NOW, connectedSessionNames: [], requestedSessionNames: [SEAT], slaRole: null,
+    })
+    expect(projected.inbox_lag).toEqual([
+      expect.objectContaining({ session: SEAT, rows: 2, oldest_age_ms: 2000 }),
+    ])
+    const archivePlan = plan(db, `SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
+      FROM messages_archive
+      WHERE seq > $cursor AND kind IN ('direct', 'broadcast')
+        AND sender != $session AND recipient IN ($session, '*')`, {
+      $cursor: 100, $session: SEAT,
+    })
+    expect(archivePlan).toMatch(/SEARCH messages_archive USING COVERING INDEX .*\(recipient=\? AND seq>\?\)/)
+  })
+
   it("keeps fleet unread equal to the old grouped query across mailbox and tracked attention", () => {
     const { db } = fixture()
     const stmts = createStatements(db)
