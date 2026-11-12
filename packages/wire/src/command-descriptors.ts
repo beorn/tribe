@@ -1040,7 +1040,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           cadence: {
             type: "object",
             description:
-              "24h response latency, open balls, cursor lag and database growth, each with as_of_ms. inbox_lag rows include last_non_event_send_at_ms (latest current messages-table send by exact name excluding events; null for absence, zero observed; archive excluded).",
+              "24h response latency, open balls, cursor lag and database growth, each with as_of_ms. inbox_lag rows include last_non_event_send_at_ms (latest current messages-table send by exact name excluding events; null for absence, zero observed; archive excluded). Optional inbox_lag_excluded names known service principals with reason service-never-read; these are excluded from lag and warnings until a canonical READ is observed.",
             additionalProperties: true,
           },
           identity: {
