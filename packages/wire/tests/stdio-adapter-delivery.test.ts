@@ -492,6 +492,47 @@ describe("stdio adapter delivery modes", () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
+  // @failure 33127: recipient delivery inside an idle hosted seat must start its existing AHP turn.
+  // @level l2 @consumer real stdio adapter, authenticated attention drain and fixed-argv wake child.
+  it.each(["request", "query", "assign", "verdict"])("hosted wake passes only its own seat and message id for %s", async (type) => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const capture = join(tmpDir, "wake.json")
+    const wakeScript = join(tmpDir, "wake.mjs")
+    writeFileSync(wakeScript, `import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[2], JSON.stringify({ argv: process.argv.slice(3), secret: process.env.HOSTED_WAKE_TEST_SECRET }));
+console.log('HOSTED_WAKE_STDOUT_IS_NOT_MCP');\n`)
+    const id = "11111111-2222-4333-8444-555555555555"
+    daemon = await spawnFakeDaemon(socketPath, {
+      fetchAttention: { actionable_unread: [{ id, type, from: "@chief", to: "@agent/test", content: "NEVER_PASS_THIS_BODY" }] },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        ...launchEnvironment(""),
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_HOSTED_WAKE_ARGV: JSON.stringify([BUN_BIN, wakeScript, capture]),
+        HOSTED_WAKE_TEST_SECRET: "must-not-reach-wake-child",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    let rawOut = ""
+    child.stdout.on("data", (chunk) => { rawOut += chunk.toString() })
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+    await waitForCondition(() => existsSync(capture), "hosted wake command")
+    expect(JSON.parse(readFileSync(capture, "utf8"))).toEqual({
+      argv: ["--input", id, "@agent/test", "--", `read your tribe inbox now: ${id}`],
+    })
+    expect(rawOut).not.toContain("HOSTED_WAKE_STDOUT_IS_NOT_MCP")
+    expect(daemon.requests.filter((row) => row.method === "tribe.fetch").every((row) =>
+      (row.params as { receipt?: boolean }).receipt === false)).toBe(true)
+  })
+
   // @failure 26564: configured push is not confirmed push; malformed register ACK must leave stdio/tools usable.
   // @level l2 @consumer native MCP delivery capability and startup confirmation
   it.each([

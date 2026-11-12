@@ -48,6 +48,7 @@ import {
 } from "./lib/code-identity.ts"
 import { pacedReexec, type ReloadDaemonView, type ReloadPeers } from "./lib/reload-pacing.ts"
 import { createHash } from "node:crypto"
+import { spawn as spawnHostedWake } from "node:child_process"
 import { constants as osConstants } from "node:os"
 import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -61,7 +62,7 @@ import { isExplicitTribePersonaName, isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } 
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
-import { composeForwardedRowContent } from "./lib/wake-read-directive.ts"
+import { composeForwardedRowContent, isWakeReadDirectiveId, wakeReadDirective } from "./lib/wake-read-directive.ts"
 import { FOREIGN_REFUSAL_KINDS } from "./lib/foreign-refusal-kinds.ts"
 import {
   createDeliveryCounter,
@@ -117,6 +118,62 @@ const log = createLogger("tribe:stdio-adapter")
 
 const proxyAc = new AbortController()
 const timers = createTimers(proxyAc.signal)
+
+const HOSTED_WAKE_TIMEOUT_MS = 30_000
+const hostedWakeArgv = (() => {
+  const raw = process.env.TRIBE_HOSTED_WAKE_ARGV
+  if (raw === undefined) return undefined
+  try {
+    const value: unknown = JSON.parse(raw)
+    if (Array.isArray(value) && value.length > 0 && value.every((part) => typeof part === "string" && part.trim().length > 0)) {
+      return value as string[]
+    }
+  } catch {
+    // Invalid optional configuration is diagnosed below; the MCP adapter remains usable.
+  }
+  process.stderr.write("tribe hosted wake: TRIBE_HOSTED_WAKE_ARGV must be a JSON array of non-empty strings; hosted wake disabled\n")
+  return undefined
+})()
+let hostedWakeInFlight = false
+
+function wakeHostedSeat(row: NonNullable<TribeFetchResult["events"]>[number]): void {
+  if (!hostedWakeArgv || !joined || hostedWakeInFlight || proxyAc.signal.aborted || row.settled === true) return
+  if (!["request", "query", "assign", "verdict"].includes(String(row.type))) return
+  const id = typeof row.id === "string" ? row.id.trim() : ""
+  if (!isWakeReadDirectiveId(id)) return
+  const env: NodeJS.ProcessEnv = {}
+  for (const key of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "HAB_ID_TOKEN_FILE", "HAB_SESSION_LAUNCH_ID", "HAB_SESSION_HABITAT_ROOT", "HAB_SESSION_HABITAT_NAME", "AG_HOST_LAUNCH_GENERATION", "TRIBE_SOCKET"]) {
+    const value = process.env[key]
+    if (value !== undefined) env[key] = value
+  }
+  env.TRIBE_NAME = myName
+  hostedWakeInFlight = true
+  let reported = false
+  const fail = (cause: string): void => {
+    if (reported) return
+    reported = true
+    process.stderr.write(`tribe hosted wake: ${myName} message ${id} failed: ${cause}\n`)
+  }
+  try {
+    const wake = spawnHostedWake(hostedWakeArgv[0]!, [...hostedWakeArgv.slice(1), "--input", id, myName, "--", wakeReadDirective(id)], {
+      env,
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: HOSTED_WAKE_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      signal: proxyAc.signal,
+    })
+    let stderr = ""
+    wake.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-1_024) })
+    wake.once("error", (error) => fail(error.message))
+    wake.once("close", (code, signal) => {
+      hostedWakeInFlight = false
+      if (code !== 0) fail(`exit ${String(code)}, signal ${String(signal)}, timeout ${HOSTED_WAKE_TIMEOUT_MS}ms${stderr ? `: ${stderr.trim()}` : ""}`)
+    })
+  } catch (error) {
+    hostedWakeInFlight = false
+    fail(error instanceof Error ? error.message : String(error))
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -1863,6 +1920,8 @@ function drainDaemonInbox(): void {
           (event) => !forwardedAttention.has(event.id ? String(event.id) : undefined),
         )
         for (const event of attentionEvents) {
+          // Only this recipient's authenticated attention can initiate a hosted turn.
+          wakeHostedSeat(event)
           const eventId = event.id ? String(event.id) : undefined
           try {
             if (!(await forwardFetchedEvent(event))) continue
