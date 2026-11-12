@@ -8,7 +8,11 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest"
+import { mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { buildMockQueryModel, buildPlanJson, alwaysAvailable, unavailableCostMethods } from "../helpers/llm-mock.ts"
+import { makeKmVault } from "../helpers/km-vault.ts"
 import type { LlmBackend } from "../../src/lib/llm-backend.ts"
 
 process.env.RECALL_DB_PATH = ":memory:"
@@ -499,4 +503,172 @@ test("agent results carry no line or collapsed-copy fields", async () => {
     expect(Object.keys(row).sort()).toEqual(["rank", "sessionId", "sessionTitle", "snippet", "timestamp", "type"])
   }
   expect(JSON.stringify(result.results)).not.toMatch(/"(line|duplicateLine|collapsedCopy\w*)"/)
+})
+
+// ──────────────────────────────────────────────────────────────────────
+// Required issue ids — 28593, both measured shapes
+// ──────────────────────────────────────────────────────────────────────
+
+function makeIssueVault(nodes: Array<{ id: string; fsPath: string; title: string; content: string }>): {
+  dir: string
+  db: string
+} {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "recall-required-ids-"))
+  return { dir, db: makeKmVault(dir, nodes) }
+}
+
+describe("recallAgent — required issue id", () => {
+  test("searches the id the question names even when the planner drops it (27398 shape)", async () => {
+    const vault = makeIssueVault([
+      {
+        id: "27398-ops-plan-mouse-tracking-leak",
+        fsPath: "@ag/code/27398-ops-plan-mouse-tracking-leak.md",
+        title: "mouse tracking leak after reattach",
+        content: "mouse leak reattach",
+      },
+    ])
+    try {
+      // The measured plan: unrelated keywords, and two substituted ids the question never named.
+      mockHolder.fn = buildMockQueryModel([
+        {
+          match: /query planner/i,
+          content: buildPlanJson({ keywords: ["controller", "memory", "resize"], bead_ids: ["28503", "28586"] }),
+        },
+        { content: "synthesized" },
+      ])
+      seedCorpus({
+        sessions: [
+          { id: "sess-intended", title: "intended", messages: ["27398 mouse leak after reattach"] },
+          { id: "sess-noise", title: "noise", messages: ["controller memory resize notes"] },
+        ],
+      })
+
+      const result = await recallAgent("27398 ops-plan resize operator confirmation of mouse leak after reattach", {
+        limit: 5,
+        vaultDb: vault.db,
+      })
+
+      expect(result.trace.requiredIds).toEqual(["27398"])
+      // The id was searched although no planner bucket held it.
+      expect(result.trace.rounds[0]?.variants).toContain("27398")
+      // The substituted ids never reached the corpus.
+      expect(result.trace.rounds[0]?.variants).not.toContain("28503")
+      expect(result.trace.rounds[0]?.variants).not.toContain("28586")
+      expect(result.trace.plannerInjectedIssueIds).toEqual(["bead_ids:28503", "bead_ids:28586"])
+      // The id's own document is in the answer's result set.
+      expect(result.results.some((r) => r.snippet.includes("27398"))).toBe(true)
+    } finally {
+      rmSync(vault.dir, { recursive: true, force: true })
+    }
+  })
+
+  test("refuses the short-circuit while the named id is unmatched (32289 shape)", async () => {
+    const vault = makeIssueVault([
+      {
+        id: "32289-move-platform-specific-code",
+        fsPath: "@ag/hab/cross-platform-posture/32289-move-platform-specific-code.md",
+        title: "move platform-specific code",
+        content: "HostMetricsProvider platform posture",
+      },
+    ])
+    try {
+      mockHolder.fn = buildMockQueryModel([
+        { match: /ROUND 2/i, content: buildPlanJson({ keywords: ["posture"] }) },
+        {
+          match: /query planner/i,
+          content: buildPlanJson({
+            keywords: [
+              "platform",
+              "HostMetricsProvider",
+              "terminfo",
+              "libvterm",
+              "VT100",
+              "Kitty",
+              "osc7",
+              "probeHash",
+            ],
+            bead_ids: ["32289", "32309", "32310", "32312"],
+          }),
+        },
+        { content: "synthesized" },
+      ])
+      // Generic coverage that would short-circuit (8/8 variants on one doc) with no 32289 anywhere.
+      seedCorpus({
+        sessions: [
+          {
+            id: "sess-noise",
+            title: "noise",
+            messages: ["platform HostMetricsProvider terminfo libvterm VT100 Kitty osc7 probeHash"],
+          },
+        ],
+      })
+
+      const result = await recallAgent("32289 platform HostMetricsProvider", { limit: 1, vaultDb: vault.db })
+
+      expect(result.trace.requiredIds).toEqual(["32289"])
+      expect(result.trace.unmatchedRequiredIds).toEqual(["32289"])
+      expect(result.trace.decision.round2Mode).not.toBe("off")
+      expect(result.trace.decision.reason).not.toMatch(/short-circuit/)
+      // The siblings the planner injected from context are gone; the named id stayed.
+      const firstRound = result.trace.rounds[0]?.variants ?? []
+      expect(firstRound).toContain("32289")
+      for (const injected of ["32309", "32310", "32312"]) expect(firstRound).not.toContain(injected)
+      expect(result.trace.plannerInjectedIssueIds).toEqual(
+        expect.arrayContaining(["bead_ids:32309", "bead_ids:32310", "bead_ids:32312"]),
+      )
+      // Round 2 actually ran instead of answering from the noise.
+      expect(result.trace.rounds.map((round) => round.round)).toEqual([1, 2])
+    } finally {
+      rmSync(vault.dir, { recursive: true, force: true })
+    }
+  })
+
+  test("still short-circuits when the named id is in the top results", async () => {
+    const vault = makeIssueVault([
+      {
+        id: "32289-move-platform-specific-code",
+        fsPath: "@ag/hab/cross-platform-posture/32289-move-platform-specific-code.md",
+        title: "move platform-specific code",
+        content: "HostMetricsProvider platform posture",
+      },
+    ])
+    try {
+      mockHolder.fn = buildMockQueryModel([
+        {
+          match: /query planner/i,
+          content: buildPlanJson({
+            keywords: [
+              "platform",
+              "HostMetricsProvider",
+              "terminfo",
+              "libvterm",
+              "VT100",
+              "Kitty",
+              "osc7",
+              "probeHash",
+            ],
+          }),
+        },
+        { content: "synthesized" },
+      ])
+      seedCorpus({
+        sessions: [
+          {
+            id: "sess-hit",
+            title: "hit",
+            messages: ["32289 platform HostMetricsProvider terminfo libvterm VT100 Kitty osc7 probeHash"],
+          },
+        ],
+      })
+
+      const result = await recallAgent("32289 platform HostMetricsProvider", { limit: 1, vaultDb: vault.db })
+
+      expect(result.trace.requiredIds).toEqual(["32289"])
+      expect(result.trace.unmatchedRequiredIds).toEqual([])
+      expect(result.trace.decision.round2Mode).toBe("off")
+      expect(result.trace.decision.reason).toMatch(/short-circuit/)
+    } finally {
+      rmSync(vault.dir, { recursive: true, force: true })
+    }
+  })
 })

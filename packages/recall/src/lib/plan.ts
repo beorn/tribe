@@ -59,7 +59,7 @@ export interface PlanCall extends Partial<LlmCostFields> {
 // Prompts
 // ============================================================================
 
-const PLAN_BUCKET_KEYS = ["keywords", "phrases", "concepts", "paths", "errors", "bead_ids"] as const
+export const PLAN_BUCKET_KEYS = ["keywords", "phrases", "concepts", "paths", "errors", "bead_ids"] as const
 const PLAN_SHAPE = JSON.stringify({
   ...Object.fromEntries(PLAN_BUCKET_KEYS.map((key) => [key, []])),
   time_hint: null,

@@ -21,6 +21,13 @@ import { DEFAULT_PLAN_TIMEOUT_MS, DEFAULT_SYNTHESIS_TIMEOUT_MS, log, THIRTY_DAYS
 import type { RecallOptions, RecallResult, RecallSearchResult, SynthesisDiagnostics } from "../history/recall-shared.ts"
 import { buildQueryContext, renderContextPrompt, type QueryContext } from "./context.ts"
 import { planQuery, planVariants, type PlanCall } from "./plan.ts"
+import {
+  resolveRequiredIssueIds,
+  stripUnrequiredIssueIds,
+  unmatchedRequiredIdsIn,
+  type RequiredIdResolution,
+} from "./required-ids.ts"
+import { getVaultDbPath } from "../history/vault-fts.ts"
 import { fanoutSearch, mergeFanouts, type FanoutResult } from "./fanout.ts"
 import { writeTrace, type RoundTrace, type TracePayload } from "./trace.ts"
 import { loadLlm, type LlmBackend, type LlmCostCall } from "./llm-backend.ts"
@@ -64,6 +71,12 @@ export interface AgentRecallResult extends RecallResult {
     synthCallsUsed?: number
     /** True iff a round-1-only answer was ever produced (speculative or single-pass). */
     round1ShortCircuited?: boolean
+    /** Issue ids the question itself named, resolved by vault id first (28593). Present only when it named any. */
+    requiredIds?: string[]
+    /** Required ids round 1 did not bring into the top results; non-empty refuses the short-circuit. */
+    unmatchedRequiredIds?: string[]
+    /** Issue ids the planner pulled from context that this run dropped because the question named its own. */
+    plannerInjectedIssueIds?: string[]
   }
   /** Path the trace file was written to, if RECALL_AGENT_TRACE is set. */
   traceFile?: string | null
@@ -114,6 +127,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
 
   const db = getDb()
   const rounds: RoundTrace[] = []
+  const droppedIssueIds: string[] = []
   const plannerCalls: LlmCostCall[] = []
   const synthesisCalls: LlmCostCall[] = []
   const planElapsed: number[] = []
@@ -173,6 +187,11 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   // ──────────────────────────────────────────────────────────────────────
   // Round 1
   // ──────────────────────────────────────────────────────────────────────
+  // Issue ids the question itself names are required matches (28593): resolved by vault id first, so a five-digit
+  // number that names no node stays a number, and deterministic, so no planner round can drop or substitute them.
+  const requiredResolution: RequiredIdResolution = resolveRequiredIssueIds(query, options.vaultDb ?? getVaultDbPath())
+  const requiredIds = requiredResolution.required
+
   const planR1 = await planQuery(query, context, { round: 1, timeoutMs: planTimeoutMs, llm })
   planElapsed.push(planR1.elapsedMs)
   plannerCalls.push(...planR1.calls)
@@ -192,8 +211,15 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
     }
   }
 
-  const variantsR1 = planVariants(planR1.plan)
-  log(`agent: round 1 plan → ${variantsR1.length} variants (planner=${planR1.model} ${planR1.elapsedMs}ms)`)
+  const strippedR1 = stripUnrequiredIssueIds(planR1.plan, requiredIds)
+  if (strippedR1.dropped.length > 0) {
+    droppedIssueIds.push(...strippedR1.dropped)
+    log(`agent: round 1 dropped planner-injected issue ids the question did not name: ${strippedR1.dropped.join(", ")}`)
+  }
+  const variantsR1 = withRequiredIds(planVariants(strippedR1.plan), requiredIds)
+  log(
+    `agent: round 1 plan → ${variantsR1.length} variants (planner=${planR1.model} ${planR1.elapsedMs}ms)${requiredIds.length > 0 ? `, required ids first: ${requiredIds.join(", ")}` : ""}`,
+  )
 
   if (variantsR1.length === 0) {
     log(`agent: round 1 produced zero variants — falling through`)
@@ -213,6 +239,11 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   log(
     `agent: round 1 fanout → ${fanoutR1.stats.rawHits} raw, ${fanoutR1.stats.uniqueDocs} unique, top-coverage=${fanoutR1.stats.topCoverage}/${fanoutR1.variants.length} (${fanoutR1.stats.msTotal}ms)`,
   )
+
+  const unmatchedRequiredIds = unmatchedRequiredIdsIn(requiredIds, fanoutR1)
+  if (unmatchedRequiredIds.length > 0) {
+    log(`agent: required issue id unmatched in the round-1 top results: ${unmatchedRequiredIds.join(", ")}`)
+  }
 
   // ──────────────────────────────────────────────────────────────────────
   // Speculative synth (runs in parallel with round 2)
@@ -241,7 +272,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   let finalFanout: FanoutResult = fanoutR1
 
   if (maxRounds >= 2 && round2 !== "off") {
-    decision = chooseRound2Mode(round2, fanoutR1, fanoutR1.variants.length, limit)
+    decision = chooseRound2Mode(round2, fanoutR1, fanoutR1.variants.length, limit, unmatchedRequiredIds)
     log(`agent: round 2 decision = ${decision.round2Mode} (${decision.reason})`)
 
     if (decision.round2Mode !== "off") {
@@ -267,7 +298,14 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
       } else {
         // Filter out variants we already tried in round 1
         const r1Set = new Set(fanoutR1.variants)
-        const variantsR2 = planVariants(planR2.plan).filter((v) => !r1Set.has(v))
+        const strippedR2 = stripUnrequiredIssueIds(planR2.plan, requiredIds)
+        if (strippedR2.dropped.length > 0) {
+          droppedIssueIds.push(...strippedR2.dropped)
+          log(
+            `agent: round 2 dropped planner-injected issue ids the question did not name: ${strippedR2.dropped.join(", ")}`,
+          )
+        }
+        const variantsR2 = planVariants(strippedR2.plan).filter((v) => !r1Set.has(v))
         log(`agent: round 2 plan → ${variantsR2.length} NEW variants (planner=${planR2.model} ${planR2.elapsedMs}ms)`)
 
         if (variantsR2.length > 0) {
@@ -386,7 +424,16 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
       llmMs: planElapsed.reduce((a, b) => a + b, 0) + synthMs,
     },
     ...(synthesisFailure ? { synthesisFailure } : {}),
-    trace: { rounds, decision, contextChars, synthPath, synthCallsUsed, round1ShortCircuited },
+    trace: {
+      rounds,
+      decision,
+      contextChars,
+      synthPath,
+      synthCallsUsed,
+      round1ShortCircuited,
+      ...(requiredIds.length > 0 ? { requiredIds, unmatchedRequiredIds } : {}),
+      ...(droppedIssueIds.length > 0 ? { plannerInjectedIssueIds: [...new Set(droppedIssueIds)] } : {}),
+    },
   }
 
   const traceFile = writeTrace(buildTracePayload(result, options, context, synthMs, costs))
@@ -405,6 +452,7 @@ function chooseRound2Mode(
   fanoutR1: FanoutResult,
   variantCount: number,
   limit: number,
+  unmatchedRequiredIds: string[] = [],
 ): { round2Mode: "wider" | "deeper" | "off"; reason: string } {
   if (requested === "off") return { round2Mode: "off", reason: "forced-off" }
   if (requested === "wider") return { round2Mode: "wider", reason: "forced-wider" }
@@ -421,7 +469,16 @@ function chooseRound2Mode(
   const haveFullResults = results.length >= limit
   const fractionShort = coverageFraction >= SHORT_CIRCUIT_COVERAGE_FRACTION
   const absoluteShort = stats.topCoverage >= SHORT_CIRCUIT_COVERAGE_ABSOLUTE
-  if (haveFullResults && (fractionShort || absoluteShort)) {
+  // "Good enough" is not good enough while an issue id the question named never reached the top results: the answer
+  // would be about other issues (28593, the 32289 shape, where 10/24 = 0.42 short-circuited around a distant id).
+  // Only the short-circuit is refused; the ordinary decisions below still choose the mode.
+  const shortCircuitBlockedByRequiredId = unmatchedRequiredIds.length > 0
+  if (shortCircuitBlockedByRequiredId && haveFullResults && (fractionShort || absoluteShort)) {
+    log(
+      `agent: short-circuit refused — required issue id unmatched in the top results (${unmatchedRequiredIds.join(", ")})`,
+    )
+  }
+  if (haveFullResults && (fractionShort || absoluteShort) && !shortCircuitBlockedByRequiredId) {
     const rationale = fractionShort
       ? `fraction=${coverageFraction.toFixed(2)}≥${SHORT_CIRCUIT_COVERAGE_FRACTION}`
       : `absolute=${stats.topCoverage}≥${SHORT_CIRCUIT_COVERAGE_ABSOLUTE}`
@@ -464,6 +521,15 @@ function countDocsAbove(hitCounts: Map<string, number>, threshold: number): numb
   let n = 0
   for (const v of hitCounts.values()) if (v > threshold) n++
   return n
+}
+
+/**
+ * The question's own issue ids lead the fan-out, whatever the planner emitted: rule 1 of 28593 is that they are
+ * required matches, so a planner that drops them cannot drop them from the search.
+ */
+function withRequiredIds(variants: string[], requiredIds: string[]): string[] {
+  if (requiredIds.length === 0) return variants
+  return [...new Set([...requiredIds, ...variants])]
 }
 
 /**
