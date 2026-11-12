@@ -25,15 +25,22 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs"
+import * as fs from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createStore, insertContent, insertEmbedding } from "@tobilu/qmd/store"
 import { safeRemoveSync } from "removely"
-import { afterEach, beforeEach, describe, expect, test } from "vitest"
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { initSchema } from "../../src/history/db-schema"
 import type { QmdEmbedRuntime } from "../../src/history/vault-embed-qmd"
 import { runVaultEmbedPass, runVaultEmbedSeed, vaultRootOf } from "../../src/history/vault-embed-index"
 import type { VaultEmbedContract } from "../../src/history/vault-embed-store"
+
+// Observe the real model stream through the module boundary; ESM exports cannot be spied on in place.
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>()
+  return { ...actual, createReadStream: vi.fn(actual.createReadStream) }
+})
 
 const CONTRACT: VaultEmbedContract = {
   model: "fixture-embed",
@@ -131,6 +138,109 @@ describe("runVaultEmbedPass", () => {
     expect(db.prepare("SELECT DISTINCT vault_id FROM vault_doc_embed").all()).toEqual([{ vault_id: statePath }])
     const second = await pass()
     expect(second).toMatchObject({ generation: 1, embeddedDocuments: 1, coveredDocuments: 1 })
+  })
+
+  test("a persisted fully covered repeat avoids model hashing, vector loading, runtime construction, and embedding", async () => {
+    addDoc("a.md", "A\n\na", 1)
+    const indexPath = join(root, "session-index.db")
+    db.close()
+    db = new Database(indexPath)
+    initSchema(db)
+    await pass()
+
+    db.close()
+    db = new Database(indexPath)
+    initSchema(db)
+
+    let runtimeBuilds = 0
+    let embedCalls = 0
+    const base = fixtureRuntime()
+    const stream = vi.mocked(fs.createReadStream)
+    stream.mockClear()
+    const prepare = vi.spyOn(db, "prepare")
+    try {
+      const report = await runVaultEmbedPass({
+        db,
+        vaultDbPath: statePath,
+        timeLeftMs: () => 1e12,
+        now: 2,
+        env: { RECALL_EMBED_MODEL: modelPath },
+        contract: CONTRACT,
+        runtime: () => {
+          runtimeBuilds++
+          return {
+            chunker: base.chunker,
+            embedder: {
+              embed: async (inputs) => {
+                embedCalls += inputs.length
+                return base.embedder.embed(inputs)
+              },
+            },
+          }
+        },
+      })
+      const modelHashStreams = stream.mock.calls.filter(([file]) => file === modelPath).length
+      const generationVectorLoads = prepare.mock.calls.filter(([sql]) =>
+        String(sql).includes("SELECT input_key, vec FROM vault_doc_embed"),
+      ).length
+      expect(report).toMatchObject({ generation: 1, coveredDocuments: 1, embeddedDocuments: 0, embeddedChunks: 0 })
+      expect({ modelHashStreams, generationVectorLoads, runtimeBuilds, embedCalls }).toEqual({
+        modelHashStreams: 0,
+        generationVectorLoads: 0,
+        runtimeBuilds: 0,
+        embedCalls: 0,
+      })
+    } finally {
+      prepare.mockRestore()
+      stream.mockClear()
+    }
+  })
+
+  test("an unchanged model is not streamed again when a new document needs embedding", async () => {
+    addDoc("a.md", "A\n\na", 1)
+    const indexPath = join(root, "session-index.db")
+    db.close()
+    db = new Database(indexPath)
+    initSchema(db)
+    await pass()
+
+    addDoc("b.md", "B\n\nb", 2)
+    db.close()
+    db = new Database(indexPath)
+    initSchema(db)
+
+    let runtimeBuilds = 0
+    let embedCalls = 0
+    const base = fixtureRuntime()
+    const stream = vi.mocked(fs.createReadStream)
+    stream.mockClear()
+    try {
+      const report = await runVaultEmbedPass({
+        db,
+        vaultDbPath: statePath,
+        timeLeftMs: () => 1e12,
+        now: 2,
+        env: { RECALL_EMBED_MODEL: modelPath },
+        contract: CONTRACT,
+        runtime: () => {
+          runtimeBuilds++
+          return {
+            chunker: base.chunker,
+            embedder: {
+              embed: async (inputs) => {
+                embedCalls += inputs.length
+                return base.embedder.embed(inputs)
+              },
+            },
+          }
+        },
+      })
+      const modelHashStreams = stream.mock.calls.filter(([file]) => file === modelPath).length
+      expect(report).toMatchObject({ generation: 1, embeddedDocuments: 1, coveredDocuments: 1 })
+      expect({ modelHashStreams, runtimeBuilds, embedCalls }).toEqual({ modelHashStreams: 0, runtimeBuilds: 1, embedCalls: 2 })
+    } finally {
+      stream.mockClear()
+    }
   })
 
   test("a changed GGUF fills a building generation and publishes it only after a complete pass", async () => {
