@@ -2889,7 +2889,6 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
   }
 
   const now = Date.now()
-  const transport = ownerTransportObservationProjector(ctx, opts, now)
   const closeEvidence = typeof a.close_evidence === "string" ? a.close_evidence : undefined
   const evidenceKind =
     closeEvidence === undefined
@@ -2904,8 +2903,11 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
         "tribe.pending: --evidence is only accepted for an incident --close; ordinary request closes do not accept evidence.",
     })
   }
-  const withOwnerTransport = <T extends PendingBall>(rows: readonly T[]): Array<T & OwnerTransportObservation> =>
-    rows.map((row) => ({ ...row, ...transport.observe(row.recipient) }))
+  const withOwnerTransport = <T extends PendingBall>(rows: readonly T[]): Array<T & OwnerTransportObservation> => {
+    if (rows.length === 0) return []
+    const transport = ownerTransportObservationProjector(ctx, opts, now)
+    return rows.map((row) => ({ ...row, ...transport.observe(row.recipient) }))
+  }
 
   if (all && typeof a.owner === "string") {
     return jsonResult({ error: "tribe.pending: all and owner are mutually exclusive." })
@@ -2982,6 +2984,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
       })
     }
     const ids = closeBatch as string[]
+    const transport = ownerTransportObservationProjector(ctx, opts, now)
     const authorityRefusal = pendingCloseAuthorityRefusalResult(ctx, owner, ids, now, transport)
     if (authorityRefusal !== undefined) return authorityRefusal
     const refusal = incidentCloseRefusal(ctx, owner, ids)
@@ -3018,6 +3021,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
   if (closeId) {
     // The evidence-bearing incident exception is independent of offline
     // deadline custody. All ordinary and batch authority stays on its path.
+    const transport = ownerTransportObservationProjector(ctx, opts, now)
     const authorityRefusal =
       closeEvidence !== undefined && evidenceKind?.request_kind === "incident" && ctx.getName() === ANDON_OWNER
         ? undefined
@@ -3047,6 +3051,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
   const liveRows = () =>
     ctx.db.transaction(() => {
       const rows = all ? allPendingBallsWithContent(ctx, now) : pendingBallsForOwnerWithContent(ctx, owner, now)
+      if (rows.length === 0) return rows
       const receipts = takingReceiptsForOpenBalls(ctx, ctx.stmts.selectTakingReceiptsForPendingBalls)
       // `owed` reads the strict receipt match inbox-status and health read, never this zero fallback, so all three agree.
       const strictReceipts = takingReceiptsForOpenBalls(ctx)

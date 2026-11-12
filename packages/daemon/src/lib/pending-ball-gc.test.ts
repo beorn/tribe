@@ -12,7 +12,7 @@
  * non-reply settlement before removing the ball-tracker row.
  */
 
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -204,6 +204,57 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
+  // 33650: an owner with no balls must not pay for another owner's traffic.
+  // Existing result tests stayed green while one empty live read consumed 17 MB.
+  it("empty-owner pending read cost stays independent of unrelated traffic and receipts", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      const ctx = makeContext(db, stmts, "@dev/empty")
+      insertBallMessage(stmts, { id: "unrelated", openedAt: now - 1_000 })
+      openBall(stmts, { id: "unrelated", recipient: "@agent/9", openedAt: now - 1_000 })
+      db.run("PRAGMA cache_size = 32")
+      const reads = () => {
+        const io = readFileSync("/proc/self/io", "utf8")
+        const field = /syscr:\s*(\d+)/.exec(io)
+        if (!field) throw new Error("/proc/self/io lacks syscr; pending read cost is unmeasured")
+        return Number(field[1])
+      }
+      const readEmpty = () => {
+        expect(parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts()))).toMatchObject({
+          owner: "@dev/empty",
+          count: 0,
+          pending: [],
+          expired: false,
+        })
+      }
+      const cost = () => {
+        readEmpty()
+        const before = reads()
+        for (let i = 0; i < 3; i++) readEmpty()
+        return (reads() - before) / 3
+      }
+      const lean = cost()
+      db.transaction(() => {
+        for (let i = 0; i < 2_000; i++) {
+          insertTaking(stmts, {
+            id: `unrelated-receipt-${i}`,
+            ballId: "unrelated",
+            owner: "@agent/9",
+            requester: "@chief",
+            ts: now,
+          })
+        }
+      })()
+      const busy = cost()
+      expect(busy, `read syscalls: empty owner ${lean}, with unrelated traffic ${busy}`).toBeLessThan(
+        Math.max(lean, 1) * 1.5,
+      )
+    } finally {
+      db.close()
+    }
+  })
+
   // AC1/AC4: full pending must expose absence and zero without letting timestamps
   // replace sequence, or unrelated status/reply messages manufacture attendance.
   it("full pending receipt rejects false matches, preserves zero and selects MAX after sequence", () => {
@@ -265,12 +316,22 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
 
   // A genuine read failure must escape through the existing error path, never
   // become a successful all-null pending projection.
-  it("full pending receipt query failure remains an explicit failure", () => {
+  it("pending row and required receipt query failures remain explicit", () => {
     const { db, stmts } = setup()
     const failure = vi.spyOn(stmts.selectTakingReceiptsForPendingBalls, "all").mockImplementation(() => {
       throw new Error("receipt read unavailable")
     })
     try {
+      const pendingFailure = vi.spyOn(stmts.selectPendingForRecipientWithContent, "all").mockImplementation(() => {
+        throw new Error("pending rows unavailable")
+      })
+      try {
+        expect(() => handleToolCall(makeContext(db, stmts, "@agent/9"), "tribe.pending", {}, makeOpts())).toThrow(
+          "pending rows unavailable",
+        )
+      } finally {
+        pendingFailure.mockRestore()
+      }
       openBall(stmts, { id: "subject", recipient: "@agent/9", openedAt: Date.now() })
       expect(() => handleToolCall(makeContext(db, stmts, "@agent/9"), "tribe.pending", {}, makeOpts())).toThrow(
         "receipt read unavailable",
@@ -1331,6 +1392,11 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       stmts.archiveExpiredMessages.run({ $cutoff: archiveCutoff, $archived_at: archiveCutoff })
       stmts.deleteExpiredMessages.run({ $cutoff: archiveCutoff })
 
+      // 33650: no live rows must not hide journal-backed historical outcomes.
+      expect(parseToolJson(handleToolCall(chief, "tribe.pending", { all: true }, makeOpts()))).toMatchObject({
+        count: 0,
+        pending: [],
+      })
       const outcomes = parseToolJson(
         handleToolCall(chief, "tribe.pending", { all: true, expired: true }, makeOpts()),
       ) as {
