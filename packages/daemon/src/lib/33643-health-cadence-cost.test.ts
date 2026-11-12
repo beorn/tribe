@@ -24,7 +24,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import type { Database } from "bun:sqlite"
 
 import { openDatabase } from "./database.ts"
@@ -135,6 +135,40 @@ describe("33643 a health call reads neither message content nor whole history", 
     const fat = costPerCall(large, () => responseLatencyProjection(large, NOW))
 
     expect(fat, `read syscalls per call: 64 B content ${lean}, 64 KiB content ${fat}`).toBeLessThan(Math.max(lean, 1) * 1.5)
+  })
+
+  it("reads every response-latency column from a covering index, and a dropped index fails loudly", () => {
+    const db = build(inWindowPairs(2, 64))
+    const sql: string[] = []
+    const statements: Array<{ finalize(): void }> = []
+    const prepare = db.prepare.bind(db)
+    const spy = vi.spyOn(db, "prepare").mockImplementation(((text: string) => {
+      sql.push(text)
+      const statement = prepare(text)
+      statements.push(statement)
+      return statement
+    }) as typeof db.prepare)
+    try {
+      responseLatencyProjection(db, NOW)
+    } finally {
+      spy.mockRestore()
+    }
+    const [projection] = sql.filter((text) => text.includes("response_journal"))
+    if (projection === undefined) throw new Error("responseLatencyProjection prepared no response_journal statement")
+    const explain = db.prepare(`EXPLAIN QUERY PLAN ${projection}`)
+    const plan = (explain.all({ $cutoff: NOW - DAY, $now: NOW }) as Array<{ detail: string }>).map((row) => row.detail)
+    // An open statement holds the schema; DROP INDEX below needs every one finalized.
+    for (const statement of [...statements, explain]) statement.finalize()
+    for (const index of [
+      "idx_messages_reply_cover",
+      "idx_messages_archive_reply_cover",
+      "idx_messages_request_cover",
+      "idx_messages_archive_request_cover",
+    ]) {
+      expect(plan.some((detail) => detail.includes(`USING COVERING INDEX ${index}`)), plan.join(" | ")).toBe(true)
+    }
+    db.run("DROP INDEX idx_messages_reply_cover")
+    expect(() => responseLatencyProjection(db, NOW)).toThrow(/no such index: idx_messages_reply_cover/)
   })
 
   it("probe D: the whole cadence projection does not track out-of-window history", () => {

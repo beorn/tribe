@@ -406,6 +406,14 @@ export function openDatabase(path: string): Database {
   db.run(
     "CREATE INDEX IF NOT EXISTS idx_messages_archive_request ON messages_archive(request) WHERE request IS NOT NULL",
   )
+  // 33643: the same projection read every in-window row WHOLE: `reply`, `ts` and `type` sit after `content` in
+  // the row, so each response and each matched request walked its content's overflow chain (73 MB per call on the
+  // 1.7 GB live store). These partial indexes carry every column the projection reads, so it never opens a row.
+  // Migration v42 declares the same four for databases that predate them.
+  db.run("CREATE INDEX IF NOT EXISTS idx_messages_reply_cover ON messages(ts, reply, sender) WHERE reply IS NOT NULL")
+  db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_reply_cover ON messages_archive(ts, reply, sender) WHERE reply IS NOT NULL")
+  db.run("CREATE INDEX IF NOT EXISTS idx_messages_request_cover ON messages(request, ts, type) WHERE request IS NOT NULL")
+  db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_request_cover ON messages_archive(request, ts, type) WHERE request IS NOT NULL")
 
   return db
 }
@@ -1540,6 +1548,31 @@ const MIGRATIONS: readonly Migration[] = [
         if (columns.size > 0 && !columns.has("incident_data")) {
           db.run(assertSingleStatement(`ALTER TABLE ${table} ADD COLUMN incident_data TEXT`))
         }
+      }
+    },
+  },
+  {
+    version: 42,
+    name: "health-response-latency-covering-indexes",
+    /**
+     * 33643: the health response-latency projection seeks `ts` (responses) and `request` (requests) and then read
+     * each row whole, because `reply`, `ts` and `type` sit after `content`: every in-window response and every
+     * matched request walked its content's overflow chain, 73 MB per tribe.health call on the 1.7 GB live store.
+     * These partial indexes carry every column it reads. Idempotent (IF NOT EXISTS), guarded on each table's own
+     * columns as v40 is, and a failure throws out of openDatabase before the version is stamped, so a database killed
+     * halfway reruns the remainder.
+     */
+    up(db) {
+      const wanted: ReadonlyArray<readonly [string, readonly string[], string]> = [
+        ["messages", ["ts", "reply", "sender"], "CREATE INDEX IF NOT EXISTS idx_messages_reply_cover ON messages(ts, reply, sender) WHERE reply IS NOT NULL"],
+        ["messages_archive", ["ts", "reply", "sender"], "CREATE INDEX IF NOT EXISTS idx_messages_archive_reply_cover ON messages_archive(ts, reply, sender) WHERE reply IS NOT NULL"],
+        ["messages", ["request", "ts", "type"], "CREATE INDEX IF NOT EXISTS idx_messages_request_cover ON messages(request, ts, type) WHERE request IS NOT NULL"],
+        ["messages_archive", ["request", "ts", "type"], "CREATE INDEX IF NOT EXISTS idx_messages_archive_request_cover ON messages_archive(request, ts, type) WHERE request IS NOT NULL"],
+      ]
+      for (const [table, columns, statement] of wanted) {
+        const present = tableColumnNames(db, table)
+        if (!columns.every((column) => present.has(column))) continue
+        db.run(assertSingleStatement(statement))
       }
     },
   },

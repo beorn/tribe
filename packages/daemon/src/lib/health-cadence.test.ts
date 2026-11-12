@@ -326,11 +326,12 @@ describe("20876 Tribe health cadence", () => {
     ])
     expect(first.database).toMatchObject({
       as_of_ms: now,
-      message_rows: 10,
-      archive_rows: 1,
       growth_7d: { message_rows: 10, archive_rows: 1 },
       growth_warning_bytes: 1,
     })
+    // 33643: no whole-history COUNT(*) on a health call; the 7-day window carries the row counts.
+    expect(first.database).not.toHaveProperty("message_rows")
+    expect(first.database).not.toHaveProperty("archive_rows")
     expect(first.database.bytes).toBeGreaterThan(0)
     expect(first.database.growth_7d.estimated_bytes).toBeGreaterThan(1)
     expect(first.warnings).toEqual([

@@ -4456,13 +4456,6 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
   // Pending-only incidents remain visible below without inflating this count.
   const unread = ctx.stmts.getAllUnreadDms.all() as Array<{ recipient: string; count: number }>
 
-  const stats = {
-    messages: (ctx.db.prepare("SELECT COUNT(*) as n FROM messages").get() as { n: number } | undefined)?.n ?? 0,
-    events:
-      (ctx.db.prepare("SELECT COUNT(*) as n FROM messages WHERE kind = 'event'").get() as { n: number } | undefined)
-        ?.n ?? 0,
-  }
-
   // 20876 / 17199: fleet-wide open-ball attention is derived from the one
   // existing pending_request authority. A per-owner sample can be empty while
   // another role is blocked, so health carries the all-owner projection and a
@@ -4597,7 +4590,6 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
       ...cadence.warnings,
     ],
     cadence,
-    stats,
     code_pin: gatherCodePin(),
     checked_at: new Date().toISOString(),
   }

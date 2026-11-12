@@ -164,10 +164,10 @@ export type HealthCadenceProjection = ProjectionStamp & {
     }
   >
   unknown_sessions?: string[]
+  // 33643 (@cto f7202cee): no whole-history row counts. Each was a COUNT(*) over a whole journal, read on every
+  // health call, growing with history; `bytes` (page count) and the 7-day window carry the size signal.
   database: ProjectionStamp & {
     bytes: number
-    message_rows: number
-    archive_rows: number
     growth_7d: {
       message_rows: number
       archive_rows: number
@@ -517,10 +517,10 @@ export function responseLatencyProjection(
     .prepare(
       assertSingleStatement(`
       WITH response_journal AS (
-        SELECT sender, ts, reply FROM messages
+        SELECT sender, ts, reply FROM messages INDEXED BY idx_messages_reply_cover
         WHERE reply IS NOT NULL AND ts >= $cutoff AND ts <= $now
         UNION ALL
-        SELECT sender, ts, reply FROM messages_archive
+        SELECT sender, ts, reply FROM messages_archive INDEXED BY idx_messages_archive_reply_cover
         WHERE reply IS NOT NULL AND ts >= $cutoff AND ts <= $now
       )
       SELECT
@@ -529,7 +529,7 @@ export function responseLatencyProjection(
         q.type AS message_type,
         r.ts - q.ts AS latency_ms
       FROM response_journal r
-      JOIN messages q
+      JOIN messages q INDEXED BY idx_messages_request_cover
         ON q.request IS NOT NULL AND q.request = r.reply AND r.ts >= q.ts
       LEFT JOIN sessions s ON s.name = r.sender
       UNION ALL
@@ -539,7 +539,7 @@ export function responseLatencyProjection(
         q.type AS message_type,
         r.ts - q.ts AS latency_ms
       FROM response_journal r
-      JOIN messages_archive q
+      JOIN messages_archive q INDEXED BY idx_messages_archive_request_cover
         ON q.request IS NOT NULL AND q.request = r.reply AND r.ts >= q.ts
       LEFT JOIN sessions s ON s.name = r.sender
       ORDER BY role, message_type, latency_ms
@@ -926,13 +926,6 @@ function databaseProjection(
 } {
   const pageCount = (db.prepare("PRAGMA page_count").get() as { page_count: number }).page_count
   const pageSize = (db.prepare("PRAGMA page_size").get() as { page_size: number }).page_size
-  const counts = db
-    .prepare(`
-    SELECT
-      (SELECT COUNT(*) FROM messages) AS message_rows,
-      (SELECT COUNT(*) FROM messages_archive) AS archive_rows
-  `)
-    .get() as { message_rows: number; archive_rows: number }
   const growth = db
     .prepare(
       assertSingleStatement(`
@@ -988,8 +981,6 @@ function databaseProjection(
   const projection: HealthCadenceProjection["database"] = {
     as_of_ms: now,
     bytes: pageCount * pageSize,
-    message_rows: counts.message_rows,
-    archive_rows: counts.archive_rows,
     growth_7d: growthMeasurement,
     growth_warning_bytes: growthWarning.kind === "valid" ? growthWarning.bytes : null,
   }
