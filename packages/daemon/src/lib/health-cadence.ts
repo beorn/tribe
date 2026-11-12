@@ -163,6 +163,8 @@ export type HealthCadenceProjection = ProjectionStamp & {
       evidence: typeof INBOX_LAG_EVIDENCE
     }
   >
+  /** Known service principals without an observed canonical READ; excluded from lag, not reported as zero. */
+  inbox_lag_excluded?: Array<{ session: string; reason: "service-never-read" }>
   unknown_sessions?: string[]
   // 33643 (@cto f7202cee): no whole-history row counts. Each was a COUNT(*) over a whole journal, read on every
   // health call, growing with history; `bytes` (page count) and the 7-day window carry the size signal.
@@ -712,9 +714,10 @@ function inboxLagProjection(
   rows: HealthCadenceProjection["inbox_lag"]
   warnings: string[]
   unknownSessions: string[]
+  excluded: NonNullable<HealthCadenceProjection["inbox_lag_excluded"]>
 } {
   const cursorQuery = db.prepare(`
-    SELECT last_inbox_pull_seq, started_at, delivery, last_delivered_seq
+    SELECT last_inbox_pull_seq, started_at, delivery, last_delivered_seq, principal_class
     FROM sessions
     WHERE name = $session
     ORDER BY updated_at DESC
@@ -816,18 +819,24 @@ function inboxLagProjection(
   )
 
   const unknownSessions: string[] = []
+  const excluded: NonNullable<HealthCadenceProjection["inbox_lag_excluded"]> = []
   const rows = [...new Set([...connectedSessionNames, ...(requestedSessionNames ?? [])])].sort().flatMap((session) => {
     const cursor = cursorQuery.get({ $session: session }) as {
       last_inbox_pull_seq: number
       started_at: number
       delivery: string
       last_delivered_seq: number | null
+      principal_class: string
     } | null
     const receipt = attentionReceiptQuery.get({ $session: session }) as {
       last_attention_read_at: number | null
     } | null
     if (cursor == null && receipt == null && requestedSessionNames?.includes(session)) {
       unknownSessions.push(session)
+      return []
+    }
+    if (cursor?.principal_class === "service" && receipt?.last_attention_read_at == null) {
+      excluded.push({ session, reason: "service-never-read" })
       return []
     }
     const lagParams = { $cursor: cursor?.last_inbox_pull_seq ?? 0, $session: session }
@@ -913,7 +922,7 @@ function inboxLagProjection(
         `; ` +
         `projection-only, pane/turn liveness excluded (threshold 30m)`,
     )
-  return { rows, warnings, unknownSessions }
+  return { rows, warnings, unknownSessions, excluded }
 }
 
 function databaseProjection(
@@ -1054,6 +1063,7 @@ export function projectHealthCadence(db: Database, options: HealthCadenceOptions
     response_latency: responseLatency.summary,
     open_balls: openBallProjection(db, now),
     inbox_lag: inboxLag.rows,
+    ...(inboxLag.excluded.length === 0 ? {} : { inbox_lag_excluded: inboxLag.excluded }),
     ...(options.requestedSessionNames === undefined ? {} : { unknown_sessions: inboxLag.unknownSessions }),
     database: database.projection,
     warnings: [...responseLatency.warnings, ...(sla ? sla.warnings : []), ...inboxLag.warnings, ...database.warnings],

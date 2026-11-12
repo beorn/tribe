@@ -350,7 +350,10 @@ session inbox lag, and database growth — surfaced via `tribe.health` /
 document, suitable for recurring liveness checks. It does not collect full diagnostics.
 
 Use `tribe health --full --json > health.json` for the full diagnostic snapshot,
-including `cadence.inbox_lag`. Exit 0 means stdout is exactly the existing MCP health
+including `cadence.inbox_lag`. Optional `cadence.inbox_lag_excluded` names known service
+principals with reason `service-never-read`: excluded from lag and warnings until a
+canonical READ is observed. Agents and services that have read remain observed.
+Exit 0 means stdout is exactly the existing MCP health
 body, without the transport wrapper or the CLI's roster additions. An empty
 `inbox_lag` array is an observed empty result. A missing or malformed projection
 fails rather than inventing an empty array. On failure, stdout holds one existing

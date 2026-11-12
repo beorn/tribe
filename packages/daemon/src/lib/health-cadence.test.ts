@@ -205,6 +205,90 @@ describe("20876 Tribe health cadence", () => {
     expect(baseline.inbox_lag[0]).not.toHaveProperty("transport_state")
   })
 
+  // 30786: health eligibility follows principal class and canonical READ history.
+  // Existing selector cases do not distinguish never-read services from agents.
+  // The projection owns no receipt writes; retained message/cursor facts must not change.
+  it("30786 excludes only never-read services and retains a service after it reads then stops", () => {
+    const emitter = "service-emitter"
+    const reader = "reading-service"
+    const agent = "@never-read-agent"
+    const sessions = [emitter, reader, agent]
+    for (const [index, name] of sessions.entries()) {
+      insertSession(db, { id: `eligibility-${index}`, name, role: "member", now: now - 4 * HOUR })
+      db.prepare("UPDATE sessions SET principal_class = $class WHERE name = $name").run({
+        $class: name === agent ? "agent" : "service",
+        $name: name,
+      })
+      insertMessage(db, {
+        id: `eligibility-live-${index}`,
+        type: "response",
+        sender: "@chief",
+        recipient: name,
+        ts: now - HOUR,
+        attentionRequired: 1,
+      })
+      db.prepare(`
+        INSERT INTO messages_archive (
+          seq, id, type, sender, recipient, kind, content, ts, delivery, archived_at, attention_required
+        ) VALUES (
+          $seq, $id, 'response', '@chief', $recipient, 'direct', $id, $ts, 'pull', $now, 1
+        )
+      `).run({
+        $seq: 2000 + index,
+        $id: `eligibility-archive-${index}`,
+        $recipient: name,
+        $ts: now - HOUR,
+        $now: now,
+      })
+    }
+    db.prepare(`
+      INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at, last_attention_read_at)
+      VALUES ($recipient, 0, $at, $at)
+    `).run({ $recipient: reader, $at: now - 2 * HOUR })
+
+    const facts = () => ({
+      sessions: db.prepare("SELECT * FROM sessions ORDER BY id").all(),
+      messages: db.prepare("SELECT * FROM messages ORDER BY id").all(),
+      archive: db.prepare("SELECT * FROM messages_archive ORDER BY seq").all(),
+      cursors: db.prepare("SELECT * FROM mailbox_cursors ORDER BY recipient").all(),
+      pending: db.prepare("SELECT * FROM pending_request ORDER BY request_id").all(),
+    })
+    const before = facts()
+    const expectedExclusion = [{ session: emitter, reason: "service-never-read" }]
+    for (const options of [
+      { now, connectedSessionNames: sessions },
+      { now, connectedSessionNames: [], requestedSessionNames: [...sessions, "@missing-eligibility"] },
+    ]) {
+      const result = projectHealthCadence(db, options)
+      expect(result.inbox_lag.map((row) => row.session)).toEqual([agent, reader])
+      expect(result).toHaveProperty("inbox_lag_excluded", expectedExclusion)
+      expect(result.warnings.some((warning) => warning.includes(emitter))).toBe(false)
+      for (const name of [agent, reader]) {
+        expect(result.inbox_lag.find((row) => row.session === name)).toMatchObject({
+          actionable_rows: 2,
+          waking_rows: 0,
+        })
+        expect(result.warnings.some((warning) => warning.includes(name))).toBe(true)
+      }
+      if (options.requestedSessionNames !== undefined) {
+        expect(result.unknown_sessions).toEqual(["@missing-eligibility"])
+      }
+    }
+    expect(facts()).toEqual(before)
+
+    db.prepare(`
+      INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at, last_attention_read_at)
+      VALUES ($recipient, 0, $at, $at)
+    `).run({ $recipient: emitter, $at: now + MINUTE })
+    const afterRead = facts()
+    const later = projectHealthCadence(db, { now: now + 4 * HOUR, connectedSessionNames: sessions })
+    expect(later.inbox_lag.map((row) => row.session)).toEqual([...sessions].sort())
+    expect(later).not.toHaveProperty("inbox_lag_excluded")
+    expect(later.inbox_lag.find((row) => row.session === emitter)).toMatchObject({ actionable_rows: 2 })
+    expect(later.warnings.some((warning) => warning.includes(emitter))).toBe(true)
+    expect(facts()).toEqual(afterRead)
+  })
+
   afterEach(() => {
     db.close()
     safeRemoveSync(tmpDir, { within: tmpdir(), allowMissing: true })
