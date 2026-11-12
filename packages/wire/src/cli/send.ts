@@ -785,8 +785,10 @@ async function warnUnresolvedRef(sender: SendCaller, ref: string, ownedPending?:
 /**
  * Runs strictly AFTER the send (22844): every branch here reports on the
  * bookkeeping half of an already-sent response, so none may read as a
- * delivery failure. Exit 3 = written to the socket, close not confirmed —
- * distinct from 1 (refused before the socket) and 2 (identity/usage).
+ * delivery failure. Exit 3 = the row is stored, its ball close not confirmed —
+ * distinct from 1 (not stored) and 2 (identity/usage). Exit 0 says stored too,
+ * never delivered: for a pull seat or an absent recipient the daemon inserts the
+ * row and writes to no socket at all (@dev/10, 33302).
  */
 function reportCommittedReplyTracker(
   owner: string,
@@ -1335,8 +1337,8 @@ export function registerSendCommands(program: Command): void {
     })
     .addHelpText(
       "after",
-      "\nExit codes: 0 written to the socket (not read); 1 refused before the socket; 2 identity or usage refused; 3 written to the socket, its ball close not " +
-        `confirmed; ${LAUNCH_UNROUTABLE_EXIT_CODE} not written because this launch's owner transport is down (a wire ` +
+      "\nExit codes: 0 stored in the journal (not proof it reached or was read by the recipient); 1 not stored; 2 identity or usage refused; 3 stored, its ball close not " +
+        `confirmed; ${LAUNCH_UNROUTABLE_EXIT_CODE} not stored because this launch's owner transport is down (a wire ` +
         `restart), marked [${LAUNCH_UNROUTABLE}] on stderr: send again once the owner re-registers.`,
     )
     .action(

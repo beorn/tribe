@@ -326,7 +326,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           reply_close_failed: {
             type: "boolean",
             description:
-              "True when a response/verdict reply closed zero rows: written to the socket, but nothing settled. Re-read pending and reply with the exact id.",
+              "True when a response/verdict reply closed zero rows: stored, but nothing settled. Re-read pending and reply with the exact id.",
           },
           summary: { type: "string", description: "The one-liner stored with the message." },
           summary_derived: {
@@ -336,7 +336,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           deduplicated: { type: "boolean", description: "True when this client UUID was already committed." },
           truncated: {
             type: "boolean",
-            description: "Legacy daemons only: true when only a prefix was written to the socket.",
+            description: "Legacy daemons only: true when only a prefix was stored.",
           },
           original_length: { type: "number", description: "Length the 4096-character cap was measured against." },
           warning: {
