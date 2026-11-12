@@ -1488,7 +1488,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         expect(result.stderr).toBe(
           peek
             ? ""
-            : "tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.\n",
+            : "tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming. You owe no open ball.\n",
         )
         expect(result.stdout).toBe(`tribe inbox: 2 row(s), cursor 99, written to ${path}\n`)
         expect(readFileSync(path, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
@@ -1497,6 +1497,48 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       }
     },
   )
+
+  // 33568 (@dev/10): a result with no attention block is a MISSING count, never zero. Defaulting it to
+  // 0 would print the same false-settled receipt this issue exists to remove, so the notice must say it
+  // has no count and name the check instead of claiming none are owed.
+  it("inbox --consume never claims no balls owed when the read reported no count (33568)", async () => {
+    const payload = { events: [], cursor: 3 }
+    const { result } = await runManagedFetchCliAgainst(["inbox", "--consume", "--json"], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+    }))
+    expect(result.code, result.stderr).toBe(0)
+    expect(result.stderr).toContain("reported no owed count")
+    expect(result.stderr, "no positive claim from a missing count").not.toContain("You owe no open ball")
+    expect(result.stderr).not.toContain("ball(s) you still owe")
+    expect(result.stderr, "the check it names is the one that answers the question").toContain("tribe pending")
+    expect(JSON.parse(result.stdout)).toEqual(payload)
+  })
+
+  // 33568: the consuming read acknowledges the ROWS; an open ball the seat still owes stays in
+  // attention, so the receipt must say that instead of reading as finished.
+  it("inbox --consume receipt names the balls still owed after the read (33568)", async () => {
+    const payload = {
+      attention: {
+        actionable_unread: [{ id: "a1", from: "@chief", type: "request", content: "answer me" }],
+        pending_balls: [{ request_id: "a1", sender: "@chief", summary: "answer me", request_kind: "request" }],
+        pending_balls_summary: { total: 2 },
+      },
+      events: [],
+      cursor: 12,
+    }
+    const { result, calls } = await runManagedFetchCliAgainst(["inbox", "--consume", "--json"], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+    }))
+    expect(result.code, result.stderr).toBe(0)
+    expect(calls).toEqual([
+      { method: "cli_self_inbox_v1", params: { idToken: MANAGED_PENDING_TOKEN, limit: 50, peek: false } },
+    ])
+    expect(result.stderr).toContain("2 ball(s) you still owe remain in attention")
+    expect(result.stderr, "the receipt names where to answer them").toContain("tribe pending")
+    expect(result.stderr, "the durable first sentence is unchanged").toContain("read was destructive")
+    // The read still succeeded and the rows are still delivered on stdout: a receipt fix, not a new failure.
+    expect(JSON.parse(result.stdout)).toEqual(payload)
+  })
 
   it("ordinary human inbox inspection leaves the prune notice unacknowledged (30793)", async () => {
     const payload = {

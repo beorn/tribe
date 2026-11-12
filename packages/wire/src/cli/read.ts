@@ -2230,6 +2230,29 @@ export function formatPendingBallLine(ball: {
   return `pending${kind} from ${ball.sender ?? "unknown"} [${ball.request_id ?? "unidentified"}]`
 }
 
+/**
+ * 33568: a consuming read acknowledges the ROWS in the mailbox; it does not settle an open ball, and the
+ * same row legitimately stays in attention as a ball this seat still owes. The old notice stopped at
+ * "messages consumed", which reads as finished, so the receipt now names the balls that remain owed in
+ * the same line. The first sentence is unchanged for callers that match on it.
+ *
+ * `owedBalls` is deliberately `undefined`-able: a result with no attention block or no summary is a
+ * MISSING COUNT, never zero, and defaulting it to 0 would print the same false-settled receipt this
+ * issue exists to remove (@dev/10, 33568). Absent, the notice says it has no count and names the check.
+ */
+function inboxConsumeNotice(owedBalls: number | undefined): string {
+  const notice =
+    "tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming."
+  if (owedBalls === undefined) {
+    return `${notice} This read reported no owed count, so it does not claim one; check with: tribe pending`
+  }
+  const owed =
+    owedBalls === 0
+      ? " You owe no open ball."
+      : ` ${owedBalls} ball(s) you still owe remain in attention; answer them with: tribe pending`
+  return `${notice}${owed}`
+}
+
 async function cmdInbox(opts: {
   limit?: number
   json?: boolean
@@ -2278,17 +2301,13 @@ async function cmdInbox(opts: {
     // Explicit consumption carries the same warning in file and stdout modes
     // (on stderr; file mode keeps stdout to the single summary line).
     if (written && consume) {
-      console.error(
-        `tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.`,
-      )
+      console.error(inboxConsumeNotice(result.attention?.pending_balls_summary?.total))
     }
     return
   }
   if (opts.json) {
     if (consume) {
-      console.error(
-        `tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.`,
-      )
+      console.error(inboxConsumeNotice(result.attention?.pending_balls_summary?.total))
     }
     await writeJsonStdout(result)
     return
