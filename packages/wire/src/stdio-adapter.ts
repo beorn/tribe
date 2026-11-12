@@ -125,13 +125,20 @@ const hostedWakeArgv = (() => {
   if (raw === undefined) return undefined
   try {
     const value: unknown = JSON.parse(raw)
-    if (Array.isArray(value) && value.length > 0 && value.every((part) => typeof part === "string" && part.trim().length > 0)) {
+    if (
+      Array.isArray(value) &&
+      value.length > 0 &&
+      value.every((part) => typeof part === "string" && part.trim().length > 0)
+    ) {
       return value as [string, ...string[]]
     }
   } catch {
-    // Invalid optional configuration is diagnosed below; the MCP adapter remains usable.
+    process.stderr.write("tribe hosted wake: TRIBE_HOSTED_WAKE_ARGV contains invalid JSON; hosted wake disabled\n")
+    return undefined
   }
-  process.stderr.write("tribe hosted wake: TRIBE_HOSTED_WAKE_ARGV must be a JSON array of non-empty strings; hosted wake disabled\n")
+  process.stderr.write(
+    "tribe hosted wake: TRIBE_HOSTED_WAKE_ARGV must be a JSON array of non-empty strings; hosted wake disabled\n",
+  )
   return undefined
 })()
 let hostedWakeInFlight = false
@@ -142,7 +149,19 @@ function wakeHostedSeat(row: NonNullable<TribeFetchResult["events"]>[number]): v
   const id = typeof row.id === "string" ? row.id.trim() : ""
   if (!isWakeReadDirectiveId(id)) return
   const env: NodeJS.ProcessEnv = {}
-  for (const key of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "HAB_ID_TOKEN_FILE", "HAB_SESSION_LAUNCH_ID", "HAB_SESSION_HABITAT_ROOT", "HAB_SESSION_HABITAT_NAME", "AG_HOST_LAUNCH_GENERATION", "TRIBE_SOCKET"]) {
+  for (const key of [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "HAB_ID_TOKEN_FILE",
+    "HAB_SESSION_LAUNCH_ID",
+    "HAB_SESSION_HABITAT_ROOT",
+    "HAB_SESSION_HABITAT_NAME",
+    "AG_HOST_LAUNCH_GENERATION",
+    "TRIBE_SOCKET",
+  ]) {
     const value = process.env[key]
     if (value !== undefined) env[key] = value
   }
@@ -155,19 +174,29 @@ function wakeHostedSeat(row: NonNullable<TribeFetchResult["events"]>[number]): v
     process.stderr.write(`tribe hosted wake: ${myName} message ${id} failed: ${cause}\n`)
   }
   try {
-    const wake = spawnHostedWake(hostedWakeArgv[0], [...hostedWakeArgv.slice(1), "--input", id, myName, "--", wakeReadDirective(id)], {
-      env,
-      stdio: ["ignore", "ignore", "pipe"],
-      timeout: HOSTED_WAKE_TIMEOUT_MS,
-      killSignal: "SIGKILL",
-      signal: proxyAc.signal,
-    })
+    const wake = spawnHostedWake(
+      hostedWakeArgv[0],
+      [...hostedWakeArgv.slice(1), "--input", id, myName, "--", wakeReadDirective(id)],
+      {
+        env,
+        stdio: ["ignore", "ignore", "pipe"],
+        timeout: HOSTED_WAKE_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+        signal: proxyAc.signal,
+      },
+    )
     let stderr = ""
-    wake.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-1_024) })
+    wake.stderr?.on("data", (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString()).slice(-1_024)
+    })
     wake.once("error", (error) => fail(error.message))
     wake.once("close", (code, signal) => {
       hostedWakeInFlight = false
-      if (code !== 0) fail(`exit ${String(code)}, signal ${String(signal)}, timeout ${HOSTED_WAKE_TIMEOUT_MS}ms${stderr ? `: ${stderr.trim()}` : ""}`)
+      if (code !== 0) {
+        fail(
+          `exit ${String(code)}, signal ${String(signal)}, timeout ${HOSTED_WAKE_TIMEOUT_MS}ms${stderr ? `: ${stderr.trim()}` : ""}`,
+        )
+      }
     })
   } catch (error) {
     hostedWakeInFlight = false

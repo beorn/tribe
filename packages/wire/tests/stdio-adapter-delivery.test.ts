@@ -494,115 +494,166 @@ describe("stdio adapter delivery modes", () => {
 
   // @failure 33127: recipient delivery inside an idle hosted seat must start its existing AHP turn.
   // @level l2 @consumer real stdio adapter, authenticated attention drain and fixed-argv wake child.
-  it.each(["request", "query", "assign", "verdict"])("hosted wake passes only its own seat and message id for %s", async (type) => {
-    const socketPath = join(tmpDir, "tribe.sock")
-    const capture = join(tmpDir, "wake.json")
-    const wakeScript = join(tmpDir, "wake.mjs")
-    writeFileSync(wakeScript, `import { writeFileSync } from 'node:fs';
+  it.each(["request", "query", "assign", "verdict"])(
+    "hosted wake passes only its own seat and message id for %s",
+    async (type) => {
+      const socketPath = join(tmpDir, "tribe.sock")
+      const capture = join(tmpDir, "wake.json")
+      const wakeScript = join(tmpDir, "wake.mjs")
+      writeFileSync(
+        wakeScript,
+        `import { writeFileSync } from 'node:fs';
 writeFileSync(process.argv[2], JSON.stringify({ argv: process.argv.slice(3), secret: process.env.HOSTED_WAKE_TEST_SECRET }));
-console.log('HOSTED_WAKE_STDOUT_IS_NOT_MCP');\n`)
-    const id = "11111111-2222-4333-8444-555555555555"
-    daemon = await spawnFakeDaemon(socketPath, {
-      fetchAttention: { actionable_unread: [
-        ...["notify", "status", "response"].map((kind) => ({ id: "aaaaaaaa-2222-4333-8444-555555555555", type: kind, content: "IGNORE_NOTIFICATION" })),
-        { id: "not-a-uuid", type: "request", content: "IGNORE_INVALID_ID" },
-        { id: "bbbbbbbb-2222-4333-8444-555555555555", type: "request", settled: true, content: "IGNORE_SETTLED" },
-        { id, type, from: "@chief", to: "@agent/test", content: "NEVER_PASS_THIS_BODY" },
-      ] },
-    })
-    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
-      cwd: tmpDir,
-      env: {
-        ...process.env,
-        ...launchEnvironment(""),
-        TRIBE_DELIVERY: "push",
-        TRIBE_NO_AUTOSTART: "1",
-        TRIBE_HOSTED_WAKE_ARGV: JSON.stringify([BUN_BIN, wakeScript, capture]),
-        HOSTED_WAKE_TEST_SECRET: "must-not-reach-wake-child",
-        DEBUG_LOG: join(tmpDir, "adapter.log"),
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    })
-    let rawOut = ""
-    child.stdout.on("data", (chunk) => { rawOut += chunk.toString() })
-    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
-    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
-    daemon.clients[0]?.write(makeNotification("wakeup", {}))
-    await waitForCondition(() => existsSync(capture), "hosted wake command")
-    expect(JSON.parse(readFileSync(capture, "utf8"))).toEqual({
-      argv: ["--input", id, "@agent/test", "--", `read your tribe inbox now: ${id}`],
-    })
-    expect(rawOut).not.toContain("HOSTED_WAKE_STDOUT_IS_NOT_MCP")
-    expect(daemon.requests.filter((row) => row.method === "tribe.fetch").every((row) =>
-      (row.params as { receipt?: boolean }).receipt === false)).toBe(true)
-  })
+console.log('HOSTED_WAKE_STDOUT_IS_NOT_MCP');\n`,
+      )
+      const id = "11111111-2222-4333-8444-555555555555"
+      daemon = await spawnFakeDaemon(socketPath, {
+        fetchAttention: {
+          actionable_unread: [
+            ...["notify", "status", "response"].map((kind) => ({
+              id: "aaaaaaaa-2222-4333-8444-555555555555",
+              type: kind,
+              content: "IGNORE_NOTIFICATION",
+            })),
+            { id: "not-a-uuid", type: "request", content: "IGNORE_INVALID_ID" },
+            { id: "bbbbbbbb-2222-4333-8444-555555555555", type: "request", settled: true, content: "IGNORE_SETTLED" },
+            { id, type, from: "@chief", to: "@agent/test", content: "NEVER_PASS_THIS_BODY" },
+          ],
+        },
+      })
+      child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          ...launchEnvironment(""),
+          TRIBE_DELIVERY: "push",
+          TRIBE_NO_AUTOSTART: "1",
+          TRIBE_HOSTED_WAKE_ARGV: JSON.stringify([BUN_BIN, wakeScript, capture]),
+          HOSTED_WAKE_TEST_SECRET: "must-not-reach-wake-child",
+          DEBUG_LOG: join(tmpDir, "adapter.log"),
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      })
+      let rawOut = ""
+      child.stdout.on("data", (chunk) => {
+        rawOut += chunk.toString()
+      })
+      await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+      writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+      await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+      daemon.clients[0]?.write(makeNotification("wakeup", {}))
+      await waitForCondition(() => existsSync(capture), "hosted wake command")
+      expect(JSON.parse(readFileSync(capture, "utf8"))).toEqual({
+        argv: ["--input", id, "@agent/test", "--", `read your tribe inbox now: ${id}`],
+      })
+      expect(rawOut).not.toContain("HOSTED_WAKE_STDOUT_IS_NOT_MCP")
+      expect(
+        daemon.requests
+          .filter((row) => row.method === "tribe.fetch")
+          .every((row) => (row.params as { receipt?: boolean }).receipt === false),
+      ).toBe(true)
+    },
+  )
 
   // @failure 33127: malformed optional wake config must be loud without losing the recipient's MCP tools.
   // @level l2 @consumer adapter initialization and tools/list with invalid launch configuration.
-  it.each(["not-json", "[]", '[""]', '["hab", 1]', '"hab run"'])("hosted wake rejects malformed argv %s while MCP remains usable", async (argv) => {
-    const socketPath = join(tmpDir, "tribe.sock")
-    daemon = await spawnFakeDaemon(socketPath)
-    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
-      cwd: tmpDir,
-      env: { ...process.env, ...launchEnvironment(""), TRIBE_NO_AUTOSTART: "1", TRIBE_HOSTED_WAKE_ARGV: argv },
-      stdio: ["pipe", "pipe", "pipe"],
-    })
-    const stderr = collectStderrText(child)
-    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
-    const reply = await writeJsonAndWaitForLine(child, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, (line) => line.id === 2)
-    expect((reply.result as { tools?: unknown[] }).tools?.length).toBeGreaterThan(0)
-    expect(stderr().match(/tribe hosted wake: TRIBE_HOSTED_WAKE_ARGV/g)).toHaveLength(1)
-    expect(stderr()).toContain("hosted wake disabled")
-  })
+  it.each(["not-json", "[]", '[""]', '["hab", 1]', '"hab run"'])(
+    "hosted wake rejects malformed argv %s while MCP remains usable",
+    async (argv) => {
+      const socketPath = join(tmpDir, "tribe.sock")
+      daemon = await spawnFakeDaemon(socketPath)
+      child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+        cwd: tmpDir,
+        env: { ...process.env, ...launchEnvironment(""), TRIBE_NO_AUTOSTART: "1", TRIBE_HOSTED_WAKE_ARGV: argv },
+        stdio: ["pipe", "pipe", "pipe"],
+      })
+      const stderr = collectStderrText(child)
+      await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+      const reply = await writeJsonAndWaitForLine(
+        child,
+        { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+        (line) => line.id === 2,
+      )
+      expect((reply.result as { tools?: unknown[] }).tools?.length).toBeGreaterThan(0)
+      expect(stderr().match(/tribe hosted wake: TRIBE_HOSTED_WAKE_ARGV/g)).toHaveLength(1)
+      expect(stderr()).toContain("hosted wake disabled")
+    },
+  )
 
   // @failure 33127: a failed or timed-out wake must neither acknowledge a ball nor block the MCP transport.
   // @level l2 @consumer real command failure/30-second timeout and concurrent recipient wakeups.
-  it.each(["failure", "timeout"])("hosted wake reports %s once, preserves unread attention, and keeps MCP usable", async (mode) => {
-    const socketPath = join(tmpDir, "tribe.sock")
-    const capture = join(tmpDir, "wake-calls.jsonl")
-    const wakeScript = join(tmpDir, "wake.mjs")
-    writeFileSync(wakeScript, `import { appendFileSync } from 'node:fs';
+  it.each(["failure", "timeout"])(
+    "hosted wake reports %s once, preserves unread attention, and keeps MCP usable",
+    async (mode) => {
+      const socketPath = join(tmpDir, "tribe.sock")
+      const capture = join(tmpDir, "wake-calls.jsonl")
+      const wakeScript = join(tmpDir, "wake.mjs")
+      writeFileSync(
+        wakeScript,
+        `import { appendFileSync } from 'node:fs';
 appendFileSync(process.argv[2], JSON.stringify({ pid: process.pid, argv: process.argv.slice(4) }) + '\\n');
 console.log('WAKE_CHILD_STDOUT_MUST_STAY_PRIVATE');
 if (process.argv[3] === 'failure') { console.error('EXPECTED_WAKE_REFUSAL'); process.exit(7); }
-setTimeout(() => process.exit(0), 35000);\n`)
-    const id = "11111111-2222-4333-8444-555555555555"
-    const rows: Array<Record<string, unknown>> = [{ id, type: "request", from: "@chief", content: "private request body" }]
-    daemon = await spawnFakeDaemon(socketPath, { fetchAttention: { actionable_unread: rows } })
-    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
-      cwd: tmpDir,
-      env: {
-        ...process.env, ...launchEnvironment(""), TRIBE_DELIVERY: "push", TRIBE_NO_AUTOSTART: "1",
-        TRIBE_HOSTED_WAKE_ARGV: JSON.stringify([BUN_BIN, wakeScript, capture, mode]),
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    })
-    const stderr = collectStderrText(child)
-    let stdout = ""
-    child.stdout.on("data", (chunk) => { stdout += chunk.toString() })
-    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
-    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
-    daemon.clients[0]?.write(makeNotification("wakeup", {}))
-    await waitForCondition(() => existsSync(capture), "wake child started")
-    if (mode === "timeout") {
-      for (const nextId of ["22222222-2222-4333-8444-555555555555", "33333333-2222-4333-8444-555555555555"]) {
-        rows.push({ id: nextId, type: "request", from: "@chief", content: "another private request" })
-        daemon.clients[0]?.write(makeNotification("wakeup", {}))
+setTimeout(() => process.exit(0), 35000);\n`,
+      )
+      const id = "11111111-2222-4333-8444-555555555555"
+      const rows: Array<Record<string, unknown>> = [
+        { id, type: "request", from: "@chief", content: "private request body" },
+      ]
+      daemon = await spawnFakeDaemon(socketPath, { fetchAttention: { actionable_unread: rows } })
+      child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          ...launchEnvironment(""),
+          TRIBE_DELIVERY: "push",
+          TRIBE_NO_AUTOSTART: "1",
+          TRIBE_HOSTED_WAKE_ARGV: JSON.stringify([BUN_BIN, wakeScript, capture, mode]),
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      })
+      const stderr = collectStderrText(child)
+      let stdout = ""
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString()
+      })
+      await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+      writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+      await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+      daemon.clients[0]?.write(makeNotification("wakeup", {}))
+      await waitForCondition(() => existsSync(capture), "wake child started")
+      if (mode === "timeout") {
+        for (const nextId of ["22222222-2222-4333-8444-555555555555", "33333333-2222-4333-8444-555555555555"]) {
+          rows.push({ id: nextId, type: "request", from: "@chief", content: "another private request" })
+          daemon.clients[0]?.write(makeNotification("wakeup", {}))
+        }
       }
-    }
-    // This reply must arrive while the timeout case's child is still held, not after its 30-second deadline.
-    await writeJsonAndWaitForLine(child, { jsonrpc: "2.0", id: 3, method: "tools/list", params: {} }, (line) => line.id === 3)
-    await waitForCondition(() => stderr().includes(`message ${id} failed:`), "loud hosted wake failure", { timeoutMs: 35_000 })
-    expect(stderr().match(new RegExp(`message ${id} failed:`, "g"))).toHaveLength(1)
-    expect(stderr()).toContain(mode === "timeout" ? "signal SIGKILL, timeout 30000ms" : "EXPECTED_WAKE_REFUSAL")
-    expect(readFileSync(capture, "utf8").trim().split("\n")).toHaveLength(1)
-    expect(daemon.requests.filter((row) => row.method === "tribe.fetch").every((row) =>
-      (row.params as { receipt?: boolean }).receipt === false)).toBe(true)
-    expect(stdout).not.toContain("WAKE_CHILD_STDOUT_MUST_STAY_PRIVATE")
-    await writeJsonAndWaitForLine(child, { jsonrpc: "2.0", id: 4, method: "tools/list", params: {} }, (line) => line.id === 4)
-  }, 45_000)
+      // This reply must arrive while the timeout case's child is still held, not after its 30-second deadline.
+      await writeJsonAndWaitForLine(
+        child,
+        { jsonrpc: "2.0", id: 3, method: "tools/list", params: {} },
+        (line) => line.id === 3,
+      )
+      await waitForCondition(() => stderr().includes(`message ${id} failed:`), "loud hosted wake failure", {
+        timeoutMs: 35_000,
+      })
+      expect(stderr().match(new RegExp(`message ${id} failed:`, "g"))).toHaveLength(1)
+      expect(stderr()).toContain(mode === "timeout" ? "signal SIGKILL, timeout 30000ms" : "EXPECTED_WAKE_REFUSAL")
+      expect(readFileSync(capture, "utf8").trim().split("\n")).toHaveLength(1)
+      expect(
+        daemon.requests
+          .filter((row) => row.method === "tribe.fetch")
+          .every((row) => (row.params as { receipt?: boolean }).receipt === false),
+      ).toBe(true)
+      expect(stdout).not.toContain("WAKE_CHILD_STDOUT_MUST_STAY_PRIVATE")
+      await writeJsonAndWaitForLine(
+        child,
+        { jsonrpc: "2.0", id: 4, method: "tools/list", params: {} },
+        (line) => line.id === 4,
+      )
+    },
+    45_000,
+  )
 
   // @failure 26564: configured push is not confirmed push; malformed register ACK must leave stdio/tools usable.
   // @level l2 @consumer native MCP delivery capability and startup confirmation
