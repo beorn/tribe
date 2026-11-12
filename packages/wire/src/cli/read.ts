@@ -14,7 +14,7 @@ import {
   type InboxWaitResult,
 } from "../lib/inbox-wait-options.ts"
 import { InboxWaitGapController } from "../lib/inbox-wait-gap.ts"
-import { isRetryableInboxWaitError } from "../lib/inbox-wait-errors.ts"
+import { INBOX_WAIT_READINESS_TIMEOUT, isRetryableInboxWaitError } from "../lib/inbox-wait-errors.ts"
 
 // The retryable transport-error classifier has ONE owner now
 // (../lib/inbox-wait-errors.ts, also exported as tribe-wire/lib/inbox-wait-errors
@@ -2584,7 +2584,7 @@ async function callInboxWaitChunk(
     return Object.assign(new Error(
       `inbox wait readiness failed: phase=${phase}, elapsed=${Math.round(span?.elapsedMs ?? 0)}ms, ` +
       `socket=${socketPath}, cause=${detail}, budget=${span?.budgetMs ?? 0}ms`, { cause },
-    ), { code: "TRIBE_INBOX_WAIT_READINESS_TIMEOUT" })
+    ), { code: INBOX_WAIT_READINESS_TIMEOUT })
   }
   const remainingReadinessMs = (): number => {
     const span = gap?.readiness
@@ -2688,6 +2688,11 @@ async function cmdInboxWait(opts: {
         ),
     })
   } catch (err) {
+    if ((err as { code?: unknown }).code === INBOX_WAIT_READINESS_TIMEOUT) {
+      console.error((err as Error).message)
+      process.exitCode = 1
+      return
+    }
     if ((err as { code?: unknown }).code !== INBOX_WAIT_PROTOCOL_MISMATCH) throw err
     console.error(`tribe ${verb}: ${(err as Error).message}`)
     process.exitCode = 1

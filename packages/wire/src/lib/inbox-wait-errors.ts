@@ -17,6 +17,9 @@
 /** The classified shape of an inbox-wait failure: a transient gap, or `null` for a real failure. */
 export type InboxWaitErrorKind = "transport-close" | "daemon-unavailable" | null
 
+/** A spent readiness allowance is terminal even when its retained cause describes a retryable RPC. */
+export const INBOX_WAIT_READINESS_TIMEOUT = "TRIBE_INBOX_WAIT_READINESS_TIMEOUT"
+
 /**
  * Classify a failed `cli_inbox_wait` call. `daemon-unavailable` is the socket
  * being absent/refusing (a restart has closed it and the new one has not bound);
@@ -25,6 +28,7 @@ export type InboxWaitErrorKind = "transport-close" | "daemon-unavailable" | null
  */
 export function inboxWaitErrorKind(err: unknown): InboxWaitErrorKind {
   const code = (err as { readonly code?: unknown } | undefined)?.code
+  if (code === INBOX_WAIT_READINESS_TIMEOUT) return null
   if (code === "ENOENT" || code === "ECONNREFUSED" || code === "TRIBE_DAEMON_CONNECT_TIMEOUT") {
     return "daemon-unavailable"
   }

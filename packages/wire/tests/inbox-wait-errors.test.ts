@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from "vitest"
 
-import { inboxWaitErrorKind, isRetryableInboxWaitError, type InboxWaitErrorKind } from "../src/lib/inbox-wait-errors.ts"
+import { INBOX_WAIT_READINESS_TIMEOUT, inboxWaitErrorKind, isRetryableInboxWaitError, type InboxWaitErrorKind } from "../src/lib/inbox-wait-errors.ts"
 
 function codedError(code: string): Error & { code: string } {
   const error = new Error(`connect ${code} /tmp/tribe.sock`) as Error & { code: string }
@@ -48,6 +48,9 @@ describe("inboxWaitErrorKind", () => {
     expect(kind).toBeNull()
     expect(inboxWaitErrorKind({ code: "EACCES" })).toBeNull()
     expect(inboxWaitErrorKind("boom")).toBeNull()
+    expect(inboxWaitErrorKind(Object.assign(new Error("Request cli_protocol timed out after 25000ms"), {
+      code: INBOX_WAIT_READINESS_TIMEOUT,
+    }))).toBeNull()
   })
 
   it("isRetryableInboxWaitError is exactly the non-null discriminator", () => {

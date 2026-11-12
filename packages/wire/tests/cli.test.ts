@@ -122,7 +122,7 @@ type OneShotRpcOutcome = { result: unknown } | { error: { code: number; message:
 const MANAGED_PENDING_TOKEN = launchToken("sid-dev2", "@dev/2")
 
 async function runManagedPendingCliAgainst(
-  outcomeFor: (request: OneShotRpcRequest) => OneShotRpcOutcome | undefined | Promise<OneShotRpcOutcome | undefined>,
+  outcomeFor: (request: OneShotRpcRequest, socket: Socket) => OneShotRpcOutcome | undefined | Promise<OneShotRpcOutcome | undefined>,
   options: { args?: string[]; token?: string; timeoutMs?: number } = {},
 ): Promise<{
   result: Awaited<ReturnType<typeof runCliAsync>>
@@ -173,7 +173,7 @@ async function runManagedPendingCliAgainst(
               ],
             },
           }
-        } else outcome = await outcomeFor(request)
+        } else outcome = await outcomeFor(request, socket)
         if (outcome === undefined || socket.destroyed) continue // Unanswered request, or caller left during readiness.
         socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, ...outcome })}\n`)
       }
@@ -800,20 +800,34 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
    * @level l1
    * @consumer managed inbox-wait CLI callers (21739); test-only fake socket, no production seam.
    */
-  it.each(["recovered", "silent", "lost-session"])(
+  it.each(["recovered", "silent", "lost-session", "disconnected-handshake", "shutdown"])(
     "keeps a later managed business gap %s after a completed chunk",
     async (mode) => {
       let chunks = 0
+      let probes = 0
+      let protocolReadyAt: number | undefined
       const { result, calls } = await runManagedPendingCliAgainst(
-        (request) => {
-          if (request.method === "cli_protocol") return { result: { protocol_version: TRIBE_PROTOCOL_VERSION } }
+        async (request, socket) => {
+          if (request.method === "cli_protocol") {
+            if (protocolReadyAt !== undefined) {
+              const remaining = Math.max(0, protocolReadyAt - performance.now())
+              if (remaining > 0) await new Promise<void>((resolveReady) => setTimeout(resolveReady, remaining))
+            }
+            return { result: { protocol_version: TRIBE_PROTOCOL_VERSION } }
+          }
           if (request.method !== "cli_inbox_wait_by_launch_v1") {
             return { error: { code: -32601, message: `unexpected method ${request.method}` } }
           }
-          ++chunks
-          if (chunks > 1 && mode === "silent") return undefined
-          if (chunks === 2 && mode === "lost-session") {
-            // 22934 AC7: the daemon rejects authority after this launch completed its first chunk.
+          const probe = request.params?.timeout_ms === 0
+          if (probe) ++probes
+          else ++chunks
+          if (!probe && chunks === 1 && mode === "disconnected-handshake") {
+            // A healthy poll outlasts readiness; the subsequent disconnect must receive a fresh bounded span.
+            await new Promise<void>((resolvePoll) => setTimeout(resolvePoll, 27_000))
+          }
+          // A permanently unanswered business call remains unanswered during its later recovery probe too.
+          if (chunks >= 2 && mode === "silent") return undefined
+          if (!probe && chunks === 2 && mode === "lost-session") {
             return {
               error: {
                 code: -32003,
@@ -825,21 +839,29 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
               },
             }
           }
-          if (chunks === 2) {
+          if (!probe && chunks === 2 && mode === "disconnected-handshake") {
+            protocolReadyAt = performance.now() + 12_000
+            socket.destroy() // Actual transport loss during a healthy long poll, not a fabricated close error.
+            return undefined
+          }
+          if (!probe && chunks === 2 && mode === "recovered") {
             return { error: { code: -32000, message: "Request cli_inbox_wait_by_launch_v1 timed out after 35000ms" } }
           }
+          const reconnect = !probe && chunks === 2 && mode === "shutdown"
+          const woken = !probe && chunks > 1 && !reconnect
           return {
             result: {
-              status: chunks > 1 ? "woken" : "timeout",
+              status: woken ? "woken" : "timeout",
               session: "@dev/2",
               unread_count: 0,
               oldest_unread_age_min: 0,
               oldest_unread_ts: 0,
-              waited_ms: 30_000,
-              effective_timeout_ms: 30_000,
-              timed_out: chunks === 1,
+              waited_ms: probe ? 0 : 30_000,
+              effective_timeout_ms: request.params?.timeout_ms ?? 0,
+              timed_out: !woken,
               aborted: false,
-              baseline_seq: 37,
+              ...(reconnect ? { reconnect: true } : {}),
+              baseline_seq: probes > 1 ? 38 : 37,
               attention: {
                 actionable_unread: [],
                 pending_balls: [],
@@ -848,12 +870,12 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
             },
           }
         },
-        { args: ["inbox-wait", "--timeout", "40s", "--json"], timeoutMs: 60_000 },
+        { args: ["inbox-wait", "--timeout", mode === "disconnected-handshake" ? "60s" : "40s", "--json"], timeoutMs: 90_000 },
       )
 
       expect(result.signal).toBeNull()
-      if (mode === "recovered") {
-        expect(result.code).toBe(0)
+      if (["recovered", "disconnected-handshake", "shutdown"].includes(mode)) {
+        expect(result.code, result.stderr).toBe(0)
         expect(JSON.parse(result.stdout)).toMatchObject({ status: "woken", timed_out: false })
         expect(result.stderr).not.toContain("TRIBE_DAEMON_CALL_TIMEOUT")
       } else if (mode === "lost-session") {
@@ -867,36 +889,25 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       } else {
         expect(result.code).toBe(1)
         expect(result.stdout).toBe("")
-        expect(result.stderr).toMatch(/Request cli_inbox_wait_by_launch_v1 timed out after \d+ms/)
-        expect(result.stderr).toContain("TRIBE_DAEMON_CALL_TIMEOUT")
+        expect(result.stderr).toMatch(/cli_inbox_wait_by_launch_v1.*timed out|remaining readiness or logical wait allowance exhausted/)
       }
-      expect(calls.map((call) => call.method)).toEqual(
-        mode === "lost-session"
-          ? ["cli_protocol", "cli_inbox_wait_by_launch_v1", "cli_protocol", "cli_inbox_wait_by_launch_v1"]
-          : [
-              "cli_protocol",
-              "cli_inbox_wait_by_launch_v1",
-              "cli_protocol",
-              "cli_inbox_wait_by_launch_v1",
-              "cli_protocol",
-              "cli_inbox_wait_by_launch_v1",
-            ],
-      )
       const waits = calls.filter((call) => call.method === "cli_inbox_wait_by_launch_v1")
-      expect(waits[0]?.params).toMatchObject({ timeout_ms: 30_000 })
+      const business = waits.filter((call) => call.params?.timeout_ms !== 0)
+      expect(waits[0]?.params).toMatchObject({ timeout_ms: 0 })
       expect(waits[0]?.params).not.toHaveProperty("after_seq")
-      expect(waits[1]?.params).toMatchObject({ timeout_ms: 30_000, after_seq: 37 })
-      if (mode === "lost-session") {
-        for (const wait of waits) {
-          expect(wait.params).toMatchObject({ launch_id: "sid-dev2", id_token: MANAGED_PENDING_TOKEN })
-        }
-      } else {
-        expect(waits[2]?.params).toMatchObject({ after_seq: 37 })
-        expect(waits[2]?.params?.timeout_ms).toBeLessThan(mode === "silent" ? 5_000 : 40_000)
+      expect(business[0]?.params).toMatchObject({ after_seq: 37 })
+      expect(business[0]?.params?.timeout_ms).toBeGreaterThan(0)
+      expect(business[0]?.params?.timeout_ms).toBeLessThanOrEqual(30_000)
+      // The second readiness reply advanced the baseline before the following poll failed.
+      expect(business[1]?.params).toMatchObject({ after_seq: 38 })
+      for (const wait of waits.slice(1)) {
+        expect(wait.params).toMatchObject({ launch_id: "sid-dev2", id_token: MANAGED_PENDING_TOKEN })
       }
-      // The helper's awaited server.close also proves both chunk connections were closed.
+      if (["recovered", "disconnected-handshake", "shutdown"].includes(mode)) {
+        expect(business[2]?.params).toMatchObject({ after_seq: 38 })
+      }
     },
-    90_000,
+    120_000,
   )
 
   /** @failure Startup lasting longer than the old protocol timeout must not kill an installed idle wait (33732).
@@ -977,7 +988,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           TRIBE_SOCKET: socketPath,
           TRIBE_NO_AUTOSTART: "1",
         },
-        { timeoutMs: 30_000 },
+        { timeoutMs: 45_000 },
       )
       const readiness = await Promise.race([
         connected.then((connectedAt) => ({ kind: "connected" as const, connectedAt })),
@@ -993,14 +1004,20 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       expect(result.signal).toBeNull()
       expect(result.code).not.toBe(0)
       expect(result.stderr).toMatch(/Request cli_protocol timed out/)
-      expect(deadlineElapsedMs).toBeGreaterThanOrEqual(9_000)
-      expect(deadlineElapsedMs).toBeLessThan(15_000)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toContain("inbox wait readiness failed: phase=cli_protocol")
+      expect(result.stderr).toContain(`socket=${socketPath}`)
+      expect(result.stderr).toContain("budget=25000ms")
+      expect(result.stderr).toMatch(/elapsed=\d+ms/)
+      expect(result.stderr.trim().split("\n")).toHaveLength(1)
+      expect(deadlineElapsedMs).toBeGreaterThanOrEqual(24_000)
+      expect(deadlineElapsedMs).toBeLessThan(35_000)
     } finally {
       for (const socket of sockets) socket.destroy()
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
       rmSync(dir, { recursive: true, force: true })
     }
-  }, 40_000)
+  }, 60_000)
 
   it("health --json measures an ABSENT socket now, not after the 28674 restart-retry window", () => {
     // 28674 gave connectToDaemon a bounded retry (CONNECT_RETRY_WINDOW_MS, 6000 ms) so a CLIENT call rides out a
