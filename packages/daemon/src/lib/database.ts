@@ -411,9 +411,15 @@ export function openDatabase(path: string): Database {
   // 1.7 GB live store). These partial indexes carry every column the projection reads, so it never opens a row.
   // Migration v42 declares the same four for databases that predate them.
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_reply_cover ON messages(ts, reply, sender) WHERE reply IS NOT NULL")
-  db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_reply_cover ON messages_archive(ts, reply, sender) WHERE reply IS NOT NULL")
-  db.run("CREATE INDEX IF NOT EXISTS idx_messages_request_cover ON messages(request, ts, type) WHERE request IS NOT NULL")
-  db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_request_cover ON messages_archive(request, ts, type) WHERE request IS NOT NULL")
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_messages_archive_reply_cover ON messages_archive(ts, reply, sender) WHERE reply IS NOT NULL",
+  )
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_messages_request_cover ON messages(request, ts, type) WHERE request IS NOT NULL",
+  )
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_messages_archive_request_cover ON messages_archive(request, ts, type) WHERE request IS NOT NULL",
+  )
 
   return db
 }
@@ -1564,10 +1570,26 @@ const MIGRATIONS: readonly Migration[] = [
      */
     up(db) {
       const wanted: ReadonlyArray<readonly [string, readonly string[], string]> = [
-        ["messages", ["ts", "reply", "sender"], "CREATE INDEX IF NOT EXISTS idx_messages_reply_cover ON messages(ts, reply, sender) WHERE reply IS NOT NULL"],
-        ["messages_archive", ["ts", "reply", "sender"], "CREATE INDEX IF NOT EXISTS idx_messages_archive_reply_cover ON messages_archive(ts, reply, sender) WHERE reply IS NOT NULL"],
-        ["messages", ["request", "ts", "type"], "CREATE INDEX IF NOT EXISTS idx_messages_request_cover ON messages(request, ts, type) WHERE request IS NOT NULL"],
-        ["messages_archive", ["request", "ts", "type"], "CREATE INDEX IF NOT EXISTS idx_messages_archive_request_cover ON messages_archive(request, ts, type) WHERE request IS NOT NULL"],
+        [
+          "messages",
+          ["ts", "reply", "sender"],
+          "CREATE INDEX IF NOT EXISTS idx_messages_reply_cover ON messages(ts, reply, sender) WHERE reply IS NOT NULL",
+        ],
+        [
+          "messages_archive",
+          ["ts", "reply", "sender"],
+          "CREATE INDEX IF NOT EXISTS idx_messages_archive_reply_cover ON messages_archive(ts, reply, sender) WHERE reply IS NOT NULL",
+        ],
+        [
+          "messages",
+          ["request", "ts", "type"],
+          "CREATE INDEX IF NOT EXISTS idx_messages_request_cover ON messages(request, ts, type) WHERE request IS NOT NULL",
+        ],
+        [
+          "messages_archive",
+          ["request", "ts", "type"],
+          "CREATE INDEX IF NOT EXISTS idx_messages_archive_request_cover ON messages_archive(request, ts, type) WHERE request IS NOT NULL",
+        ],
       ]
       for (const [table, columns, statement] of wanted) {
         const present = tableColumnNames(db, table)

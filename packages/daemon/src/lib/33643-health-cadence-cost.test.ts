@@ -21,6 +21,7 @@
  *   flat; an unbounded `COUNT(*)` over each table tracks the growth.
  */
 
+import { assertSingleStatement } from "@bearly/sqlite"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -38,7 +39,9 @@ const NOW = 1_800_000_000_000
 function readSyscalls(): number {
   const io = readFileSync("/proc/self/io", "utf8")
   const match = io.match(/syscr:\s*(\d+)/)
-  if (!match) throw new Error(`/proc/self/io exposes no syscr field — cannot bound page reads. Read: ${io.slice(0, 200)}`)
+  if (!match) {
+    throw new Error(`/proc/self/io exposes no syscr field — cannot bound page reads. Read: ${io.slice(0, 200)}`)
+  }
   return Number(match[1])
 }
 
@@ -59,7 +62,15 @@ afterEach(() => {
   }
 })
 
-type Row = { id: string; type: string; ts: number; content: string; request?: string; reply?: string; archive?: boolean }
+type Row = {
+  id: string
+  type: string
+  ts: number
+  content: string
+  request?: string
+  reply?: string
+  archive?: boolean
+}
 
 function insert(db: Database, rows: readonly Row[]): void {
   const live = db.prepare(
@@ -134,7 +145,9 @@ describe("33643 a health call reads neither message content nor whole history", 
     const lean = costPerCall(small, () => responseLatencyProjection(small, NOW))
     const fat = costPerCall(large, () => responseLatencyProjection(large, NOW))
 
-    expect(fat, `read syscalls per call: 64 B content ${lean}, 64 KiB content ${fat}`).toBeLessThan(Math.max(lean, 1) * 1.5)
+    expect(fat, `read syscalls per call: 64 B content ${lean}, 64 KiB content ${fat}`).toBeLessThan(
+      Math.max(lean, 1) * 1.5,
+    )
   })
 
   it("reads every response-latency column from a covering index, and a dropped index fails loudly", () => {
@@ -155,7 +168,7 @@ describe("33643 a health call reads neither message content nor whole history", 
     }
     const [projection] = sql.filter((text) => text.includes("response_journal"))
     if (projection === undefined) throw new Error("responseLatencyProjection prepared no response_journal statement")
-    const explain = db.prepare(`EXPLAIN QUERY PLAN ${projection}`)
+    const explain = db.prepare(assertSingleStatement(`EXPLAIN QUERY PLAN ${projection}`))
     const plan = (explain.all({ $cutoff: NOW - DAY, $now: NOW }) as Array<{ detail: string }>).map((row) => row.detail)
     // An open statement holds the schema; DROP INDEX below needs every one finalized.
     for (const statement of [...statements, explain]) statement.finalize()
@@ -165,7 +178,10 @@ describe("33643 a health call reads neither message content nor whole history", 
       "idx_messages_request_cover",
       "idx_messages_archive_request_cover",
     ]) {
-      expect(plan.some((detail) => detail.includes(`USING COVERING INDEX ${index}`)), plan.join(" | ")).toBe(true)
+      expect(
+        plan.some((detail) => detail.includes(`USING COVERING INDEX ${index}`)),
+        plan.join(" | "),
+      ).toBe(true)
     }
     db.run("DROP INDEX idx_messages_reply_cover")
     expect(() => responseLatencyProjection(db, NOW)).toThrow(/no such index: idx_messages_reply_cover/)
