@@ -30,7 +30,7 @@ export const CONNECTED_PULL_READ_CEILING_MS = 10 * MINUTE
  *
  * A socket write proves the adapter took the row, not that the model read it, so
  * the health reader must not page on delivery alone — that is the false page
- * 33213 reproduced (a verdict delivered inline 56 ms after send, paged within
+ * 33213 reproduced (a verdict written to its socket 56 ms after send, paged within
  * minutes while the seat was still inside the turn it woke). Ten minutes is the
  * fleet's in-progress ceiling (AGENTS.md: a request older than ten minutes is
  * broken), so the grace cannot hide a row for longer than the ceiling that
@@ -329,7 +329,7 @@ export type ActionableLagReading = LagRow & {
  * Same attention set as `attentionLagSql`, plus the grace split — the count is
  * returned whole so a caller can show both "counts now" and "held", and the
  * three causes partition it: directive, delivered-inline-past-grace, and
- * everything else (never delivered to this seat, or inbox-only by class).
+ * everything else (never written to this seat, or inbox-only by class).
  */
 function actionableLagSql(table: "messages" | "messages_archive"): string {
   const sequence = table === "messages" ? "rowid" : "seq"
