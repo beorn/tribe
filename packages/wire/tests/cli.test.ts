@@ -974,13 +974,15 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(calls.find((call) => call.method === "cli_inbox_wait_by_launch_v1")?.params?.timeout_ms).toBe(0)
   }, 60_000)
 
-  // The absent socket exercises retry/backoff exhaustion; silence exercises an in-flight protocol deadline.
-  it.each(["silent", "absent"])(
+  // A delayed connect must leave only the remainder of the SAME protocol-readiness allowance.
+  // Without phase clipping it fails after 8s + 25s instead of within the original 25s.
+  it.each(["silent", "absent", "delayed-connect"])(
     "fails loudly by the readiness deadline when the inbox-wait daemon is %s",
     async (mode) => {
       const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-silent-"))
       const socketPath = join(dir, "tribe.sock")
       const sockets = new Set<Socket>()
+      let listenTimer: ReturnType<typeof setTimeout> | undefined
       let resolveConnected!: (timestamp: number) => void
       const connected = new Promise<number>((resolve) => {
         resolveConnected = resolve
@@ -993,15 +995,15 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       })
 
       try {
-        if (mode === "silent") {
-          await new Promise<void>((resolveListen, rejectListen) => {
+        const listen = (): Promise<void> =>
+          new Promise<void>((resolveListen, rejectListen) => {
             server.once("error", rejectListen)
             server.listen(socketPath, () => {
               server.off("error", rejectListen)
               resolveListen()
             })
           })
-        }
+        if (mode === "silent") await listen()
         const startedAt = Date.now()
         const childRun = runCliAsync(
           ["inbox-wait", "--session", "@chief", "--timeout", "0s", "--json"],
@@ -1013,6 +1015,12 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           },
           { timeoutMs: 45_000 },
         )
+        if (mode === "delayed-connect") {
+          await new Promise<void>((resolveDelay) => {
+            listenTimer = setTimeout(resolveDelay, 8_000)
+          })
+          await listen()
+        }
         const readiness =
           mode === "absent"
             ? { kind: "connected" as const, connectedAt: startedAt }
@@ -1025,22 +1033,23 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         }
         const { connectedAt } = readiness
         const result = await childRun
-        const deadlineElapsedMs = Date.now() - connectedAt
+        const deadlineElapsedMs = Date.now() - (mode === "delayed-connect" ? startedAt : connectedAt)
 
         expect(result.signal).toBeNull()
         expect(result.code).not.toBe(0)
-        expect(result.stderr).toMatch(mode === "silent" ? /Request cli_protocol timed out/ : /ENOENT/)
+        expect(result.stderr).toMatch(mode === "absent" ? /ENOENT/ : /Request cli_protocol timed out/)
         expect(result.stdout).toBe("")
         expect(result.stderr).toContain(
-          `inbox wait readiness failed: phase=${mode === "silent" ? "cli_protocol" : "connect"}`,
+          `inbox wait readiness failed: phase=${mode === "absent" ? "connect" : "cli_protocol"}`,
         )
         expect(result.stderr).toContain(`socket=${socketPath}`)
         expect(result.stderr).toContain("budget=25000ms")
         expect(result.stderr).toMatch(/elapsed=\d+ms/)
         expect(result.stderr.trim().split("\n")).toHaveLength(1)
         expect(deadlineElapsedMs).toBeGreaterThanOrEqual(24_000)
-        expect(deadlineElapsedMs).toBeLessThan(35_000)
+        expect(deadlineElapsedMs).toBeLessThan(mode === "delayed-connect" ? 30_000 : 35_000)
       } finally {
+        clearTimeout(listenTimer)
         for (const socket of sockets) socket.destroy()
         if (server.listening) await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
         rmSync(dir, { recursive: true, force: true })
