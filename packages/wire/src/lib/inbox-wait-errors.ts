@@ -25,10 +25,12 @@ export type InboxWaitErrorKind = "transport-close" | "daemon-unavailable" | null
  */
 export function inboxWaitErrorKind(err: unknown): InboxWaitErrorKind {
   const code = (err as { readonly code?: unknown } | undefined)?.code
-  if (code === "ENOENT" || code === "ECONNREFUSED") return "daemon-unavailable"
+  if (code === "ENOENT" || code === "ECONNREFUSED" || code === "TRIBE_DAEMON_CONNECT_TIMEOUT") {
+    return "daemon-unavailable"
+  }
   if (code === "ECONNRESET" || code === "EPIPE") return "transport-close"
   const message = err instanceof Error ? err.message : String(err)
-  return /connection closed|socket closed|socket hang up|closed before response|request cli_inbox_wait(?:_by_launch_v1)? timed out/i.test(
+  return /connection closed|socket closed|socket hang up|closed before response|request (?:cli_protocol|cli_inbox_wait(?:_by_launch_v1)?) timed out/i.test(
     message,
   )
     ? "transport-close"

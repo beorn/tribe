@@ -21,6 +21,34 @@ const sleepMs = (action: InboxWaitGapAction): number => {
 }
 
 describe("InboxWaitGapController", () => {
+  /** @failure Connect time/backoff must consume one readiness allowance; healthy polling must not (33732). */
+  it("retains a readiness span until an authoritative reply and opens a new one at a later poll failure", () => {
+    let now = 0
+    const gap = new InboxWaitGapController({
+      deadlineMs: 120_000,
+      monotonicNow: () => now,
+      backoff: { kind: "fixed", intervalMs: 250 },
+      readinessBudgetMs: 25_000,
+      unavailableGraceMs: 2_000,
+    })
+
+    gap.beginReadiness()
+    now = 10_000
+    expect(sleepMs(gap.afterError(new Error("Request cli_protocol timed out after 10000ms")))).toBe(250)
+    expect(gap.readiness).toMatchObject({ startedAtMs: 0, elapsedMs: 10_000, remainingMs: 15_000 })
+    now = 24_900
+    gap.beginReadiness()
+    expect(sleepMs(gap.afterError(coded("ENOENT")))).toBe(100)
+    gap.afterSuccess()
+    expect(gap.readiness).toBeNull()
+
+    now = 60_000 // The preceding healthy long poll does not spend recovery allowance.
+    expect(sleepMs(gap.afterError(coded("ECONNRESET")))).toBe(250)
+    expect(gap.readiness).toMatchObject({ startedAtMs: 60_000, remainingMs: 25_000 })
+    now = 85_000
+    expect(terminal(gap.afterError(coded("ECONNRESET")))).toMatchObject({ reason: "readiness-budget" })
+  })
+
   it("proceeds on the first call even with no time left, then stops at the deadline (slack 0)", () => {
     let now = 1_000
     const gap = new InboxWaitGapController({

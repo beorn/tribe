@@ -7,12 +7,14 @@ import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
 import {
   DEFAULT_INBOX_WAIT_TIMEOUT_MS,
+  DEFAULT_INBOX_WAIT_READINESS_MS,
   DEFAULT_WAIT_TIMEOUT_MS,
   deriveInboxWaitCallTimeoutMs,
   parseInboxWaitResult,
   type InboxWaitResult,
 } from "../lib/inbox-wait-options.ts"
 import { InboxWaitGapController } from "../lib/inbox-wait-gap.ts"
+import { isRetryableInboxWaitError } from "../lib/inbox-wait-errors.ts"
 
 // The retryable transport-error classifier has ONE owner now
 // (../lib/inbox-wait-errors.ts, also exported as tribe-wire/lib/inbox-wait-errors
@@ -305,6 +307,7 @@ type InboxWaitCall = (args: {
   timeoutMs: number
   wakeOnCorrelatedReply: boolean
   afterSeq?: number
+  readiness?: { controller: InboxWaitGapController; rememberBaseline: (sequence: number) => void }
 }) => Promise<InboxWaitChunkResult>
 
 type InboxWaitChunkResult = InboxWaitResult & {
@@ -2477,6 +2480,7 @@ export async function waitForInboxWithReconnect(opts: {
   maxChunkMs?: number
   retryDelayMs?: number
   unavailableGraceMs?: number
+  readinessBudgetMs?: number
   wakeOnCorrelatedReply?: boolean
 }): Promise<InboxWaitResult> {
   // The deadline is measured on ONE monotonic clock, the same one the boundary
@@ -2502,6 +2506,7 @@ export async function waitForInboxWithReconnect(opts: {
     monotonicNow: now,
     backoff: { kind: "exponential", initialMs: retryDelayMs, capMs: INBOX_WAIT_MAX_RETRY_DELAY_MS },
     unavailableGraceMs,
+    readinessBudgetMs: opts.readinessBudgetMs,
   })
   let latestResult: InboxWaitResult | undefined
   let lastRetryableError: unknown
@@ -2519,16 +2524,20 @@ export async function waitForInboxWithReconnect(opts: {
         timeoutMs: Math.min(maxChunkMs, gate.remainingMs),
         wakeOnCorrelatedReply: controls.wakeOnCorrelatedReply,
         ...(afterSeq === undefined ? {} : { afterSeq }),
+        ...(opts.readinessBudgetMs === undefined
+          ? {}
+          : { readiness: { controller: gap, rememberBaseline: (sequence: number) => { afterSeq = sequence } } }),
       })
-      gap.afterSuccess()
       if (Number.isSafeInteger(result.baseline_seq) && Number(result.baseline_seq) >= 0) {
         afterSeq = Number(result.baseline_seq)
       }
+      if (result.reconnect === true && opts.readinessBudgetMs !== undefined) {
+        throw new Error("connection closed: daemon requested inbox-wait reconnect")
+      }
+      gap.afterSuccess()
       latestResult = result
       lastRetryableError = undefined
-      if (result.reconnect === true) {
-        continue
-      }
+      if (result.reconnect === true) continue
       if (result.aborted) {
         return totalWaited(result, startedAt, now, controls.timeoutMs)
       }
@@ -2561,35 +2570,69 @@ async function callInboxWaitChunk(
   timeoutMs: number,
   wakeOnCorrelatedReply: boolean,
   afterSeq?: number,
+  readiness?: Parameters<InboxWaitCall>[0]["readiness"],
 ): Promise<InboxWaitChunkResult> {
   const socketPath = resolveSocketPath()
   const callTimeoutMs = deriveInboxWaitCallTimeoutMs(timeoutMs)
-  const client = await connectToDaemon(socketPath, { callTimeoutMs })
+  const gap = readiness?.controller
+  gap?.beginReadiness()
+  let phase = "connect"
+  let client: DaemonClient | undefined
+  const readinessFailure = (cause: unknown): Error => {
+    const span = gap?.readiness
+    const detail = (cause instanceof Error ? cause.message : String(cause)).replace(/\s+/g, " ")
+    return Object.assign(new Error(
+      `inbox wait readiness failed: phase=${phase}, elapsed=${Math.round(span?.elapsedMs ?? 0)}ms, ` +
+      `socket=${socketPath}, cause=${detail}, budget=${span?.budgetMs ?? 0}ms`, { cause },
+    ), { code: "TRIBE_INBOX_WAIT_READINESS_TIMEOUT" })
+  }
+  const remainingReadinessMs = (): number => {
+    const span = gap?.readiness
+    if (span === null || span === undefined) return callTimeoutMs
+    if (span.remainingMs <= 0) throw readinessFailure(new Error("remaining readiness or logical wait allowance exhausted"))
+    return Math.ceil(span.remainingMs)
+  }
   try {
-    await assertInboxWaitProtocol(client, deriveInboxWaitCallTimeoutMs(0))
-    const raw = await client.call(
-      method,
-      {
+    const connectedClient = await connectToDaemon(socketPath, { callTimeoutMs: remainingReadinessMs() })
+    client = connectedClient
+    phase = "cli_protocol"
+    await assertInboxWaitProtocol(connectedClient, gap === undefined ? deriveInboxWaitCallTimeoutMs(0) : remainingReadinessMs())
+    const waitChunk = async (waitMs: number, baseline: number | undefined, rpcTimeoutMs: number): Promise<InboxWaitChunkResult> => {
+      const raw = await connectedClient.call(method, {
         ...target,
-        timeout_ms: timeoutMs,
+        timeout_ms: waitMs,
         ...(wakeOnCorrelatedReply ? { wake_on_correlated_reply: true } : {}),
-        ...(afterSeq === undefined ? {} : { after_seq: afterSeq }),
-      },
-      { timeoutMs: callTimeoutMs },
-    )
-    const parsed = parseInboxWaitResult(raw)
-    const baselineSeq = (raw as { baseline_seq?: unknown }).baseline_seq
-    if (!Number.isSafeInteger(baselineSeq) || Number(baselineSeq) < 0) {
-      throw new Error("Inbox-wait daemon omitted the private reconnect baseline")
+        ...(baseline === undefined ? {} : { after_seq: baseline }),
+      }, { timeoutMs: rpcTimeoutMs })
+      const parsed = parseInboxWaitResult(raw)
+      const baselineSeq = (raw as { baseline_seq?: unknown }).baseline_seq
+      if (!Number.isSafeInteger(baselineSeq) || Number(baselineSeq) < 0) {
+        throw new Error("Inbox-wait daemon omitted the private reconnect baseline")
+      }
+      readiness?.rememberBaseline(Number(baselineSeq))
+      return { ...parsed, baseline_seq: Number(baselineSeq) }
     }
-    return { ...parsed, baseline_seq: Number(baselineSeq) }
+    if (gap !== undefined) {
+      phase = `${method} readiness probe`
+      const probe = await waitChunk(0, afterSeq, remainingReadinessMs())
+      // A shutdown reply is not readiness. The existing retry owner handles it without renewing the span.
+      if (probe.reconnect || probe.aborted || !probe.timed_out) return probe
+      gap.afterSuccess()
+      afterSeq = probe.baseline_seq
+      const gate = gap.beforeCall()
+      if (!gate.proceed) return probe
+      timeoutMs = Math.min(timeoutMs, gate.remainingMs)
+    }
+    phase = method
+    return await waitChunk(timeoutMs, afterSeq, deriveInboxWaitCallTimeoutMs(timeoutMs))
   } catch (err) {
     if ((err as { code?: unknown }).code === -32601 && method.endsWith("_by_launch_v1")) {
       throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
     }
+    if (gap?.readiness?.remainingMs === 0 && isRetryableInboxWaitError(err)) throw readinessFailure(err)
     throw err
   } finally {
-    client.close()
+    client?.close()
   }
 }
 
@@ -2633,13 +2676,15 @@ async function cmdInboxWait(opts: {
       session: opts.session,
       timeoutMs: controls.timeoutMs,
       wakeOnCorrelatedReply: controls.wakeOnCorrelatedReply,
-      call: ({ timeoutMs: chunkTimeoutMs, wakeOnCorrelatedReply, afterSeq }) =>
+      readinessBudgetMs: DEFAULT_INBOX_WAIT_READINESS_MS,
+      call: ({ timeoutMs: chunkTimeoutMs, wakeOnCorrelatedReply, afterSeq, readiness }) =>
         callInboxWaitChunk(
           cliInboxMethod("wait", opts.session),
           target,
           chunkTimeoutMs,
           wakeOnCorrelatedReply,
           afterSeq,
+          readiness,
         ),
     })
   } catch (err) {

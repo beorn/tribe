@@ -1,3 +1,5 @@
+import { DEFAULT_INBOX_WAIT_READINESS_MS } from "./packages/wire/src/lib/inbox-wait-options.ts"
+
 export default {
   name: "tribe",
   habitants: {
@@ -52,7 +54,11 @@ export default {
       // default the probe was killed first, so the reader saw hab's kill (or, on the exit path before 27871 AC1,
       // nothing at all) instead of wire's own answer. 25 s covers the CLI's worst case with headroom; a bound at or
       // above `intervalMs` is refused, and wire declares no interval.
-      health: { command: "tribe health --json", timeoutMs: 25_000 },
+      health: {
+        command: "tribe health --json",
+        timeoutMs: 25_000,
+        readyWithinMs: DEFAULT_INBOX_WAIT_READINESS_MS,
+      },
       // 29498 (@cto 15092986): compare the loaded closure before restarting on a promotion. The 28691
       // every-promotion rule covered spawned Hab and verifier dependencies that now follow call-time promotion
       // pointers (28921). The controller restarts on a changed or unmeasured closure and on a moved unit definition.

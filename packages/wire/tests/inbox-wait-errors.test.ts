@@ -21,6 +21,7 @@ describe("inboxWaitErrorKind", () => {
   it("classifies an absent or refusing socket as daemon-unavailable", () => {
     expect(inboxWaitErrorKind(codedError("ENOENT"))).toBe("daemon-unavailable")
     expect(inboxWaitErrorKind(codedError("ECONNREFUSED"))).toBe("daemon-unavailable")
+    expect(inboxWaitErrorKind(codedError("TRIBE_DAEMON_CONNECT_TIMEOUT"))).toBe("daemon-unavailable")
   })
 
   it("classifies an established connection closing mid-read as transport-close", () => {
@@ -32,11 +33,12 @@ describe("inboxWaitErrorKind", () => {
     expect(inboxWaitErrorKind(new Error("socket hang up"))).toBe("transport-close")
     expect(inboxWaitErrorKind(new Error("connection closed before response"))).toBe("transport-close")
     expect(inboxWaitErrorKind(new Error("request cli_inbox_wait timed out"))).toBe("transport-close")
+    expect(inboxWaitErrorKind(new Error("Request cli_protocol timed out after 10000ms"))).toBe("transport-close")
     // Captured launch-identity timeout; the legacy-only match loses managed waiters (22934).
     expect(inboxWaitErrorKind(new Error("Request cli_inbox_wait_by_launch_v1 timed out after 35000ms"))).toBe(
       "transport-close",
     )
-    for (const method of ["tribe.send", "cli_inbox_wait_by_launch_v2", "cli_inbox_wait_extra"]) {
+    for (const method of ["tribe.send", "cli_protocol_extra", "cli_inbox_wait_by_launch_v2", "cli_inbox_wait_extra"]) {
       expect(inboxWaitErrorKind(new Error(`Request ${method} timed out after 35000ms`))).toBeNull()
     }
   })

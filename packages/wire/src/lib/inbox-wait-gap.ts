@@ -39,13 +39,15 @@ export interface InboxWaitGapControllerOptions {
   readonly backoff: InboxWaitBackoffPolicy
   /** Total retryable-gap age bound in ms (seat); absent leaves the gap unbounded by age. */
   readonly gapBudgetMs?: number
+  /** Optional connect-through-authoritative-probe allowance. Existing callers need not enable it. */
+  readonly readinessBudgetMs?: number
   /** Pre-first-success `daemon-unavailable` grace in ms (CLI); absent disables the grace. */
   readonly unavailableGraceMs?: number
   /** How far before the deadline a retry must stop; 0 stops only once past it. */
   readonly deadlineSlackMs?: number
 }
 
-export type InboxWaitGapTerminalReason = "deadline" | "gap-budget" | "unavailable-grace"
+export type InboxWaitGapTerminalReason = "deadline" | "gap-budget" | "unavailable-grace" | "readiness-budget"
 
 /**
  * The decision for one classified error: retry after `ms` (0 means retry at
@@ -79,6 +81,8 @@ export class InboxWaitGapController {
   private readonly monotonicNow: () => number
   private readonly backoff: InboxWaitBackoffPolicy
   private readonly gapBudgetMs: number | undefined
+  private readonly readinessBudgetMs: number | undefined
+  private readinessStartedAtMs: number | null = null
   private readonly unavailableGraceMs: number | undefined
   private readonly deadlineSlackMs: number
   private attempted = false
@@ -92,6 +96,7 @@ export class InboxWaitGapController {
     this.monotonicNow = opts.monotonicNow
     this.backoff = opts.backoff
     this.gapBudgetMs = opts.gapBudgetMs
+    this.readinessBudgetMs = opts.readinessBudgetMs
     this.unavailableGraceMs = opts.unavailableGraceMs
     this.deadlineSlackMs = opts.deadlineSlackMs ?? 0
   }
@@ -99,6 +104,26 @@ export class InboxWaitGapController {
   /** Read-only: whether a classified gap is currently open (since the last success). */
   get gapOpen(): boolean {
     return this.gapStartedAtMs !== null
+  }
+
+  /** Start once before connect, or retain the span already opened by a failed poll. */
+  beginReadiness(): void {
+    if (this.readinessBudgetMs !== undefined) this.readinessStartedAtMs ??= this.monotonicNow()
+  }
+
+  /** Only this owner reads the clock; transport phases consume its remaining allowance. */
+  get readiness(): { startedAtMs: number; elapsedMs: number; remainingMs: number; budgetMs: number } | null {
+    if (this.readinessStartedAtMs === null || this.readinessBudgetMs === undefined) return null
+    const now = this.monotonicNow()
+    const elapsedMs = Math.max(0, now - this.readinessStartedAtMs)
+    // Preserve the first authoritative attempt even at a zero logical timeout.
+    const logicalRemainingMs = this.hasEverSucceeded ? Math.max(0, this.deadlineMs - now) : Number.POSITIVE_INFINITY
+    return {
+      startedAtMs: this.readinessStartedAtMs,
+      elapsedMs,
+      remainingMs: Math.min(Math.max(0, this.readinessBudgetMs - elapsedMs), logicalRemainingMs),
+      budgetMs: this.readinessBudgetMs,
+    }
   }
 
   /**
@@ -119,6 +144,7 @@ export class InboxWaitGapController {
     const recovered = gapStartedAtMs !== null
     const gapAgeMs = recovered ? now - gapStartedAtMs : 0
     this.gapStartedAtMs = null
+    this.readinessStartedAtMs = null
     this.unavailableSinceMs = null
     this.consecutiveRetryableErrors = 0
     this.hasEverSucceeded = true
@@ -135,13 +161,15 @@ export class InboxWaitGapController {
     if (kind === null) throw err
 
     const now = this.monotonicNow()
+    // A failed healthy poll starts recovery here, excluding the time it spent healthy.
+    this.beginReadiness()
     if (this.gapStartedAtMs === null) this.gapStartedAtMs = now
     const backoffMs = this.backoffMs()
     this.consecutiveRetryableErrors += 1
     const attempts = this.consecutiveRetryableErrors
     const gapAgeMs = now - this.gapStartedAtMs
 
-    if (this.unavailableGraceMs !== undefined) {
+    if (this.unavailableGraceMs !== undefined && this.readinessStartedAtMs === null) {
       if (kind === "daemon-unavailable") {
         // The absence grace begins at this outage and is consumed only before
         // any authoritative chunk; a restart's socket gap must not be measured
@@ -158,11 +186,15 @@ export class InboxWaitGapController {
 
     const remainingMs = Math.max(0, this.deadlineMs - now)
     if (remainingMs <= this.deadlineSlackMs) return this.terminal("deadline", kind, err, gapAgeMs, attempts)
+    const readiness = this.readiness
+    if (readiness !== null && readiness.remainingMs <= 0) {
+      return this.terminal("readiness-budget", kind, err, gapAgeMs, attempts)
+    }
     if (this.gapBudgetMs !== undefined && gapAgeMs >= this.gapBudgetMs) {
       return this.terminal("gap-budget", kind, err, gapAgeMs, attempts)
     }
 
-    return { action: "sleep", ms: Math.min(backoffMs, remainingMs), kind }
+    return { action: "sleep", ms: Math.min(backoffMs, remainingMs, readiness?.remainingMs ?? Number.POSITIVE_INFINITY), kind }
   }
 
   private terminal(

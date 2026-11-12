@@ -1,5 +1,7 @@
 export const DEFAULT_INBOX_WAIT_SESSION = "@chief"
 export const DEFAULT_INBOX_WAIT_TIMEOUT_MS = 30_000
+/** Wire's startup/readiness allowance, also used by its service declaration. */
+export const DEFAULT_INBOX_WAIT_READINESS_MS = 25_000
 export const DEFAULT_WAIT_TIMEOUT_MS = 5 * 60_000
 export const DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS = 5_000
 /** Bounds ONE daemon inbox-wait call (the daemon's own clamp, and the MCP path's after its host ceiling).
