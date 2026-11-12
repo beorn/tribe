@@ -1859,13 +1859,11 @@ export function withDispatcher<
       // Spec: @km/tribe/15588-tribe-list-sessions.
       const liveClient = clients.get(connId)
       if (liveClient) liveClient.lastActivityAt = Date.now()
-      if (liveClient && liveClient.role !== "pending" && method !== "register") {
-        log.info?.("operation.received", {
-          ...identityLogFields(liveClient),
-          direction: "inbound",
-          operation: operationLogName(method),
-        })
-      }
+      log.info?.("operation.received", {
+        ...connectionLogIdentity(liveClient, connId),
+        direction: "inbound",
+        operation: operationLogName(method),
+      })
 
       try {
         if (

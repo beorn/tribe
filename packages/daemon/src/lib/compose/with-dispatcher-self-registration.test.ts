@@ -723,6 +723,34 @@ describe("dispatcher operational logging", () => {
 
     expect(logs.filter((event) => event.level === "info")).toEqual([])
 
+    const privatePayload = "message-payload-must-not-enter-logs"
+    // Pending CLI and refused requests are real dispatches, but their caller
+    // identity must remain connection-only until registration succeeds.
+    parseResult<CliStatusResult>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "pending-status", method: "cli_status", params: {} },
+        client.connId,
+      ),
+    )
+    const refused = JSON.parse(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "pending-refused",
+          method: "cli_unrecognized",
+          params: { name: `${privatePayload}-identity`, token: `${privatePayload}-token`, content: privatePayload },
+        },
+        client.connId,
+      ),
+    ) as { error?: unknown }
+    expect(refused.error).toBeDefined()
+    const pendingOperations = logs.filter((event) => event.message === "operation.received")
+    expect(pendingOperations.map((event) => event.props)).toEqual([
+      { connection_id: client.connId, direction: "inbound", operation: "cli_status" },
+      { connection_id: client.connId, direction: "inbound", operation: "cli_unrecognized" },
+    ])
+    expect(pendingOperations.every((event) => typeof event.time === "number")).toBe(true)
+
     const registered = parseResult<RegisterResult>(
       await harness.register(client.connId, {
         name: "@agent/6",
@@ -732,7 +760,9 @@ describe("dispatcher operational logging", () => {
         launchParentPid: 6006,
       }),
     )
-    const privatePayload = "message-payload-must-not-enter-logs"
+    expect(
+      logs.find((event) => event.message === "operation.received" && event.props?.operation === "register")?.props,
+    ).toEqual({ connection_id: client.connId, direction: "inbound", operation: "register" })
     parseResult<{ structuredContent: SendResult }>(
       await harness.dispatcher.handleRequest(
         {
