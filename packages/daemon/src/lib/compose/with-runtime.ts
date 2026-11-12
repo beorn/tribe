@@ -251,7 +251,7 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     })
 
     // Cleanup tick — registers on root scope so disposal stops it. The normal
-    // data-retention cleanup remains eager; stale transports wait for daemon
+    // initial data-retention cleanup waits for socket listen; stale transports wait for daemon
     // startup reconnect grace, then share this existing six-hour cadence as
     // the backstop for anything the disconnect-driven collection above missed
     // (a daemon that died before its timer fired, rows from an older build).
@@ -283,8 +283,6 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     }
     cleanupInterval.unref?.()
     t.scope.defer(() => clearInterval(cleanupInterval as unknown as ReturnType<typeof setInterval>))
-    cleanupOldData(t.daemonCtx, { liveWindowMs: retentionConfig.liveWindowMs })
-    runRetention()
     const startupReapDelayMs = t.registry.startupReconnectGraceRemainingMs(Date.now())
     const startupReapTimer = setTimeout(reapStaleTransports, startupReapDelayMs) as unknown as {
       unref?: () => void
@@ -343,7 +341,15 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
 
     opts.publishShutdown(shutdown)
 
-    function run(): Promise<void> {
+    let startupRetentionRan = false
+    async function run(): Promise<void> {
+      const binding = await t.socket.binding
+      if (binding === "occupied" || t.scope.signal.aborted) return
+      if (!startupRetentionRan) {
+        startupRetentionRan = true
+        cleanupOldData(t.daemonCtx, { liveWindowMs: retentionConfig.liveWindowMs })
+        runRetention()
+      }
       return new Promise((resolve) => {
         if (t.scope.signal.aborted) {
           resolve()

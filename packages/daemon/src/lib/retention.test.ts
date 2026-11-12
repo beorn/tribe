@@ -18,6 +18,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { gunzipSync, gzipSync } from "node:zlib"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { createScope } from "tribe-wire"
 
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
@@ -25,6 +26,10 @@ import { sendMessage } from "./messaging.ts"
 import { resolveRetentionConfig, runRetentionSweep, type RetentionConfig } from "./retention.ts"
 import { handleToolCall, readAttentionProjection, type HandlerOpts } from "./handlers.ts"
 import { cleanupOldData } from "./session.ts"
+import { createBaseTribe } from "./compose/base.ts"
+import { withClientRegistry } from "./compose/with-client-registry.ts"
+import { withSocketServer } from "./compose/with-socket-server.ts"
+import { withRuntime } from "./compose/with-runtime.ts"
 
 const DAY = 24 * 60 * 60 * 1000
 
@@ -180,6 +185,60 @@ describe("journal retention sweep", () => {
     batchSize: 500,
     liveWindowMs: 7 * DAY,
     ...overrides,
+  })
+
+  // @failure Startup retention archives the journal before the socket binds,
+  // or the initial sweep replaces/duplicates the existing six-hour cadence.
+  // @level l2
+  // @consumer The daemon's real socket/runtime lifecycle and journal history.
+  it("33749: listens before initial retention and keeps one six-hour cleanup interval", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+    const { db, stmts } = setup()
+    const scope = createScope("retention-after-listen")
+    const ctx = makeContext(db, stmts)
+    const seed = () => {
+      const sent = sendMessage(ctx, "@chief", "retained startup history", "notify")
+      setMessageTs(db, sent.id, Date.now() - 20 * DAY)
+      return sent.id
+    }
+    const initial = seed()
+    let running: Promise<void> | undefined
+    try {
+      const registryShape = withClientRegistry()(createBaseTribe({ scope }))
+      const socketShape = withSocketServer()({
+        ...registryShape,
+        config: { socketPath: join(tmpDir, "runtime.sock"), inheritFd: null },
+        broadcast: { log: () => {} },
+      } as never)
+      const subject = withRuntime({
+        plugins: [],
+        buildPluginApi: () => ({}) as never,
+        publishActivePluginNames: () => {},
+        publishStopPlugins: () => {},
+        publishShutdown: () => {},
+      })({ ...socketShape, db, stmts, daemonCtx: ctx, recall: null } as never)
+      running = subject.run()
+
+      // The real listen callback has not run in this synchronous turn.
+      expect(liveIds(db)).toContain(initial)
+      await expect(socketShape.socket.binding).resolves.toBe("listening")
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(liveIds(db)).not.toContain(initial)
+      expect(archivedIds(db)).toContain(initial)
+      expect(vi.getTimerCount()).toBe(1)
+
+      const later = seed()
+      vi.advanceTimersByTime(6 * 60 * 60 * 1000 - 1)
+      expect(liveIds(db)).toContain(later)
+      vi.advanceTimersByTime(1)
+      expect(liveIds(db)).not.toContain(later)
+      expect(archivedIds(db)).toEqual([initial, later])
+    } finally {
+      await scope[Symbol.asyncDispose]()
+      await running
+      db.close()
+      vi.useRealTimers()
+    }
   })
 
   // -------------------------------------------------------------------
