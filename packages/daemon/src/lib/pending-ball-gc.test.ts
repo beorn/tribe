@@ -206,54 +206,58 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
 
   // 33650: an owner with no balls must not pay for another owner's traffic.
   // Existing result tests stayed green while one empty live read consumed 17 MB.
-  it("empty-owner pending read cost stays independent of unrelated traffic and receipts", () => {
-    const { db, stmts } = setup()
-    try {
-      const now = Date.now()
-      const ctx = makeContext(db, stmts, "@dev/empty")
-      insertBallMessage(stmts, { id: "unrelated", openedAt: now - 1_000 })
-      openBall(stmts, { id: "unrelated", recipient: "@agent/9", openedAt: now - 1_000 })
-      db.run("PRAGMA cache_size = 32")
-      const reads = () => {
-        const io = readFileSync("/proc/self/io", "utf8")
-        const field = /syscr:\s*(\d+)/.exec(io)
-        if (!field) throw new Error("/proc/self/io lacks syscr; pending read cost is unmeasured")
-        return Number(field[1])
-      }
-      const readEmpty = () => {
-        expect(parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts()))).toMatchObject({
-          owner: "@dev/empty",
-          count: 0,
-          pending: [],
-          expired: false,
-        })
-      }
-      const cost = () => {
-        readEmpty()
-        const before = reads()
-        for (let i = 0; i < 3; i++) readEmpty()
-        return (reads() - before) / 3
-      }
-      const lean = cost()
-      db.transaction(() => {
-        for (let i = 0; i < 2_000; i++) {
-          insertTaking(stmts, {
-            id: `unrelated-receipt-${i}`,
-            ballId: "unrelated",
-            owner: "@agent/9",
-            requester: "@chief",
-            ts: now,
+  // Syscall measurement needs Linux procfs; result and failure checks remain portable.
+  it.skipIf(process.platform !== "linux")(
+    "empty-owner pending read cost stays independent of unrelated traffic and receipts",
+    () => {
+      const { db, stmts } = setup()
+      try {
+        const now = Date.now()
+        const ctx = makeContext(db, stmts, "@dev/empty")
+        insertBallMessage(stmts, { id: "unrelated", openedAt: now - 1_000 })
+        openBall(stmts, { id: "unrelated", recipient: "@agent/9", openedAt: now - 1_000 })
+        db.run("PRAGMA cache_size = 32")
+        const reads = () => {
+          const io = readFileSync("/proc/self/io", "utf8")
+          const field = /syscr:\s*(\d+)/.exec(io)
+          if (!field) throw new Error("/proc/self/io lacks syscr; pending read cost is unmeasured")
+          return Number(field[1])
+        }
+        const readEmpty = () => {
+          expect(parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts()))).toMatchObject({
+            owner: "@dev/empty",
+            count: 0,
+            pending: [],
+            expired: false,
           })
         }
-      })()
-      const busy = cost()
-      expect(busy, `read syscalls: empty owner ${lean}, with unrelated traffic ${busy}`).toBeLessThan(
-        Math.max(lean, 1) * 1.5,
-      )
-    } finally {
-      db.close()
-    }
-  })
+        const cost = () => {
+          readEmpty()
+          const before = reads()
+          for (let i = 0; i < 3; i++) readEmpty()
+          return (reads() - before) / 3
+        }
+        const lean = cost()
+        db.transaction(() => {
+          for (let i = 0; i < 2_000; i++) {
+            insertTaking(stmts, {
+              id: `unrelated-receipt-${i}`,
+              ballId: "unrelated",
+              owner: "@agent/9",
+              requester: "@chief",
+              ts: now,
+            })
+          }
+        })()
+        const busy = cost()
+        expect(busy, `read syscalls: empty owner ${lean}, with unrelated traffic ${busy}`).toBeLessThan(
+          Math.max(lean, 1) * 1.5,
+        )
+      } finally {
+        db.close()
+      }
+    },
+  )
 
   // AC1/AC4: full pending must expose absence and zero without letting timestamps
   // replace sequence, or unrelated status/reply messages manufacture attendance.
