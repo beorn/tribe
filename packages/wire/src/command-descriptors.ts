@@ -991,6 +991,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             description:
               "Additional exact session names to observe, including disconnected names; unknown names are reported separately. Connected sessions remain included.",
           },
+          unread_sessions: {
+            type: "array",
+            items: { type: "string", minLength: 1 },
+            description:
+              "Optional exact names for unread counts only, independent of sessions. Omit for global unread; [] requests no unread counts. Pending-ball custody remains global.",
+          },
         },
       },
       outputSchema: OBJ(
@@ -1020,6 +1026,15 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "array",
             description: "Actionable direct-message counts per recipient.",
             items: { type: "object", additionalProperties: true },
+          },
+          unread_scope: {
+            type: "object",
+            description: "Present only for explicit unread_sessions; omitted names have not been counted.",
+            required: ["kind", "names"],
+            properties: {
+              kind: { type: "string", enum: ["sessions"] },
+              names: { type: "array", items: { type: "string" } },
+            },
           },
           pending_balls: { type: "object", description: "Bounded active-ball summary.", additionalProperties: true },
           cadence: {

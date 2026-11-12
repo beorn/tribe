@@ -32,10 +32,12 @@ import { assertSingleStatement } from "@bearly/sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import type { Database } from "bun:sqlite"
 
 import { projectHealthCadence } from "./health-cadence.ts"
+import { createTribeContext } from "./context.ts"
+import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 
 import {
   ATTENTION_PREDICATE_SQL,
@@ -189,6 +191,8 @@ function plan(db: Database, sql: string, params: Record<string, string | number>
 }
 
 afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
   for (const entry of open.splice(0)) {
     entry.db.close()
     rmSync(entry.dir, { recursive: true, force: true })
@@ -243,6 +247,31 @@ describe("health projection reads the archive through an index", () => {
   it("keeps fleet unread equal to the old grouped query across mailbox and tracked attention", () => {
     const { db } = fixture()
     const stmts = createStatements(db)
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(NOW)
+    const ctx = createTribeContext({
+      db,
+      stmts,
+      sessionId: "health-reader",
+      sessionRole: "member",
+      initialName: "health-reader",
+      domains: [],
+      claudeSessionId: null,
+      claudeSessionName: null,
+    })
+    const opts: HandlerOpts = {
+      cleanup: () => undefined,
+      userRenamed: false,
+      setUserRenamed: () => undefined,
+      getActiveSessionIds: () => new Set(),
+      hasActiveTransport: () => false,
+      getActiveSessionInfo: () => [],
+    }
+    const health = (args: Record<string, unknown>) => {
+      const result = handleToolCall(ctx, "tribe.health", args, opts)
+      const text = (result as { content: Array<{ text: string }> }).content[0]!.text
+      return JSON.parse(text) as Record<string, unknown>
+    }
     db.exec(
       assertSingleStatement(`
       INSERT INTO messages (rowid, id, type, sender, recipient, content, ts, kind, request, reply, ref, attention_required, is_incident) VALUES
@@ -298,10 +327,58 @@ describe("health projection reads the archive through an index", () => {
     for (const row of actual) {
       expect(stmts.getUnreadDms.get({ $name: row.recipient })).toMatchObject({ count: row.count })
     }
-    db.exec("DELETE FROM mailbox_cursors WHERE recipient IN ('beta', 'response-owner')")
+    // 33650: scope is explicit and independent of backlog's `sessions` option.
+    // Reuse the oracle fixture so tracked/direct overlap, archive, broadcast,
+    // cursor retirement, TAKING and self-send cannot diverge at the API boundary.
+    const assertUnreadScopes = () => {
+      const oracle = sort(db.prepare(assertSingleStatement(OLD_FLEET_UNREAD_SQL)).all() as typeof actual)
+      const legacy = health({})
+      expect(sort(legacy.unread as typeof actual)).toEqual(oracle)
+      expect(legacy).not.toHaveProperty("unread_scope")
+      expect(sort(health({ sessions: ["alpha"] }).unread as typeof actual)).toEqual(oracle)
+      for (const names of [
+        [],
+        [
+          "alpha",
+          "alpha",
+          "archive-owner",
+          "gamma",
+          "beta",
+          "delta",
+          "epsilon",
+          "response-owner",
+          "incident-owner",
+          "self-owner",
+          "unknown",
+        ],
+        ["unknown"],
+        ["alpha"],
+      ]) {
+        const scoped = health({ unread_sessions: names })
+        expect(sort(scoped.unread as typeof actual)).toEqual(oracle.filter((row) => names.includes(row.recipient)))
+        expect(scoped).toEqual({
+          ...legacy,
+          unread: scoped.unread,
+          unread_scope: { kind: "sessions", names: [...new Set(names)] },
+        })
+      }
+    }
+    assertUnreadScopes()
+    db.exec("DELETE FROM mailbox_cursors WHERE recipient IN ('alpha', 'beta', 'response-owner')")
     expect(sort(stmts.getAllUnreadDms.all() as typeof actual)).toEqual(
       sort(db.prepare(assertSingleStatement(OLD_FLEET_UNREAD_SQL)).all() as typeof actual),
     )
+    assertUnreadScopes()
+    // An explicit empty scope has no unread work, even if those queries cannot run.
+    const unavailable = () => {
+      throw new Error("unread query must not run for an empty scope")
+    }
+    vi.spyOn(stmts.getAllUnreadDms, "all").mockImplementation(unavailable)
+    vi.spyOn(stmts.getUnreadDms, "get").mockImplementation(unavailable)
+    expect(health({ unread_sessions: [] })).toMatchObject({
+      unread: [],
+      unread_scope: { kind: "sessions", names: [] },
+    })
   })
 
   it("seeks taking receipts for open balls in both retention tiers without scanning receipts", () => {

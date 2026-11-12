@@ -4360,6 +4360,14 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
   ) {
     throw new Error("tribe.health sessions must be an array of nonempty exact session names")
   }
+  if (
+    a.unread_sessions !== undefined &&
+    (!Array.isArray(a.unread_sessions) ||
+      a.unread_sessions.some((name) => typeof name !== "string" || name.trim().length === 0))
+  ) {
+    throw new Error("tribe.health unread_sessions must be an array of nonempty exact session names")
+  }
+  const unreadNames = a.unread_sessions === undefined ? undefined : [...new Set(a.unread_sessions as string[])]
   const now = Date.now()
   const silentThreshold = now - 300_000 // 5 minutes
 
@@ -4459,7 +4467,13 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
   // Default-wake/stop-line count is the same projection inbox status/fetch use:
   // unread direct actionables plus untaken tracked direct/broadcast actionables.
   // Pending-only incidents remain visible below without inflating this count.
-  const unread = ctx.stmts.getAllUnreadDms.all() as Array<{ recipient: string; count: number }>
+  const unread =
+    unreadNames === undefined
+      ? (ctx.stmts.getAllUnreadDms.all() as Array<{ recipient: string; count: number }>)
+      : unreadNames.flatMap((recipient) => {
+          const { count } = ctx.stmts.getUnreadDms.get({ $name: recipient }) as { count: number }
+          return count > 0 ? [{ recipient, count }] : []
+        })
 
   // 20876 / 17199: fleet-wide open-ball attention is derived from the one
   // existing pending_request authority. A per-owner sample can be empty while
@@ -4542,6 +4556,7 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
   const result: Record<string, unknown> = {
     members,
     unread,
+    ...(unreadNames === undefined ? {} : { unread_scope: { kind: "sessions", names: unreadNames } }),
     pending_balls: {
       count: pending.length,
       owner_count: pendingOwners.length,
