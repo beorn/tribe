@@ -225,12 +225,13 @@ describe("20876 Tribe health cadence", () => {
         sender: "@chief",
         recipient: name,
         ts: now - HOUR,
+        attentionRequired: 1,
       })
       db.prepare(`
         INSERT INTO messages_archive (
-          seq, id, type, sender, recipient, kind, content, ts, delivery, archived_at
+          seq, id, type, sender, recipient, kind, content, ts, delivery, archived_at, attention_required
         ) VALUES (
-          $seq, $id, 'response', '@chief', $recipient, 'direct', $id, $ts, 'pull', $now
+          $seq, $id, 'response', '@chief', $recipient, 'direct', $id, $ts, 'pull', $now, 1
         )
       `).run({
         $seq: 2000 + index,
@@ -263,7 +264,10 @@ describe("20876 Tribe health cadence", () => {
       expect(result).toHaveProperty("inbox_lag_excluded", expectedExclusion)
       expect(result.warnings.some((warning) => warning.includes(emitter))).toBe(false)
       for (const name of [agent, reader]) {
-        expect(result.inbox_lag.find((row) => row.session === name)).toMatchObject({ actionable_rows: 2 })
+        expect(result.inbox_lag.find((row) => row.session === name)).toMatchObject({
+          actionable_rows: 2,
+          waking_rows: 0,
+        })
         expect(result.warnings.some((warning) => warning.includes(name))).toBe(true)
       }
       if (options.requestedSessionNames !== undefined) {
