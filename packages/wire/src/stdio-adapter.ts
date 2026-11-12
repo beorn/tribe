@@ -126,7 +126,7 @@ const hostedWakeArgv = (() => {
   try {
     const value: unknown = JSON.parse(raw)
     if (Array.isArray(value) && value.length > 0 && value.every((part) => typeof part === "string" && part.trim().length > 0)) {
-      return value as string[]
+      return value as [string, ...string[]]
     }
   } catch {
     // Invalid optional configuration is diagnosed below; the MCP adapter remains usable.
@@ -155,7 +155,7 @@ function wakeHostedSeat(row: NonNullable<TribeFetchResult["events"]>[number]): v
     process.stderr.write(`tribe hosted wake: ${myName} message ${id} failed: ${cause}\n`)
   }
   try {
-    const wake = spawnHostedWake(hostedWakeArgv[0]!, [...hostedWakeArgv.slice(1), "--input", id, myName, "--", wakeReadDirective(id)], {
+    const wake = spawnHostedWake(hostedWakeArgv[0], [...hostedWakeArgv.slice(1), "--input", id, myName, "--", wakeReadDirective(id)], {
       env,
       stdio: ["ignore", "ignore", "pipe"],
       timeout: HOSTED_WAKE_TIMEOUT_MS,
