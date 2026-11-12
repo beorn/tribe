@@ -122,7 +122,7 @@ type OneShotRpcOutcome = { result: unknown } | { error: { code: number; message:
 const MANAGED_PENDING_TOKEN = launchToken("sid-dev2", "@dev/2")
 
 async function runManagedPendingCliAgainst(
-  outcomeFor: (request: OneShotRpcRequest) => OneShotRpcOutcome | undefined,
+  outcomeFor: (request: OneShotRpcRequest) => OneShotRpcOutcome | undefined | Promise<OneShotRpcOutcome | undefined>,
   options: { args?: string[]; token?: string; timeoutMs?: number } = {},
 ): Promise<{
   result: Awaited<ReturnType<typeof runCliAsync>>
@@ -134,7 +134,7 @@ async function runManagedPendingCliAgainst(
   let serviceRegistration: Record<string, unknown> | undefined
   const server = createServer((socket) => {
     let buffer = ""
-    socket.on("data", (chunk) => {
+    socket.on("data", async (chunk) => {
       buffer += chunk.toString("utf8")
       for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
         const request = JSON.parse(buffer.slice(0, newline)) as OneShotRpcRequest
@@ -173,8 +173,8 @@ async function runManagedPendingCliAgainst(
               ],
             },
           }
-        } else outcome = outcomeFor(request)
-        if (outcome === undefined) continue // Deliberately unanswered business request.
+        } else outcome = await outcomeFor(request)
+        if (outcome === undefined || socket.destroyed) continue // Unanswered request, or caller left during readiness.
         socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, ...outcome })}\n`)
       }
     })
@@ -898,6 +898,53 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     },
     90_000,
   )
+
+  /** @failure Startup lasting longer than the old protocol timeout must not kill an installed idle wait (33732).
+   * @level l1
+   * @consumer inbox-wait CLI callers; the existing isolated socket delays the real cli_protocol response.
+   */
+  it("recovers an initial cli_protocol handshake delayed past 10s within startup readiness", async () => {
+    let protocolReadyAt: number | undefined
+    const { result, calls } = await runManagedPendingCliAgainst(
+      async (request) => {
+        if (request.method === "cli_protocol") {
+          // All connections share the same readiness time: a reconnect must not make the fixture ready early.
+          protocolReadyAt ??= performance.now() + 12_000
+          const remainingMs = Math.max(0, protocolReadyAt - performance.now())
+          if (remainingMs > 0) await new Promise<void>((resolveReady) => setTimeout(resolveReady, remainingMs))
+          return { result: { protocol_version: TRIBE_PROTOCOL_VERSION } }
+        }
+        if (request.method !== "cli_inbox_wait_by_launch_v1") {
+          return { error: { code: -32601, message: `unexpected method ${request.method}` } }
+        }
+        return {
+          result: {
+            status: "woken",
+            session: "@dev/2",
+            unread_count: 0,
+            oldest_unread_age_min: 0,
+            oldest_unread_ts: 0,
+            waited_ms: 0,
+            effective_timeout_ms: request.params?.timeout_ms ?? 0,
+            timed_out: false,
+            aborted: false,
+            baseline_seq: 37,
+            attention: {
+              actionable_unread: [],
+              pending_balls: [],
+              pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
+            },
+          },
+        }
+      },
+      { args: ["inbox-wait", "--timeout", "30s", "--json"], timeoutMs: 45_000 },
+    )
+
+    expect(result.signal).toBeNull()
+    expect(result.code, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: "woken", timed_out: false })
+    expect(calls.find((call) => call.method === "cli_inbox_wait_by_launch_v1")?.params?.timeout_ms).toBe(0)
+  }, 60_000)
 
   it("fails loudly by the client deadline when the inbox-wait daemon stays silent", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-silent-"))
