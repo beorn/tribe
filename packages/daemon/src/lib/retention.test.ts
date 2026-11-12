@@ -188,10 +188,11 @@ describe("journal retention sweep", () => {
   })
 
   // @failure Startup retention archives the journal before the socket binds,
-  // or the initial sweep replaces/duplicates the existing six-hour cadence.
+  // the initial sweep replaces/duplicates the existing six-hour cadence,
+  // or a failed bind escapes run() before the daemon's own handler disposes it.
   // @level l2
   // @consumer The daemon's real socket/runtime lifecycle and journal history.
-  it("33749: listens before initial retention and keeps one six-hour cleanup interval", async () => {
+  it.each(["listening", "failed"] as const)("33749: %s startup preserves retention lifecycle", async (binding) => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
     const { db, stmts } = setup()
     const scope = createScope("retention-after-listen")
@@ -202,12 +203,15 @@ describe("journal retention sweep", () => {
       return sent.id
     }
     const initial = seed()
-    let running: Promise<void> | undefined
+    let runSettled: Promise<"resolved" | "rejected"> | undefined
     try {
       const registryShape = withClientRegistry()(createBaseTribe({ scope }))
       const socketShape = withSocketServer()({
         ...registryShape,
-        config: { socketPath: join(tmpDir, "runtime.sock"), inheritFd: null },
+        config: {
+          socketPath: binding === "failed" ? join(tmpDir, "missing", "runtime.sock") : join(tmpDir, "runtime.sock"),
+          inheritFd: null,
+        },
         broadcast: { log: () => {} },
       } as never)
       const subject = withRuntime({
@@ -217,7 +221,20 @@ describe("journal retention sweep", () => {
         publishStopPlugins: () => {},
         publishShutdown: () => {},
       })({ ...socketShape, db, stmts, daemonCtx: ctx, recall: null } as never)
-      running = subject.run()
+      runSettled = subject.run().then(
+        () => "resolved" as const,
+        () => "rejected" as const,
+      )
+
+      if (binding === "failed") {
+        // The real socket fails with ENOENT; daemon-run owns its diagnostic,
+        // root-scope disposal and exit. Runtime must not race that handler.
+        await expect(socketShape.socket.binding).rejects.toMatchObject({ code: "ENOENT" })
+        expect(await runSettled).toBe("resolved")
+        expect(liveIds(db)).toContain(initial)
+        expect(archivedIds(db)).not.toContain(initial)
+        return
+      }
 
       // The real listen callback has not run in this synchronous turn.
       expect(liveIds(db)).toContain(initial)
@@ -235,7 +252,7 @@ describe("journal retention sweep", () => {
       expect(archivedIds(db)).toEqual([initial, later])
     } finally {
       await scope[Symbol.asyncDispose]()
-      await running
+      await runSettled
       db.close()
       vi.useRealTimers()
     }

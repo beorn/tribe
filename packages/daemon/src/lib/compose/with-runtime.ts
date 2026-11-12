@@ -343,8 +343,10 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
 
     let startupRetentionRan = false
     async function run(): Promise<void> {
-      const binding = await t.socket.binding
-      if (binding === "occupied" || t.scope.signal.aborted) return
+      // daemon-run owns bind-error reporting, scope disposal and exit. Do not
+      // reject its top-level run() while that handler is still disposing.
+      const binding = await t.socket.binding.catch(() => "failed" as const)
+      if (binding !== "listening" || t.scope.signal.aborted) return
       if (!startupRetentionRan) {
         startupRetentionRan = true
         cleanupOldData(t.daemonCtx, { liveWindowMs: retentionConfig.liveWindowMs })
