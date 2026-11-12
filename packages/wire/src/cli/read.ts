@@ -307,7 +307,7 @@ type InboxWaitCall = (args: {
   timeoutMs: number
   wakeOnCorrelatedReply: boolean
   afterSeq?: number
-  readiness?: { controller: InboxWaitGapController; rememberBaseline: (sequence: number) => void }
+  readiness?: { controller: InboxWaitGapController; rememberBaseline: (sequence: number) => void; lastError: unknown }
 }) => Promise<InboxWaitChunkResult>
 
 type InboxWaitChunkResult = InboxWaitResult & {
@@ -2526,7 +2526,15 @@ export async function waitForInboxWithReconnect(opts: {
         ...(afterSeq === undefined ? {} : { afterSeq }),
         ...(opts.readinessBudgetMs === undefined
           ? {}
-          : { readiness: { controller: gap, rememberBaseline: (sequence: number) => { afterSeq = sequence } } }),
+          : {
+              readiness: {
+                controller: gap,
+                lastError: lastRetryableError,
+                rememberBaseline: (sequence: number) => {
+                  afterSeq = sequence
+                },
+              },
+            }),
       })
       if (Number.isSafeInteger(result.baseline_seq) && Number(result.baseline_seq) >= 0) {
         afterSeq = Number(result.baseline_seq)
@@ -2581,29 +2589,48 @@ async function callInboxWaitChunk(
   const readinessFailure = (cause: unknown): Error => {
     const span = gap?.readiness
     const detail = (cause instanceof Error ? cause.message : String(cause)).replace(/\s+/g, " ")
-    return Object.assign(new Error(
-      `inbox wait readiness failed: phase=${phase}, elapsed=${Math.round(span?.elapsedMs ?? 0)}ms, ` +
-      `socket=${socketPath}, cause=${detail}, budget=${span?.budgetMs ?? 0}ms`, { cause },
-    ), { code: INBOX_WAIT_READINESS_TIMEOUT })
+    return Object.assign(
+      new Error(
+        `inbox wait readiness failed: phase=${phase}, elapsed=${Math.round(span?.elapsedMs ?? 0)}ms, ` +
+          `socket=${socketPath}, cause=${detail}, budget=${span?.budgetMs ?? 0}ms`,
+        { cause },
+      ),
+      { code: INBOX_WAIT_READINESS_TIMEOUT },
+    )
   }
   const remainingReadinessMs = (): number => {
     const span = gap?.readiness
     if (span === null || span === undefined) return callTimeoutMs
-    if (span.remainingMs <= 0) throw readinessFailure(new Error("remaining readiness or logical wait allowance exhausted"))
+    if (span.remainingMs <= 0) {
+      throw readinessFailure(
+        readiness?.lastError ?? new Error("remaining readiness or logical wait allowance exhausted"),
+      )
+    }
     return Math.ceil(span.remainingMs)
   }
   try {
     const connectedClient = await connectToDaemon(socketPath, { callTimeoutMs: remainingReadinessMs() })
     client = connectedClient
     phase = "cli_protocol"
-    await assertInboxWaitProtocol(connectedClient, gap === undefined ? deriveInboxWaitCallTimeoutMs(0) : remainingReadinessMs())
-    const waitChunk = async (waitMs: number, baseline: number | undefined, rpcTimeoutMs: number): Promise<InboxWaitChunkResult> => {
-      const raw = await connectedClient.call(method, {
-        ...target,
-        timeout_ms: waitMs,
-        ...(wakeOnCorrelatedReply ? { wake_on_correlated_reply: true } : {}),
-        ...(baseline === undefined ? {} : { after_seq: baseline }),
-      }, { timeoutMs: rpcTimeoutMs })
+    await assertInboxWaitProtocol(
+      connectedClient,
+      gap === undefined ? deriveInboxWaitCallTimeoutMs(0) : remainingReadinessMs(),
+    )
+    const waitChunk = async (
+      waitMs: number,
+      baseline: number | undefined,
+      rpcTimeoutMs: number,
+    ): Promise<InboxWaitChunkResult> => {
+      const raw = await connectedClient.call(
+        method,
+        {
+          ...target,
+          timeout_ms: waitMs,
+          ...(wakeOnCorrelatedReply ? { wake_on_correlated_reply: true } : {}),
+          ...(baseline === undefined ? {} : { after_seq: baseline }),
+        },
+        { timeoutMs: rpcTimeoutMs },
+      )
       const parsed = parseInboxWaitResult(raw)
       const baselineSeq = (raw as { baseline_seq?: unknown }).baseline_seq
       if (!Number.isSafeInteger(baselineSeq) || Number(baselineSeq) < 0) {

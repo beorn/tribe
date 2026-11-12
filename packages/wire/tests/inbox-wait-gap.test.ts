@@ -47,6 +47,22 @@ describe("InboxWaitGapController", () => {
     expect(gap.readiness).toMatchObject({ startedAtMs: 60_000, remainingMs: 25_000 })
     now = 85_000
     expect(terminal(gap.afterError(coded("ECONNRESET")))).toMatchObject({ reason: "readiness-budget" })
+
+    // Even a zero logical wait gets its first authoritative probe after an initial socket gap.
+    now = 0
+    const zero = new InboxWaitGapController({
+      deadlineMs: 0,
+      monotonicNow: () => now,
+      backoff: { kind: "fixed", intervalMs: 250 },
+      readinessBudgetMs: 25_000,
+    })
+    expect(zero.beforeCall()).toEqual({ proceed: true, remainingMs: 0 })
+    zero.beginReadiness()
+    now = 6_000
+    expect(sleepMs(zero.afterError(coded("ENOENT")))).toBe(250)
+    expect(zero.beforeCall()).toEqual({ proceed: true, remainingMs: 0 })
+    zero.afterSuccess()
+    expect(zero.beforeCall()).toEqual({ proceed: false, reason: "deadline" })
   })
 
   it("proceeds on the first call even with no time left, then stops at the deadline (slack 0)", () => {

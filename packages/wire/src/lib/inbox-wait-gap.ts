@@ -127,12 +127,15 @@ export class InboxWaitGapController {
   }
 
   /**
-   * The pre-call deadline gate. The first call always proceeds, even with no
-   * time left, so a caller never skips its one authoritative attempt.
+   * The pre-call deadline gate. The first authoritative attempt always proceeds,
+   * including bounded readiness retries, even with no logical time left.
    */
   beforeCall(): { proceed: true; remainingMs: number } | { proceed: false; reason: "deadline" } {
     const remainingMs = Math.max(0, this.deadlineMs - this.monotonicNow())
-    if (this.attempted && remainingMs <= this.deadlineSlackMs) return { proceed: false, reason: "deadline" }
+    const awaitingFirstReply = this.readinessStartedAtMs !== null && !this.hasEverSucceeded
+    if (this.attempted && remainingMs <= this.deadlineSlackMs && !awaitingFirstReply) {
+      return { proceed: false, reason: "deadline" }
+    }
     this.attempted = true
     return { proceed: true, remainingMs }
   }
@@ -184,7 +187,11 @@ export class InboxWaitGapController {
       }
     }
 
-    const remainingMs = Math.max(0, this.deadlineMs - now)
+    // The first authoritative attempt includes its bounded connect/probe retries, even for timeout=0.
+    const remainingMs =
+      this.readinessStartedAtMs !== null && !this.hasEverSucceeded
+        ? Number.POSITIVE_INFINITY
+        : Math.max(0, this.deadlineMs - now)
     if (remainingMs <= this.deadlineSlackMs) return this.terminal("deadline", kind, err, gapAgeMs, attempts)
     const readiness = this.readiness
     if (readiness !== null && readiness.remainingMs <= 0) {
@@ -194,7 +201,11 @@ export class InboxWaitGapController {
       return this.terminal("gap-budget", kind, err, gapAgeMs, attempts)
     }
 
-    return { action: "sleep", ms: Math.min(backoffMs, remainingMs, readiness?.remainingMs ?? Number.POSITIVE_INFINITY), kind }
+    return {
+      action: "sleep",
+      ms: Math.min(backoffMs, remainingMs, readiness?.remainingMs ?? Number.POSITIVE_INFINITY),
+      kind,
+    }
   }
 
   private terminal(

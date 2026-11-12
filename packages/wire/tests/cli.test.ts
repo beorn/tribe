@@ -122,7 +122,10 @@ type OneShotRpcOutcome = { result: unknown } | { error: { code: number; message:
 const MANAGED_PENDING_TOKEN = launchToken("sid-dev2", "@dev/2")
 
 async function runManagedPendingCliAgainst(
-  outcomeFor: (request: OneShotRpcRequest, socket: Socket) => OneShotRpcOutcome | undefined | Promise<OneShotRpcOutcome | undefined>,
+  outcomeFor: (
+    request: OneShotRpcRequest,
+    socket: Socket,
+  ) => OneShotRpcOutcome | undefined | Promise<OneShotRpcOutcome | undefined>,
   options: { args?: string[]; token?: string; timeoutMs?: number } = {},
 ): Promise<{
   result: Awaited<ReturnType<typeof runCliAsync>>
@@ -131,16 +134,17 @@ async function runManagedPendingCliAgainst(
   const dir = mkdtempSync(join(tmpdir(), "tribe-wire-pending-response-"))
   const socketPath = join(dir, "tribe.sock")
   const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+  const handlerFailure: { error?: unknown } = {}
   let serviceRegistration: Record<string, unknown> | undefined
   const server = createServer((socket) => {
     let buffer = ""
-    socket.on("data", async (chunk) => {
+    socket.on("data", (chunk) => {
       buffer += chunk.toString("utf8")
       for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
         const request = JSON.parse(buffer.slice(0, newline)) as OneShotRpcRequest
         buffer = buffer.slice(newline + 1)
         calls.push({ method: request.method, params: request.params })
-        let outcome: OneShotRpcOutcome | undefined
+        let outcome: OneShotRpcOutcome | undefined | Promise<OneShotRpcOutcome | undefined>
         if (options.token !== undefined && request.method === "register") {
           serviceRegistration = request.params
           outcome = {
@@ -173,9 +177,16 @@ async function runManagedPendingCliAgainst(
               ],
             },
           }
-        } else outcome = await outcomeFor(request, socket)
-        if (outcome === undefined || socket.destroyed) continue // Unanswered request, or caller left during readiness.
-        socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, ...outcome })}\n`)
+        } else outcome = outcomeFor(request, socket)
+        void Promise.resolve(outcome)
+          .then((reply) => {
+            if (reply === undefined || socket.destroyed) return // Unanswered request, or caller left during readiness.
+            socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, ...reply })}\n`)
+          })
+          .catch((error: unknown) => {
+            handlerFailure.error = error
+            socket.destroy()
+          })
       }
     })
   })
@@ -198,6 +209,7 @@ async function runManagedPendingCliAgainst(
       },
       { timeoutMs: options.timeoutMs },
     )
+    if ("error" in handlerFailure) throw handlerFailure.error
     return { result, calls }
   } finally {
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
@@ -870,7 +882,10 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
             },
           }
         },
-        { args: ["inbox-wait", "--timeout", mode === "disconnected-handshake" ? "60s" : "40s", "--json"], timeoutMs: 90_000 },
+        {
+          args: ["inbox-wait", "--timeout", mode === "disconnected-handshake" ? "60s" : "40s", "--json"],
+          timeoutMs: 90_000,
+        },
       )
 
       expect(result.signal).toBeNull()
@@ -889,7 +904,9 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       } else {
         expect(result.code).toBe(1)
         expect(result.stdout).toBe("")
-        expect(result.stderr).toMatch(/cli_inbox_wait_by_launch_v1.*timed out|remaining readiness or logical wait allowance exhausted/)
+        expect(result.stderr).toMatch(
+          /cli_inbox_wait_by_launch_v1.*timed out|remaining readiness or logical wait allowance exhausted/,
+        )
       }
       const waits = calls.filter((call) => call.method === "cli_inbox_wait_by_launch_v1")
       const business = waits.filter((call) => call.params?.timeout_ms !== 0)
@@ -957,67 +974,80 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(calls.find((call) => call.method === "cli_inbox_wait_by_launch_v1")?.params?.timeout_ms).toBe(0)
   }, 60_000)
 
-  it("fails loudly by the client deadline when the inbox-wait daemon stays silent", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-silent-"))
-    const socketPath = join(dir, "tribe.sock")
-    const sockets = new Set<Socket>()
-    let resolveConnected!: (timestamp: number) => void
-    const connected = new Promise<number>((resolve) => {
-      resolveConnected = resolve
-    })
-    const server = createServer((socket) => {
-      sockets.add(socket)
-      resolveConnected(Date.now())
-      socket.on("close", () => sockets.delete(socket))
-      socket.on("data", () => undefined)
-    })
-
-    try {
-      await new Promise<void>((resolveListen, rejectListen) => {
-        server.once("error", rejectListen)
-        server.listen(socketPath, () => {
-          server.off("error", rejectListen)
-          resolveListen()
-        })
+  // The absent socket exercises retry/backoff exhaustion; silence exercises an in-flight protocol deadline.
+  it.each(["silent", "absent"])(
+    "fails loudly by the readiness deadline when the inbox-wait daemon is %s",
+    async (mode) => {
+      const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-silent-"))
+      const socketPath = join(dir, "tribe.sock")
+      const sockets = new Set<Socket>()
+      let resolveConnected!: (timestamp: number) => void
+      const connected = new Promise<number>((resolve) => {
+        resolveConnected = resolve
       })
-      const childRun = runCliAsync(
-        ["inbox-wait", "--session", "@chief", "--timeout", "0s", "--json"],
-        {
-          ...process.env,
-          BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(dir, "bun-transpiler-cache"),
-          TRIBE_SOCKET: socketPath,
-          TRIBE_NO_AUTOSTART: "1",
-        },
-        { timeoutMs: 45_000 },
-      )
-      const readiness = await Promise.race([
-        connected.then((connectedAt) => ({ kind: "connected" as const, connectedAt })),
-        childRun.then((result) => ({ kind: "exited" as const, result })),
-      ])
-      if (readiness.kind === "exited") {
-        throw new Error(`inbox-wait child exited before connecting: ${readiness.result.stderr}`)
-      }
-      const { connectedAt } = readiness
-      const result = await childRun
-      const deadlineElapsedMs = Date.now() - connectedAt
+      const server = createServer((socket) => {
+        sockets.add(socket)
+        resolveConnected(Date.now())
+        socket.on("close", () => sockets.delete(socket))
+        socket.on("data", () => undefined)
+      })
 
-      expect(result.signal).toBeNull()
-      expect(result.code).not.toBe(0)
-      expect(result.stderr).toMatch(/Request cli_protocol timed out/)
-      expect(result.stdout).toBe("")
-      expect(result.stderr).toContain("inbox wait readiness failed: phase=cli_protocol")
-      expect(result.stderr).toContain(`socket=${socketPath}`)
-      expect(result.stderr).toContain("budget=25000ms")
-      expect(result.stderr).toMatch(/elapsed=\d+ms/)
-      expect(result.stderr.trim().split("\n")).toHaveLength(1)
-      expect(deadlineElapsedMs).toBeGreaterThanOrEqual(24_000)
-      expect(deadlineElapsedMs).toBeLessThan(35_000)
-    } finally {
-      for (const socket of sockets) socket.destroy()
-      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
-      rmSync(dir, { recursive: true, force: true })
-    }
-  }, 60_000)
+      try {
+        if (mode === "silent") {
+          await new Promise<void>((resolveListen, rejectListen) => {
+            server.once("error", rejectListen)
+            server.listen(socketPath, () => {
+              server.off("error", rejectListen)
+              resolveListen()
+            })
+          })
+        }
+        const startedAt = Date.now()
+        const childRun = runCliAsync(
+          ["inbox-wait", "--session", "@chief", "--timeout", "0s", "--json"],
+          {
+            ...process.env,
+            BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(dir, "bun-transpiler-cache"),
+            TRIBE_SOCKET: socketPath,
+            TRIBE_NO_AUTOSTART: "1",
+          },
+          { timeoutMs: 45_000 },
+        )
+        const readiness =
+          mode === "absent"
+            ? { kind: "connected" as const, connectedAt: startedAt }
+            : await Promise.race([
+                connected.then((connectedAt) => ({ kind: "connected" as const, connectedAt })),
+                childRun.then((result) => ({ kind: "exited" as const, result })),
+              ])
+        if (readiness.kind === "exited") {
+          throw new Error(`inbox-wait child exited before connecting: ${readiness.result.stderr}`)
+        }
+        const { connectedAt } = readiness
+        const result = await childRun
+        const deadlineElapsedMs = Date.now() - connectedAt
+
+        expect(result.signal).toBeNull()
+        expect(result.code).not.toBe(0)
+        expect(result.stderr).toMatch(mode === "silent" ? /Request cli_protocol timed out/ : /ENOENT/)
+        expect(result.stdout).toBe("")
+        expect(result.stderr).toContain(
+          `inbox wait readiness failed: phase=${mode === "silent" ? "cli_protocol" : "connect"}`,
+        )
+        expect(result.stderr).toContain(`socket=${socketPath}`)
+        expect(result.stderr).toContain("budget=25000ms")
+        expect(result.stderr).toMatch(/elapsed=\d+ms/)
+        expect(result.stderr.trim().split("\n")).toHaveLength(1)
+        expect(deadlineElapsedMs).toBeGreaterThanOrEqual(24_000)
+        expect(deadlineElapsedMs).toBeLessThan(35_000)
+      } finally {
+        for (const socket of sockets) socket.destroy()
+        if (server.listening) await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    60_000,
+  )
 
   it("health --json measures an ABSENT socket now, not after the 28674 restart-retry window", () => {
     // 28674 gave connectToDaemon a bounded retry (CONNECT_RETRY_WINDOW_MS, 6000 ms) so a CLIENT call rides out a
@@ -2747,14 +2777,14 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
             request.method === "cli_protocol"
               ? { protocol_version: TRIBE_PROTOCOL_VERSION }
               : {
-                  status: "woken",
+                  status: request.params?.timeout_ms === 0 && timeoutMs > 0 ? "timeout" : "woken",
                   session: "@chief",
                   unread_count: 1,
                   oldest_unread_age_min: 0,
                   oldest_unread_ts: 1,
                   waited_ms: 0,
                   effective_timeout_ms: timeoutMs,
-                  timed_out: false,
+                  timed_out: request.params?.timeout_ms === 0 && timeoutMs > 0,
                   aborted: false,
                   baseline_seq: 0,
                   attention: {
@@ -2770,7 +2800,9 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       // The reconnect loop sends at most 30s per RPC and subtracts elapsed
       // time. Its public effective budget stays exact.
       expect((JSON.parse(result.stdout) as { effective_timeout_ms: number }).effective_timeout_ms).toBe(timeoutMs)
-      const sentTimeout = calls.find((call) => call.method === "cli_inbox_wait")?.params?.timeout_ms as number
+      const waitCalls = calls.filter((call) => call.method === "cli_inbox_wait")
+      expect(waitCalls[0]?.params?.timeout_ms).toBe(0)
+      const sentTimeout = waitCalls.at(-1)?.params?.timeout_ms as number
       const chunkMs = Math.min(timeoutMs, 30_000)
       expect(sentTimeout).toBeLessThanOrEqual(chunkMs)
       expect(sentTimeout).toBeGreaterThanOrEqual(Math.max(0, chunkMs - 1_000))
