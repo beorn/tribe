@@ -55,6 +55,13 @@ import { fileURLToPath } from "node:url"
 import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
 import { isIdentityTokenMissingRefusal } from "./lib/identity-token-missing-refusal.ts"
 import { TRIBE_NAME_ENV, TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE_ENV } from "./lib/session-identity-env.ts"
+import { AG_HOST_LAUNCH_GENERATION_ENV } from "./lib/ag-host-env.ts"
+import {
+  HAB_ID_TOKEN_FILE_ENV,
+  HAB_SESSION_LAUNCH_ID_ENV,
+  HAB_SESSION_HABITAT_ROOT_ENV,
+  HAB_SESSION_HABITAT_NAME_ENV,
+} from "./lib/hab-session-env.ts"
 import { CLI_ONLY_TOOLS, toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
@@ -155,17 +162,17 @@ function wakeHostedSeat(row: NonNullable<TribeFetchResult["events"]>[number]): v
     "TMPDIR",
     "LANG",
     "LC_ALL",
-    "HAB_ID_TOKEN_FILE",
-    "HAB_SESSION_LAUNCH_ID",
-    "HAB_SESSION_HABITAT_ROOT",
-    "HAB_SESSION_HABITAT_NAME",
-    "AG_HOST_LAUNCH_GENERATION",
+    HAB_ID_TOKEN_FILE_ENV,
+    HAB_SESSION_LAUNCH_ID_ENV,
+    HAB_SESSION_HABITAT_ROOT_ENV,
+    HAB_SESSION_HABITAT_NAME_ENV,
+    AG_HOST_LAUNCH_GENERATION_ENV,
     "TRIBE_SOCKET",
   ]) {
     const value = process.env[key]
     if (value !== undefined) env[key] = value
   }
-  env.TRIBE_NAME = myName
+  env[TRIBE_NAME_ENV] = myName
   hostedWakeInFlight = true
   let reported = false
   const fail = (cause: string): void => {
