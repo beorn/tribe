@@ -42,7 +42,7 @@ export interface TribeDaemonCalls {
 
 /**
  * An authenticated operation's outcome. `refused` is the daemon declining it in-band (its result carries `error`),
- * carried as data so a caller tells it from a transport failure by kind (@cto 26ff1f69 rider 1): nothing was delivered.
+ * carried as data so a caller tells it from a transport failure by kind (@cto 26ff1f69 rider 1): nothing was written to a socket.
  */
 export type SendOutcome = DaemonCallOutcome<unknown> | Readonly<{ kind: "refused"; refusal: string }>
 

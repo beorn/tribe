@@ -669,7 +669,10 @@ function settleDirectReply(
  * which is the durability baseline.
  *
  * `rowid` is returned so the daemon can advance per-recipient
- * `sessions.last_delivered_seq` after a successful write().
+ * `sessions.last_delivered_seq` after a successful socket write. That cursor is a
+ * high-water mark over "bytes accepted by a writable socket", not a per-row
+ * acceptance record: a client that never reads the row, and a pane that refuses
+ * it, both leave the cursor advanced.
  *
  * `kind` defaults to `direct` for backward compatibility. Broadcasts should
  * pass `broadcast`; journal-only events should pass `event` (and route via

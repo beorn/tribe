@@ -2112,7 +2112,7 @@ export function createStatements(db: Database) {
      * tribe-wire/lib/persona-name) is attention ONLY when its ref names a ball
      * the recipient is party to and that is still open — a TAKING receipt to the
      * requester, a precision to the owner, a third seat's status on a live ball.
-     * Without one it is ambient: delivered, drained and in history, never
+     * Without one it is ambient: written to the socket, drained and in history, never
      * attention and never counted (C2, @cto c49b6d2a, which replaced ruling C
      * after @chief measured 66.6 attention rows an hour against a 15 bound).
      * A closed ball's row is deleted, so its ref no longer counts; watchers,
@@ -3208,7 +3208,7 @@ export function createStatements(db: Database) {
 				-- the subscription is that not everyone needs to know everything,
 				-- and a direct IS the right agent being told. Push may still skip
 				-- the WAKEUP for a non-actionable direct (shouldDeliver's diet) —
-				-- that is a different question from whether the row is delivered,
+				-- that is a different question from whether the row reached a socket,
 				-- and the two paths are meant to differ here.
 				OR ($filter_mode = 'focus' AND (m.recipient = $name OR m.type IN (${ACTIONABLE_TYPES_SQL})))
 				OR ($filter_mode = 'normal' AND (

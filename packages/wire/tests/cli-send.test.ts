@@ -280,7 +280,7 @@ describe("registerSendCommands", () => {
       const malformed = await runSend(["malformed", "proof"])
       expect(malformed.code).toBe(3)
       expect(malformed.stdout).toBe("")
-      expect(malformed.stderr).toContain("message DELIVERED, but the daemon returned malformed redirect proof")
+      expect(malformed.stderr).toContain("message SENT, but the daemon returned malformed redirect proof")
       expect(malformed.stderr).toContain("Inspect the recipient mailbox and daemon delivery policy before retrying.")
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
@@ -1241,7 +1241,7 @@ describe("registerSendCommands", () => {
       // gone), and exit 3 is unchanged.
       const withdrawn = await runCli(["send", "@agent/3", "done", "--type", "verdict", "--reply", "req-withdrawn"])
       expect(withdrawn.code).toBe(3)
-      expect(withdrawn.stderr).toContain("verdict DELIVERED, but did not settle ball req-withdrawn")
+      expect(withdrawn.stderr).toContain("verdict SENT, but did not settle ball req-withdrawn")
       expect(withdrawn.stderr).toContain("sender-withdrawn")
       expect(withdrawn.stderr).not.toContain("settle it with --type response or verdict")
       expect(withdrawn.stderr).toContain("verify: tribe pending --owner @chief")
@@ -1259,9 +1259,7 @@ describe("registerSendCommands", () => {
         "req-withdrawn-other-owner",
       ])
       expect(withdrawnOtherOwner.code).toBe(3)
-      expect(withdrawnOtherOwner.stderr).toContain(
-        "response DELIVERED, but did not settle ball req-withdrawn-other-owner",
-      )
+      expect(withdrawnOtherOwner.stderr).toContain("response SENT, but did not settle ball req-withdrawn-other-owner")
       expect(withdrawnOtherOwner.stderr).toContain("sender-withdrawn")
       expect(withdrawnOtherOwner.stderr).toContain("verify: tribe pending --owner @chief")
 
@@ -1281,7 +1279,7 @@ describe("registerSendCommands", () => {
       ])
       expect(fanoutLoser).toMatchObject({ code: 0 })
       expect(fanoutLoser.stdout).toContain("Sent message to @agent/3")
-      expect(fanoutLoser.stderr).toContain("response DELIVERED; ball req-fanout-loser was already settled")
+      expect(fanoutLoser.stderr).toContain("response SENT; ball req-fanout-loser was already settled")
       expect(fanoutLoser.stderr).toContain("answered by @dev/3")
       expect(fanoutLoser.stderr).not.toContain("did not settle ball req-fanout-loser")
 
@@ -1296,7 +1294,7 @@ describe("registerSendCommands", () => {
       ])
       expect(offlineClosed).toMatchObject({ code: 0 })
       expect(offlineClosed.stdout).toContain("Sent message to @agent/3")
-      expect(offlineClosed.stderr).toContain("response DELIVERED; ball req-offline-closed was already settled")
+      expect(offlineClosed.stderr).toContain("response SENT; ball req-offline-closed was already settled")
       expect(offlineClosed.stderr).toContain("offline-owner-close")
       expect(offlineClosed.stderr).not.toContain("did not settle ball req-offline-closed")
 
@@ -1328,7 +1326,7 @@ describe("registerSendCommands", () => {
       expect(alreadySettled).toMatchObject({ code: 0 })
       expect(alreadySettled.stdout).toContain("Sent message to @agent/3")
       expect(alreadySettled.stderr).toContain(
-        "response DELIVERED; ball req-already-settled was already settled (answered by @chief at 2026-10-28T14:36:43.059Z; use --ref req-already-settled on follow-up responses after settling)",
+        "response SENT; ball req-already-settled was already settled (answered by @chief at 2026-10-28T14:36:43.059Z; use --ref req-already-settled on follow-up responses after settling)",
       )
 
       pendingOpen = true
@@ -1363,16 +1361,16 @@ describe("registerSendCommands", () => {
       expect(authenticatedClose.stdout).toContain("Closed 1 pending request(s) for @chief: req-123")
 
       // 22844: every branch below reports on the bookkeeping half of an
-      // ALREADY-DELIVERED response — exit 3 (delivered, close unconfirmed),
-      // never exit 1 (not delivered), and the wording says DELIVERED.
+      // ALREADY-SENT response — exit 3 (delivered, close unconfirmed),
+      // never exit 1 (not delivered), and the wording says SENT.
       pendingOpen = true
       const unproven = await runReply("unproven")
       expect(unproven.code).toBe(3)
       expect(unproven.stdout).toBe("")
       // 30160 revised: the daemon says the ball is not open, so the line names
       // its cause and points at pending — it does NOT advise a second settle
-      // of a ball that is gone. Still DELIVERED, still exit 3 (22844 unchanged).
-      expect(unproven.stderr).toContain("response DELIVERED, but did not settle ball req-123")
+      // of a ball that is gone. Still SENT, still exit 3 (22844 unchanged).
+      expect(unproven.stderr).toContain("response SENT, but did not settle ball req-123")
       expect(unproven.stderr).not.toContain("settle it with --type response or verdict")
       expect(unproven.stderr).toContain("verify: tribe pending --owner @chief")
 
@@ -1380,18 +1378,14 @@ describe("registerSendCommands", () => {
       const missing = await runReply("missing")
       expect(missing.code).toBe(3)
       expect(missing.stdout).toBe("")
-      expect(missing.stderr).toContain(
-        "response DELIVERED, but the daemon returned no committed tracker proof for req-123",
-      )
+      expect(missing.stderr).toContain("response SENT, but the daemon returned no committed tracker proof for req-123")
       expect(missing.stderr).toContain("Verify current state with: tribe pending --owner @chief")
 
       pendingOpen = true
       const malformed = await runReply("malformed")
       expect(malformed.code).toBe(3)
       expect(malformed.stdout).toBe("")
-      expect(malformed.stderr).toContain(
-        "response DELIVERED, but the daemon returned malformed committed tracker proof",
-      )
+      expect(malformed.stderr).toContain("response SENT, but the daemon returned malformed committed tracker proof")
       expect(malformed.stderr).toContain("Verify current state with: tribe pending --owner @chief")
 
       const closes = calls.filter((call) => call.method === "tribe.pending" && call.params.close !== undefined)

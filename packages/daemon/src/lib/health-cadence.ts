@@ -25,8 +25,8 @@ export const CURSOR_WARNING_MS = 30 * MINUTE
  */
 export const CONNECTED_PULL_READ_CEILING_MS = 10 * MINUTE
 /**
- * 33213 (@cto 52e27942): how long a direct row that was delivered WITH its body
- * to a push seat may go unfetched before it counts as attention lag.
+ * 33213 (@cto 52e27942): how long a direct row written to a push seat socket
+ * WITH its body may go unfetched before it counts as attention lag.
  *
  * A socket write proves the adapter took the row, not that the model read it, so
  * the health reader must not page on delivery alone — that is the false page
@@ -35,7 +35,7 @@ export const CONNECTED_PULL_READ_CEILING_MS = 10 * MINUTE
  * fleet's in-progress ceiling (AGENTS.md: a request older than ten minutes is
  * broken), so the grace cannot hide a row for longer than the ceiling that
  * already governs every other waiting seat. Directive rows (BALL_OPENING_TYPES,
- * delivered body-less) and undelivered rows skip the grace entirely — their
+ * written body-less) and never-written rows skip the grace entirely — their
  * transport state is unknown, so only the row's own age may speak for them.
  */
 const INLINE_DELIVERY_LAG_GRACE_MS = 10 * MINUTE
@@ -137,7 +137,7 @@ export type HealthCadenceProjection = ProjectionStamp & {
       oldest_age_ms: number
       actionable_rows: number
       actionable_oldest_age_ms: number
-      /** 33213: actionable rows delivered inline to this push seat and still inside the grace. */
+      /** 33213: actionable rows written to this push seat socket and still inside the grace. */
       actionable_held_rows: number
       /** Which case put each counted row in `actionable_rows` — never-delivered, directive-unread, or delivered-inline-unfetched. */
       actionable_causes: Array<{ cause: ActionableLagCause; rows: number; oldest_age_ms: number }>
@@ -295,7 +295,7 @@ function deliveredInlineRowSql(sequence: string): string {
 }
 
 /**
- * Inside the grace: delivered with its body and still younger than the window, so
+ * Inside the grace: written to its socket with its body and still younger than the window, so
  * the seat still has time to read it. `m.ts` (send time) is the bound, not the
  * delivery write, because the journal keeps no per-row delivery timestamp —
  * `sessions.last_delivered_ts` is the newest delivery for the whole seat and would
@@ -307,7 +307,7 @@ function inlineGraceExemptSql(sequence: string): string {
       AND m.ts > $graceCutoff`
 }
 
-/** Delivered with its body, and the grace is over: this row counts, as today. */
+/** Written to its socket with its body, and the grace is over: this row counts, as today. */
 function inlineGraceExpiredSql(sequence: string): string {
   return `${deliveredInlineRowSql(sequence)}
       AND m.ts <= $graceCutoff`
@@ -688,8 +688,8 @@ function openBallProjection(db: Database, now: number): HealthCadenceProjection[
 
 /**
  * 33213 (@cto 52e27942 item 4): the page names the case that fired, so its reader
- * knows whether to look at the transport (never delivered, directive unread) or at
- * the seat (delivered inline and unfetched).
+ * knows whether to look at the transport (never written to a socket, directive
+ * unread) or at the seat (written to its socket and unfetched).
  */
 function actionableCauseLabel(entry: { cause: ActionableLagCause; rows: number; oldest_age_ms: number }): string {
   const age = durationLabel(entry.oldest_age_ms)
@@ -697,9 +697,9 @@ function actionableCauseLabel(entry: { cause: ActionableLagCause; rows: number; 
     case "directive-unread":
       return `${entry.rows} directive unread (oldest ${age})`
     case "delivered-inline-unfetched":
-      return `${entry.rows} delivered inline, unfetched for ${age}`
+      return `${entry.rows} written to its socket, unfetched for ${age}`
     case "never-delivered":
-      return `${entry.rows} never delivered (oldest ${age})`
+      return `${entry.rows} never written to its socket (oldest ${age})`
   }
 }
 
@@ -909,7 +909,7 @@ function inboxLagProjection(
         `${row.actionable_rows} actionable row(s)` +
         `${row.actionable_rows > 0 ? ` [${row.actionable_causes.map(actionableCauseLabel).join("; ")}]` : ""}` +
         `, oldest ${durationLabel(row.actionable_oldest_age_ms)}` +
-        `${row.actionable_held_rows > 0 ? `; ${row.actionable_held_rows} delivered inline and held under the ${durationLabel(INLINE_DELIVERY_LAG_GRACE_MS)} grace` : ""}` +
+        `${row.actionable_held_rows > 0 ? `; ${row.actionable_held_rows} written to its socket and held under the ${durationLabel(INLINE_DELIVERY_LAG_GRACE_MS)} grace` : ""}` +
         `; ` +
         `projection-only, pane/turn liveness excluded (threshold 30m)`,
     )

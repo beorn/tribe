@@ -5,9 +5,9 @@
  * model read it" were the same thing to the health reader.
  *
  * The split (see health-cadence.ts `INLINE_DELIVERY_LAG_GRACE_MS`): a direct row
- * delivered WITH its body to an acknowledged push seat is held back for ten
- * minutes; a directive row (request/query/assign, delivered body-less), an
- * undelivered row, and every row on a pull seat count from the first second.
+ * written to a push seat socket WITH its body is held back for ten minutes; a
+ * directive row (request/query/assign, written body-less), a never-written row,
+ * and every row on a pull seat count from the first second.
  */
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -108,9 +108,9 @@ afterEach(() => {
 // @level l2
 // @consumer Hab attention, chief supervision, captured Wire health readers
 describe("33213 a body delivered to a push seat is not attention until it goes unread", () => {
-  it("does not count a delivered inline row still inside the grace", () => {
+  it("does not count a row written to its socket still inside the grace", () => {
     const f = fixture("push")
-    // The reproduced shape: delivered 56 ms after send, seat still inside its turn.
+    // The reproduced shape: written 56 ms after send, seat still inside its turn.
     sendAndDeliver(f, { id: "verdict-fresh", type: "verdict", ts: NOW - 4 * MINUTE })
 
     const { row, warnings } = inboxRow(f)
@@ -142,7 +142,36 @@ describe("33213 a body delivered to a push seat is not attention until it goes u
       actionable_causes: [{ cause: "delivered-inline-unfetched", rows: 1, oldest_age_ms: 45 * MINUTE }],
       oldest_actionable: { id: "verdict-stale", type: "verdict" },
     })
-    expect(warnings.join("\n")).toContain("1 actionable row(s) [1 delivered inline, unfetched for 45m]")
+    expect(warnings.join("\n")).toContain("1 actionable row(s) [1 written to its socket, unfetched for 45m]")
+  })
+
+  // The three readings @cto asked for, in one place: what the write path records,
+  // what the session high-water mark holds, and what a fetch can still report.
+  // A writable socket accepts the bytes and never acknowledges them; the health
+  // reader says exactly that and nothing more.
+  it("records the socket write and the high-water mark, and leaves the pull cursor alone", () => {
+    const f = fixture("push")
+    const seq = sendAndDeliver(f, { id: "verdict-socket-only", type: "verdict", ts: NOW - 45 * MINUTE })
+
+    const delivered = f.stmts.getLastDelivered.get({ $id: "sess-33213-push" }) as {
+      last_delivered_ts: number
+      last_delivered_seq: number
+    }
+    expect(delivered.last_delivered_seq).toBe(seq)
+
+    // What a drain advances is last_inbox_pull_seq, and a socket write never
+    // touches it, so the row is still reportable by a fetch whatever the reader
+    // says about the transport.
+    const pull = f.db
+      .prepare("SELECT last_inbox_pull_seq FROM sessions WHERE id = $id")
+      .get({ $id: "sess-33213-push" }) as { last_inbox_pull_seq: number }
+    expect(pull.last_inbox_pull_seq).toBe(0)
+    const row = f.db.prepare("SELECT delivery FROM messages WHERE id = $id").get({ $id: "verdict-socket-only" }) as {
+      delivery: string
+    }
+    expect(row.delivery).toBe("push")
+
+    expect(inboxRow(f).warnings.join("\n")).toContain("[1 written to its socket, unfetched for 45m]")
   })
 
   it("counts a directive row at once even though the socket wrote it", () => {

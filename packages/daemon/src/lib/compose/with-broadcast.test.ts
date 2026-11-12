@@ -212,7 +212,11 @@ describe("22514 daemon health-log broadcast admission", () => {
 })
 
 describe("withBroadcast fanout admission: G9 self-inbox wakeups and 28200 daemon journal events", () => {
-  function focusSeatFanout(extraPullSockets = false, mode: "focus" | "normal" = "focus") {
+  function focusSeatFanout(
+    extraPullSockets = false,
+    mode: "focus" | "normal" = "focus",
+    socketWrite?: (line: string) => void,
+  ) {
     const writes: string[] = []
     const pullWrites: string[] = []
     const delivered = vi.fn()
@@ -226,7 +230,11 @@ describe("withBroadcast fanout admission: G9 self-inbox wakeups and 28200 daemon
       role: "member",
       delivery: "push",
       ctx: { sessionId: "seat" },
-      socket: { destroyed: false, writable: true, write: (m: string) => writes.push(m) },
+      socket: {
+        destroyed: false,
+        writable: true,
+        write: socketWrite ?? ((m: string) => void writes.push(m)),
+      },
     }
     registry.attachTransport("conn-seat", seat as never)
     if (extraPullSockets) {
@@ -286,6 +294,26 @@ describe("withBroadcast fanout admission: G9 self-inbox wakeups and 28200 daemon
       await vi.waitFor(() => expect(fanout.writes).toHaveLength(1))
       expect(fanout.pullWrites).toEqual([])
       expect(fanout.delivered).toHaveBeenCalledTimes(1)
+    } finally {
+      fanout.dispose()
+    }
+  })
+
+  // @failure A direct fanout whose socket write throws still credits the delivery
+  // cursor, so sessions.last_delivered_seq calls a row written when nothing
+  // reached a socket. The cursor is a high-water mark over accepted bytes, never
+  // an acceptance record (@cto ruling on 33302).
+  // @level l2 @consumer withBroadcast's direct fanout and delivery cursor credit
+  test("does not credit the delivery cursor when the direct write throws", async () => {
+    let attempts = 0
+    const fanout = focusSeatFanout(false, "focus", () => {
+      attempts += 1
+      throw new Error("EPIPE")
+    })
+    try {
+      fanout.tap(fanout.reply({ requestId: "r-own", requester: "@seat" }))
+      await vi.waitFor(() => expect(attempts).toBe(1))
+      expect(fanout.delivered).not.toHaveBeenCalled()
     } finally {
       fanout.dispose()
     }

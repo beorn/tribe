@@ -1167,6 +1167,6 @@ export const githubPlugin: TribePluginApi = {
 
   instructions() {
     const repo = detectRepoFromGit()
-    return `- GitHub integration active: push, PR, CI, and issue notifications are delivered automatically for ${repo ?? "detected repo"}`
+    return `- GitHub integration active: push, PR, CI, and issue notifications are sent automatically for ${repo ?? "detected repo"}`
   },
 }

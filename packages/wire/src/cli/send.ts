@@ -626,7 +626,7 @@ function reportBallReference(
             ? cause.replace(/^closed 0 rows for [^:]+:\s*/u, "")
             : `already settled by ${owner}`
         console.error(
-          `${type} DELIVERED; ball ${id} was already settled (${detail}; use --ref ${id} on follow-up responses after settling)`,
+          `${type} SENT; ball ${id} was already settled (${detail}; use --ref ${id} on follow-up responses after settling)`,
         )
         return
       }
@@ -636,9 +636,9 @@ function reportBallReference(
           : `settled no ball: no open ball currently matches ${id}`
       console.error(
         result.ball?.open === true
-          ? `${type} DELIVERED, but ${detail}; ` +
+          ? `${type} SENT, but ${detail}; ` +
               `settle it with --type response or verdict --reply ${id} (verify: tribe pending --owner ${owner})`
-          : `${type} DELIVERED, but ${detail}; verify: tribe pending --owner ${owner}`,
+          : `${type} SENT, but ${detail}; verify: tribe pending --owner ${owner}`,
       )
       process.exit(3)
     }
@@ -783,10 +783,10 @@ async function warnUnresolvedRef(sender: SendCaller, ref: string, ownedPending?:
 }
 
 /**
- * Runs strictly AFTER delivery (22844): every branch here reports on the
+ * Runs strictly AFTER the send (22844): every branch here reports on the
  * bookkeeping half of an already-sent response, so none may read as a
- * delivery failure. Exit 3 = delivered, close not confirmed — distinct from
- * 1 (not delivered) and 2 (identity/usage).
+ * delivery failure. Exit 3 = written to the socket, close not confirmed —
+ * distinct from 1 (refused before the socket) and 2 (identity/usage).
  */
 function reportCommittedReplyTracker(
   owner: string,
@@ -795,9 +795,7 @@ function reportCommittedReplyTracker(
   json = false,
 ): void {
   if (tracker === undefined) {
-    console.error(
-      `tribe-wire send: response DELIVERED, but the daemon returned no committed tracker proof for ${reply}.`,
-    )
+    console.error(`tribe-wire send: response SENT, but the daemon returned no committed tracker proof for ${reply}.`)
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
     process.exit(3)
   }
@@ -811,7 +809,7 @@ function reportCommittedReplyTracker(
     closed < 0
   ) {
     console.error(
-      `tribe-wire send: response DELIVERED, but the daemon returned malformed committed tracker proof for ${reply} ` +
+      `tribe-wire send: response SENT, but the daemon returned malformed committed tracker proof for ${reply} ` +
         `(expected a canonical request_id and a non-negative integer closed count).`,
     )
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
@@ -825,8 +823,8 @@ function reportCommittedReplyTracker(
     const cause = typeof tracker.cause === "string" && tracker.cause.length > 0 ? tracker.cause : undefined
     console.error(
       cause !== undefined
-        ? `tribe-wire send: response DELIVERED, but its reply did not settle the ball: ${cause}`
-        : `tribe-wire send: response DELIVERED, but its committed tracker result closed 0 rows for ${canonicalRequestId} ` +
+        ? `tribe-wire send: response SENT, but its reply did not settle the ball: ${cause}`
+        : `tribe-wire send: response SENT, but its committed tracker result closed 0 rows for ${canonicalRequestId} ` +
             `(ball not currently owned — expired, settled out-of-band, or never tracked).`,
     )
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
@@ -943,7 +941,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
       reason.length === 0
     ) {
       console.error(
-        `tribe.send: delivery error - message DELIVERED, but the daemon returned malformed redirect proof for ${input.to}.`,
+        `tribe.send: delivery error - message SENT, but the daemon returned malformed redirect proof for ${input.to}.`,
       )
       console.error("Inspect the recipient mailbox and daemon delivery policy before retrying.")
       process.exit(3)
@@ -1003,7 +1001,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   // rule as the derived summary — the sender learns from its own terminal.
   if (result.truncated) {
     console.warn(
-      `  message TRUNCATED: only the first 4096 of ${result.original_length ?? "?"} chars were delivered; resend the remainder or link the full text`,
+      `  message TRUNCATED: only the first 4096 of ${result.original_length ?? "?"} chars were sent; resend the remainder or link the full text`,
     )
   }
 }
@@ -1337,8 +1335,8 @@ export function registerSendCommands(program: Command): void {
     })
     .addHelpText(
       "after",
-      "\nExit codes: 0 delivered; 1 not delivered; 2 identity or usage refused; 3 delivered, its ball close not " +
-        `confirmed; ${LAUNCH_UNROUTABLE_EXIT_CODE} not delivered because this launch's owner transport is down (a wire ` +
+      "\nExit codes: 0 written to the socket (not read); 1 refused before the socket; 2 identity or usage refused; 3 written to the socket, its ball close not " +
+        `confirmed; ${LAUNCH_UNROUTABLE_EXIT_CODE} not written because this launch's owner transport is down (a wire ` +
         `restart), marked [${LAUNCH_UNROUTABLE}] on stderr: send again once the owner re-registers.`,
     )
     .action(

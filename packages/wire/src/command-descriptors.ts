@@ -326,7 +326,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           reply_close_failed: {
             type: "boolean",
             description:
-              "True when a response/verdict reply closed zero rows: delivered, but nothing settled. Re-read pending and reply with the exact id.",
+              "True when a response/verdict reply closed zero rows: written to the socket, but nothing settled. Re-read pending and reply with the exact id.",
           },
           summary: { type: "string", description: "The one-liner stored with the message." },
           summary_derived: {
@@ -334,7 +334,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             description: "True when a non-LLM sender omitted summary and the daemon derived one.",
           },
           deduplicated: { type: "boolean", description: "True when this client UUID was already committed." },
-          truncated: { type: "boolean", description: "Legacy daemons only: true when only a prefix was delivered." },
+          truncated: {
+            type: "boolean",
+            description: "Legacy daemons only: true when only a prefix was written to the socket.",
+          },
           original_length: { type: "number", description: "Length the 4096-character cap was measured against." },
           warning: {
             type: "string",
@@ -1272,7 +1275,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.filter",
     title: "Filter",
     description:
-      "Per-session subscription. Governs BOTH the push wakeup and what a tribe.fetch drain returns, so it is the lever for protecting your own context. mode controls focus level: focus = addressed + actionable only; normal = everything minus active mutes; ambient = everything. mute stores topic globs to silence until the optional timestamp. Filtered rows stay durable and remain reachable through an explicit history read (from/with/since) — they are not delivered. Empty args clears the filter.",
+      "Per-session subscription. Governs BOTH the push wakeup and what a tribe.fetch drain returns, so it is the lever for protecting your own context. mode controls focus level: focus = addressed + actionable only; normal = everything minus active mutes; ambient = everything. mute stores topic globs to silence until the optional timestamp. Filtered rows stay durable and remain reachable through an explicit history read (from/with/since) — they are not written to a socket. Empty args clears the filter.",
     lifetime: "live-session",
     mcpList: "listed",
     mcp: {
