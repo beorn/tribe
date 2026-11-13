@@ -30,6 +30,7 @@
 import { createLogger } from "loggily"
 import { readOpenIncidents, sendMessage } from "../messaging.ts"
 import { cleanupOldData, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
+import { judgeLaunchParent } from "../session-transport-state.ts"
 import { resolveRetentionConfig, runRetentionSweep } from "../retention.ts"
 import { loadPlugins } from "../plugin-loader.ts"
 import type { TribeClientApi, TribePluginApi, TribePluginHandle } from "../plugin-api.ts"
@@ -173,12 +174,19 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
         hasActiveTransport: (sessionId) => t.registry.hasActiveTransport(sessionId),
         isReconnectGraceProtected: (sessionId) => t.registry.isReconnectGraceProtected(sessionId, nowMs),
         getActiveLaunchIds: () => activeLaunchIds(t.registry.getActiveSessionInfo()),
+        // 21669 — a durable row whose launch parent is provably gone is litter,
+        // not a wedge: the launch ended, and no transport is ever coming back.
+        isLaunchParentAlive: (parentPid, storedStartTime) => judgeLaunchParent(parentPid, storedStartTime).alive,
         onlySessionIds,
       })
       const reapedIds = report.reaped_sessions.map((session) => session.member_id)
       t.registry.forgetTransportSessions(reapedIds)
       if (report.reaped > 0) {
-        log.info?.(`cleanup: reaped ${report.reaped} disconnected connection-scoped session row(s)`)
+        const ownerGone = report.reason_counts.reaped_owner_gone
+        log.info?.(
+          `cleanup: reaped ${report.reaped} disconnected session row(s)` +
+            (ownerGone > 0 ? ` (${ownerGone} whose launch parent is gone)` : ""),
+        )
       }
       return report
     }

@@ -72,6 +72,7 @@ import { registeredTrustTierForTopic, senderMayUseRegisteredTrustTopic, type Ses
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
 import {
   DEFAULT_MAX_SILENCE_SEC,
+  judgeLaunchParent,
   observeMailboxConsumers,
   projectSessionLiveness,
   projectSessionTransportEvidence,
@@ -4267,6 +4268,7 @@ type HealthSessionRow = {
   identity_sid: string | null
   launch_id: string | null
   launch_parent_pid: number | null
+  launch_parent_start_time: string | null
   provider: string | null
 }
 
@@ -4397,6 +4399,17 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
     const transport = projectSessionTransportState({
       transportConnected: false,
     })
+    // 21669 — a disconnected durable row is a WEDGE only while its launch may
+    // still be running. `judgeLaunchParent` is the probe registration already
+    // trusts to decide `replaced-parent-gone`: a gone parent means the launch
+    // ended, so the row is litter awaiting the reap sweep, never evidence of a
+    // live seat that lost its transport. Malformed identities carry no launch
+    // parent to judge, so they stay wedges exactly as before.
+    const launchParentPid = session.launch_parent_pid
+    const owner =
+      lifetime === "durable-launch" && launchParentPid !== null
+        ? judgeLaunchParent(launchParentPid, session.launch_parent_start_time)
+        : null
     return [
       {
         member_id: session.id,
@@ -4406,10 +4419,24 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
         launch_parent_pid: session.launch_parent_pid,
         registration_lifetime: lifetime,
         wedge_reason: lifetime === "durable-launch" ? "durable-launch-no-transport" : "malformed-launch-identity",
+        owner_process: owner === null ? "unknown" : owner.alive ? "alive" : "gone",
+        ...(owner === null ? {} : { owner_process_comparison: owner.comparison }),
+        registration_age_ms: Math.max(0, now - session.started_at),
         ...transport,
       },
     ]
   })
+  const liveTransportWedges = transportWedges.filter((wedge) => wedge.owner_process !== "gone")
+  const ownerGoneWedges = transportWedges.filter((wedge) => wedge.owner_process === "gone")
+  // Always present, even at zero: an absent key cannot be told apart from a
+  // projection that never ran, and this count is the evidence that the wedge
+  // list was filtered rather than simply short.
+  const staleTransportRows = {
+    count: ownerGoneWedges.length,
+    oldest_age_ms: ownerGoneWedges.reduce((oldest, wedge) => Math.max(oldest, wedge.registration_age_ms), 0),
+    names: ownerGoneWedges.map((wedge) => wedge.name),
+    meaning: "launch parent process is gone; these rows are litter reaped by the sweep, not wedges",
+  }
   const members = liveSessions.map((s) => {
     const active = byId.get(s.id)
     if (active === undefined) throw new Error(`active session ${s.id} disappeared during membership projection`)
@@ -4583,7 +4610,8 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
         oldest_age_ms: oldestStaleAgeMs,
       },
     },
-    transport_wedges: transportWedges,
+    transport_wedges: liveTransportWedges,
+    stale_transport_rows: staleTransportRows,
     // Retain unidentified durable history without manufacturing named-seat
     // alarms. One known producer is @ag/tribe/no-tribe-flag-does-not-gate-the-join.
     anonymous_disconnected: disconnected.anonymousDurable.length,
@@ -4607,9 +4635,9 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
     },
     issues: [
       ...(opts.recallVaultRefusal ? [`recall vault REFUSED: --vault-db ${opts.recallVaultRefusal.reason}`] : []),
-      ...transportWedges.map(
+      ...liveTransportWedges.map(
         (wedge) =>
-          `transport wedge ${wedge.name}: transport_state=${wedge.transport_state} owner_state=${wedge.owner_state} reason=${wedge.wedge_reason}`,
+          `transport wedge ${wedge.name}: transport_state=${wedge.transport_state} owner_state=${wedge.owner_state} reason=${wedge.wedge_reason} owner_process=${wedge.owner_process}`,
       ),
       ...mailboxReadIssues,
       ...(identityVerifierFault === undefined || identityVerifierFault === null ? [] : [identityVerifierFault]),

@@ -99,6 +99,7 @@ export type StaleTransportReapReasonCounts = {
   malformed_launch_identity: number
   reaped_connection_scoped: number
   reaped_superseded_launch: number
+  reaped_owner_gone: number
 }
 
 export type StaleTransportReapReport = {
@@ -147,6 +148,17 @@ export type StaleTransportReapOpts = {
    * path that the sweep would have preserved.
    */
   onlySessionIds?: ReadonlySet<string>
+  /**
+   * Whether a disconnected durable row's launch parent is still the process
+   * that registered it. This is the SAME probe registration already trusts to
+   * decide `replaced-parent-gone`: kernel start time where the platform has
+   * it, pid existence otherwise. A gone parent means the launch ENDED — it is
+   * positive evidence about the process, never an inference from the missing
+   * transport — so the row is litter and may be reaped. Omitted (or answering
+   * `true`) preserves the prior behaviour: durable rows survive unless a live
+   * registration holds their launch id.
+   */
+  isLaunchParentAlive?: (launchParentPid: number, launchParentStartTime: string | null) => boolean
 }
 
 /**
@@ -156,8 +168,9 @@ export type StaleTransportReapOpts = {
  * transaction deletes a row.
  *
  * Durable-launch rows are preserved unless a LIVE registration holds the same
- * launch id: a missing transport still never establishes agent absence, so
- * only positive evidence of replacement makes a durable row reapable.
+ * launch id, or the launch parent process is provably gone: a missing
+ * transport still never establishes agent absence, so only positive evidence
+ * of replacement or of the launch ending makes a durable row reapable.
  */
 export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpts): StaleTransportReapReport {
   const nowMs = opts.nowMs ?? Date.now()
@@ -165,16 +178,21 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
   const selectScopedRow =
     scoped === undefined
       ? null
-      : db.prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions WHERE id = $id")
+      : db.prepare(
+          "SELECT id, name, launch_id, launch_parent_pid, launch_parent_start_time FROM sessions WHERE id = $id",
+        )
   const rows = (
     selectScopedRow === null
-      ? db.prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions ORDER BY id").all()
+      ? db
+          .prepare("SELECT id, name, launch_id, launch_parent_pid, launch_parent_start_time FROM sessions ORDER BY id")
+          .all()
       : [...(scoped as ReadonlySet<string>)].flatMap((sessionId) => selectScopedRow.all({ $id: sessionId }))
   ) as Array<{
     id: string
     name: string
     launch_id: string | null
     launch_parent_pid: number | null
+    launch_parent_start_time: string | null
   }>
   const reasonCounts: StaleTransportReapReasonCounts = {
     active_transport: 0,
@@ -183,11 +201,16 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
     malformed_launch_identity: 0,
     reaped_connection_scoped: 0,
     reaped_superseded_launch: 0,
+    reaped_owner_gone: 0,
   }
   const activeLaunchIds = opts.getActiveLaunchIds?.() ?? new Set<string>()
   const isSupersededLaunch = (launchId: string | null): boolean =>
     typeof launchId === "string" && launchId.length > 0 && activeLaunchIds.has(launchId)
-  const candidates: Array<(typeof rows)[number] & { superseded: boolean }> = []
+  const isLaunchParentGone = (row: { launch_parent_pid: number | null; launch_parent_start_time: string | null }) =>
+    row.launch_parent_pid !== null &&
+    opts.isLaunchParentAlive !== undefined &&
+    !opts.isLaunchParentAlive(row.launch_parent_pid, row.launch_parent_start_time)
+  const candidates: Array<(typeof rows)[number] & { superseded: boolean; ownerGone: boolean }> = []
 
   for (const row of rows) {
     if (opts.hasActiveTransport(row.id)) {
@@ -199,7 +222,8 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
       launchParentPid: row.launch_parent_pid,
     })
     const superseded = isSupersededLaunch(row.launch_id)
-    if (lifetime === "durable-launch" && !superseded) {
+    const ownerGone = lifetime === "durable-launch" && isLaunchParentGone(row)
+    if (lifetime === "durable-launch" && !superseded && !ownerGone) {
       reasonCounts.durable_launch++
       continue
     }
@@ -211,11 +235,13 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
       reasonCounts.reconnect_grace++
       continue
     }
-    candidates.push({ ...row, superseded })
+    candidates.push({ ...row, superseded, ownerGone })
   }
 
   const reapedSessions: Array<{ member_id: string; name: string }> = []
-  const getCurrent = db.prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions WHERE id = $id LIMIT 1")
+  const getCurrent = db.prepare(
+    "SELECT id, name, launch_id, launch_parent_pid, launch_parent_start_time FROM sessions WHERE id = $id LIMIT 1",
+  )
   const deleteRoomMembers = db.prepare("DELETE FROM room_members WHERE session_id = $id")
   const deleteSession = db.prepare("DELETE FROM sessions WHERE id = $id")
 
@@ -233,6 +259,7 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
         name: string
         launch_id: string | null
         launch_parent_pid: number | null
+        launch_parent_start_time: string | null
       } | null
       if (!current) continue
       const currentLifetime = classifySessionRegistrationLifetime({
@@ -240,7 +267,8 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
         launchParentPid: current.launch_parent_pid,
       })
       const currentSuperseded = isSupersededLaunch(current.launch_id)
-      if (currentLifetime === "durable-launch" && !currentSuperseded) {
+      const currentOwnerGone = currentLifetime === "durable-launch" && isLaunchParentGone(current)
+      if (currentLifetime === "durable-launch" && !currentSuperseded && !currentOwnerGone) {
         reasonCounts.durable_launch++
         continue
       }
@@ -256,6 +284,7 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
       const deleted = deleteSession.run({ $id: current.id })
       if (Number(deleted.changes ?? 0) === 1) {
         if (currentSuperseded) reasonCounts.reaped_superseded_launch++
+        else if (currentOwnerGone) reasonCounts.reaped_owner_gone++
         else reasonCounts.reaped_connection_scoped++
         reapedSessions.push({ member_id: current.id, name: current.name })
       }

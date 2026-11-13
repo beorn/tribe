@@ -1316,6 +1316,18 @@ async function cmdHealth(opts?: { json?: boolean; full?: boolean }): Promise<voi
           console.log("  No issues detected.")
         }
       }
+      if (key === "stale_transport_rows" && value !== null && typeof value === "object") {
+        // 21669 — litter is not an issue, but it must never be invisible: the
+        // sweep reaps these rows, and `tribe repair reap_stale_transports` can
+        // reach them now. Report the count without inflating the issue list.
+        const stale = value as { count?: unknown; names?: unknown }
+        if (typeof stale.count === "number" && stale.count > 0) {
+          const named = Array.isArray(stale.names) && stale.names.length > 0 ? ` (${stale.names.join(", ")})` : ""
+          console.log(
+            `\n  Stale registrations: ${stale.count} disconnected durable row(s) whose launch process is gone${named}`,
+          )
+        }
+      }
     }
     // 15588 — show the live roster section so chief can answer "who is
     // connected / who is idle >15min" with one command. Roster comes from

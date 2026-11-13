@@ -8,6 +8,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { spawnSync } from "node:child_process"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -23,6 +24,7 @@ import {
   registerSession,
   type StaleTransportReapReport,
 } from "./session.ts"
+import { judgeLaunchParent } from "./session-transport-state.ts"
 import { DEFAULT_RECONNECT_GRACE_MS, withClientRegistry } from "./compose/with-client-registry.ts"
 import { withRuntime } from "./compose/with-runtime.ts"
 
@@ -78,6 +80,7 @@ function emptyReasonCounts(): StaleTransportReapReport["reason_counts"] {
     malformed_launch_identity: 0,
     reaped_connection_scoped: 0,
     reaped_superseded_launch: 0,
+    reaped_owner_gone: 0,
   }
 }
 
@@ -175,7 +178,9 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
 
   it("keeps durable and malformed launch disconnects loud without paging on legacy PID reuse", () => {
     addSession(db, stmts, "legacy-health", "legacy-health")
-    addSession(db, stmts, "durable-health", "@agent/6", { id: "launch-health", parentPid: 6006 })
+    // The launch parent is THIS process, so the row is a live-owner wedge — the
+    // condition that must stay loud -- not litter awaiting the reap sweep.
+    addSession(db, stmts, "durable-health", "@agent/6", { id: "launch-health", parentPid: process.pid })
     addSession(db, stmts, "malformed-health", "malformed-health")
     db.prepare("UPDATE sessions SET launch_id = 'partial-only' WHERE id = 'malformed-health'").run()
     const ctx = makeContext(db, stmts, "operator", "@operator")
@@ -229,7 +234,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
           member_id: "durable-health",
           name: "@agent/6",
           launch_id: "launch-health",
-          launch_parent_pid: 6006,
+          launch_parent_pid: process.pid,
           last_refusal: null,
           state: "missing-transport",
         },
@@ -243,6 +248,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
           member_id: "durable-health",
           name: "@agent/6",
           owner_state: "unknown",
+          owner_process: "alive",
           transport_state: "disconnected",
           wedge_reason: "durable-launch-no-transport",
         }),
@@ -293,7 +299,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
           member_id: "durable-health",
           name: "@agent/6",
           launch_id: "launch-health",
-          launch_parent_pid: 6006,
+          launch_parent_pid: process.pid,
           state: "missing-transport",
         }),
       ],
@@ -302,7 +308,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
 
   it("keeps disconnected retired registrations as history without reporting a live-seat outage", () => {
     addSession(db, stmts, "retired-fleet", "@fleet", { id: "launch-fleet", parentPid: 7001 })
-    addSession(db, stmts, "durable-health", "@agent/6", { id: "launch-health", parentPid: 6006 })
+    addSession(db, stmts, "durable-health", "@agent/6", { id: "launch-health", parentPid: process.pid })
     addSession(db, stmts, "malformed-health", "malformed-health")
     db.prepare("UPDATE sessions SET launch_id = 'partial-only' WHERE id = 'malformed-health'").run()
     const ctx = makeContext(db, stmts, "operator", "@operator")
@@ -363,7 +369,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
           member_id: "durable-health",
           name: "@agent/6",
           launch_id: "launch-health",
-          launch_parent_pid: 6006,
+          launch_parent_pid: process.pid,
           state: "missing-transport",
         }),
       ],
@@ -532,6 +538,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
         durable_launch: 1,
         malformed_launch_identity: 1,
         reaped_connection_scoped: 1,
+        reaped_owner_gone: 0,
       },
       reaped_sessions: [{ member_id: "stale", name: "legacy-stale" }],
     })
@@ -553,6 +560,33 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
         }
       ).count,
     ).toBe(1)
+  })
+
+  it("reaps a durable row whose launch parent is provably gone, and only that row", () => {
+    // A real dead pid: spawn a child that exits immediately and reuse its number.
+    const deadPid = spawnSync("true").pid
+    if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")
+    addSession(db, stmts, "litter", "@dev/0", { id: "launch-dev0", parentPid: deadPid })
+    addSession(db, stmts, "grace-gone", "@dev/1", { id: "launch-dev1", parentPid: deadPid })
+    addSession(db, stmts, "live-owner", "@dev/9", { id: "launch-dev9", parentPid: process.pid })
+
+    const report = reapStaleTransportRows(db, {
+      nowMs: 50_000,
+      hasActiveTransport: () => false,
+      // The owner-gone rule runs INSIDE the reconnect grace, so a seat that is
+      // mid-restart is still preserved by its own grace window.
+      isReconnectGraceProtected: (sessionId) => sessionId === "grace-gone",
+      isLaunchParentAlive: (parentPid, storedStartTime) => judgeLaunchParent(parentPid, storedStartTime).alive,
+    })
+
+    expect(report.reason_counts.reaped_owner_gone).toBe(1)
+    expect(report.reason_counts.durable_launch).toBe(1)
+    expect(report.reason_counts.reconnect_grace).toBe(1)
+    expect(report.reaped_sessions).toEqual([{ member_id: "litter", name: "@dev/0" }])
+    const survivors = (db.prepare("SELECT id FROM sessions ORDER BY id").all() as Array<{ id: string }>).map(
+      (row) => row.id,
+    )
+    expect(survivors).toEqual(["grace-gone", "live-owner"])
   })
 
   it("performs a final synchronous sibling-transport fence before deletion", () => {

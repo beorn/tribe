@@ -1274,6 +1274,7 @@ export function withDispatcher<
         hasActiveTransport: (sessionId) => registry.hasActiveTransport(sessionId),
         isReconnectGraceProtected: (sessionId) => registry.isReconnectGraceProtected(sessionId, nowMs),
         getActiveLaunchIds: () => activeLaunchIds(registry.getActiveSessionInfo()),
+        isLaunchParentAlive: (parentPid, storedStartTime) => judgeLaunchParent(parentPid, storedStartTime).alive,
       })
       registry.forgetTransportSessions(report.reaped_sessions.map((session) => session.member_id))
       return report

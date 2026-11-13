@@ -1009,8 +1009,15 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           transport_wedges: {
             type: "array",
-            description: "Disconnected addressable launch rows kept loud with wedge_reason.",
+            description:
+              "Disconnected addressable launch rows whose owner process may still be running, kept loud with wedge_reason and owner_process.",
             items: { type: "object", additionalProperties: true },
+          },
+          stale_transport_rows: {
+            type: "object",
+            description:
+              "Disconnected durable rows whose launch parent process is provably gone: litter awaiting the reap sweep, never counted as wedges. Always present; count 0 is a measured zero.",
+            additionalProperties: true,
           },
           anonymous_disconnected: {
             type: "number",

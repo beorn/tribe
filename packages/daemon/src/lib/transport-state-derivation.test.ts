@@ -45,6 +45,7 @@ import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type ActiveSessionInfo, type HandlerOpts } from "./handlers.ts"
 import { reapStaleTransportRows, registerSession } from "./session.ts"
+import { judgeLaunchParent } from "./session-transport-state.ts"
 
 const PROJECT_ID = "transport-state-derivation"
 
@@ -374,7 +375,7 @@ describe("a replaced registration is retired by projection and repair, never by 
   it("still reports a durable row with no live claimant as a wedge — absence is not supersession", () => {
     addSession(db, stmts, "orphan-connection", "@agent/9", process.pid, {
       id: "provider-launch-2::%40agent%2F9",
-      parentPid: 9009,
+      parentPid: process.pid,
     })
     const ctx = makeContext(db, stmts, "operator", "@operator")
     const opts = optsFor([])
@@ -385,7 +386,13 @@ describe("a replaced registration is retired by projection and repair, never by 
     }
 
     expect(health.transport_wedges).toEqual([
-      expect.objectContaining({ name: "@agent/9", wedge_reason: "durable-launch-no-transport" }),
+      expect.objectContaining({
+        name: "@agent/9",
+        wedge_reason: "durable-launch-no-transport",
+        // The owner process is ALIVE and only the transport is gone: the
+        // condition that must stay loud (21669).
+        owner_process: "alive",
+      }),
     ])
     expect(health.membership_discrepancy).toEqual(
       expect.objectContaining({
@@ -433,19 +440,39 @@ describe("the repair verb can reach a superseded durable registration", () => {
   it("never reaps a durable row that no live transport has claimed", () => {
     addSession(db, stmts, "orphan-connection", "@agent/9", process.pid, {
       id: "provider-launch-4::%40agent%2F9",
-      parentPid: 9009,
+      parentPid: process.pid,
     })
 
     const report = reapStaleTransportRows(db, {
       hasActiveTransport: () => false,
       isReconnectGraceProtected: () => false,
       getActiveLaunchIds: () => new Set<string>(),
+      isLaunchParentAlive: (parentPid, storedStartTime) => judgeLaunchParent(parentPid, storedStartTime).alive,
     })
 
     expect(report.reaped).toBe(0)
     expect(report.reason_counts.durable_launch).toBe(1)
     const survivors = db.prepare("SELECT id FROM sessions ORDER BY id").all() as Array<{ id: string }>
     expect(survivors).toEqual([{ id: "orphan-connection" }])
+  })
+
+  it("reaps a durable row whose launch parent is provably gone", () => {
+    addSession(db, stmts, "litter-connection", "@agent/9", mintDeadPid(), {
+      id: "provider-launch-5::%40agent%2F9",
+      parentPid: mintDeadPid(),
+    })
+
+    const report = reapStaleTransportRows(db, {
+      hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
+      getActiveLaunchIds: () => new Set<string>(),
+      isLaunchParentAlive: (parentPid, storedStartTime) => judgeLaunchParent(parentPid, storedStartTime).alive,
+    })
+
+    expect(report.reaped).toBe(1)
+    expect(report.reason_counts.reaped_owner_gone).toBe(1)
+    const survivors = db.prepare("SELECT id FROM sessions ORDER BY id").all() as Array<{ id: string }>
+    expect(survivors).toEqual([])
   })
 
   it("does not require the dead transport it is repairing", () => {
