@@ -167,9 +167,11 @@ export type StaleTransportReapOpts = {
    */
   judgeLaunchParent?: (launchParentPid: number, launchParentStartTime: string | null) => LaunchParentJudgement
   /**
-   * Called for each durable row reaped because its launch parent is gone,
-   * BEFORE the delete, so the loss is attributed in the journal exactly as
-   * registration's own `replaced-parent-gone` delete attributes it.
+   * Called for each durable row reaped because its launch parent is gone, AFTER
+   * that row's delete has landed and inside the same transaction, so the loss is
+   * attributed in the journal exactly as registration's own
+   * `replaced-parent-gone` delete attributes it — and a rollback takes the
+   * journal row along with the delete it describes.
    */
   onOwnerGoneReap?: (row: {
     memberId: string

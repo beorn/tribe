@@ -670,6 +670,51 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     expect(db.prepare("SELECT id FROM sessions WHERE id = 'unreadable'").get()).toEqual({ id: "unreadable" })
   })
 
+  it("tells the sender a reaped name has no live transport, so a stored ball never reads as delivered", () => {
+    const deadPid = spawnSync("true").pid
+    if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")
+    addSession(db, stmts, "ghost", "@dev/ghost", { id: "launch-ghost", parentPid: deadPid })
+    const sender = makeContext(db, stmts, "operator", "@operator")
+    const opts = {
+      cleanup: () => {},
+      userRenamed: false,
+      setUserRenamed: () => {},
+      getActiveSessionIds: () => new Set<string>(),
+      hasActiveTransport: () => false,
+      getActiveSessionInfo: () => [],
+    } as HandlerOpts
+    reapStaleTransportRows(db, {
+      hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
+      judgeLaunchParent: judgeLaunchParentSafely,
+    })
+    expect(db.prepare("SELECT id FROM sessions WHERE id = 'ghost'").get()).toBeNull()
+
+    // Distinguish this from the parked seat above: that name is reachable again
+    // because its own recent send widened the recipient directory. A name with
+    // no row and no recent traffic is stored all the same (@cto: storing for a
+    // name with no row is what a never-registered name already gets) — and what
+    // the sender gets back says so in two independent facts, so it can never
+    // read the ball as delivered.
+    const sent = parseToolJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "@dev/ghost", message: "anyone there?", type: "request", request: true, summary: "anyone there?" },
+        opts,
+      ),
+    )
+    expect(sent.error).toBeUndefined()
+    expect(sent.delivery).toMatchObject({ state: "offline", recipient: "@dev/ghost", reason: "no-session-record" })
+    expect(String(sent.warning)).toContain("unreachable (no session)")
+    const sentAttention = parseToolJson(handleToolCall(sender, "tribe.fetch", {}, opts)) as {
+      attention?: { sent_offline_balls?: Array<{ request_id: string }> }
+    }
+    expect((sentAttention.attention?.sent_offline_balls ?? []).map((ball) => ball.request_id)).toContain(
+      sent.request_id as string,
+    )
+  })
+
   it("previews a bulk reap without deleting anything (@cto item 3)", () => {
     const deadPid = spawnSync("true").pid
     if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")
@@ -761,6 +806,17 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     expect(typeof afterId).toBe("string")
     expect(ballIds("@dev/parked")).toContain(afterId)
     expect(ballIds("@operator")).toContain(owedId)
+    // @cto's condition on option (a): a ball stored for a name with no live
+    // transport must never read as delivered. The send result says offline —
+    // never the online form that means "a live transport took this"...
+    expect(afterReap.delivery).toMatchObject({ state: "offline", recipient: "@dev/parked" })
+    // ...and the sender's own next default fetch surfaces the ball it sent into
+    // the void as still offline, so it is visible as outstanding rather than
+    // assumed landed.
+    const senderAttention = parseToolJson(handleToolCall(sender, "tribe.fetch", {}, opts)) as {
+      attention?: { sent_offline_balls?: Array<{ request_id: string }> }
+    }
+    expect((senderAttention.attention?.sent_offline_balls ?? []).map((ball) => ball.request_id)).toContain(afterId)
 
     // The seat comes back and reads what was sent to it.
     const back = addSession(db, stmts, "parked-back", "@dev/parked", {
