@@ -331,14 +331,39 @@ describe("HTTP MCP adapter", () => {
         if (!Reflect.set(Bun, "serve", originalServe)) throw new Error("could not restore Bun.serve")
         vi.stubEnv(HAB_ID_TOKEN_ENV, validToken)
       }
-      await tool("rename", { new_name: "@codi/renamed" })
+      // HTTP refusal coverage (wire-rename-refuse, @cto 6f0a6862): the out-of-pair rename is refused with both names
+      // and the allowed pair; the exempt `/prev` rename below is the one that persists through reconnect.
+      {
+        if (bridge === undefined) throw new Error("HTTP journey has no bridge")
+        const refused = await fetch(bridge.url, {
+          method: "POST",
+          headers: {
+            accept: "application/json, text/event-stream",
+            "content-type": "application/json",
+            authorization: `Bearer ${bridge.secret}`,
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 2,
+            method: "tools/call",
+            params: { name: "rename", arguments: { new_name: "@codi/renamed" } },
+          }),
+        })
+        const payload = (await refused.json()) as { result?: { content?: Array<{ text?: string }>; isError?: boolean } }
+        expect(payload.result?.isError).toBe(true)
+        expect(payload.result?.content?.[0]?.text).toContain(
+          'tribe.rename refused: requested "@codi/renamed", verified "@codi/hermes"',
+        )
+        expect(payload.result?.content?.[0]?.text).toContain('allowed "@codi/hermes" or "@codi/hermes/prev"')
+      }
+      await tool("rename", { new_name: "@codi/hermes/prev" })
       daemon.child.kill("SIGTERM")
       await daemon.child.exited
       await daemon.stderr
       daemon = await startDaemon()
       await vi.waitFor(
         async () => {
-          const renamed = (await tool("members")).sessions?.find((row) => row.name === "@codi/renamed")
+          const renamed = (await tool("members")).sessions?.find((row) => row.name === "@codi/hermes/prev")
           expect(renamed).toMatchObject({
             authority: "verified",
             launch_id: "http-protocol@1",

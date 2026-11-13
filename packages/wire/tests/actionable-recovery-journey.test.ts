@@ -1140,7 +1140,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const dbPath = join(tmpDir, "managed-cli-inbox.db")
     const ownLaunchId = "managed-cli-own-launch"
     const spawnTimeName = "@agent/3-spawn"
-    const runtimeName = "@agent/3-runtime"
+    // wire-rename-refuse (@cto 6f0a6862): a verified seat may rename only within its pair, so the runtime name is the
+    // exempt `/prev` form; the old out-of-pair target stays as the stdio refusal case below.
+    const runtimeName = "@agent/3-spawn/prev"
     const foreignName = "@agent/foreign"
     // Each launch's own token, as its adapter presents it: the only self-read credential since 25074 3d-3.
     const ownToken = launchToken(ownLaunchId, spawnTimeName)
@@ -1164,6 +1166,10 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     })
     await callLaunchToolWhenRegistered(own, 60, "members", {})
     await callLaunchToolWhenRegistered(foreign, 61, "members", {})
+    // stdio refusal coverage: the out-of-pair rename is refused with both names and the allowed pair.
+    await expect(callLaunchTool(own, 162, "rename", { new_name: "@agent/3-runtime" })).rejects.toThrow(
+      'tribe.rename refused: requested "@agent/3-runtime", verified "@agent/3-spawn" by this session\'s HAB_ID_TOKEN; allowed "@agent/3-spawn" or "@agent/3-spawn/prev"',
+    )
     await callLaunchTool(own, 62, "rename", { new_name: runtimeName })
 
     // Simulate the reported recovery state: the managed launch remains in the
@@ -1442,7 +1448,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         ...BASE_ENV,
         TRIBE_SOCKET: socketPath,
         TRIBE_LAUNCH_ID: launchId,
-        HAB_ID_TOKEN: launchToken(launchId),
+        HAB_ID_TOKEN: launchToken(launchId, "@chief/next"),
         // Both spawn-time hints are intentionally stale after takeover.
         TRIBE_NAME: "@chief/next",
         TRIBE_SESSION_NAME: "@chief/next",
@@ -1460,7 +1466,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         ...BASE_ENV,
         TRIBE_SOCKET: socketPath,
         TRIBE_LAUNCH_ID: launchId,
-        HAB_ID_TOKEN: launchToken(launchId),
+        HAB_ID_TOKEN: launchToken(launchId, "@chief/next"),
         TRIBE_NAME: "@chief/next",
         TRIBE_SESSION_NAME: "@chief/next",
         TRIBE_NO_AUTOSTART: "1",
@@ -2856,18 +2862,18 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       dbRename
         .prepare(`
         INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, sender_authority)
-        VALUES ('order3-rename-msg', 'request', '@chief', '@dev/order3-renamed', 'direct', 'rename request', ?, 'push', 'verified')
+        VALUES ('order3-rename-msg', 'request', '@chief', '@dev/order3/prev', 'direct', 'rename request', ?, 'push', 'verified')
       `)
         .run(now)
     } finally {
       dbRename.close()
     }
 
-    await pushClient.call("tribe.rename", { new_name: "@dev/order3-renamed" })
+    await pushClient.call("tribe.rename", { new_name: "@dev/order3/prev" })
     await waitForCondition(
       () =>
-        pushNotifications.filter((n) => n.method === "wakeup" && n.params?.claimed_name === "@dev/order3-renamed")
-          .length > 0,
+        pushNotifications.filter((n) => n.method === "wakeup" && n.params?.claimed_name === "@dev/order3/prev").length >
+        0,
       "push connection receives wakeup after rename",
       { timeoutMs: 5000 },
     )
@@ -2898,7 +2904,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       `).run(seatName, now)
       db.prepare(`
         INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, sender_authority)
-        VALUES ('order4-rename-msg', 'request', '@chief', '@dev/order4-renamed', 'direct', 'rename request', ?, 'push', 'verified')
+        VALUES ('order4-rename-msg', 'request', '@chief', '@dev/order4/prev', 'direct', 'rename request', ?, 'push', 'verified')
       `).run(now)
     } finally {
       db.close()
@@ -2926,7 +2932,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     })
 
     // 3. Rename with pull delivery — notifyWakeupForReplay is called but has no push connection
-    await pullClient.call("tribe.rename", { new_name: "@dev/order4-renamed" })
+    await pullClient.call("tribe.rename", { new_name: "@dev/order4/prev" })
 
     // Give any event loop turns a moment to execute
     await new Promise((resolveTick) => setTimeout(resolveTick, 250))

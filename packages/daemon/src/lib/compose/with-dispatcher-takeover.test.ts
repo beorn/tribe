@@ -1894,19 +1894,19 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
           project: "/tmp/p",
           launchId: "sid-dev7@1",
           launchParentPid: ownerPid,
-          // The session must be VERIFIED for the rename below to be allowed at all: tribe.rename refuses a persona
-          // target while `sessions.identity_sid` is null (with-dispatcher.ts:3036-3044).
           idToken: "token-standalone",
         }),
       ).name,
     ).toBe("standalone")
-    // The seat renames itself to a persona at runtime, which persists against its launch identity.
-    parseResult(
-      await harness.dispatcher.handleRequest(
-        { jsonrpc: "2.0", id: "rename-persona", method: "tribe.rename", params: { new_name: "@dev/7" } },
-        "conn-standalone",
-      ),
-    )
+    // A saved persona rename against this launch identity. No runtime call can write it any more: tribe.rename
+    // refuses a persona while `sessions.identity_sid` is null, and a verified session may rename only to the name its
+    // token proves (wire-rename-refuse). The row stands for one written before those rules.
+    const launch = harness.db
+      .prepare("SELECT launch_id, launch_parent_pid FROM sessions WHERE name = 'standalone'")
+      .get() as { launch_id: string; launch_parent_pid: number }
+    harness.db
+      .prepare("INSERT INTO launch_renames (launch_id, launch_parent_pid, name, renamed_at) VALUES (?, ?, '@dev/7', ?)")
+      .run(launch.launch_id, launch.launch_parent_pid, Date.now())
     harness.dropClient("conn-standalone")
 
     harness.addPendingClient("conn-standalone-2")
@@ -1931,6 +1931,379 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
       (session) => session.pid === 6602,
     )
     expect(live.map((session) => session.name)).toEqual(["standalone"])
+  })
+
+  // wire-rename-refuse (operator card wire-rename-refuse-1113, @cto 71cf50a5). Live fault 2026-11-13 08:00: the verified
+  // seat @dev/luna5 sent tribe.join name "dev/luna5", the daemon accepted it, and sends to @dev/luna5 read offline for
+  // 25 minutes. A verified session may join or rename only to the name its token proves; token-less sessions keep
+  // free rename.
+  describe("a verified session may not join or rename to another name (wire-rename-refuse)", () => {
+    const lunaVerifier = () =>
+      siteVerifier({
+        "token-luna5": { result: "verified", actor: "@dev/luna5", sid: "sid-luna5", gen: 1 },
+        "token-peer": { result: "verified", actor: "@dev/peer", sid: "sid-peer", gen: 1 },
+      })
+    const registerLuna = async (harness: ReturnType<typeof createDispatcherHarness>, connId: string, pid: number) => {
+      harness.addPendingClient(connId)
+      return parseResult<RegisterResult>(
+        await harness.register(connId, {
+          name: "@dev/luna5",
+          pid,
+          project: "/tmp/p",
+          launchId: "sid-luna5@1",
+          launchParentPid: 7100,
+          idToken: "token-luna5",
+        }),
+      )
+    }
+    const toolText = <T>(line: string): T =>
+      JSON.parse(parseResult<{ content: Array<{ text: string }> }>(line).content[0]!.text) as T
+    const call = (
+      harness: ReturnType<typeof createDispatcherHarness>,
+      connId: string,
+      method: string,
+      params: Record<string, unknown>,
+    ) => harness.dispatcher.handleRequest({ jsonrpc: "2.0", id: `${method}-${connId}`, method, params }, connId)
+    const memberState = (harness: ReturnType<typeof createDispatcherHarness>) => ({
+      rows: harness.db
+        .prepare(
+          `SELECT id, name, identity_sid, launch_id, launch_parent_pid, last_delivered_seq, last_inbox_pull_seq
+           FROM sessions ORDER BY id`,
+        )
+        .all(),
+      balls: harness.db.prepare("SELECT request_id, recipient, sender FROM pending_request ORDER BY request_id").all(),
+      saved: harness.db
+        .prepare("SELECT launch_id, launch_parent_pid, name FROM launch_renames ORDER BY launch_id")
+        .all(),
+      messages: harness.db.prepare("SELECT count(*) AS n FROM messages").get(),
+    })
+
+    /**
+     * @failure A verified session's bare join or rename to a name other than its verified persona is accepted, so the
+     *          seat stops answering to its persona and sends to it read offline.
+     * @level l1
+     * @consumer wire-rename-refuse: @cto 71cf50a5 conditions 1 and 2.
+     */
+    it.each([
+      { method: "tribe.join", params: { name: "dev/luna5" } },
+      { method: "tribe.rename", params: { new_name: "dev/luna5" } },
+    ])(
+      "refuses $method to a name the token does not prove, naming both names and the retry, and changes nothing",
+      async ({ method, params }) => {
+        const harness = createDispatcherHarness({ identityVerifier: lunaVerifier() })
+        cleanup = harness.dispose
+        await registerLuna(harness, "conn-luna", 7101)
+        harness.addPendingClient("conn-peer")
+        parseResult<RegisterResult>(
+          await harness.register("conn-peer", {
+            name: "@dev/peer",
+            pid: 7201,
+            project: "/tmp/p",
+            launchId: "sid-peer@1",
+            launchParentPid: 7200,
+            idToken: "token-peer",
+          }),
+        )
+        toolText(
+          await call(harness, "conn-peer", "tribe.send", {
+            to: "@dev/luna5",
+            message: "open ball",
+            type: "request",
+          }),
+        )
+        const before = memberState(harness)
+        expect(before.balls).toEqual([expect.objectContaining({ recipient: "@dev/luna5", sender: "@dev/peer" })])
+
+        const refusal = parseError(await call(harness, "conn-luna", method, params))
+        expect(refusal.code).toBe(-32003)
+        expect(refusal.message).toContain('requested "dev/luna5"')
+        expect(refusal.message).toContain('verified "@dev/luna5"')
+        expect(refusal.message).toContain("join as @dev/luna5 or omit the name")
+        // @cto 5d2291ef item 4: the refusal names the two names this verified persona may hold.
+        expect(refusal.message).toContain('allowed "@dev/luna5" or "@dev/luna5/prev"')
+        expect(refusal.data).toMatchObject({
+          kind: "identity-name-mismatch",
+          claimed: "dev/luna5",
+          actor: "@dev/luna5",
+          allowed: ["@dev/luna5", "@dev/luna5/prev"],
+        })
+
+        expect(memberState(harness)).toEqual(before)
+        expect(await membersAuthority(harness)).toMatchObject({ "@dev/luna5": "verified" })
+        expect(
+          parseResult<CliStatusResult>(await harness.cliStatus())
+            .sessions.map((s) => s.name)
+            .sort(),
+        ).toEqual(["@dev/luna5", "@dev/peer"])
+      },
+    )
+
+    /**
+     * @failure The refusal also blocks a verified session re-joining under its own verified name.
+     * @level l1
+     * @consumer wire-rename-refuse: /up re-joins every session start with the launch name.
+     */
+    it("still accepts a verified join with the exact verified name", async () => {
+      const harness = createDispatcherHarness({ identityVerifier: lunaVerifier() })
+      cleanup = harness.dispose
+      await registerLuna(harness, "conn-luna", 7101)
+      expect(
+        toolText<{ joined: boolean; name: string }>(
+          await call(harness, "conn-luna", "tribe.join", { name: "@dev/luna5" }),
+        ),
+      ).toMatchObject({ joined: true, name: "@dev/luna5" })
+      expect(
+        toolText<{ name?: string; error?: string }>(
+          await call(harness, "conn-luna", "tribe.rename", { new_name: "@dev/luna5" }),
+        ),
+      ).not.toHaveProperty("error")
+      expect(await membersAuthority(harness)).toMatchObject({ "@dev/luna5": "verified" })
+    })
+
+    /**
+     * @failure The refusal blocks a verified session's nameless re-join, the second retry the refusal names.
+     * @level l1
+     * @consumer wire-rename-refuse: @cto 71cf50a5 condition 2 ("or omit the name").
+     */
+    it("still accepts a verified join that omits the name", async () => {
+      const harness = createDispatcherHarness({ identityVerifier: lunaVerifier() })
+      cleanup = harness.dispose
+      await registerLuna(harness, "conn-luna", 7101)
+      expect(
+        toolText<{ joined: boolean; name: string }>(await call(harness, "conn-luna", "tribe.join", {})),
+      ).toMatchObject({ joined: true, name: "@dev/luna5" })
+      expect(await membersAuthority(harness)).toMatchObject({ "@dev/luna5": "verified" })
+    })
+
+    /**
+     * @failure The verified-name rule leaks onto token-less ad hoc sessions and takes away their free rename.
+     * @level l1
+     * @consumer wire-rename-refuse: @cto 71cf50a5 condition 4.
+     */
+    it("leaves a token-less session free to rename and re-join under bare names", async () => {
+      const harness = createDispatcherHarness({ identityVerifier: lunaVerifier() })
+      cleanup = harness.dispose
+      harness.addPendingClient("conn-adhoc")
+      parseResult<RegisterResult>(
+        await harness.register("conn-adhoc", { name: "standalone", pid: 7301, project: "/tmp/p" }),
+      )
+      expect(
+        toolText<{ renamed: boolean; new_name: string }>(
+          await call(harness, "conn-adhoc", "tribe.rename", { new_name: "dev/luna5" }),
+        ),
+      ).toMatchObject({ renamed: true, new_name: "dev/luna5" })
+      expect(
+        toolText<{ joined: boolean; name: string }>(
+          await call(harness, "conn-adhoc", "tribe.join", { name: "probe-two" }),
+        ),
+      ).toMatchObject({ joined: true, name: "probe-two" })
+      expect(await membersAuthority(harness)).toMatchObject({ "probe-two": "claimed" })
+    })
+
+    /**
+     * @failure A verified session's reconnect re-applies a saved runtime rename that differs from its verified name,
+     *          so the fault returns at the next reconnect even with the join/rename refusal in place.
+     * @level l1
+     * @consumer wire-rename-refuse: @cto 71cf50a5 condition 3 (skip with a warn naming both; stale row removed).
+     */
+    it("skips and removes a saved rename that differs from the verified name on a verified register", async () => {
+      const harness = createDispatcherHarness({ identityVerifier: lunaVerifier() })
+      cleanup = harness.dispose
+      await registerLuna(harness, "conn-luna", 7101)
+      const launch = harness.db
+        .prepare("SELECT launch_id, launch_parent_pid FROM sessions WHERE name = '@dev/luna5'")
+        .get() as { launch_id: string; launch_parent_pid: number }
+      // The stale row the live fault left behind: written by the accepted "dev/luna5" join before this rule existed.
+      harness.db
+        .prepare(
+          "INSERT INTO launch_renames (launch_id, launch_parent_pid, name, renamed_at) VALUES (?, ?, 'dev/luna5', ?)",
+        )
+        .run(launch.launch_id, launch.launch_parent_pid, Date.now())
+      harness.dropClient("conn-luna")
+
+      const warnings: string[] = []
+      const previousLevel = getLogLevel()
+      const output = vi.spyOn(console, "warn").mockImplementation(() => {})
+      setLogLevel("warn")
+      const unsubscribe = addWriter((_formatted, level, _namespace, event) => {
+        if (level === "warn" && "message" in event) warnings.push(event.message)
+      })
+      try {
+        const reconnected = await registerLuna(harness, "conn-luna-2", 7102)
+        expect(reconnected.name).toBe("@dev/luna5")
+      } finally {
+        unsubscribe()
+        setLogLevel(previousLevel)
+        output.mockRestore()
+      }
+      const line = warnings.find((message) => message.includes("saved rename"))
+      expect(line).toBeDefined()
+      expect(line).toContain('"dev/luna5"')
+      expect(line).toContain('"@dev/luna5"')
+      expect(line).toContain("removed")
+      expect(harness.db.prepare("SELECT count(*) AS n FROM launch_renames").get()).toEqual({ n: 0 })
+      expect(await membersAuthority(harness)).toMatchObject({ "@dev/luna5": "verified" })
+    })
+
+    // @cto 5d2291ef: the role successor handoff (pm/@sop/artifacts/work.md § Role Handoffs) is the one managed flow
+    // that renames verified sessions. Exactly two transitions are exempt, structurally: verified <base>/next may hold
+    // <base>/next or <base>; verified <base> may hold <base> or <base>/prev. Nothing else, no chain.
+    const handoffVerifier = () =>
+      siteVerifier({
+        "token-chief": { result: "verified", actor: "@chief", sid: "sid-chief", gen: 1 },
+        "token-chief-next": { result: "verified", actor: "@chief/next", sid: "sid-chief-next", gen: 1 },
+        // A second verified actor under the successor's sid. Production signs one token per launch, so this pairing
+        // exists only in tests; it drives the one outside-the-pair test below.
+        "token-oneshot": { result: "verified", actor: "oneshot-seat", sid: "sid-chief-next", gen: 1 },
+      })
+    const registerHandoffSeat = async (
+      harness: ReturnType<typeof createDispatcherHarness>,
+      connId: string,
+      seat: "@chief" | "@chief/next",
+      pid: number,
+    ) => {
+      harness.addPendingClient(connId)
+      const key = seat === "@chief" ? "chief" : "chief-next"
+      return parseResult<RegisterResult>(
+        await harness.register(connId, {
+          name: seat,
+          pid,
+          project: "/tmp/p",
+          launchId: `sid-${key}@1`,
+          launchParentPid: seat === "@chief" ? 7500 : 7600,
+          idToken: `token-${key}`,
+        }),
+      )
+    }
+
+    /**
+     * @failure The verified-name refusal blocks the role successor handoff: the predecessor cannot step aside to
+     *          <base>/prev, or the successor cannot claim <base>.
+     * @level l1
+     * @consumer wire-rename-refuse: @cto 5d2291ef items 1, 2 and 5 (both exempt renames pass).
+     */
+    it("lets a verified predecessor take <base>/prev and then a verified successor claim <base>", async () => {
+      const harness = createDispatcherHarness({ identityVerifier: handoffVerifier() })
+      cleanup = harness.dispose
+      await registerHandoffSeat(harness, "conn-chief", "@chief", 7501)
+      await registerHandoffSeat(harness, "conn-next", "@chief/next", 7601)
+      expect(
+        toolText<{ renamed: boolean; new_name: string }>(
+          await call(harness, "conn-chief", "tribe.rename", { new_name: "@chief/prev" }),
+        ),
+      ).toMatchObject({ renamed: true, new_name: "@chief/prev" })
+      expect(
+        toolText<{ renamed: boolean; new_name: string }>(
+          await call(harness, "conn-next", "tribe.rename", { new_name: "@chief" }),
+        ),
+      ).toMatchObject({ renamed: true, new_name: "@chief" })
+      expect(await membersAuthority(harness)).toMatchObject({ "@chief": "verified", "@chief/prev": "verified" })
+    })
+
+    /**
+     * @failure The exemption is read as a family rule: a successor reaches <base>/prev, or a base reaches <base>/next.
+     * @level l1
+     * @consumer wire-rename-refuse: @cto 5d2291ef items 1, 2, 4 and 5 (no chain; refusal names the allowed pair).
+     */
+    it.each([
+      { seat: "@chief/next" as const, target: "@chief/prev", allowed: ["@chief/next", "@chief"] },
+      { seat: "@chief" as const, target: "@chief/next", allowed: ["@chief", "@chief/prev"] },
+    ])("refuses verified $seat renaming to $target and names its allowed pair", async ({ seat, target, allowed }) => {
+      const harness = createDispatcherHarness({ identityVerifier: handoffVerifier() })
+      cleanup = harness.dispose
+      await registerHandoffSeat(harness, "conn-seat", seat, 7701)
+      const refusal = parseError(await call(harness, "conn-seat", "tribe.rename", { new_name: target }))
+      expect(refusal.code).toBe(-32003)
+      expect(refusal.message).toContain(`requested "${target}"`)
+      expect(refusal.message).toContain(`verified "${seat}"`)
+      expect(refusal.message).toContain(`allowed "${allowed[0]}" or "${allowed[1]}"`)
+      expect(refusal.data).toMatchObject({ kind: "identity-name-mismatch", claimed: target, actor: seat, allowed })
+      expect(await membersAuthority(harness)).toMatchObject({ [seat]: "verified" })
+    })
+
+    /**
+     * @failure The exemption bypasses the name-taken rule, so a successor displaces a predecessor still holding <base>.
+     * @level l1
+     * @consumer wire-rename-refuse: @cto 5d2291ef item 1 (name-taken rule unchanged).
+     */
+    it("keeps the name-taken rule: a successor cannot claim <base> while the predecessor holds it", async () => {
+      const harness = createDispatcherHarness({ identityVerifier: handoffVerifier() })
+      cleanup = harness.dispose
+      await registerHandoffSeat(harness, "conn-chief", "@chief", 7501)
+      await registerHandoffSeat(harness, "conn-next", "@chief/next", 7601)
+      expect(
+        toolText<{ error?: string }>(await call(harness, "conn-next", "tribe.rename", { new_name: "@chief" })).error,
+      ).toContain("already taken")
+      expect(
+        parseResult<CliStatusResult>(await harness.cliStatus())
+          .sessions.map((s) => s.name)
+          .sort(),
+      ).toEqual(["@chief", "@chief/next"])
+    })
+
+    /**
+     * @failure A successor that reconnects or compacts after its claim loses <base>: the saved-rename skip deletes the
+     *          exempt row and the seat comes back as <base>/next.
+     * @level l1
+     * @consumer wire-rename-refuse: @cto 5d2291ef items 3 and 5 (successor rejoin after claim keeps <base>).
+     */
+    it("keeps <base> for a successor that reconnects after its claim, and a nameless join lands on it", async () => {
+      const harness = createDispatcherHarness({ identityVerifier: handoffVerifier() })
+      cleanup = harness.dispose
+      await registerHandoffSeat(harness, "conn-next", "@chief/next", 7601)
+      toolText(await call(harness, "conn-next", "tribe.rename", { new_name: "@chief" }))
+      harness.dropClient("conn-next")
+
+      const reconnected = await registerHandoffSeat(harness, "conn-next-2", "@chief/next", 7602)
+      expect(reconnected.name).toBe("@chief")
+      expect(harness.db.prepare("SELECT name FROM launch_renames").all()).toEqual([{ name: "@chief" }])
+      expect(
+        toolText<{ joined: boolean; name: string }>(await call(harness, "conn-next-2", "tribe.join", {})),
+      ).toMatchObject({ joined: true, name: "@chief" })
+      expect(await membersAuthority(harness)).toMatchObject({ "@chief": "verified" })
+    })
+
+    /**
+     * @failure A connection whose verified name is outside the pair takes a launch's saved exempt name, by register or
+     *          by asking for it.
+     * @level l1
+     * @consumer wire-rename-refuse: @cto a0988d73 item 2 (the one test kept after the fan-in path was removed).
+     *
+     * Two verified actors under one launch key exist only in test fixtures: hab signs one token per launch
+     * (ag/packages/hab-identity/src/index.ts:2), and a token-keyed register's launch key is the token's <sid>@<gen>.
+     * Under the plain item-3 rule such a connection never takes the saved name: it registers under its own verified name
+     * and its direct join is refused. The plain rule judges the saved row against the REGISTERING connection's pair, so
+     * this unreachable register does delete the successor's row; the assertion pins that, so nobody reads the rule as
+     * protecting the row.
+     */
+    it("refuses an outside-the-pair connection the launch's saved name; the plain rule deletes the row", async () => {
+      const harness = createDispatcherHarness({ identityVerifier: handoffVerifier() })
+      cleanup = harness.dispose
+      await registerHandoffSeat(harness, "conn-next", "@chief/next", 7601)
+      toolText(await call(harness, "conn-next", "tribe.rename", { new_name: "@chief" }))
+      harness.addPendingClient("conn-other")
+      const other = parseResult<RegisterResult>(
+        await harness.register("conn-other", {
+          name: "oneshot-seat",
+          pid: 7801,
+          project: "/tmp/p",
+          launchId: "sid-chief-next@1",
+          launchParentPid: 7600,
+          idToken: "token-oneshot",
+        }),
+      )
+      expect(other.name).toBe("oneshot-seat")
+      expect(harness.db.prepare("SELECT count(*) AS n FROM launch_renames").get()).toEqual({ n: 0 })
+      const refusal = parseError(await call(harness, "conn-other", "tribe.join", { name: "@chief" }))
+      expect(refusal.code).toBe(-32003)
+      expect(refusal.message).toContain('requested "@chief", verified "oneshot-seat"')
+      expect(refusal.message).toContain('allowed "oneshot-seat" or "oneshot-seat/prev"')
+      expect(
+        parseResult<CliStatusResult>(await harness.cliStatus())
+          .sessions.map((s) => s.name)
+          .sort(),
+      ).toEqual(["@chief", "oneshot-seat"])
+    })
   })
 
   it("reports and pages a post-boot verifier fault, then clears on repair without exposing the token", async () => {
