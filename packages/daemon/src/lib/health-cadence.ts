@@ -123,6 +123,15 @@ export type HealthCadenceProjection = ProjectionStamp & {
   response_latency: ProjectionStamp &
     LatencySummary & {
       window_ms: number
+      /**
+       * Request/response pairs whose request row is an incident edge, excluded
+       * from every series above. An alarm's lifetime is how long a condition
+       * lasted, never how long a seat took to answer: counting the two together
+       * made a p95 of days that no fleet change could lower. The count is
+       * reported because an excluded population that is not counted is a
+       * silent filter.
+       */
+      incident_pairs_excluded: number
       by_role_and_type: ResponseLatencyGroup[]
     }
   open_balls: ProjectionStamp & {
@@ -194,6 +203,8 @@ type ResponseLatencyRow = {
   sender: string
   message_type: string
   latency_ms: number
+  /** The request row this pair settles is an incident edge (messages.is_incident). */
+  is_incident: number
 }
 
 type LagRow = {
@@ -529,7 +540,13 @@ export function responseLatencyProjection(
         COALESCE(s.role, 'unknown') AS role,
         r.sender AS sender,
         q.type AS message_type,
-        r.ts - q.ts AS latency_ms
+        r.ts - q.ts AS latency_ms,
+        (
+          EXISTS (SELECT 1 FROM messages i INDEXED BY idx_messages_incident_request
+                   WHERE i.is_incident = 1 AND i.request = r.reply)
+          OR EXISTS (SELECT 1 FROM messages_archive a INDEXED BY idx_messages_archive_incident_request
+                      WHERE a.is_incident = 1 AND a.request = r.reply)
+        ) AS is_incident
       FROM response_journal r
       JOIN messages q INDEXED BY idx_messages_request_cover
         ON q.request IS NOT NULL AND q.request = r.reply AND r.ts >= q.ts
@@ -539,7 +556,13 @@ export function responseLatencyProjection(
         COALESCE(s.role, 'unknown') AS role,
         r.sender AS sender,
         q.type AS message_type,
-        r.ts - q.ts AS latency_ms
+        r.ts - q.ts AS latency_ms,
+        (
+          EXISTS (SELECT 1 FROM messages i INDEXED BY idx_messages_incident_request
+                   WHERE i.is_incident = 1 AND i.request = r.reply)
+          OR EXISTS (SELECT 1 FROM messages_archive a INDEXED BY idx_messages_archive_incident_request
+                      WHERE a.is_incident = 1 AND a.request = r.reply)
+        ) AS is_incident
       FROM response_journal r
       JOIN messages_archive q INDEXED BY idx_messages_archive_request_cover
         ON q.request IS NOT NULL AND q.request = r.reply AND r.ts >= q.ts
@@ -549,8 +572,14 @@ export function responseLatencyProjection(
     )
     .all({ $cutoff: now - DAY, $now: now }) as ResponseLatencyRow[]
 
+  // Incident edges are not latency. Their request row is a standing condition
+  // with a quiet-until; the reply that finally lands on it measures how long the
+  // ALARM lived (measured 2026-11-13: 1,038 of 1,040 rows over one hour, from 25
+  // incident balls, p95 of days) and it drowned every answering series beside it.
+  // `rows` itself stays complete: the role-actionable projection below reads it.
+  const seriesRows = rows.filter((row) => row.is_incident === 0)
   const grouped = new Map<string, { role: string; messageType: string; values: number[] }>()
-  for (const row of rows) {
+  for (const row of seriesRows) {
     const key = JSON.stringify([row.role, row.message_type])
     const group = grouped.get(key) ?? { role: row.role, messageType: row.message_type, values: [] }
     group.values.push(row.latency_ms)
@@ -576,7 +605,8 @@ export function responseLatencyProjection(
     summary: {
       as_of_ms: now,
       window_ms: DAY,
-      ...summarizeLatencies(rows.map((row) => row.latency_ms)),
+      ...summarizeLatencies(seriesRows.map((row) => row.latency_ms)),
+      incident_pairs_excluded: rows.length - seriesRows.length,
       by_role_and_type: byRoleAndType,
     },
     rows,

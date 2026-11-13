@@ -172,11 +172,15 @@ describe("33643 a health call reads neither message content nor whole history", 
     const plan = (explain.all({ $cutoff: NOW - DAY, $now: NOW }) as Array<{ detail: string }>).map((row) => row.detail)
     // An open statement holds the schema; DROP INDEX below needs every one finalized.
     for (const statement of [...statements, explain]) statement.finalize()
+    // 34009: the incident-edge test is an index-only probe of the small partial
+    // index too, so excluding incidents cannot turn into a request-row read.
     for (const index of [
       "idx_messages_reply_cover",
       "idx_messages_archive_reply_cover",
       "idx_messages_request_cover",
       "idx_messages_archive_request_cover",
+      "idx_messages_incident_request",
+      "idx_messages_archive_incident_request",
     ]) {
       expect(
         plan.some((detail) => detail.includes(`USING COVERING INDEX ${index}`)),
