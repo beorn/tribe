@@ -45,6 +45,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { safeRemoveSync } from "removely"
 import { createStatements, openDatabase } from "../../daemon/src/lib/database.ts"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
+import { connectTribeLaunch } from "../src/launch-registration.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
 import { launchToken, writeClaimsVerifier } from "./launch-token.ts"
@@ -773,6 +774,50 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await once(child, "exit")
     return { exitCode: child.exitCode, stdout, stderr }
   }
+
+  // @failure A verifierless daemon's certified launch key prevents the same owner recovering after verified restart.
+  // @level l3 @consumer Managed launch owners survive daemon replacement without a seat relaunch (33946).
+  it("recovers a launch owner after a verifierless daemon is replaced by a verified daemon", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const dbPath = join(tmpDir, "tribe.db")
+    const launchId = "sid-reboot-recovery"
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForDaemonSocket(daemonProc, socketPath)
+    console.info("33946 repro: verifierless daemon socket ready")
+    const owner = await connectTribeLaunch(
+      {
+        name: NAME,
+        principalClass: "agent",
+        launchId,
+        cwd: tmpDir,
+        domains: [],
+        takeover: true,
+        idToken: launchToken(launchId, NAME),
+      },
+      {
+        connect: connectToDaemon,
+        socketPath: () => socketPath,
+        sleep: (ms) => new Promise((resolveTick) => setTimeout(resolveTick, ms)),
+        processId: () => process.pid,
+      },
+    )
+    console.info("33946 repro: initial owner registered", owner.launchId)
+    try {
+      expect(owner.launchId).toBe(`${launchId}::${encodeURIComponent(NAME)}`)
+      await stopChild(daemonProc, "verifierless daemon")
+      await waitForCondition(() => !existsSync(socketPath), "verifierless socket removal")
+      const verifierPath = join(tmpDir, "verified-recovery.ts")
+      writeClaimsVerifier(verifierPath)
+      daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: verifierPath })
+      await waitForDaemonSocket(daemonProc, socketPath, "verified replacement daemon")
+      console.info("33946 repro: verified replacement socket ready")
+      await owner.ensureRegistered()
+      expect(owner.launchId).toBe(`${launchId}@1`)
+      expect(owner.isConnected()).toBe(true)
+    } finally {
+      owner.close()
+    }
+  }, 180_000)
 
   it("keeps ambient supervisor traffic fetchable without waking and still wakes actionables", async () => {
     const socketPath = join(tmpDir, "notification-diet.sock")

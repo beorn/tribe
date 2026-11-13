@@ -343,6 +343,7 @@ describe("ensureRegistered re-registers a launch the daemon dropped (25074 accep
     const sockets: Array<{ destroyed: boolean; dead: boolean }> = []
     let refuseConnects = 0
     let pid = PID
+    let launchId = DERIVED
     const registers: Array<Record<string, unknown>> = []
     const connect: TribeLaunchDeps["connect"] = async () => {
       if (refuseConnects > 0) {
@@ -361,7 +362,7 @@ describe("ensureRegistered re-registers a launch the daemon dropped (25074 accep
             return {
               name: REQUEST.name,
               principalClass: "service",
-              launchId: DERIVED,
+              launchId,
               launchParentPid: pid,
               protocolVersion: 11,
               transportDelivery: "pull",
@@ -402,6 +403,10 @@ describe("ensureRegistered re-registers a launch the daemon dropped (25074 accep
         for (const socket of sockets) Object.assign(socket, { destroyed: true, dead: true })
         refuseConnects = refusedConnects
       },
+      /** A replacement daemon verifies the same token after the previous daemon only claimed its launch. */
+      certifyLaunch: (next: string) => {
+        launchId = next
+      },
       /** From the next register on, this client presents (and the daemon keys) another harness pid. */
       changePid: (next: number) => {
         pid = next
@@ -430,6 +435,26 @@ describe("ensureRegistered re-registers a launch the daemon dropped (25074 accep
     expect(joined.launchId).toBe(DERIVED)
     expect(joined.isConnected()).toBe(true)
     joined.close()
+  })
+
+  // @failure A verifier-bearing replacement keys the same seat sid@gen, but its owner rejects the new ACK forever.
+  // @level l2 @consumer Managed seats recover from a verifierless daemon without relaunch (33946).
+  it("recovers when the replacement daemon verifies its previously claimed token", async () => {
+    const daemon = restartableDaemon()
+    const request = { ...REQUEST, idToken: tokenWithClaims({ sid: REQUEST.launchId, gen: 3 }) }
+    const joined = await connectTribeLaunch(request, daemon.deps)
+    expect(joined.launchId).toBe(DERIVED)
+    daemon.restart(0)
+    daemon.certifyLaunch("sid-dev7@3")
+    try {
+      await joined.ensureRegistered()
+      expect(joined.isConnected()).toBe(true)
+      expect(joined.launchId).toBe("sid-dev7@3")
+      expect(daemon.registers).toHaveLength(2)
+      expect(daemon.registers[1]).toEqual(daemon.registers[0])
+    } finally {
+      joined.close()
+    }
   })
 
   it("is a no-op while the owner transport is connected", async () => {
