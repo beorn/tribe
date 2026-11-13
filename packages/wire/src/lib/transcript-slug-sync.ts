@@ -27,9 +27,9 @@ export function createTranscriptSlugSync(deps: TranscriptSlugSyncDeps): () => vo
     const slug = deps.readSlug()
     if (!slug || slug === lastSlug || slug === deps.currentName()) return
     lastSlug = slug
-    deps
-      .rename(slug)
-      .then((answer) => {
+    void (async () => {
+      try {
+        const answer = await deps.rename(slug)
         if (answer.name) {
           deps.onRenamed(answer.name)
           return
@@ -37,11 +37,11 @@ export function createTranscriptSlugSync(deps: TranscriptSlugSyncDeps): () => vo
         deps.warn(
           `tribe.rename to transcript slug "${slug}" was not applied: ${answer.error ?? "the daemon answered without a name"}`,
         )
-      })
-      .catch((error: unknown) => {
+      } catch (error: unknown) {
         deps.warn(
           `tribe.rename to transcript slug "${slug}" was refused: ${error instanceof Error ? error.message : String(error)}`,
         )
-      })
+      }
+    })()
   }
 }
