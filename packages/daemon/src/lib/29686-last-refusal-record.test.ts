@@ -108,6 +108,7 @@ function baseOpts(overrides: Partial<HandlerOpts> = {}): HandlerOpts {
     setUserRenamed: () => {},
     getActiveSessionIds: () => new Set<string>(),
     hasActiveTransport: () => false,
+    isReconnectGraceProtected: () => false,
     getActiveSessionInfo: () => [],
     isPidAlive: () => true,
     ...overrides,

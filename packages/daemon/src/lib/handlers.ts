@@ -297,7 +297,13 @@ export type HandlerOpts = {
   hasActiveTransport: (sessionId: string) => boolean
   /** Probe whether a process is still alive. Defaults to pidStillAlive (process.kill(pid, 0)). */
   isPidAlive?: (pid: number) => boolean
-  isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
+  /**
+   * 34069 — the registry's reconnect-grace predicate, REQUIRED so a builder that
+   * forgets it is a compile error rather than a silent `false`. `tribe health`,
+   * its ladder preview and the reap sweep judge a disconnected row by this one
+   * rule; defaulting it away is how health came to call grace-held rows litter.
+   */
+  isReconnectGraceProtected: (sessionId: string, nowMs: number) => boolean
   /**
    * 24284 — whether the caller can still receive the response this handler is
    * about to build. A one-shot CLI (`cli_self_inbox_v1` / `cli_inbox_drain*`)
@@ -3992,7 +3998,6 @@ function handleRename(
     getActiveSessionIds: () => Set<string>
     /** All connected transports, used to authorize destructive name reclaim. */
     hasActiveTransport: (sessionId: string) => boolean
-    isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
     /** Optional: opportunistic socket wakeup after a name-claim replay rewind. */
     notifyWakeupForReplay?: (sessionId: string, claimedName: string, targetConnId?: string) => void
   },
@@ -4030,10 +4035,11 @@ function handleRename(
     const holderIsActive = opts.hasActiveTransport(existing.id)
     const isDifferentLiveProcess =
       existingPid > 0 && (selfPid === 0 || existingPid !== selfPid) && pidStillAlive(existingPid)
-    const holderIsAlive =
-      holderIsActive ||
-      isDifferentLiveProcess ||
-      (opts.isReconnectGraceProtected ? opts.isReconnectGraceProtected(existing.id, Date.now()) : false)
+    // Rename decides on transport + pid, never on reconnect grace: the registry's
+    // grace also covers daemon-startup adoption, where every row is protected, so
+    // consulting it would refuse a legitimate reclaim of a dead holder's name
+    // (34069 — this hook was never wired in production and stays out).
+    const holderIsAlive = holderIsActive || isDifferentLiveProcess
     if (holderIsAlive) {
       const activeIds = opts.getActiveSessionIds()
       const existing_names = listActiveSessionNames(ctx, activeIds)
@@ -4175,10 +4181,8 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     const takenPid = takenRow?.pid ?? 0
     const holderIsActive = opts.hasActiveTransport(taken.id)
     const isDifferentLiveProcess = takenPid > 0 && (selfPid === 0 || takenPid !== selfPid) && pidStillAlive(takenPid)
-    const holderIsAlive =
-      holderIsActive ||
-      isDifferentLiveProcess ||
-      (opts.isReconnectGraceProtected ? opts.isReconnectGraceProtected(taken.id, Date.now()) : false)
+    // See the reclaim arm above: rename never consults reconnect grace.
+    const holderIsAlive = holderIsActive || isDifferentLiveProcess
     if (!holderIsAlive) {
       // Dead session — tombstone and reclaim.
       const tombstoneName = `${joinName}-dead-${taken.id.slice(0, 8)}`
@@ -4398,19 +4402,9 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
   // document cannot call a row litter that the delete walk would preserve.
   const classifyCtx: TransportRowClassifyContext = {
     hasActiveTransport: (sessionId) => opts.hasActiveTransport(sessionId),
-    isReconnectGraceProtected: (sessionId, atMs) => {
-      const wired = opts.isReconnectGraceProtected
-      // 34069 (@cto): defaulting this to `false` let an unwired caller call
-      // grace-held rows litter again, silently. Absent wiring is a programming
-      // error, so it is loud at the one point where the answer moves a row
-      // between buckets.
-      if (wired === undefined) {
-        throw new Error(
-          "tribe.health: isReconnectGraceProtected is not wired, so a row reaching the grace question cannot be classified",
-        )
-      }
-      return wired(sessionId, atMs)
-    },
+    // 34069 (@cto): required by `HandlerOpts`, so the wiring cannot be missing;
+    // the type carries the guarantee that the runtime throw used to carry.
+    isReconnectGraceProtected: (sessionId, atMs) => opts.isReconnectGraceProtected(sessionId, atMs),
     getActiveLaunchIds: () => activeLaunchIds(opts.getActiveSessionInfo()),
     judgeLaunchParent: judgeLaunchParentSafely,
   }

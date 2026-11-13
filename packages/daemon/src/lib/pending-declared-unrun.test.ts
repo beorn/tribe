@@ -47,6 +47,7 @@ function optsWithRoster(members: Array<{ name: string; expected: boolean }>): Ha
     setUserRenamed: () => undefined,
     getActiveSessionIds: () => new Set<string>(),
     hasActiveTransport: () => false,
+    isReconnectGraceProtected: () => false,
     getActiveSessionInfo: () => [],
     getExpectedMembers: () => roster(members),
   }
@@ -60,6 +61,7 @@ function optsWithLiveSeats(members: Array<{ name: string; expected: boolean }>, 
     setUserRenamed: () => undefined,
     getActiveSessionIds: () => activeIds,
     hasActiveTransport: (id) => activeIds.has(id),
+    isReconnectGraceProtected: () => false,
     getActiveSessionInfo: () =>
       liveNames.map((name) => ({
         id: `sess-${name.replaceAll("/", "-")}`,
@@ -168,6 +170,7 @@ describe("24588 row 4: dual expected:false balls do not accrue", () => {
           setUserRenamed: () => undefined,
           getActiveSessionIds: () => new Set<string>(),
           hasActiveTransport: () => false,
+          isReconnectGraceProtected: () => false,
           getActiveSessionInfo: () => [],
         },
       ),
@@ -186,6 +189,7 @@ describe("24588 row 4: dual expected:false balls do not accrue", () => {
           ...optsWithRoster(UNRUN),
           getActiveSessionIds: () => new Set(["sess-dev3"]),
           hasActiveTransport: (id) => id === "sess-dev3",
+          isReconnectGraceProtected: () => false,
           getActiveSessionInfo: () => [
             {
               id: "sess-dev3",

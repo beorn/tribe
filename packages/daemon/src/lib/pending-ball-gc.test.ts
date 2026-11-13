@@ -36,6 +36,7 @@ function makeOpts(active: ActiveSessionInfo[] = []): HandlerOpts {
     setUserRenamed: () => undefined,
     getActiveSessionIds: () => new Set(active.map((session) => session.id)),
     hasActiveTransport: (sessionId) => active.some((session) => session.id === sessionId),
+    isReconnectGraceProtected: () => false,
     getActiveSessionInfo: () => active,
   }
 }

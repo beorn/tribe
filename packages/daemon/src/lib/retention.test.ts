@@ -1507,6 +1507,7 @@ describe("21757 — retention live window, unread protection, prune notice", () 
       setUserRenamed: () => {},
       getActiveSessionIds: activeIds,
       hasActiveTransport: (sessionId) => activeIds().has(sessionId),
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () =>
         [...activeIds()].flatMap((id) => {
           const row = db.prepare("SELECT name FROM sessions WHERE id = ?").get(id) as { name: string } | null

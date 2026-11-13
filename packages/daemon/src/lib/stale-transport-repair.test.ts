@@ -146,6 +146,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
       reapStaleTransports,
     } as HandlerOpts
@@ -167,6 +168,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
       reapStaleTransports,
     } as HandlerOpts
@@ -194,6 +196,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
       reapStaleTransports,
     } as HandlerOpts
@@ -216,6 +219,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
       reapStaleTransports,
     } as HandlerOpts
@@ -240,6 +244,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set(["legacy-health"]),
       hasActiveTransport: (sessionId: string) => sessionId === "legacy-health",
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [
         {
           id: "legacy-health",
@@ -369,6 +374,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
       retiredNames,
     } as HandlerOpts
@@ -437,6 +443,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set(["retired-fleet"]),
       hasActiveTransport: (sessionId: string) => sessionId === "retired-fleet",
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [
         {
           id: "retired-fleet",
@@ -516,6 +523,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set(["durable"]),
       hasActiveTransport: (sessionId: string) => sessionId === "durable",
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [
         {
           id: "durable",
@@ -685,25 +693,6 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     expect(report.reason_counts.durable_launch).toBe(1)
   })
 
-  it("refuses to classify a disconnected row when the grace predicate is unwired", () => {
-    // @cto 34069 note 2: defaulting an absent predicate to false is how health
-    // came to call grace-held rows litter in the first place, so it is loud.
-    const deadPid = spawnSync("true").pid
-    if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")
-    addSession(db, stmts, "unwired-grace", "@dev/2", { id: "launch-dev2", parentPid: deadPid })
-    const watcher = makeContext(db, stmts, "watcher2", "@watcher2")
-    const opts = {
-      cleanup: () => {},
-      userRenamed: false,
-      setUserRenamed: () => {},
-      getActiveSessionIds: () => new Set<string>(),
-      hasActiveTransport: () => false,
-      getActiveSessionInfo: () => [],
-    } as HandlerOpts
-
-    expect(() => handleToolCall(watcher, "tribe.health", {}, opts)).toThrow(/isReconnectGraceProtected is not wired/)
-  })
-
   it("performs a final synchronous sibling-transport fence before deletion", () => {
     addSession(db, stmts, "racing", "legacy-racing")
     let probes = 0
@@ -745,6 +734,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
     } as HandlerOpts
     reapStaleTransportRows(db, {
@@ -790,6 +780,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
     } as HandlerOpts
     const raise = () =>
@@ -924,6 +915,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
     } as HandlerOpts
     const sendBall = (from: TribeContext, to: string, label: string) =>

@@ -47,6 +47,7 @@ function makeOpts(): HandlerOpts {
     setUserRenamed: () => undefined,
     getActiveSessionIds: () => new Set(["sess-chief"]),
     hasActiveTransport: (sessionId) => sessionId === "sess-chief",
+    isReconnectGraceProtected: () => false,
     getActiveSessionInfo: () => [],
   }
 }
