@@ -119,12 +119,12 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
   }
 
   /** The ball's originating message — the sequence a TAKING receipt must postdate. */
-  function insertBallMessage(stmts: TribeStatements, o: { id: string; openedAt: number }): void {
+  function insertBallMessage(stmts: TribeStatements, o: { id: string; openedAt: number; recipient?: string }): void {
     stmts.insertMessage.run({
       $id: `${o.id}-msg`,
       $type: "request",
       $sender: "@chief",
-      $recipient: "@agent/9",
+      $recipient: o.recipient ?? "@agent/9",
       $kind: "direct",
       $content: `ball ${o.id}`,
       $bead_id: null,
@@ -204,18 +204,24 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
-  // 33650: an owner with no balls must not pay for another owner's traffic.
-  // Existing result tests stayed green while one empty live read consumed 17 MB.
+  // 33650: empty reads skip enrichment; nonempty reads need transport facts,
+  // but not the send-only directory of every recently active sender.
   // Syscall measurement needs Linux procfs; result and failure checks remain portable.
-  it.skipIf(process.platform !== "linux")(
-    "empty-owner pending read cost stays independent of unrelated traffic and receipts",
-    () => {
+  it.skipIf(process.platform !== "linux").each([
+    { scope: "empty owner", hasOwnBall: false },
+    { scope: "nonempty owner", hasOwnBall: true },
+  ])("$scope pending read cost stays independent of unrelated recent traffic", ({ hasOwnBall }) => {
       const { db, stmts } = setup()
       try {
         const now = Date.now()
-        const ctx = makeContext(db, stmts, "@dev/empty")
+        const owner = "@dev/read-cost"
+        const ctx = makeContext(db, stmts, owner)
         insertBallMessage(stmts, { id: "unrelated", openedAt: now - 1_000 })
         openBall(stmts, { id: "unrelated", recipient: "@agent/9", openedAt: now - 1_000 })
+        if (hasOwnBall) {
+          insertBallMessage(stmts, { id: "own", openedAt: now - 1_000, recipient: owner })
+          openBall(stmts, { id: "own", recipient: owner, openedAt: now - 1_000 })
+        }
         db.run("PRAGMA cache_size = 32")
         const reads = () => {
           const io = readFileSync("/proc/self/io", "utf8")
@@ -223,18 +229,18 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           if (!field) throw new Error("/proc/self/io lacks syscr; pending read cost is unmeasured")
           return Number(field[1])
         }
-        const readEmpty = () => {
+        const readPending = () => {
           expect(parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts()))).toMatchObject({
-            owner: "@dev/empty",
-            count: 0,
-            pending: [],
+            owner,
+            count: hasOwnBall ? 1 : 0,
+            pending: hasOwnBall ? [expect.objectContaining({ request_id: "own", recipient: owner })] : [],
             expired: false,
           })
         }
         const cost = () => {
-          readEmpty()
+          readPending()
           const before = reads()
-          for (let i = 0; i < 3; i++) readEmpty()
+          for (let i = 0; i < 3; i++) readPending()
           return (reads() - before) / 3
         }
         const lean = cost()
@@ -242,7 +248,9 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           for (let i = 0; i < 2_000; i++) {
             insertTaking(stmts, {
               id: `unrelated-receipt-${i}`,
-              ballId: "unrelated",
+              // The empty case retains its receipt-growth regression. The
+              // nonempty case isolates sender traffic, not receipt-query cost.
+              ballId: hasOwnBall ? `untracked-traffic-${i}` : "unrelated",
               owner: "@agent/9",
               requester: "@chief",
               ts: now,
@@ -250,14 +258,13 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           }
         })()
         const busy = cost()
-        expect(busy, `read syscalls: empty owner ${lean}, with unrelated traffic ${busy}`).toBeLessThan(
+        expect(busy, `read syscalls: owner ${lean}, with unrelated recent traffic ${busy}`).toBeLessThan(
           Math.max(lean, 1) * 1.5,
         )
       } finally {
         db.close()
       }
-    },
-  )
+    })
 
   // AC1/AC4: full pending must expose absence and zero without letting timestamps
   // replace sequence, or unrelated status/reply messages manufacture attendance.
