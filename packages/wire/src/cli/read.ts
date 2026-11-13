@@ -2569,6 +2569,20 @@ export async function waitForInboxWithReconnect(opts: {
       }
       continue
     } catch (err) {
+      // The readiness allowance is the lesser of its own budget and the logical wait. When the budget
+      // still has room and the daemon already answered, the allowance ran out because the logical
+      // deadline passed between the gate and a transport phase: that is this wait's timeout, not a
+      // readiness failure. A spent readiness budget, or no answer yet, still fails loud below.
+      const span = gap.readiness
+      if (
+        (err as { code?: unknown }).code === INBOX_WAIT_READINESS_TIMEOUT &&
+        latestResult !== undefined &&
+        now() >= deadline &&
+        span !== null &&
+        span.elapsedMs < span.budgetMs
+      ) {
+        return logicalTimeoutInboxWaitResult(latestResult, lastRetryableError, startedAt, now, controls.timeoutMs)
+      }
       // The boundary controller classifies once and throws a non-retryable
       // error unchanged; it owns the backoff, the absence grace and the bounds.
       const action = gap.afterError(err)
