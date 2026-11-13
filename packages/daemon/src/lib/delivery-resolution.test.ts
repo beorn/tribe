@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
@@ -781,6 +781,91 @@ describe("generic direct-message delivery resolution", () => {
     expect(refused.detail).toContain("no connected, PID-live transport")
     expect(db.prepare("SELECT request_id FROM pending_request WHERE request_id = 'req-dead-fallback'").get()).toBeNull()
     expect(db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = 'do work'").get()).toBeNull()
+  })
+
+  /**
+   * @failure Multi-send admission rereads activity changed by a policy callback.
+   * @level l2
+   * @consumer Senders relying on one pre-resolution admission snapshot.
+   */
+  it.each(["hot", "archived"] as const)(
+    "keeps the pre-resolution sender directory for multi-send with %s activity",
+    (tier) => {
+      const recent = makeContext(db, stmts, "@recent", "departed-recent-snapshot")
+      logEvent(recent, "session.left", undefined, { name: "@recent", reason: "peer-close" })
+      logEvent(sender, "snapshot.ready", undefined, {})
+      if (tier === "archived") {
+        db.prepare(`INSERT INTO messages_archive (seq,id,type,sender,recipient,kind,content,ref,ts,archived_at)
+          SELECT rowid,id,type,sender,recipient,kind,content,ref,ts,? FROM messages WHERE sender=?`).run(
+          Date.now(),
+          "@recent",
+        )
+        db.prepare("DELETE FROM messages WHERE sender=?").run("@recent")
+      }
+      const observed: Array<{ recipient: string; written: number }> = []
+      const message = `multi-snapshot-${tier}`
+      const sent = resultJson(
+        handleToolCall(
+          sender,
+          "tribe.send",
+          { to: ["@recent", "@sender"], message, type: "request", request: `req-${message}` },
+          {
+            ...opts(),
+            resolveDelivery: ({ recipient }) => {
+              // The send's directory already includes @recent. A policy
+              // callback changing the journal must not change that snapshot.
+              if (recipient === "@recent") {
+                db.prepare("DELETE FROM messages WHERE sender=?").run("@recent")
+                db.prepare("DELETE FROM messages_archive WHERE sender=?").run("@recent")
+              }
+              const row = db.prepare("SELECT COUNT(*) AS count FROM messages WHERE content=?").get(message) as {
+                count: number
+              }
+              observed.push({ recipient, written: row.count })
+              return { status: "accepted", state: "offline" }
+            },
+          },
+        ),
+      )
+
+      expect(sent.sent).toBe(true)
+      expect(observed).toEqual([
+        { recipient: "@recent", written: 0 },
+        { recipient: "@sender", written: 0 },
+      ])
+      expect(sent.deliveries).toEqual([
+        expect.objectContaining({ state: "offline", recipient: "@recent" }),
+        expect.objectContaining({ state: "offline", recipient: "@sender" }),
+      ])
+      expect(db.prepare("SELECT recipient FROM messages WHERE content=? ORDER BY rowid").all(message)).toEqual([
+        { recipient: "@recent" },
+        { recipient: "@sender" },
+      ])
+    },
+  )
+
+  /**
+   * @failure Required send admission SQL errors disappear into successful delivery.
+   * @level l2
+   * @consumer Senders who need the real directory-read failure and no delivery.
+   */
+  it("propagates a required sender-directory read failure without delivering mail", () => {
+    const prepare = db.prepare.bind(db)
+    const failure = new Error("sender directory unavailable")
+    const spy = vi.spyOn(db, "prepare").mockImplementation((sql, ...params) => {
+      // Fault the directory read itself; earlier presence and authority reads
+      // must still succeed so this cannot pass on an unrelated DB failure.
+      if (sql.includes("SELECT sender AS name FROM messages")) throw failure
+      return prepare(sql, ...params)
+    })
+    try {
+      expect(() =>
+        handleToolCall(sender, "tribe.send", { to: "@sender", message: "directory-failure", type: "request" }, opts()),
+      ).toThrow(failure)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(db.prepare("SELECT id FROM messages WHERE content='directory-failure'").get()).toBeNull()
   })
 
   it("preflights every multi-recipient target before persistence and reports each accepted disposition", () => {
