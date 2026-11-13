@@ -805,6 +805,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     try {
       expect(owner.launchId).toBe(`${launchId}::${encodeURIComponent(NAME)}`)
       const firstSession = owner.sessionId
+      if (firstSession === undefined) throw new Error("recovery fixture requires the daemon session id")
       const fixtureDb = openDatabase(dbPath)
       let queuedId: string
       try {
