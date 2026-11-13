@@ -80,6 +80,8 @@ function baseOpts(overrides: Partial<HandlerOpts> = {}): HandlerOpts {
     getActiveSessionIds: () => new Set<string>(),
     hasActiveTransport: () => false,
     getActiveSessionInfo: () => [],
+    // 34069 (@cto): health no longer defaults an unwired grace predicate to false.
+    isReconnectGraceProtected: () => false,
     ...overrides,
   } as HandlerOpts
 }

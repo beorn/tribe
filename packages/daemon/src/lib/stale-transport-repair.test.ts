@@ -482,6 +482,8 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
       getActiveSessionInfo: () => [],
+      // 34069 (@cto): health no longer defaults an unwired grace predicate to false.
+      isReconnectGraceProtected: () => false,
     } as HandlerOpts
 
     const before = parseToolJson(handleToolCall(ctx, "tribe.health", {}, opts)) as {
@@ -681,6 +683,25 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     expect(report.would_reap_sessions?.map((row) => row.name)).toEqual(health.stale_transport_rows.names)
     expect(report.reason_counts.reconnect_grace).toBe(1)
     expect(report.reason_counts.durable_launch).toBe(1)
+  })
+
+  it("refuses to classify a disconnected row when the grace predicate is unwired", () => {
+    // @cto 34069 note 2: defaulting an absent predicate to false is how health
+    // came to call grace-held rows litter in the first place, so it is loud.
+    const deadPid = spawnSync("true").pid
+    if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")
+    addSession(db, stmts, "unwired-grace", "@dev/2", { id: "launch-dev2", parentPid: deadPid })
+    const watcher = makeContext(db, stmts, "watcher2", "@watcher2")
+    const opts = {
+      cleanup: () => {},
+      userRenamed: false,
+      setUserRenamed: () => {},
+      getActiveSessionIds: () => new Set<string>(),
+      hasActiveTransport: () => false,
+      getActiveSessionInfo: () => [],
+    } as HandlerOpts
+
+    expect(() => handleToolCall(watcher, "tribe.health", {}, opts)).toThrow(/isReconnectGraceProtected is not wired/)
   })
 
   it("performs a final synchronous sibling-transport fence before deletion", () => {

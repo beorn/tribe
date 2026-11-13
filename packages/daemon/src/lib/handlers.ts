@@ -4398,7 +4398,19 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
   // document cannot call a row litter that the delete walk would preserve.
   const classifyCtx: TransportRowClassifyContext = {
     hasActiveTransport: (sessionId) => opts.hasActiveTransport(sessionId),
-    isReconnectGraceProtected: (sessionId, atMs) => opts.isReconnectGraceProtected?.(sessionId, atMs) ?? false,
+    isReconnectGraceProtected: (sessionId, atMs) => {
+      const wired = opts.isReconnectGraceProtected
+      // 34069 (@cto): defaulting this to `false` let an unwired caller call
+      // grace-held rows litter again, silently. Absent wiring is a programming
+      // error, so it is loud at the one point where the answer moves a row
+      // between buckets.
+      if (wired === undefined) {
+        throw new Error(
+          "tribe.health: isReconnectGraceProtected is not wired, so a row reaching the grace question cannot be classified",
+        )
+      }
+      return wired(sessionId, atMs)
+    },
     getActiveLaunchIds: () => activeLaunchIds(opts.getActiveSessionInfo()),
     judgeLaunchParent: judgeLaunchParentSafely,
   }
@@ -4421,7 +4433,14 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
   // live seat, and it is not litter either, so it is reported on its own line
   // rather than being called one of the other two.
   const transportWedges = classified
-    .filter(({ verdict }) => verdict.disposition === "keep" && verdict.reason !== "reconnect_grace")
+    .filter(
+      ({ verdict }) =>
+        verdict.disposition === "keep" &&
+        verdict.reason !== "reconnect_grace" &&
+        // @cto: a row the classifier keeps because a transport is live is not a
+        // wedge, even if the disconnected projection and the registry disagree.
+        verdict.reason !== "active_transport",
+    )
     .map(({ session, lifetime, verdict }) => {
       const owner = verdict.owner
       const ownerJudged = owner !== null && owner.state !== "unjudged"
