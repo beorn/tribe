@@ -777,14 +777,25 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     return { exitCode: child.exitCode, stdout, stderr }
   }
 
-  // @failure A verifierless daemon's certified launch key prevents the same owner recovering after verified restart.
+  // @failure A verifierless daemon strands its managed owner while health reports healthy, then its key blocks recovery.
   // @level l3 @consumer Managed launch owners survive daemon replacement without a seat relaunch (33946).
   it("recovers a launch owner after a verifierless daemon is replaced by a verified daemon", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
     const launchId = "sid-reboot-recovery"
+    const healthEnv = {
+      ...BASE_ENV,
+      TRIBE_SOCKET: socketPath,
+      TRIBE_LAUNCH_ID: launchId,
+      TRIBE_LAUNCH_PARENT_PID: String(process.pid),
+      HAB_ID_TOKEN: launchToken(launchId, NAME),
+      TRIBE_NO_AUTOSTART: "1",
+    }
     daemonProc = spawnDaemon(socketPath, dbPath)
     await waitForDaemonSocket(daemonProc, socketPath)
+    const standaloneHealth = await runCli(["health", "--json"], healthEnv)
+    expect(JSON.parse(standaloneHealth.stdout)).toMatchObject({ state: "healthy" })
+    expect(standaloneHealth.exitCode, standaloneHealth.stderr).toBe(0)
     const owner = await connectTribeLaunch(
       {
         name: NAME,
@@ -846,6 +857,18 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       const before = readStored()
       expect(before.session).toMatchObject({ id: firstSession, delivery: "pull", filter_mode: "focus" })
       expect(before.queued).toMatchObject({ id: queuedId, content: "queued before verified recovery", recipient: NAME })
+      // 33946: a responding socket does not establish that a managed owner can read its mailbox.
+      // Reuse this real recovery journey so health is checked against the same failed authority, not a mock field.
+      const unavailableInbox = await runCli(["inbox", "--consume", "--json"], healthEnv)
+      expect(unavailableInbox.exitCode, unavailableInbox.stderr).not.toBe(0)
+      expect(unavailableInbox.stderr).toContain("authority")
+      const unavailableHealth = await runCli(["health", "--json"], healthEnv)
+      expect.soft(JSON.parse(unavailableHealth.stdout)).toMatchObject({
+        schema: "hab-service-health/2",
+        service: "wire",
+        state: "unhealthy",
+      })
+      expect.soft(unavailableHealth.exitCode, unavailableHealth.stderr).toBe(2)
       await stopChild(daemonProc, "verifierless daemon")
       await waitForCondition(() => !existsSync(socketPath), "verifierless socket removal")
       const verifierPath = join(tmpDir, "verified-recovery.ts")
@@ -874,6 +897,13 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       await owner.attachWatch(() => {})
       expect(owner.sessionId).toBe(firstSession)
       expect(readStored()).toEqual(before)
+      const recoveredHealth = await runCli(["health", "--json"], healthEnv)
+      expect(JSON.parse(recoveredHealth.stdout)).toMatchObject({
+        schema: "hab-service-health/2",
+        service: "wire",
+        state: "healthy",
+      })
+      expect(recoveredHealth.exitCode, recoveredHealth.stderr).toBe(0)
     } finally {
       owner.close()
     }
