@@ -1327,6 +1327,9 @@ export function withDispatcher<
       setUserRenamed: () => {},
       getActiveSessionIds: () => registry.getActiveSessionIds(),
       hasActiveTransport: (sessionId: string) => registry.hasActiveTransport(sessionId),
+      // 34069 — the same grace rule the reap sweep uses, wired into the opts that
+      // serve `tribe health`, so the report cannot call a held row litter.
+      isReconnectGraceProtected: (sessionId: string) => registry.isReconnectGraceProtected(sessionId, Date.now()),
       getActiveSessionInfo: () => registry.getActiveSessionInfo(),
       // 29686 (@cto ruling 1): the store holds the last register refusal, and the wire's `foreign_transport` is
       // DERIVED from it, so a reader of that field sees exactly the shape it saw before this change.
@@ -1398,7 +1401,7 @@ export function withDispatcher<
           last_delivered_seq: number | null
         }>,
       }),
-    } as const
+    } as const satisfies HandlerOpts
 
     function deduplicateName(name: string): string {
       const live = Array.from(clients.values())

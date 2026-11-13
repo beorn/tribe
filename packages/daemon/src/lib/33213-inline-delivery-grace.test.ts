@@ -240,6 +240,7 @@ describe("33213 a body delivered to a push seat is not attention until it goes u
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
     })
     const drain = async (receipt: boolean) => {

@@ -129,6 +129,7 @@ function optsFor(active: ActiveSessionInfo[]): HandlerOpts {
     setUserRenamed: () => {},
     getActiveSessionIds: () => activeIds,
     hasActiveTransport: (sessionId: string) => activeIds.has(sessionId),
+    isReconnectGraceProtected: () => false,
     getActiveSessionInfo: () => active,
   } as HandlerOpts
 }

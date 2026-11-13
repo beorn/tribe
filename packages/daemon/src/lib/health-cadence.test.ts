@@ -893,6 +893,7 @@ describe("20876 Tribe health cadence", () => {
       getActiveSessionIds: () => new Set(["sess-agent-5"]),
       hasActiveTransport: (sessionId) => sessionId === "sess-agent-5",
       getActiveSessionInfo: () => [activeSession("sess-agent-5", "@agent/5", "member", tmpDir, now)],
+      isReconnectGraceProtected: () => false,
     }
 
     // @failure Offline requests vanish from health when only connected inbox rows are projected (#22798).

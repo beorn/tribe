@@ -145,6 +145,7 @@ function makeOpts(inboxWait?: HandlerOpts["inboxWait"]): HandlerOpts {
     setUserRenamed: () => {},
     getActiveSessionIds: () => new Set<string>(),
     hasActiveTransport: () => false,
+    isReconnectGraceProtected: () => false,
     getActiveSessionInfo: () => [],
     inboxWait,
   }

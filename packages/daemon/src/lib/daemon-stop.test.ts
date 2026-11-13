@@ -30,6 +30,7 @@ function makeOpts(overrides: Partial<HandlerOpts> = {}): HandlerOpts {
     setUserRenamed: () => undefined,
     getActiveSessionIds: () => new Set(),
     hasActiveTransport: () => false,
+    isReconnectGraceProtected: () => false,
     getActiveSessionInfo: () => [],
     ...overrides,
   }

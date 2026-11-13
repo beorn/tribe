@@ -1360,14 +1360,21 @@ async function cmdHealth(opts?: { json?: boolean; full?: boolean }): Promise<voi
       }
       if (key === "stale_transport_rows" && value !== null && typeof value === "object") {
         // 21669 — litter is not an issue, but it must never be invisible: the
-        // sweep reaps these rows, and `tribe repair reap_stale_transports` can
-        // reach them now. Report the count without inflating the issue list.
+        // final rule for wedges, litter and grace is the repair pass's own
+        // classifier, so "would be reaped" is what the next sweep does.
         const stale = value as { count?: unknown; names?: unknown }
         if (typeof stale.count === "number" && stale.count > 0) {
           const named = Array.isArray(stale.names) && stale.names.length > 0 ? ` (${stale.names.join(", ")})` : ""
-          console.log(
-            `\n  Stale registrations: ${stale.count} disconnected durable row(s) whose launch process is gone${named}`,
-          )
+          console.log(`\n  Stale registrations: ${stale.count} disconnected row(s) the next reap sweep removes${named}`)
+        }
+      }
+      if (key === "reconnect_grace_rows" && value !== null && typeof value === "object") {
+        // Neither a wedge nor litter: the launch ended, but the grace window
+        // still holds the row, so the next sweep will not touch it either.
+        const grace = value as { count?: unknown; names?: unknown }
+        if (typeof grace.count === "number" && grace.count > 0) {
+          const named = Array.isArray(grace.names) && grace.names.length > 0 ? ` (${grace.names.join(", ")})` : ""
+          console.log(`  Reconnect grace: ${grace.count} disconnected row(s) the sweep keeps until grace ends${named}`)
         }
       }
     }

@@ -80,6 +80,7 @@ function makeOpts(info: ActiveSessionInfo[] = [], expectedMembers?: () => Declar
     setUserRenamed: () => undefined,
     getActiveSessionIds: () => ids,
     hasActiveTransport: (id) => ids.has(id),
+    isReconnectGraceProtected: () => false,
     getActiveSessionInfo: () => info,
     getExpectedMembers: expectedMembers,
   }

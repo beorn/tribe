@@ -233,6 +233,7 @@ describe("generic direct-message delivery resolution", () => {
       setUserRenamed: () => undefined,
       getActiveSessionIds: () => new Set(["sess-sender", "sess-manager"]),
       hasActiveTransport: (sessionId) => sessionId === "sess-sender" || sessionId === "sess-manager",
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [
         {
           id: "sess-sender",
@@ -762,6 +763,7 @@ describe("generic direct-message delivery resolution", () => {
       ...opts(),
       getActiveSessionIds: () => new Set(["sess-sender"]),
       hasActiveTransport: (sessionId: string) => sessionId === "sess-sender",
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () =>
         opts()
           .getActiveSessionInfo()

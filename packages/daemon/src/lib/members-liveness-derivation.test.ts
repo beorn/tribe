@@ -119,6 +119,7 @@ describe("tribe.members separates connector state from mailbox progress", () => 
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
     } as HandlerOpts
 
@@ -168,6 +169,7 @@ describe("tribe.members separates connector state from mailbox progress", () => 
       // incidents: registry presence says connected, the pid says otherwise.
       getActiveSessionIds: () => new Set(["zombie-transport"]),
       hasActiveTransport: (sessionId: string) => sessionId === "zombie-transport",
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [activeInfoFor("zombie-transport", "zombie-agent", deadPid)],
     } as HandlerOpts
 
@@ -199,6 +201,7 @@ describe("tribe.members separates connector state from mailbox progress", () => 
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set(["live-transport"]),
       hasActiveTransport: (sessionId: string) => sessionId === "live-transport",
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [activeInfoFor("live-transport", "live-agent", process.pid)],
     } as HandlerOpts
 
@@ -232,6 +235,7 @@ describe("tribe.members separates connector state from mailbox progress", () => 
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set(["legacy-live", "readable-live"]),
       hasActiveTransport: (sessionId: string) => sessionId === "legacy-live" || sessionId === "readable-live",
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [
         activeInfoFor("legacy-live", "legacy-live-agent", process.pid),
         activeInfoFor("readable-live", "readable-live-agent", process.pid),
@@ -300,6 +304,7 @@ describe("tribe.members separates connector state from mailbox progress", () => 
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
     } as HandlerOpts
 

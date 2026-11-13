@@ -106,6 +106,7 @@ const opts = (): HandlerOpts => ({
   setUserRenamed: () => {},
   getActiveSessionIds: () => new Set<string>(),
   hasActiveTransport: () => false,
+  isReconnectGraceProtected: () => false,
   getActiveSessionInfo: () => [],
 })
 
@@ -266,6 +267,7 @@ describe("an incident wakes its idle owner", () => {
       ...opts(),
       getActiveSessionIds: () => active,
       hasActiveTransport: (id) => active.has(id),
+      isReconnectGraceProtected: () => false,
     }
     const { manager, page } = rig()
     const ownerCtx = context("sess-owner", "boot-sess-owner", manager.onMessageInserted)

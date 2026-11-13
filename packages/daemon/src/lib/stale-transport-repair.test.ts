@@ -146,6 +146,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
       reapStaleTransports,
     } as HandlerOpts
@@ -167,6 +168,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
       reapStaleTransports,
     } as HandlerOpts
@@ -194,6 +196,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
       reapStaleTransports,
     } as HandlerOpts
@@ -216,6 +219,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
       reapStaleTransports,
     } as HandlerOpts
@@ -240,6 +244,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set(["legacy-health"]),
       hasActiveTransport: (sessionId: string) => sessionId === "legacy-health",
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [
         {
           id: "legacy-health",
@@ -369,6 +374,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
       retiredNames,
     } as HandlerOpts
@@ -437,6 +443,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set(["retired-fleet"]),
       hasActiveTransport: (sessionId: string) => sessionId === "retired-fleet",
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [
         {
           id: "retired-fleet",
@@ -482,6 +489,8 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
       getActiveSessionInfo: () => [],
+      // 34069 (@cto): health no longer defaults an unwired grace predicate to false.
+      isReconnectGraceProtected: () => false,
     } as HandlerOpts
 
     const before = parseToolJson(handleToolCall(ctx, "tribe.health", {}, opts)) as {
@@ -514,6 +523,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set(["durable"]),
       hasActiveTransport: (sessionId: string) => sessionId === "durable",
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [
         {
           id: "durable",
@@ -640,6 +650,49 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     expect(survivors).toEqual(["grace-gone", "live-owner"])
   })
 
+  it("health names as litter exactly what the sweep would reap, never a row the grace still holds", () => {
+    const deadPid = spawnSync("true").pid
+    if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")
+    addSession(db, stmts, "litter", "@dev/0", { id: "launch-dev0", parentPid: deadPid })
+    addSession(db, stmts, "grace-gone", "@dev/1", { id: "launch-dev1", parentPid: deadPid })
+    addSession(db, stmts, "live-owner", "@dev/9", { id: "launch-dev9", parentPid: process.pid })
+    const grace = (sessionId: string) => sessionId === "grace-gone"
+
+    // @cto 5a5a3914 — measured live before this rule: health called four rows
+    // "litter reaped by the sweep" while the sweep kept all four in reconnect
+    // grace and reaped none of them.
+    const watcher = makeContext(db, stmts, "watcher", "@watcher")
+    const health = parseToolJson(
+      handleToolCall(watcher, "tribe.health", {}, {
+        cleanup: () => {},
+        userRenamed: false,
+        setUserRenamed: () => {},
+        getActiveSessionIds: () => new Set<string>(),
+        hasActiveTransport: () => false,
+        isReconnectGraceProtected: grace,
+        getActiveSessionInfo: () => [],
+      } as HandlerOpts),
+    ) as {
+      transport_wedges: Array<{ name: string }>
+      stale_transport_rows: { names: string[] }
+      reconnect_grace_rows: { names: string[] }
+    }
+
+    expect(health.transport_wedges.map((wedge) => wedge.name)).toEqual(["@dev/9"])
+    expect(health.stale_transport_rows.names).toEqual(["@dev/0"])
+    expect(health.reconnect_grace_rows.names).toEqual(["@dev/1"])
+
+    const report = reapStaleTransportRows(db, {
+      hasActiveTransport: () => false,
+      isReconnectGraceProtected: grace,
+      judgeLaunchParent: judgeLaunchParentSafely,
+      dryRun: true,
+    })
+    expect(report.would_reap_sessions?.map((row) => row.name)).toEqual(health.stale_transport_rows.names)
+    expect(report.reason_counts.reconnect_grace).toBe(1)
+    expect(report.reason_counts.durable_launch).toBe(1)
+  })
+
   it("performs a final synchronous sibling-transport fence before deletion", () => {
     addSession(db, stmts, "racing", "legacy-racing")
     let probes = 0
@@ -681,6 +734,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
     } as HandlerOpts
     reapStaleTransportRows(db, {
@@ -726,6 +780,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
     } as HandlerOpts
     const raise = () =>
@@ -860,6 +915,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
     } as HandlerOpts
     const sendBall = (from: TribeContext, to: string, label: string) =>

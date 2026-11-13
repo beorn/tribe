@@ -97,6 +97,7 @@ const handlerOpts = (): HandlerOpts => ({
   setUserRenamed: () => {},
   getActiveSessionIds: () => new Set<string>(),
   hasActiveTransport: () => false,
+  isReconnectGraceProtected: () => false,
   getActiveSessionInfo: () => [],
 })
 
