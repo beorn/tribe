@@ -1200,7 +1200,8 @@ export function evaluateWireHealthDocument(
         verdict: {
           kind: "unknown",
           reason: "unparsed",
-          observed: "cli_status did not supply a valid authority_issues string array; inspect the running daemon version",
+          observed:
+            "cli_status did not supply a valid authority_issues string array; inspect the running daemon version",
         },
       },
     }
