@@ -80,7 +80,11 @@ export function recallEmbedContract(): VaultEmbedContract {
   }
 }
 
-/** `realpath:size:mtimeMs`: how a query names the model without hashing it (D4). */
+/**
+ * `realpath:size:mtimeMs`: the shared query/producer freshness key (CTO 33868, a01b54d9).
+ * A same-size, same-mtime rewrite of a mutable fixture/custom model is not seen. The production model is an
+ * immutable Nix store path; this key is a freshness signal, not cryptographic proof of arbitrary mutable files.
+ */
 export function modelFileStat(path: string): string {
   const real = realpathSync(path)
   const stat = statSync(real)

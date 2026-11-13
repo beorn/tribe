@@ -4,7 +4,8 @@
  * @consumer @ag/recall/three-dark-search-paths (vault semantic leg, slice 2: generation selection, CTO D4)
  * @testonly none
  *
- * Requirement (D4, CTO 9686f199/0609d989/8d4ea4f4): the pass hashes the GGUF once and refreshes the published
+ * Requirement (D4, amended by CTO 3bad8137/a01b54d9): a pass hashes on first use or changed stat/contract, otherwise
+ * reuses its stored verified digest without expensive setup; it refreshes the published
  * generation only when its contract and digest match; a changed digest fills a separate building generation and
  * publishes it only after a complete pass; the first generation is published at once so partial coverage is served;
  * vault_id is the realpath of the bound state.db and file paths resolve against <root> of <root>/.km/state.db.

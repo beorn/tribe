@@ -1,7 +1,8 @@
 /**
  * The vault embedding pass of `recall index` (@ag/recall/three-dark-search-paths, D3/D4).
  *
- * Runs only when `--vault-db` is bound. The GGUF is hashed once per pass and must be the digest the contract pins.
+ * Runs only when `--vault-db` is bound. First use or a changed stat/contract hashes the GGUF and checks its pin;
+ * an unchanged generation reuses its verified digest (CTO 33868, 3bad8137/a01b54d9).
  * The pass refreshes the published generation when its contract and digest match the running ones. Otherwise it
  * fills a building generation with the running identity, publishing it once a pass covers every document it can.
  * When nothing is published yet, the first generation is published at once, so its partial coverage is served and
@@ -13,6 +14,7 @@ import { basename, dirname } from "node:path"
 import { createStore } from "@tobilu/qmd/store"
 import {
   modelIdentity,
+  modelFileStat,
   recallEmbedContract,
   requirePinnedModel,
   requireRecallEmbedModel,
@@ -147,9 +149,20 @@ export async function runVaultEmbedPass(options: VaultEmbedPassOptions): Promise
   const contract = options.contract ?? recallEmbedContract()
   const now = options.now ?? Date.now()
 
-  const { generation, publishWhenComplete } = selectGeneration(db, contract, await modelIdentity(modelPath), now)
+  const stat = modelFileStat(modelPath)
+  const verified = db
+    .prepare(
+      "SELECT gguf_sha256 AS sha256, gguf_stat AS stat FROM vault_embed_generation " +
+        "WHERE state IN ('published', 'building') AND contract_json = ? AND gguf_stat = ? " +
+        "ORDER BY CASE state WHEN 'published' THEN 0 ELSE 1 END, id DESC LIMIT 1",
+    )
+    .get(contractIdentity(contract), stat) as ModelIdentity | null
+  const model = verified ?? (await modelIdentity(modelPath))
+  const { generation, publishWhenComplete } = selectGeneration(db, contract, model, now)
 
-  const runtime = (options.runtime ?? ((c) => createQmdEmbedRuntime(c, env)))(contract)
+  let runtime: QmdEmbedRuntime | undefined
+  const getRuntime = (): QmdEmbedRuntime =>
+    (runtime ??= (options.runtime ?? ((c) => createQmdEmbedRuntime(c, env)))(contract))
   const report = await refreshVaultEmbeddings({
     db,
     vaultDb: openVaultDb(vaultId),
@@ -157,8 +170,12 @@ export async function runVaultEmbedPass(options: VaultEmbedPassOptions): Promise
     vaultRoot,
     generation,
     contract,
-    chunker: runtime.chunker,
-    embedder: runtime.embedder,
+    chunker: {
+      chunk: (...args) => getRuntime().chunker.chunk(...args),
+      title: (...args) => getRuntime().chunker.title(...args),
+      format: (...args) => getRuntime().chunker.format(...args),
+    },
+    embedder: { embed: (inputs) => getRuntime().embedder.embed(inputs) },
     timeLeftMs: options.timeLeftMs,
   })
   let isPublished = !publishWhenComplete

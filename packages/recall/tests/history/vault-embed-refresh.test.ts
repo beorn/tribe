@@ -25,7 +25,7 @@ import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
-import { afterEach, beforeEach, describe, expect, test } from "vitest"
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { initSchema } from "../../src/history/db-schema"
 import {
   refreshVaultEmbeddings,
@@ -177,9 +177,15 @@ describe("refreshVaultEmbeddings", () => {
     const vec = db.prepare("SELECT vec FROM vault_doc_embed WHERE chunk = 0").get() as { vec: Uint8Array }
     expect(decodeVaultVectorInto(vec.vec, new Float32Array(4))).toHaveLength(4)
 
+    const prepare = vi.spyOn(db, "prepare")
     const second = await run(embedder)
+    const generationVectorLoads = prepare.mock.calls.filter(([sql]) =>
+      String(sql).includes("SELECT input_key, vec FROM vault_doc_embed"),
+    ).length
+    prepare.mockRestore()
     expect(second).toMatchObject({ embeddedDocuments: 0, embeddedChunks: 0, coveredDocuments: 1 })
     expect(embedder.calls).toHaveLength(1)
+    expect(generationVectorLoads).toBe(0)
   })
 
   test("an edit re-embeds only the changed chunk and prunes the path's older rows after commit", async () => {
@@ -191,6 +197,47 @@ describe("refreshVaultEmbeddings", () => {
     expect(report).toMatchObject({ embeddedDocuments: 1, embeddedChunks: 1, reusedChunks: 2 })
     expect(embedder.calls[1]).toEqual(["doc: Alpha | TWO"])
     expect(new Set(rows().map((r) => r.doc_hash))).toEqual(new Set([sha256("Alpha\n\none\n\nTWO")]))
+  })
+
+  test("a chunk moved from an updated document stays reusable by a later document before deferred pruning", async () => {
+    putFile("a.md", "Title\n\nkeep\n\nmove", 10)
+    await run(recordingEmbedder())
+    const movedInputKey = createHash("sha256")
+      .update(contractIdentity(CONTRACT))
+      .update("\0")
+      .update("doc: Title | move")
+      .digest("hex")
+    const oldMovedVector = db
+      .prepare("SELECT vec FROM vault_doc_embed WHERE fs_path = ? AND input_key = ?")
+      .get("a.md", movedInputKey) as { vec: Uint8Array }
+
+    // a.md sorts before b.md; its completed write must not prune the old `move` row before b.md reuses it.
+    putFile("a.md", "Title\n\nkeep", 20)
+    putFile("b.md", "Title\n\nmove", 30)
+    putFile("c.md", "C\n\nunique", 40)
+    const calls: string[][] = []
+    const failing: VaultEmbedder = {
+      embed: async (inputs) => {
+        calls.push([...inputs])
+        if (inputs.some((input) => input.includes("unique"))) throw new Error("fixture failure after moved chunk")
+        return recordingEmbedder().embed(inputs)
+      },
+    }
+
+    await expect(run(failing)).rejects.toThrow(/c\.md.*fixture failure after moved chunk/)
+
+    const movedRow = db
+      .prepare("SELECT vec FROM vault_doc_embed WHERE fs_path = ? AND input_key = ?")
+      .get("b.md", movedInputKey) as { vec: Uint8Array } | null
+    expect(movedRow?.vec).toEqual(oldMovedVector.vec)
+    expect(new Set(rows().filter((row) => row.fs_path === "a.md").map((row) => row.doc_hash))).toEqual(
+      new Set([sha256("Title\n\nkeep")]),
+    )
+    expect(new Set(rows().filter((row) => row.fs_path === "b.md").map((row) => row.doc_hash))).toEqual(
+      new Set([sha256("Title\n\nmove")]),
+    )
+    expect(rows().some((row) => row.fs_path === "c.md")).toBe(false)
+    expect(calls).toEqual([["doc: C | C", "doc: C | unique"]])
   })
 
   test("bytes that do not hash to km's current fs_content_hash are not embedded and are reported", async () => {
