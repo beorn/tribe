@@ -18,6 +18,7 @@ import {
   type IncidentIdentity,
 } from "tribe-wire"
 import { isExplicitTribePersonaName } from "tribe-wire/lib/persona-name"
+import type { LaunchParentComparison } from "./session-transport-state.ts"
 
 export type { BallSettlementReason } from "tribe-wire"
 
@@ -1187,6 +1188,7 @@ export type SessionLeftReason =
   | "replaced-by-displacement"
   | "replaced-by-successor-generation"
   | "replaced-parent-gone"
+  | "reaped-parent-gone"
 
 /** The reasons that are positive evidence the LAUNCH is over, not merely
  *  that a socket closed. The membership projection finishes a launch on
@@ -1240,6 +1242,8 @@ export function logSessionLeft(
     reason: SessionLeftReason
     /** A successor-generation replacement names both generations (24604 (a), @cto 5b98b2a1). */
     generation?: { readonly holder: number; readonly successor: number }
+    /** How a `…parent-gone` judgement was reached: kernel start time, or pid only. */
+    launchParentComparison?: LaunchParentComparison
   },
 ): string {
   return logEvent(
@@ -1254,6 +1258,9 @@ export function logSessionLeft(
       launch_id: member.launchId,
       launch_parent_pid: member.launchParentPid,
       reason: member.reason,
+      ...(member.launchParentComparison === undefined
+        ? {}
+        : { launch_parent_comparison: member.launchParentComparison }),
       ...(member.generation === undefined
         ? {}
         : { holder_gen: member.generation.holder, successor_gen: member.generation.successor }),

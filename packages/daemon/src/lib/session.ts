@@ -12,6 +12,7 @@ import {
   probeProcessState,
   readProcessStartTime,
   type LaunchParentComparison,
+  type LaunchParentJudgement,
 } from "./session-transport-state.ts"
 
 const log = createLogger("tribe:session")
@@ -96,9 +97,11 @@ export type StaleTransportReapReasonCounts = {
   active_transport: number
   reconnect_grace: number
   durable_launch: number
+  launch_parent_unjudged: number
   malformed_launch_identity: number
   reaped_connection_scoped: number
   reaped_superseded_launch: number
+  reaped_owner_gone: number
 }
 
 export type StaleTransportReapReport = {
@@ -106,6 +109,9 @@ export type StaleTransportReapReport = {
   reaped: number
   reason_counts: StaleTransportReapReasonCounts
   reaped_sessions: Array<{ member_id: string; name: string }>
+  /** True when nothing was deleted. `would_reap_sessions` then names the rows the same call would remove. */
+  dry_run?: boolean
+  would_reap_sessions?: Array<{ member_id: string; name: string }>
 }
 
 /**
@@ -147,6 +153,41 @@ export type StaleTransportReapOpts = {
    * path that the sweep would have preserved.
    */
   onlySessionIds?: ReadonlySet<string>
+  /**
+   * Judge whether a disconnected durable row's launch parent is still the
+   * process that registered it. This is the SAME probe registration already
+   * trusts to decide `replaced-parent-gone`: kernel start time where the
+   * platform has it, pid existence otherwise. A `gone` parent means the launch
+   * ENDED — positive evidence about the process, never an inference from the
+   * missing transport — so the row is litter and may be reaped. `unjudged` (a
+   * probe that could not read the process at all) SKIPS the row and is counted
+   * in `launch_parent_unjudged`: one unreadable /proc entry never aborts the
+   * sweep, and never deletes a row. Omitted preserves the prior behaviour:
+   * durable rows survive unless a live registration holds their launch id.
+   */
+  judgeLaunchParent?: (launchParentPid: number, launchParentStartTime: string | null) => LaunchParentJudgement
+  /**
+   * Called for each durable row reaped because its launch parent is gone,
+   * BEFORE the delete, so the loss is attributed in the journal exactly as
+   * registration's own `replaced-parent-gone` delete attributes it.
+   */
+  onOwnerGoneReap?: (row: {
+    memberId: string
+    name: string
+    role: string
+    domains: readonly string[]
+    launchId: string | null
+    launchParentPid: number
+    launchParentStartTime: string | null
+    comparison: LaunchParentComparison
+  }) => void
+  /**
+   * Classify and report, delete nothing. Every fence (transport, lifetime,
+   * supersession, owner, grace) runs exactly as in a real pass; the delete
+   * transaction is skipped, so the result is advisory and names the rows the
+   * next real sweep would remove. A bulk reap is previewed, never assumed.
+   */
+  dryRun?: boolean
 }
 
 /**
@@ -156,8 +197,9 @@ export type StaleTransportReapOpts = {
  * transaction deletes a row.
  *
  * Durable-launch rows are preserved unless a LIVE registration holds the same
- * launch id: a missing transport still never establishes agent absence, so
- * only positive evidence of replacement makes a durable row reapable.
+ * launch id, or the launch parent process is provably gone: a missing
+ * transport still never establishes agent absence, so only positive evidence
+ * of replacement or of the launch ending makes a durable row reapable.
  */
 export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpts): StaleTransportReapReport {
   const nowMs = opts.nowMs ?? Date.now()
@@ -165,29 +207,49 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
   const selectScopedRow =
     scoped === undefined
       ? null
-      : db.prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions WHERE id = $id")
+      : db.prepare(
+          "SELECT id, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time FROM sessions WHERE id = $id",
+        )
   const rows = (
     selectScopedRow === null
-      ? db.prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions ORDER BY id").all()
+      ? db
+          .prepare(
+            "SELECT id, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time FROM sessions ORDER BY id",
+          )
+          .all()
       : [...(scoped as ReadonlySet<string>)].flatMap((sessionId) => selectScopedRow.all({ $id: sessionId }))
   ) as Array<{
     id: string
     name: string
+    role: string
+    domains: string
     launch_id: string | null
     launch_parent_pid: number | null
+    launch_parent_start_time: string | null
   }>
   const reasonCounts: StaleTransportReapReasonCounts = {
     active_transport: 0,
     reconnect_grace: 0,
     durable_launch: 0,
+    launch_parent_unjudged: 0,
     malformed_launch_identity: 0,
     reaped_connection_scoped: 0,
     reaped_superseded_launch: 0,
+    reaped_owner_gone: 0,
   }
   const activeLaunchIds = opts.getActiveLaunchIds?.() ?? new Set<string>()
   const isSupersededLaunch = (launchId: string | null): boolean =>
     typeof launchId === "string" && launchId.length > 0 && activeLaunchIds.has(launchId)
-  const candidates: Array<(typeof rows)[number] & { superseded: boolean }> = []
+  const judgeOwner = (row: {
+    launch_parent_pid: number | null
+    launch_parent_start_time: string | null
+  }): LaunchParentJudgement | null =>
+    row.launch_parent_pid === null || opts.judgeLaunchParent === undefined
+      ? null
+      : opts.judgeLaunchParent(row.launch_parent_pid, row.launch_parent_start_time)
+  const candidates: Array<
+    (typeof rows)[number] & { superseded: boolean; ownerGone: boolean; ownerComparison: LaunchParentComparison | null }
+  > = []
 
   for (const row of rows) {
     if (opts.hasActiveTransport(row.id)) {
@@ -199,7 +261,14 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
       launchParentPid: row.launch_parent_pid,
     })
     const superseded = isSupersededLaunch(row.launch_id)
-    if (lifetime === "durable-launch" && !superseded) {
+    const judgement = lifetime === "durable-launch" ? judgeOwner(row) : null
+    if (lifetime === "durable-launch" && judgement?.state === "unjudged") {
+      reasonCounts.launch_parent_unjudged++
+      continue
+    }
+    const ownerGone = lifetime === "durable-launch" && judgement?.state === "gone"
+    const ownerComparison = judgement !== null && judgement.state !== "unjudged" ? judgement.comparison : null
+    if (lifetime === "durable-launch" && !superseded && !ownerGone) {
       reasonCounts.durable_launch++
       continue
     }
@@ -211,11 +280,30 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
       reasonCounts.reconnect_grace++
       continue
     }
-    candidates.push({ ...row, superseded })
+    candidates.push({ ...row, superseded, ownerGone, ownerComparison })
   }
 
   const reapedSessions: Array<{ member_id: string; name: string }> = []
-  const getCurrent = db.prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions WHERE id = $id LIMIT 1")
+  if (opts.dryRun === true) {
+    // The counters describe what the same call WOULD do, so a preview reads
+    // exactly like the run it previews — `reaped` itself stays 0.
+    for (const candidate of candidates) {
+      if (candidate.superseded) reasonCounts.reaped_superseded_launch++
+      else if (candidate.ownerGone) reasonCounts.reaped_owner_gone++
+      else reasonCounts.reaped_connection_scoped++
+    }
+    return {
+      examined: rows.length,
+      reaped: 0,
+      reason_counts: reasonCounts,
+      reaped_sessions: [],
+      dry_run: true,
+      would_reap_sessions: candidates.map((candidate) => ({ member_id: candidate.id, name: candidate.name })),
+    }
+  }
+  const getCurrent = db.prepare(
+    "SELECT id, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time FROM sessions WHERE id = $id LIMIT 1",
+  )
   const deleteRoomMembers = db.prepare("DELETE FROM room_members WHERE session_id = $id")
   const deleteSession = db.prepare("DELETE FROM sessions WHERE id = $id")
 
@@ -231,8 +319,11 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
       const current = getCurrent.get({ $id: candidate.id }) as {
         id: string
         name: string
+        role: string
+        domains: string
         launch_id: string | null
         launch_parent_pid: number | null
+        launch_parent_start_time: string | null
       } | null
       if (!current) continue
       const currentLifetime = classifySessionRegistrationLifetime({
@@ -240,7 +331,13 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
         launchParentPid: current.launch_parent_pid,
       })
       const currentSuperseded = isSupersededLaunch(current.launch_id)
-      if (currentLifetime === "durable-launch" && !currentSuperseded) {
+      const currentJudgement = currentLifetime === "durable-launch" ? judgeOwner(current) : null
+      if (currentLifetime === "durable-launch" && currentJudgement?.state === "unjudged") {
+        reasonCounts.launch_parent_unjudged++
+        continue
+      }
+      const currentOwnerGone = currentLifetime === "durable-launch" && currentJudgement?.state === "gone"
+      if (currentLifetime === "durable-launch" && !currentSuperseded && !currentOwnerGone) {
         reasonCounts.durable_launch++
         continue
       }
@@ -256,7 +353,22 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
       const deleted = deleteSession.run({ $id: current.id })
       if (Number(deleted.changes ?? 0) === 1) {
         if (currentSuperseded) reasonCounts.reaped_superseded_launch++
-        else reasonCounts.reaped_connection_scoped++
+        else if (currentOwnerGone && currentJudgement !== null) {
+          reasonCounts.reaped_owner_gone++
+          // Inside the transaction, after the delete landed: a rolled-back
+          // delete takes its attribution with it, and no departure is ever
+          // recorded for a row that is still there.
+          opts.onOwnerGoneReap?.({
+            memberId: current.id,
+            name: current.name,
+            role: current.role,
+            domains: parseDomains(current.domains),
+            launchId: current.launch_id,
+            launchParentPid: current.launch_parent_pid as number,
+            launchParentStartTime: current.launch_parent_start_time,
+            comparison: currentJudgement.comparison,
+          })
+        } else reasonCounts.reaped_connection_scoped++
         reapedSessions.push({ member_id: current.id, name: current.name })
       }
     }

@@ -1316,6 +1316,18 @@ async function cmdHealth(opts?: { json?: boolean; full?: boolean }): Promise<voi
           console.log("  No issues detected.")
         }
       }
+      if (key === "stale_transport_rows" && value !== null && typeof value === "object") {
+        // 21669 — litter is not an issue, but it must never be invisible: the
+        // sweep reaps these rows, and `tribe repair reap_stale_transports` can
+        // reach them now. Report the count without inflating the issue list.
+        const stale = value as { count?: unknown; names?: unknown }
+        if (typeof stale.count === "number" && stale.count > 0) {
+          const named = Array.isArray(stale.names) && stale.names.length > 0 ? ` (${stale.names.join(", ")})` : ""
+          console.log(
+            `\n  Stale registrations: ${stale.count} disconnected durable row(s) whose launch process is gone${named}`,
+          )
+        }
+      }
     }
     // 15588 — show the live roster section so chief can answer "who is
     // connected / who is idle >15min" with one command. Roster comes from
@@ -2753,6 +2765,7 @@ export type RepairCliOptions = {
   session?: string
   inboxCursor?: string
   reapStaleTransports?: boolean
+  dryRun?: boolean
   json?: boolean
 }
 
@@ -2760,13 +2773,18 @@ export function resolveRepairOptions(
   opts: RepairCliOptions,
 ):
   | { params: { session: string; inbox_cursor: string; reap_stale_transports?: never } }
-  | { params: { reap_stale_transports: true; session?: never; inbox_cursor?: never } }
+  | { params: { reap_stale_transports: true; dry_run?: boolean; session?: never; inbox_cursor?: never } }
   | { error: string } {
   if (opts.inboxCursor !== undefined && opts.reapStaleTransports === true) {
     return { error: "--inbox-cursor and --reap-stale-transports are mutually exclusive" }
   }
+  if (opts.dryRun === true && opts.reapStaleTransports !== true) {
+    return { error: "--dry-run previews --reap-stale-transports and does nothing on its own" }
+  }
   if (opts.reapStaleTransports === true) {
-    return { params: { reap_stale_transports: true } }
+    return opts.dryRun === true
+      ? { params: { reap_stale_transports: true, dry_run: true } }
+      : { params: { reap_stale_transports: true } }
   }
 
   const inboxCursor = opts.inboxCursor ?? "tail"
@@ -2798,6 +2816,8 @@ async function cmdRepair(opts: RepairCliOptions): Promise<void> {
     examined?: number
     reaped?: number
     reason_counts?: Record<string, number>
+    dry_run?: boolean
+    would_reap_sessions?: Array<{ member_id: string; name: string }>
   }
 
   if (opts.json) {
@@ -2813,6 +2833,14 @@ async function cmdRepair(opts: RepairCliOptions): Promise<void> {
     const reasons = Object.entries(result.reason_counts ?? {})
       .map(([reason, count]) => `${reason}=${count}`)
       .join(" ")
+    if (result.dry_run === true) {
+      const names = (result.would_reap_sessions ?? []).map((row) => row.name)
+      console.log(
+        `DRY RUN — nothing deleted. Would reap ${names.length}/${result.examined ?? 0} stale transport rows` +
+          `${reasons ? ` (${reasons})` : ""}: ${names.length === 0 ? "(none)" : names.join(", ")}.`,
+      )
+      return
+    }
     console.log(
       `Reaped ${result.reaped ?? 0}/${result.examined ?? 0} stale transport rows${reasons ? ` (${reasons})` : ""}.`,
     )
@@ -3234,6 +3262,7 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
   const repairSession = cliOption(REPAIR_CLI, "session")
   const repairInboxCursor = cliOption(REPAIR_CLI, "inbox-cursor")
   const repairReapStaleTransports = cliOption(REPAIR_CLI, "reap-stale-transports")
+  const repairDryRun = cliOption(REPAIR_CLI, "dry-run")
   const repairJson = cliOption(REPAIR_CLI, "json")
   program
     .command(REPAIR_CLI.name)
@@ -3241,6 +3270,7 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     .option(repairSession.flags, repairSession.description, repairSession.default)
     .option(repairInboxCursor.flags, repairInboxCursor.description)
     .option(repairReapStaleTransports.flags, repairReapStaleTransports.description)
+    .option(repairDryRun.flags, repairDryRun.description)
     .option(repairJson.flags, repairJson.description)
     .action((opts: RepairCliOptions) => cmdRepair(opts))
 

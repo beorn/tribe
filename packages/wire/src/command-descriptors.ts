@@ -1009,8 +1009,15 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           transport_wedges: {
             type: "array",
-            description: "Disconnected addressable launch rows kept loud with wedge_reason.",
+            description:
+              "Disconnected addressable launch rows whose owner process may still be running, kept loud with wedge_reason and owner_process.",
             items: { type: "object", additionalProperties: true },
+          },
+          stale_transport_rows: {
+            type: "object",
+            description:
+              "Disconnected durable rows whose launch parent process is provably gone: litter awaiting the reap sweep, never counted as wedges. Always present; count 0 is a measured zero.",
+            additionalProperties: true,
           },
           anonymous_disconnected: {
             type: "number",
@@ -1230,7 +1237,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "boolean",
             const: true,
             description:
-              "Reap disconnected connection-scoped registrations after reconnect grace; durable rows, messages and balls are kept.",
+              "Reap disconnected registrations after reconnect grace: connection-scoped rows, and durable rows whose launch parent process is provably gone. Messages and balls are kept.",
+          },
+          dry_run: {
+            type: "boolean",
+            description:
+              "With reap_stale_transports: run every fence, delete nothing, and list the rows the same call would remove in would_reap_sessions.",
           },
         },
         oneOf: [{ required: ["inbox_cursor"] }, { required: ["reap_stale_transports"] }],
@@ -1240,6 +1252,15 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           repaired: { type: "boolean" },
           session: { type: "string" },
           repair: { type: "string" },
+          dry_run: {
+            type: "boolean",
+            description: "True when nothing was deleted; would_reap_sessions says what would be.",
+          },
+          would_reap_sessions: {
+            type: "array",
+            description: "Dry run only: rows the same reap would delete.",
+            items: { type: "object", additionalProperties: true },
+          },
           cursor_before: { type: "number" },
           cursor_after: { type: "number" },
           tail: { type: "number" },
@@ -1279,8 +1300,15 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "reap-stale-transports",
           flags: "--reap-stale-transports",
-          description: "Reap disconnected connection-scoped registrations after reconnect grace",
+          description:
+            "Reap disconnected registrations after reconnect grace (connection-scoped rows, and durable rows whose launch parent is gone)",
           mapsTo: "reap_stale_transports",
+        },
+        {
+          name: "dry-run",
+          flags: "--dry-run",
+          description: "With --reap-stale-transports: list what would be removed and delete nothing",
+          mapsTo: "dry_run",
         },
         { name: "json", flags: "--json", description: "Emit machine-readable JSON" },
       ],

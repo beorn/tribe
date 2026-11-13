@@ -92,7 +92,12 @@ import {
   sendMessage,
 } from "../messaging.ts"
 import { registerSession, NameConflictError, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
-import { foreignTransportView, judgeLaunchParent, readProcessStartTime } from "../session-transport-state.ts"
+import {
+  foreignTransportView,
+  judgeLaunchParent,
+  judgeLaunchParentSafely,
+  readProcessStartTime,
+} from "../session-transport-state.ts"
 import {
   adoptByPidCwd,
   adoptIdentity,
@@ -1267,13 +1272,26 @@ export function withDispatcher<
       })
     }
 
-    const reapStaleTransports = () => {
+    const reapStaleTransports = (dryRun = false) => {
       const nowMs = Date.now()
       const report = reapStaleTransportRows(db, {
         nowMs,
         hasActiveTransport: (sessionId) => registry.hasActiveTransport(sessionId),
         isReconnectGraceProtected: (sessionId) => registry.isReconnectGraceProtected(sessionId, nowMs),
         getActiveLaunchIds: () => activeLaunchIds(registry.getActiveSessionInfo()),
+        judgeLaunchParent: judgeLaunchParentSafely,
+        onOwnerGoneReap: (row) =>
+          logSessionLeft(daemonCtx, {
+            memberId: row.memberId,
+            name: row.name,
+            role: row.role,
+            domains: row.domains,
+            launchId: row.launchId,
+            launchParentPid: row.launchParentPid,
+            reason: "reaped-parent-gone",
+            launchParentComparison: row.comparison,
+          }),
+        ...(dryRun ? { dryRun: true } : {}),
       })
       registry.forgetTransportSessions(report.reaped_sessions.map((session) => session.member_id))
       return report

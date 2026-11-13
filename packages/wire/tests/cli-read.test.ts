@@ -431,6 +431,15 @@ describe("resolveRepairOptions", () => {
       error: "--inbox-cursor and --reap-stale-transports are mutually exclusive",
     })
   })
+
+  test("previews a reap with --dry-run and refuses a dry run on its own", () => {
+    expect(resolveRepairOptions({ reapStaleTransports: true, dryRun: true })).toEqual({
+      params: { reap_stale_transports: true, dry_run: true },
+    })
+    expect(resolveRepairOptions({ dryRun: true })).toEqual({
+      error: "--dry-run previews --reap-stale-transports and does nothing on its own",
+    })
+  })
 })
 
 describe("formatRestartResult", () => {

@@ -8,6 +8,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { spawnSync } from "node:child_process"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -23,6 +24,7 @@ import {
   registerSession,
   type StaleTransportReapReport,
 } from "./session.ts"
+import { judgeLaunchParentSafely } from "./session-transport-state.ts"
 import { DEFAULT_RECONNECT_GRACE_MS, withClientRegistry } from "./compose/with-client-registry.ts"
 import { withRuntime } from "./compose/with-runtime.ts"
 
@@ -78,6 +80,8 @@ function emptyReasonCounts(): StaleTransportReapReport["reason_counts"] {
     malformed_launch_identity: 0,
     reaped_connection_scoped: 0,
     reaped_superseded_launch: 0,
+    reaped_owner_gone: 0,
+    launch_parent_unjudged: 0,
   }
 }
 
@@ -173,9 +177,60 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     expect(reapStaleTransports).not.toHaveBeenCalled()
   })
 
+  it("passes a dry run through the repair verb and never reports a repair", () => {
+    const ctx = makeContext(db, stmts, "operator", "@operator")
+    const report: StaleTransportReapReport = {
+      examined: 3,
+      reaped: 0,
+      reaped_sessions: [],
+      dry_run: true,
+      would_reap_sessions: [{ member_id: "legacy", name: "scratch" }],
+      reason_counts: { ...emptyReasonCounts(), reaped_connection_scoped: 1, durable_launch: 2 },
+    }
+    const reapStaleTransports = vi.fn(() => report)
+    const opts = {
+      cleanup: () => {},
+      userRenamed: false,
+      setUserRenamed: () => {},
+      getActiveSessionIds: () => new Set<string>(),
+      hasActiveTransport: () => false,
+      getActiveSessionInfo: () => [],
+      reapStaleTransports,
+    } as HandlerOpts
+
+    const dry = parseToolJson(handleToolCall(ctx, "tribe.repair", { reap_stale_transports: true, dry_run: true }, opts))
+    expect(reapStaleTransports).toHaveBeenCalledWith(true)
+    expect(dry).toEqual({ repair: "reap_stale_transports", ...report })
+    expect(dry.repaired).toBeUndefined()
+
+    parseToolJson(handleToolCall(ctx, "tribe.repair", { reap_stale_transports: true }, opts))
+    expect(reapStaleTransports).toHaveBeenLastCalledWith(false)
+  })
+
+  it("refuses a non-boolean dry_run instead of coercing it", () => {
+    const ctx = makeContext(db, stmts, "operator", "@operator")
+    const reapStaleTransports = vi.fn()
+    const opts = {
+      cleanup: () => {},
+      userRenamed: false,
+      setUserRenamed: () => {},
+      getActiveSessionIds: () => new Set<string>(),
+      hasActiveTransport: () => false,
+      getActiveSessionInfo: () => [],
+      reapStaleTransports,
+    } as HandlerOpts
+
+    expect(
+      parseToolJson(handleToolCall(ctx, "tribe.repair", { reap_stale_transports: true, dry_run: "yes" }, opts)),
+    ).toEqual({ error: "dry_run must be a boolean when given" })
+    expect(reapStaleTransports).not.toHaveBeenCalled()
+  })
+
   it("keeps durable and malformed launch disconnects loud without paging on legacy PID reuse", () => {
     addSession(db, stmts, "legacy-health", "legacy-health")
-    addSession(db, stmts, "durable-health", "@agent/6", { id: "launch-health", parentPid: 6006 })
+    // The launch parent is THIS process, so the row is a live-owner wedge — the
+    // condition that must stay loud -- not litter awaiting the reap sweep.
+    addSession(db, stmts, "durable-health", "@agent/6", { id: "launch-health", parentPid: process.pid })
     addSession(db, stmts, "malformed-health", "malformed-health")
     db.prepare("UPDATE sessions SET launch_id = 'partial-only' WHERE id = 'malformed-health'").run()
     const ctx = makeContext(db, stmts, "operator", "@operator")
@@ -229,7 +284,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
           member_id: "durable-health",
           name: "@agent/6",
           launch_id: "launch-health",
-          launch_parent_pid: 6006,
+          launch_parent_pid: process.pid,
           last_refusal: null,
           state: "missing-transport",
         },
@@ -243,6 +298,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
           member_id: "durable-health",
           name: "@agent/6",
           owner_state: "unknown",
+          owner_process: "alive",
           transport_state: "disconnected",
           wedge_reason: "durable-launch-no-transport",
         }),
@@ -293,7 +349,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
           member_id: "durable-health",
           name: "@agent/6",
           launch_id: "launch-health",
-          launch_parent_pid: 6006,
+          launch_parent_pid: process.pid,
           state: "missing-transport",
         }),
       ],
@@ -302,7 +358,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
 
   it("keeps disconnected retired registrations as history without reporting a live-seat outage", () => {
     addSession(db, stmts, "retired-fleet", "@fleet", { id: "launch-fleet", parentPid: 7001 })
-    addSession(db, stmts, "durable-health", "@agent/6", { id: "launch-health", parentPid: 6006 })
+    addSession(db, stmts, "durable-health", "@agent/6", { id: "launch-health", parentPid: process.pid })
     addSession(db, stmts, "malformed-health", "malformed-health")
     db.prepare("UPDATE sessions SET launch_id = 'partial-only' WHERE id = 'malformed-health'").run()
     const ctx = makeContext(db, stmts, "operator", "@operator")
@@ -363,7 +419,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
           member_id: "durable-health",
           name: "@agent/6",
           launch_id: "launch-health",
-          launch_parent_pid: 6006,
+          launch_parent_pid: process.pid,
           state: "missing-transport",
         }),
       ],
@@ -532,6 +588,8 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
         durable_launch: 1,
         malformed_launch_identity: 1,
         reaped_connection_scoped: 1,
+        reaped_owner_gone: 0,
+        launch_parent_unjudged: 0,
       },
       reaped_sessions: [{ member_id: "stale", name: "legacy-stale" }],
     })
@@ -555,6 +613,33 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     ).toBe(1)
   })
 
+  it("reaps a durable row whose launch parent is provably gone, and only that row", () => {
+    // A real dead pid: spawn a child that exits immediately and reuse its number.
+    const deadPid = spawnSync("true").pid
+    if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")
+    addSession(db, stmts, "litter", "@dev/0", { id: "launch-dev0", parentPid: deadPid })
+    addSession(db, stmts, "grace-gone", "@dev/1", { id: "launch-dev1", parentPid: deadPid })
+    addSession(db, stmts, "live-owner", "@dev/9", { id: "launch-dev9", parentPid: process.pid })
+
+    const report = reapStaleTransportRows(db, {
+      nowMs: 50_000,
+      hasActiveTransport: () => false,
+      // The owner-gone rule runs INSIDE the reconnect grace, so a seat that is
+      // mid-restart is still preserved by its own grace window.
+      isReconnectGraceProtected: (sessionId) => sessionId === "grace-gone",
+      judgeLaunchParent: judgeLaunchParentSafely,
+    })
+
+    expect(report.reason_counts.reaped_owner_gone).toBe(1)
+    expect(report.reason_counts.durable_launch).toBe(1)
+    expect(report.reason_counts.reconnect_grace).toBe(1)
+    expect(report.reaped_sessions).toEqual([{ member_id: "litter", name: "@dev/0" }])
+    const survivors = (db.prepare("SELECT id FROM sessions ORDER BY id").all() as Array<{ id: string }>).map(
+      (row) => row.id,
+    )
+    expect(survivors).toEqual(["grace-gone", "live-owner"])
+  })
+
   it("performs a final synchronous sibling-transport fence before deletion", () => {
     addSession(db, stmts, "racing", "legacy-racing")
     let probes = 0
@@ -566,6 +651,141 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
 
     expect(report).toMatchObject({ reaped: 0, reason_counts: { active_transport: 1 } })
     expect(db.prepare("SELECT id FROM sessions WHERE id = 'racing'").get()).toEqual({ id: "racing" })
+  })
+
+  it("skips a durable row whose launch parent cannot be read, and says so in the report", () => {
+    addSession(db, stmts, "unreadable", "@dev/unknown-parent", { id: "launch-unreadable", parentPid: 4242 })
+
+    const report = reapStaleTransportRows(db, {
+      nowMs: 50_000,
+      hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
+      // An unreadable /proc entry is not evidence of death: the row is skipped,
+      // counted, and the sweep carries on.
+      judgeLaunchParent: () => ({ state: "unjudged", reason: "/proc/4242/stat is unreadable (EPERM)" }),
+    })
+
+    expect(report.reaped).toBe(0)
+    expect(report.reason_counts.launch_parent_unjudged).toBe(1)
+    expect(db.prepare("SELECT id FROM sessions WHERE id = 'unreadable'").get()).toEqual({ id: "unreadable" })
+  })
+
+  it("previews a bulk reap without deleting anything (@cto item 3)", () => {
+    const deadPid = spawnSync("true").pid
+    if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")
+    addSession(db, stmts, "litter", "@dev/0", { id: "launch-dev0", parentPid: deadPid })
+    addSession(db, stmts, "live-owner", "@dev/9", { id: "launch-dev9", parentPid: process.pid })
+    addSession(db, stmts, "legacy", "legacy-scratch")
+
+    const report = reapStaleTransportRows(db, {
+      nowMs: 50_000,
+      hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
+      judgeLaunchParent: judgeLaunchParentSafely,
+      dryRun: true,
+    })
+
+    expect(report).toMatchObject({
+      examined: 3,
+      reaped: 0,
+      dry_run: true,
+      // The live-owner row is NOT listed, and nothing is deleted.
+      would_reap_sessions: [
+        { member_id: "legacy", name: "legacy-scratch" },
+        { member_id: "litter", name: "@dev/0" },
+      ],
+    })
+    expect(report.reason_counts.reaped_owner_gone).toBe(1)
+    expect(report.reason_counts.durable_launch).toBe(1)
+    expect((db.prepare("SELECT id FROM sessions ORDER BY id").all() as Array<{ id: string }>).map((r) => r.id)).toEqual(
+      ["legacy", "litter", "live-owner"],
+    )
+  })
+
+  it("keeps a parked seat addressable, and its balls live, across an owner-gone reap (@cto item 2)", () => {
+    const deadPid = spawnSync("true").pid
+    if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")
+    const parked = addSession(db, stmts, "parked", "@dev/parked", { id: "launch-parked", parentPid: deadPid })
+    const sender = makeContext(db, stmts, "operator", "@operator")
+    const opts = {
+      cleanup: () => {},
+      userRenamed: false,
+      setUserRenamed: () => {},
+      getActiveSessionIds: () => new Set<string>(),
+      hasActiveTransport: () => false,
+      getActiveSessionInfo: () => [],
+    } as HandlerOpts
+    const sendBall = (from: TribeContext, to: string, label: string) =>
+      parseToolJson(
+        handleToolCall(
+          from,
+          "tribe.send",
+          { to, message: label, type: "request", request: true, summary: label },
+          opts,
+        ),
+      )
+    const ballIds = (owner: string) =>
+      (
+        parseToolJson(handleToolCall(sender, "tribe.pending", { owner }, opts)).pending as Array<{
+          request_id: string
+        }>
+      ).map((ball) => ball.request_id)
+
+    // MEASURED, and the reason this test names both sides: while the
+    // disconnected durable row still exists its mailbox reads as deaf, so the
+    // 24581 gate REFUSES a tracked ball ("not online"). After the reap the name
+    // has no row, falls out of that gate, and the ball is STORED for pickup.
+    // The reap therefore loosens delivery for every parked seat — reported to
+    // @cto before submit rather than left to be discovered.
+    const beforeReap = sendBall(sender, "@dev/parked", "sent while the car was parked")
+    expect(beforeReap.error).toMatch(/not online/)
+    expect(ballIds("@dev/parked")).toEqual([])
+    // A ball the parked seat itself OWES is the other direction that must survive.
+    const owed = sendBall(parked, "@operator", "parked work still owed")
+    expect(owed.error).toBeUndefined()
+    const owedId = (owed.request_id ?? owed.id) as string
+
+    const report = reapStaleTransportRows(db, {
+      hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
+      judgeLaunchParent: judgeLaunchParentSafely,
+    })
+    expect(report.reason_counts.reaped_owner_gone).toBe(1)
+    expect(db.prepare("SELECT id FROM sessions WHERE id = 'parked'").get()).toBeNull()
+
+    // Delivery after the row is gone is the SAME outcome: accepted and stored,
+    // never refused as an unknown recipient.
+    const afterReap = sendBall(sender, "@dev/parked", "sent after the row was reaped")
+    expect(afterReap.error).toBeUndefined()
+    const afterId = (afterReap.request_id ?? afterReap.id) as string
+    expect(typeof afterId).toBe("string")
+    expect(ballIds("@dev/parked")).toContain(afterId)
+    expect(ballIds("@operator")).toContain(owedId)
+
+    // The seat comes back and reads what was sent to it.
+    const back = addSession(db, stmts, "parked-back", "@dev/parked", {
+      id: "launch-parked-back",
+      parentPid: process.pid,
+    })
+    const fetched = parseToolJson(handleToolCall(back, "tribe.fetch", {}, opts)) as {
+      attention?: { actionable_unread?: Array<{ id: string }> }
+    }
+    expect((fetched.attention?.actionable_unread ?? []).map((row) => row.id)).toEqual(expect.arrayContaining([afterId]))
+    const reply = parseToolJson(
+      handleToolCall(
+        back,
+        "tribe.send",
+        {
+          to: "@operator",
+          message: "read and answered",
+          type: "response",
+          reply: afterId,
+          summary: "read and answered",
+        },
+        opts,
+      ),
+    )
+    expect(reply.tracker).toMatchObject({ closed: 1 })
   })
 
   it("rolls the whole transaction back when session deletion aborts", () => {
@@ -591,6 +811,11 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     vi.useFakeTimers()
     vi.setSystemTime(10_000)
     addSession(db, stmts, "incident-silvercode-30852", "silvercode-30852")
+    // A durable row whose launch parent is gone: reaped by the same startup
+    // sweep, and journaled rather than vanishing into a count.
+    const deadPid = spawnSync("true").pid
+    if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")
+    addSession(db, stmts, "parked-seat", "@dev/parked", { id: "launch-parked", parentPid: deadPid })
     const scope = createScope("stale-transport-runtime-test")
     const registry = {
       clients: new Map(),
@@ -633,7 +858,27 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     })
     await vi.advanceTimersByTimeAsync(1)
     expect(db.prepare("SELECT id FROM sessions WHERE id = 'incident-silvercode-30852'").get()).toBeNull()
-    expect(registry.forgetTransportSessions).toHaveBeenCalledWith(["incident-silvercode-30852"])
+    expect(db.prepare("SELECT id FROM sessions WHERE id = 'parked-seat'").get()).toBeNull()
+    expect(registry.forgetTransportSessions).toHaveBeenCalledWith(["incident-silvercode-30852", "parked-seat"])
+    const leftFact = db
+      .prepare("SELECT content FROM messages WHERE type = 'event.session.left' AND ref = 'parked-seat'")
+      .get() as { content: string } | null
+    expect(leftFact).not.toBeNull()
+    expect(JSON.parse(leftFact?.content ?? "{}")).toMatchObject({
+      member_id: "parked-seat",
+      name: "@dev/parked",
+      launch_id: "launch-parked",
+      launch_parent_pid: deadPid,
+      reason: "reaped-parent-gone",
+      launch_parent_comparison: "pid-only-row",
+    })
+    // Connection-scoped litter is reaped without a departure fact: nothing says
+    // that launch was a seat, and a synthetic fact would read as a fresh exit.
+    expect(
+      db
+        .prepare("SELECT id FROM messages WHERE type = 'event.session.left' AND ref = 'incident-silvercode-30852'")
+        .get(),
+    ).toBeNull()
 
     addSession(db, stmts, "incident-session-1", "session 1")
     await vi.advanceTimersByTimeAsync(899)

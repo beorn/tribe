@@ -28,8 +28,9 @@
  */
 
 import { createLogger } from "loggily"
-import { readOpenIncidents, sendMessage } from "../messaging.ts"
+import { logSessionLeft, readOpenIncidents, sendMessage } from "../messaging.ts"
 import { cleanupOldData, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
+import { judgeLaunchParentSafely } from "../session-transport-state.ts"
 import { resolveRetentionConfig, runRetentionSweep } from "../retention.ts"
 import { loadPlugins } from "../plugin-loader.ts"
 import type { TribeClientApi, TribePluginApi, TribePluginHandle } from "../plugin-api.ts"
@@ -173,12 +174,36 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
         hasActiveTransport: (sessionId) => t.registry.hasActiveTransport(sessionId),
         isReconnectGraceProtected: (sessionId) => t.registry.isReconnectGraceProtected(sessionId, nowMs),
         getActiveLaunchIds: () => activeLaunchIds(t.registry.getActiveSessionInfo()),
+        // 21669 — a durable row whose launch parent is provably gone is litter,
+        // not a wedge: the launch ended, and no transport is ever coming back.
+        // `judgeLaunchParentSafely` never throws: an unreadable process is
+        // counted as unjudged and the row is preserved.
+        judgeLaunchParent: judgeLaunchParentSafely,
+        // Its loss is attributed, exactly as registration's own parent-gone
+        // delete attributes it — never "found as 0 stored".
+        onOwnerGoneReap: (row) =>
+          logSessionLeft(t.daemonCtx, {
+            memberId: row.memberId,
+            name: row.name,
+            role: row.role,
+            domains: row.domains,
+            launchId: row.launchId,
+            launchParentPid: row.launchParentPid,
+            reason: "reaped-parent-gone",
+            launchParentComparison: row.comparison,
+          }),
         onlySessionIds,
       })
       const reapedIds = report.reaped_sessions.map((session) => session.member_id)
       t.registry.forgetTransportSessions(reapedIds)
       if (report.reaped > 0) {
-        log.info?.(`cleanup: reaped ${report.reaped} disconnected connection-scoped session row(s)`)
+        const ownerGone = report.reason_counts.reaped_owner_gone
+        const unjudged = report.reason_counts.launch_parent_unjudged
+        log.info?.(
+          `cleanup: reaped ${report.reaped} disconnected session row(s)` +
+            (ownerGone > 0 ? ` (${ownerGone} whose launch parent is gone)` : "") +
+            (unjudged > 0 ? `; ${unjudged} durable row(s) skipped, launch parent unreadable` : ""),
+        )
       }
       return report
     }

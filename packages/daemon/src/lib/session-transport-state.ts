@@ -319,3 +319,23 @@ export function judgeLaunchParent(
   if (storedStartTime === null) return { alive: probeProcessState(pid) !== "dead", comparison: "pid-only-row" }
   return { alive: current === storedStartTime, comparison: "start-time" }
 }
+
+/**
+ * The judged forms, with "cannot tell" as its own state rather than an
+ * exception: `readProcessStartTime` throws on an unreadable /proc entry
+ * (EPERM, a transient I/O error) because that is not evidence of death. A
+ * caller that sweeps every row must skip the row it could not read and say so,
+ * never abort the sweep or conclude the launch ended.
+ */
+export type LaunchParentJudgement =
+  | { state: "alive" | "gone"; comparison: LaunchParentComparison }
+  | { state: "unjudged"; reason: string }
+
+export function judgeLaunchParentSafely(pid: number, storedStartTime: string | null): LaunchParentJudgement {
+  try {
+    const judged = judgeLaunchParent(pid, storedStartTime)
+    return { state: judged.alive ? "alive" : "gone", comparison: judged.comparison }
+  } catch (error) {
+    return { state: "unjudged", reason: error instanceof Error ? error.message : String(error) }
+  }
+}
