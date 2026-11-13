@@ -152,9 +152,7 @@ export async function runVaultEmbedPass(options: VaultEmbedPassOptions): Promise
   const stat = modelFileStat(modelPath)
   const verified = db
     .prepare(
-      "SELECT gguf_sha256 AS sha256, gguf_stat AS stat FROM vault_embed_generation " +
-        "WHERE state IN ('published', 'building') AND contract_json = ? AND gguf_stat = ? " +
-        "ORDER BY CASE state WHEN 'published' THEN 0 ELSE 1 END, id DESC LIMIT 1",
+      "SELECT gguf_sha256 AS sha256, gguf_stat AS stat FROM vault_embed_generation WHERE state IN ('published', 'building') AND contract_json = ? AND gguf_stat = ? ORDER BY CASE state WHEN 'published' THEN 0 ELSE 1 END, id DESC LIMIT 1",
     )
     .get(contractIdentity(contract), stat) as ModelIdentity | null
   const model = verified ?? (await modelIdentity(modelPath))
