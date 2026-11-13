@@ -13,9 +13,10 @@
  * directory, a standalone install) means no takeover; the poll never throws and
  * the launcher's own kill still ends a supervisor normally.
  */
-import { readFileSync, renameSync, writeFileSync } from "node:fs"
+import { readFileSync, statSync } from "node:fs"
 import { randomUUID } from "node:crypto"
-import { isAbsolute, join } from "node:path"
+import { dirname, isAbsolute, join } from "node:path"
+import { atomicWriteFileSync } from "@bearly/durable-file"
 import { AG_HOST_SESSION_STATE_DIR_ENV } from "tribe-wire/lib/ag-host-env"
 
 /** Explicit claim directory (wins over the launch state dir); for tests and probes. */
@@ -64,16 +65,16 @@ export function readSupervisorClaim(path: string): SupervisorClaim | null {
 }
 
 /**
- * Atomic single-file write (temp + rename) so a reader never sees a torn claim.
- * The parent directory is deliberately NOT created: the launch state dir is the
+ * Durable single-file write (synced temp + rename + folder sync) so a reader never
+ * sees a torn claim. The parent directory is deliberately NOT created (the durable
+ * writer would create it, so it is checked first): the launch state dir is the
  * host's, and inventing it would change the host's own exit-record behaviour
  * (plugins/claude daemon-restart, "a launch state directory that does not
  * exist"). A missing directory throws; the caller logs and takes no takeover.
  */
 export function writeSupervisorClaim(path: string, claim: SupervisorClaim): void {
-  const tmp = `${path}.tmp-${process.pid}`
-  writeFileSync(tmp, JSON.stringify(claim), "utf8")
-  renameSync(tmp, path)
+  statSync(dirname(path))
+  atomicWriteFileSync(path, JSON.stringify(claim), 0o666)
 }
 
 export function newSupervisorToken(): string {

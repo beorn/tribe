@@ -116,7 +116,6 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  renameSync,
   statSync,
   truncateSync,
   writeSync,
@@ -124,6 +123,7 @@ import {
 import { dirname, join } from "node:path"
 import { isDeepStrictEqual } from "node:util"
 import { gunzipSync, gzipSync } from "node:zlib"
+import { atomicWriteFileSync } from "@bearly/durable-file"
 import { assertSingleStatement } from "@bearly/sqlite"
 import type { Database } from "bun:sqlite"
 import { createLogger } from "loggily"
@@ -479,28 +479,11 @@ function parseExportRows(file: string, raw: Buffer): Array<Record<string, unknow
   return rows
 }
 
-function fsyncPath(path: string): void {
-  const fd = openSync(path, "r")
-  try {
-    fsyncSync(fd)
-  } finally {
-    closeSync(fd)
-  }
-}
-
-function writeExportManifest(dir: string, path: string, manifest: ExportManifest): void {
-  const tmp = `${path}.tmp`
+function writeExportManifest(path: string, manifest: ExportManifest): void {
   // The manifest names the ids whose rows may be deleted; it is created 0o600
-  // like the day file it proves (F2, @cto 2026-10-11).
-  const fd = openSync(tmp, "w", 0o600)
-  try {
-    writeSync(fd, JSON.stringify(manifest))
-    fsyncSync(fd)
-  } finally {
-    closeSync(fd)
-  }
-  renameSync(tmp, path)
-  fsyncPath(dir)
+  // like the day file it proves (F2, @cto 2026-10-11). The durable writer syncs
+  // the temp and the folder around the rename.
+  atomicWriteFileSync(path, JSON.stringify(manifest), 0o600)
 }
 
 /**
@@ -577,7 +560,7 @@ function appendExportRows(
   // Second, commit an EMPTY manifest BEFORE the first append of a new day, so
   // from the first byte the day file is always accompanied by its proof.
   if (manifest === null) {
-    writeExportManifest(dir, manifestPath, { day, rows: 0, bytes: 0, sha256: EMPTY_SHA256, ids: [] })
+    writeExportManifest(manifestPath, { day, rows: 0, bytes: 0, sha256: EMPTY_SHA256, ids: [] })
   }
 
   let raw = Buffer.alloc(0)
@@ -720,7 +703,7 @@ function appendExportRows(
   // is caught, on the recorded-candidate path (step 2b).
   const bytes = recordedBytes + appended.length
   if (appended.length > 0) {
-    writeExportManifest(dir, manifestPath, {
+    writeExportManifest(manifestPath, {
       day,
       rows: known.size + appendedIds.length,
       bytes,

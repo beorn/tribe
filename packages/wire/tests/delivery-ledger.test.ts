@@ -9,10 +9,12 @@
  * @level    l2
  * @consumer @cto 9a077460 adapter/Tribe delivery counter and the 4h per-seat report
  * @testonly none
+ * @reach    fs-walk <fixture-only: lists one mkdtemp folder for leftover temps>
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+import { safeRemoveSync } from "removely"
 import { describe, expect, it } from "vitest"
 import {
   DELIVERY_LEDGER_VERSION,
@@ -211,6 +213,33 @@ describe("loadDeliveryLedger (#27459)", () => {
     expect(loaded.state).toMatchObject({ pane: "@dev/luna6", windowStartMs: NOW, ids: ["row-a"] })
     expect(loaded.state?.counters.newDeliveries).toBe(1)
     rmSync(path, { force: true })
+  })
+
+  it("replaces a ledger keeping today's mode (0666 less the umask) and leaves no temp beside it (#33944)", () => {
+    for (const [umask, expected] of [
+      [0o022, 0o644],
+      [0o002, 0o664],
+    ] as const) {
+      const path = tempPath()
+      const state = openDeliveryLedgerWindow({
+        existing: null,
+        coverage: { restarts: 0, gap: false, gapReason: "none" },
+        pane: "@dev/luna6",
+        now: NOW,
+      })
+      const prior = process.umask(umask)
+      try {
+        saveDeliveryLedger(path, state)
+        state.ids = ["row-a"]
+        saveDeliveryLedger(path, state)
+      } finally {
+        process.umask(prior)
+      }
+      expect(statSync(path).mode & 0o777).toBe(expected)
+      expect(readdirSync(dirname(path))).toEqual(["ledger.json"])
+      expect(loadDeliveryLedger(path).state?.ids).toEqual(["row-a"])
+      safeRemoveSync(dirname(path), { within: tmpdir(), allowMissing: true })
+    }
   })
 
   // #27459 gap-7 — the open-ball summary throttle's fingerprint is persisted in

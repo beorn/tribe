@@ -19,12 +19,13 @@
  * Env override: TRIBE_NO_DAEMON=1 forces library mode regardless of config.
  *
  * Reads never throw — a missing / unparseable / malformed file yields the
- * default. Writes are atomic (write to .tmp, rename).
+ * default. Writes are atomic and durable (@bearly/durable-file).
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, resolve } from "node:path"
+import { atomicWriteFileSync } from "@bearly/durable-file"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -91,17 +92,15 @@ export function readTribeConfig(path?: string): TribeAutostartConfig {
 
 /**
  * Atomically write the config file. Creates parent directories as needed.
- * Writes to `<path>.tmp` first, then renames — so a concurrent reader never
- * sees a half-written file.
+ * The durable writer syncs a unique temp, renames it over the file and syncs the
+ * folder, so a concurrent reader never sees a half-written file.
  */
 export function writeTribeConfig(path: string, config: TribeAutostartConfig): void {
   if (!isAutostart(config.autostart)) {
     throw new Error(`Invalid autostart mode: ${String(config.autostart)}`)
   }
   mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.tmp`
-  writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n", "utf-8")
-  renameSync(tmp, path)
+  atomicWriteFileSync(path, JSON.stringify(config, null, 2) + "\n", 0o666)
 }
 
 // ---------------------------------------------------------------------------
