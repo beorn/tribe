@@ -128,6 +128,88 @@ export function activeLaunchIds(active: ReadonlyArray<{ launchId: string | null 
   return launchIds
 }
 
+/** Why a disconnected registration row survives a pass, in the sweep's own vocabulary. */
+export type TransportRowKeepReason =
+  | "active_transport"
+  | "durable_launch"
+  | "launch_parent_unjudged"
+  | "malformed_launch_identity"
+  | "reconnect_grace"
+
+/** Why the delete walk removes a row: replacement, an ended launch, or a transport-only registration. */
+export type TransportRowReapReason = "superseded_launch" | "owner_gone" | "connection_scoped"
+
+export type TransportRowVerdict =
+  | {
+      readonly disposition: "keep"
+      readonly reason: TransportRowKeepReason
+      readonly owner: LaunchParentJudgement | null
+    }
+  | {
+      readonly disposition: "reap"
+      readonly reason: TransportRowReapReason
+      readonly owner: LaunchParentJudgement | null
+    }
+
+export type TransportRowClassifyInput = {
+  readonly id: string
+  readonly launch_id: string | null
+  readonly launch_parent_pid: number | null
+  readonly launch_parent_start_time: string | null
+}
+
+export type TransportRowClassifyContext = {
+  readonly hasActiveTransport: (sessionId: string) => boolean
+  readonly isReconnectGraceProtected: (sessionId: string, nowMs: number) => boolean
+  readonly getActiveLaunchIds?: () => ReadonlySet<string>
+  readonly judgeLaunchParent?: (launchParentPid: number, launchParentStartTime: string | null) => LaunchParentJudgement
+}
+
+/**
+ * The ONE fence for every reader of a disconnected registration row: the reap
+ * sweep, its preview, and `tribe health`'s wedge-versus-litter split all ask
+ * this and nothing else (21669, @cto 5a5a3914). A row health calls litter is
+ * then, by construction, a row the delete walk would remove now — never a row
+ * the reconnect grace still holds.
+ *
+ * Order is the delete walk's order and must not be rearranged: an active
+ * transport outranks every lifetime rule, a durable row is only litter once
+ * its launch parent is provably gone, and grace protects whatever is left.
+ */
+export function classifyTransportRow(
+  row: TransportRowClassifyInput,
+  ctx: TransportRowClassifyContext,
+  nowMs: number,
+): TransportRowVerdict {
+  if (ctx.hasActiveTransport(row.id)) return { disposition: "keep", reason: "active_transport", owner: null }
+  const lifetime = classifySessionRegistrationLifetime({
+    launchId: row.launch_id,
+    launchParentPid: row.launch_parent_pid,
+  })
+  const superseded =
+    typeof row.launch_id === "string" &&
+    row.launch_id.length > 0 &&
+    (ctx.getActiveLaunchIds?.() ?? new Set<string>()).has(row.launch_id)
+  const owner =
+    lifetime === "durable-launch" && row.launch_parent_pid !== null && ctx.judgeLaunchParent !== undefined
+      ? ctx.judgeLaunchParent(row.launch_parent_pid, row.launch_parent_start_time)
+      : null
+  if (owner?.state === "unjudged") return { disposition: "keep", reason: "launch_parent_unjudged", owner }
+  const ownerGone = owner?.state === "gone"
+  if (lifetime === "durable-launch" && !superseded && !ownerGone) {
+    return { disposition: "keep", reason: "durable_launch", owner }
+  }
+  if (lifetime === "malformed-launch-identity" && !superseded) {
+    return { disposition: "keep", reason: "malformed_launch_identity", owner }
+  }
+  if (ctx.isReconnectGraceProtected(row.id, nowMs)) {
+    return { disposition: "keep", reason: "reconnect_grace", owner }
+  }
+  if (superseded) return { disposition: "reap", reason: "superseded_launch", owner }
+  if (ownerGone) return { disposition: "reap", reason: "owner_gone", owner }
+  return { disposition: "reap", reason: "connection_scoped", owner }
+}
+
 export type StaleTransportReapOpts = {
   nowMs?: number
   hasActiveTransport: (sessionId: string) => boolean
@@ -239,30 +321,16 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
     reaped_superseded_launch: 0,
     reaped_owner_gone: 0,
   }
-  const activeLaunchIds = opts.getActiveLaunchIds?.() ?? new Set<string>()
-  const isSupersededLaunch = (launchId: string | null): boolean =>
-    typeof launchId === "string" && launchId.length > 0 && activeLaunchIds.has(launchId)
-  const judgeOwner = (row: {
-    launch_parent_pid: number | null
-    launch_parent_start_time: string | null
-  }): LaunchParentJudgement | null =>
-    row.launch_parent_pid === null || opts.judgeLaunchParent === undefined
-      ? null
-      : opts.judgeLaunchParent(row.launch_parent_pid, row.launch_parent_start_time)
-  type ReapableRow = {
-    id: string
+  type ReapableRow = TransportRowClassifyInput & {
     name: string
     role: string
     domains: string
-    launch_id: string | null
-    launch_parent_pid: number | null
-    launch_parent_start_time: string | null
   }
-  type ReapVerdict = {
-    superseded: boolean
-    ownerGone: boolean
-    ownerComparison: LaunchParentComparison | null
-    ownerComparisonJudgement: { state: "alive" | "gone"; comparison: LaunchParentComparison } | null
+  const classifyCtx: TransportRowClassifyContext = {
+    hasActiveTransport: (sessionId) => opts.hasActiveTransport(sessionId),
+    isReconnectGraceProtected: (sessionId, atMs) => opts.isReconnectGraceProtected(sessionId, atMs),
+    ...(opts.getActiveLaunchIds === undefined ? {} : { getActiveLaunchIds: opts.getActiveLaunchIds }),
+    ...(opts.judgeLaunchParent === undefined ? {} : { judgeLaunchParent: opts.judgeLaunchParent }),
   }
   /**
    * The ONE fence a preview and a real pass both walk: classify a row and say
@@ -271,45 +339,16 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
    * so `--dry-run` cannot advertise a row that the delete would preserve: the
    * two-probe race (a transport that connects between probes, a row that is
    * rewritten, a parent that starts answering) resolves the same way in both.
+   * `classifyTransportRow` owns the rule; this only counts its answer.
    */
+  type ReapVerdict = Extract<TransportRowVerdict, { disposition: "reap" }>
   const classifyReapable = (row: ReapableRow): ReapVerdict | null => {
-    // The no-await registry read: the race fence for a sibling that connected
-    // after the previous pass.
-    if (opts.hasActiveTransport(row.id)) {
-      reasonCounts.active_transport++
+    const verdict = classifyTransportRow(row, classifyCtx, nowMs)
+    if (verdict.disposition === "keep") {
+      reasonCounts[verdict.reason]++
       return null
     }
-    const lifetime = classifySessionRegistrationLifetime({
-      launchId: row.launch_id,
-      launchParentPid: row.launch_parent_pid,
-    })
-    const superseded = isSupersededLaunch(row.launch_id)
-    const judgement = lifetime === "durable-launch" ? judgeOwner(row) : null
-    if (lifetime === "durable-launch" && judgement?.state === "unjudged") {
-      reasonCounts.launch_parent_unjudged++
-      return null
-    }
-    const ownerGone = lifetime === "durable-launch" && judgement?.state === "gone"
-    const ownerComparison = judgement !== null && judgement.state !== "unjudged" ? judgement.comparison : null
-    const ownerComparisonJudgement = judgement !== null && judgement.state === "gone" ? judgement : null
-    if (lifetime === "durable-launch" && !superseded && !ownerGone) {
-      reasonCounts.durable_launch++
-      return null
-    }
-    if (lifetime === "malformed-launch-identity" && !superseded) {
-      reasonCounts.malformed_launch_identity++
-      return null
-    }
-    if (opts.isReconnectGraceProtected(row.id, nowMs)) {
-      reasonCounts.reconnect_grace++
-      return null
-    }
-    return {
-      superseded,
-      ownerGone,
-      ownerComparison,
-      ownerComparisonJudgement,
-    }
+    return verdict
   }
   const getCurrent = db.prepare(
     "SELECT id, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time FROM sessions WHERE id = $id LIMIT 1",
@@ -334,8 +373,8 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
       if (current === null) continue
       const verdict = classifyReapable(current)
       if (verdict === null) continue
-      if (verdict.superseded) reasonCounts.reaped_superseded_launch++
-      else if (verdict.ownerGone) reasonCounts.reaped_owner_gone++
+      if (verdict.reason === "superseded_launch") reasonCounts.reaped_superseded_launch++
+      else if (verdict.reason === "owner_gone") reasonCounts.reaped_owner_gone++
       else reasonCounts.reaped_connection_scoped++
       wouldReap.push({ member_id: current.id, name: current.name })
     }
@@ -362,8 +401,9 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
       deleteRoomMembers.run({ $id: current.id })
       const deleted = deleteSession.run({ $id: current.id })
       if (Number(deleted.changes ?? 0) === 1) {
-        if (verdict.superseded) reasonCounts.reaped_superseded_launch++
-        else if (verdict.ownerGone && verdict.ownerComparisonJudgement !== null) {
+        const ownerGone = verdict.owner !== null && verdict.owner.state === "gone" ? verdict.owner : null
+        if (verdict.reason === "superseded_launch") reasonCounts.reaped_superseded_launch++
+        else if (verdict.reason === "owner_gone" && ownerGone !== null) {
           reasonCounts.reaped_owner_gone++
           // Inside the transaction, after the delete landed: a rolled-back
           // delete takes its attribution with it, and no departure is ever
@@ -376,7 +416,7 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
             launchId: current.launch_id,
             launchParentPid: current.launch_parent_pid as number,
             launchParentStartTime: current.launch_parent_start_time,
-            comparison: verdict.ownerComparisonJudgement.comparison,
+            comparison: ownerGone.comparison,
           })
         } else reasonCounts.reaped_connection_scoped++
         reapedSessions.push({ member_id: current.id, name: current.name })
