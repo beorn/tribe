@@ -3142,6 +3142,36 @@ function projectMailboxReadCapability(session: { readonly identity_sid: string |
     : { state: "unavailable", evidence_kind: "observed", reason: "self-mailbox-authority-missing" }
 }
 
+/** Shared by full diagnostics and the cheap status probe; callers supply current registrations only. */
+export function projectMailboxReadIssues(
+  sessions: readonly {
+    readonly name: string
+    readonly launch_id: string | null
+    readonly launch_parent_pid: number | null
+    readonly identity_sid: string | null | undefined
+  }[],
+): string[] {
+  return sessions.flatMap((session) => {
+    if (
+      classifySessionRegistrationLifetime({
+        launchId: session.launch_id,
+        launchParentPid: session.launch_parent_pid,
+      }) !== "durable-launch"
+    ) {
+      return []
+    }
+    if (session.identity_sid === undefined) {
+      return [`mailbox read unavailable for ${session.name}: its connected registration has no stored authority record`]
+    }
+    return projectMailboxReadCapability({ identity_sid: session.identity_sid }).state === "available"
+      ? []
+      : [
+          `mailbox read unavailable for ${session.name}: no verified authority to read its inbox; ` +
+            "inspect this session's registration and the configured identity verifier",
+        ]
+  })
+}
+
 /** The "missing-transport" / "exited-not-remounted" shapes returned directly
  *  by `classifyDisconnectedDurableRow` — everything `missing` carries except
  *  `never-registered`, which has no row to draw an identity from (see
@@ -4573,20 +4603,7 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
     ...(a.sessions === undefined ? {} : { requestedSessionNames: a.sessions as string[] }),
     dbGrowthWarning: parseDbGrowthWarningBytes(process.env.TRIBE_HEALTH_DB_GROWTH_WARN_BYTES),
   })
-  const mailboxReadIssues = liveSessions.flatMap((session) => {
-    // Connection-scoped tools and legacy diagnostic rows are not managed
-    // seats. Only a durable launch is required to register with its identity
-    // token, so keep health loud without manufacturing incidents for
-    // processes that have no canonical seat mailbox to read.
-    if (!isDurableMembershipSessionRow(session)) return []
-    const capability = projectMailboxReadCapability(session)
-    return capability.state === "available"
-      ? []
-      : [
-          `mailbox read unavailable for ${session.name}: ${capability.reason}; ` +
-            "replace the session-root owner (rearm/resume preserves it)",
-        ]
-  })
+  const mailboxReadIssues = projectMailboxReadIssues(liveSessions)
   const identityVerifierFault = opts.getIdentityVerifierFault?.()
 
   // Stale-code detector (@km/tribe/20033): surface whether the running daemon

@@ -902,6 +902,7 @@ function createDispatcherHarness(
       return socket
     },
     db: db as Database,
+    stmts,
     async dispose() {
       await scope[Symbol.asyncDispose]()
     },
@@ -2706,6 +2707,71 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       return verdict
     },
   }
+  // @failure Cheap health must report authority faults without scanning retained sessions or
+  // mistaking an in-flight registration for a missing authority row (33946, CTO conditions 3–5).
+  // @level l2 @consumer one-shot cli_status health reader; the real journey misses query cost and cached faults.
+  it("projects cheap health from committed connected authority rows and the cached verifier fault", async () => {
+    let verifierFault = false
+    const harness = createDispatcherHarness({
+      identityVerifier: {
+        ...identityVerifier,
+        verify: async (token: string): Promise<IdentityVerdict> => {
+          if (verifierFault) throw new Error("signing key unreadable at /private/verifier-key")
+          return identityVerifier.verify(token)
+        },
+      },
+    })
+    cleanup = harness.dispose
+    harness.addPendingClient("retained-health-row")
+    const retained = parseResult<RegisterResult>(
+      await harness.register("retained-health-row", { name: "retained-health-row", pid: 0, project: "/tmp/p" }),
+    )
+    harness.dropClient("retained-health-row")
+    harness.addPendingClient("connected-health-row")
+    const registered = parseResult<RegisterResult>(
+      await harness.register("connected-health-row", {
+        name: "@dev/7",
+        pid: process.pid,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: "token-g3",
+      }),
+    )
+    expect(harness.db.prepare("SELECT identity_sid FROM sessions WHERE id = ?").get(registered.sessionId)).toEqual({
+      identity_sid: "sid-dev7",
+    })
+    expect(harness.db.prepare("SELECT id FROM sessions WHERE id = ?").get(retained.sessionId)).not.toBeNull()
+    const authorityRead = vi.spyOn(harness.stmts.selectSessionAuthority, "get")
+    const fullScan = vi.spyOn(harness.stmts.allSessions, "all").mockImplementation(() => {
+      throw new Error("cheap health must not scan retained sessions")
+    })
+    try {
+      expect(parseResult<{ authority_issues: string[] }>(await harness.cliStatus()).authority_issues).toEqual([])
+      expect(authorityRead.mock.calls).toEqual([[{ $id: registered.sessionId }]])
+      authorityRead.mockReturnValueOnce(null)
+      expect(parseResult<{ authority_issues: string[] }>(await harness.cliStatus()).authority_issues).toEqual([
+        "mailbox read unavailable for @dev/7: its connected registration has no stored authority record",
+      ])
+      verifierFault = true
+      const output = vi.spyOn(console, "error").mockImplementation(() => {})
+      try {
+        parseError(await harness.request("cli_self_inbox_v1", { idToken: fixtureToken("token-g3"), peek: true }))
+      } finally {
+        output.mockRestore()
+      }
+      expect(harness.db.prepare("SELECT identity_sid FROM sessions WHERE id = ?").get(registered.sessionId)).toEqual({
+        identity_sid: "sid-dev7",
+      })
+      const issues = parseResult<{ authority_issues: string[] }>(await harness.cliStatus()).authority_issues
+      expect(issues).toEqual(["wire: the configured identity verifier reports an authority fault"])
+      expect(JSON.stringify(issues)).not.toMatch(/sid-dev7|private\/verifier-key|token-g3/)
+      expect(fullScan).not.toHaveBeenCalled()
+      expect(authorityRead.mock.calls).toEqual(Array.from({ length: 3 }, () => [{ $id: registered.sessionId }]))
+    } finally {
+      authorityRead.mockRestore()
+      fullScan.mockRestore()
+    }
+  })
   // @failure Fanning a watch and a member into one launch gives both transports
   // the first registrant's role, so an outcome arrives on a member or mailbox
   // delivery is consumed by the watch.

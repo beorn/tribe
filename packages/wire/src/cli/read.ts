@@ -1146,6 +1146,7 @@ export function evaluateWireHealthDocument(
   result: {
     daemon?: { pid: number; uptime: number; clients: number }
     sessions?: unknown[]
+    authority_issues?: unknown
   } | null,
   error?: unknown,
   socketPath = resolveSocketPath(),
@@ -1185,6 +1186,52 @@ export function evaluateWireHealthDocument(
     }
   }
 
+  const authorityIssues = result?.authority_issues
+  if (
+    !Array.isArray(authorityIssues) ||
+    !authorityIssues.every((issue): issue is string => typeof issue === "string" && issue.trim().length > 0)
+  ) {
+    return {
+      exitCode: 3,
+      document: {
+        schema: "hab-service-health/2",
+        service: "wire",
+        state: "unknown",
+        verdict: {
+          kind: "unknown",
+          reason: "unparsed",
+          observed:
+            "cli_status did not supply a valid authority_issues string array; inspect the running daemon version",
+        },
+      },
+    }
+  }
+  const facts = {
+    pid: result?.daemon?.pid,
+    uptime: result?.daemon?.uptime,
+    clients: result?.daemon?.clients,
+    sessions: Array.isArray(result?.sessions) ? result.sessions.length : 0,
+  }
+  if (authorityIssues.length > 0) {
+    return {
+      exitCode: 2,
+      document: {
+        schema: "hab-service-health/2",
+        service: "wire",
+        state: "unhealthy",
+        verdict: { kind: "running" },
+        facts,
+        error: {
+          code: "wire-authority-unavailable",
+          cause: authorityIssues.join("; "),
+          resolution: [
+            "Inspect the named session in tribe members and the configured verifier in tribe health --full.",
+            "Repair the reported authority at its owner; a responding socket alone does not prove mailbox access.",
+          ],
+        },
+      },
+    }
+  }
   return {
     exitCode: 0,
     document: {
@@ -1192,12 +1239,7 @@ export function evaluateWireHealthDocument(
       service: "wire",
       state: "healthy",
       verdict: { kind: "running" },
-      facts: {
-        pid: result?.daemon?.pid,
-        uptime: result?.daemon?.uptime,
-        clients: result?.daemon?.clients,
-        sessions: Array.isArray(result?.sessions) ? result.sessions.length : 0,
-      },
+      facts,
     },
   }
 }

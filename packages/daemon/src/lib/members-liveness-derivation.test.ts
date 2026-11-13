@@ -282,7 +282,7 @@ describe("tribe.members separates connector state from mailbox progress", () => 
       ]),
     )
     expect(health.issues).toContain(
-      "mailbox read unavailable for legacy-live-agent: self-mailbox-authority-missing; replace the session-root owner (rearm/resume preserves it)",
+      "mailbox read unavailable for legacy-live-agent: no verified authority to read its inbox; inspect this session's registration and the configured identity verifier",
     )
     expect(JSON.stringify(health)).not.toContain("a".repeat(64))
   })
