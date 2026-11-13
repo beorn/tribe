@@ -212,6 +212,19 @@ export interface WithDispatcher {
   readonly dispatcher: Dispatcher
 }
 
+/**
+ * wire-rename-refuse (@cto 5d2291ef): the only two names a verified persona may hold, structurally and with no seat
+ * list. They are the role successor handoff's transitions (pm/@sop/artifacts/work.md § Role Handoffs): verified
+ * `<base>/next` may hold `<base>/next` or `<base>`; any other verified `<base>` may hold `<base>` or `<base>/prev`.
+ * No other suffix and no chain: `<base>/next` never reaches `<base>/prev`.
+ */
+function namesHeldByVerifiedPersona(verified: string): readonly [string, string] {
+  const successorSuffix = "/next"
+  return verified.endsWith(successorSuffix)
+    ? [verified, verified.slice(0, -successorSuffix.length)]
+    : [verified, `${verified}/prev`]
+}
+
 function relPath(p: string): string {
   const cwd = process.cwd()
   return p.startsWith(cwd + "/") ? p.slice(cwd.length + 1) : p
@@ -1376,6 +1389,20 @@ export function withDispatcher<
     type RegistrationRefusal = { readonly message: string; readonly data: { kind: string } & Record<string, unknown> }
     type PersonaTokenDefect = "missing" | "malformed" | "absent"
 
+    /** The session's saved runtime rename (21454) when it is one of the verified persona's two names, else null. */
+    function savedExemptName(sessionId: string, allowed: readonly string[]): string | null {
+      const launch = db.prepare("SELECT launch_id, launch_parent_pid FROM sessions WHERE id = ?").get(sessionId) as {
+        launch_id: string | null
+        launch_parent_pid: number | null
+      } | null
+      if (!launch?.launch_id || !launch.launch_parent_pid) return null
+      const saved = stmts.getLaunchRename.get({
+        $launch_id: launch.launch_id,
+        $launch_parent_pid: launch.launch_parent_pid,
+      }) as { name: string } | null
+      return saved !== null && allowed.includes(saved.name) ? saved.name : null
+    }
+
     function missingPersonaTokenRefusal(claimed: string, reason: PersonaTokenDefect, action: string) {
       const message =
         `${action} refused: explicit persona ${claimed} has a ${reason} ${HAB_ID_TOKEN_ENV}; ` +
@@ -1394,6 +1421,8 @@ export function withDispatcher<
       | {
           readonly sid: string | null
           readonly gen: number | null
+          /** The verified persona; present exactly when `sid` is, and equal to the register's requested name. */
+          readonly actor?: string
           readonly habitatRoot?: string
           readonly observedAgPid?: number
           readonly observedAgStartTime?: string
@@ -1438,6 +1467,7 @@ export function withDispatcher<
             return {
               sid: verdict.sid,
               gen: verdict.gen ?? null,
+              actor: verdict.actor,
               ...(verdict.habitatRoot === undefined ? {} : { habitatRoot: verdict.habitatRoot }),
               ...(verdict.observedAgPid === undefined
                 ? {}
@@ -1771,6 +1801,7 @@ export function withDispatcher<
         launchId: string | null
         launchParentPid: number | null
         verifiedHabitatRoot?: string
+        verifiedName?: string
         claudeSessionId: string | null
         peerSocket: string | null
         ctx: TribeContext
@@ -1801,6 +1832,7 @@ export function withDispatcher<
         launchId: fields.launchId,
         launchParentPid: fields.launchParentPid,
         verifiedHabitatRoot: fields.verifiedHabitatRoot,
+        verifiedName: fields.verifiedName,
         claudeSessionId: fields.claudeSessionId,
         peerSocket: fields.peerSocket,
         conn: relPath(socket.socketPath),
@@ -2178,6 +2210,21 @@ export function withDispatcher<
                   log.warn?.(
                     `skipped persisted persona rename "${persistedRename.name}" for launch ${launchIdentity.id}: ${HAB_ID_TOKEN_ENV} did not verify; registering as "${resolvedName}"`,
                   )
+                } else if (
+                  identity.actor !== undefined &&
+                  !namesHeldByVerifiedPersona(identity.actor).includes(persistedRename.name)
+                ) {
+                  // wire-rename-refuse (@cto 71cf50a5 condition 3, 5d2291ef item 3): a verified session answers only to
+                  // the two names its persona may hold, so a saved rename to any other name is stale. Re-applying it
+                  // would bring back the fault the join/rename refusal closes; the row is deleted so no later reconnect
+                  // reads it again. A saved exempt rename (a successor's claimed <base>) falls through and is honoured.
+                  db.prepare("DELETE FROM launch_renames WHERE launch_id = ? AND launch_parent_pid = ?").run(
+                    launchIdentity.id,
+                    launchIdentity.parentPid,
+                  )
+                  log.warn?.(
+                    `skipped saved rename "${persistedRename.name}" for launch ${launchIdentity.id}: its ${HAB_ID_TOKEN_ENV} verifies "${identity.actor}"; registering as "${resolvedName}" and removed the saved row`,
+                  )
                 } else {
                   const liveHolder = Array.from(clients.values()).find(
                     (client) => client.id !== connId && client.name === persistedRename.name,
@@ -2298,6 +2345,7 @@ export function withDispatcher<
                 launchId: launch.id,
                 launchParentPid: launch.parentPid,
                 verifiedHabitatRoot: identity.habitatRoot,
+                verifiedName: identity.actor,
                 claudeSessionId,
                 peerSocket,
                 ctx: holder.ctx,
@@ -2741,6 +2789,7 @@ export function withDispatcher<
               launchId: launchIdentity?.id ?? null,
               launchParentPid: launchIdentity?.parentPid ?? null,
               verifiedHabitatRoot: identity.habitatRoot,
+              verifiedName: identity.actor,
               claudeSessionId,
               peerSocket,
               ctx: clientCtx,
@@ -3136,9 +3185,34 @@ export function withDispatcher<
               (method === TRIBE_COORD_METHODS.join || method === TRIBE_COORD_METHODS.rename)
             ) {
               const requestedName = method === TRIBE_COORD_METHODS.rename ? p.new_name : p.name
+              // wire-rename-refuse (@cto 71cf50a5 conditions 1-2, 5d2291ef): a session whose token verified at register
+              // answers only to the two names that persona may hold (namesHeldByVerifiedPersona). Exact compare:
+              // "dev/luna5" is not "@dev/luna5". Refused before the handler runs, so the row, cursors, balls and the
+              // name others address stay as they were. A nameless join lands on the saved exempt name if this launch
+              // has one (a successor that already claimed <base>), else the verified name.
+              const verifiedName = client.verifiedName
+              if (verifiedName !== undefined) {
+                const allowed = namesHeldByVerifiedPersona(verifiedName)
+                if (method === TRIBE_COORD_METHODS.join && requestedName === undefined) {
+                  toolParams = { ...toolParams, name: savedExemptName(ctx.sessionId, allowed) ?? verifiedName }
+                } else if (typeof requestedName === "string" && !allowed.includes(requestedName)) {
+                  const message =
+                    `${method} refused: requested "${requestedName}", verified "${verifiedName}" by this session's ` +
+                    `${HAB_ID_TOKEN_ENV}; allowed "${allowed[0]}" or "${allowed[1]}"; ` +
+                    `join as ${verifiedName} or omit the name`
+                  log.warn?.(message)
+                  return makeError(id, -32003, message, {
+                    kind: "identity-name-mismatch",
+                    claimed: requestedName,
+                    actor: verifiedName,
+                    allowed: [...allowed],
+                  })
+                }
+              }
               const targetName =
                 method === TRIBE_COORD_METHODS.join
-                  ? resolveRuntimeJoinIdentity(ctx, p, (sessionId) => registry.hasActiveTransport(sessionId)).joinName
+                  ? resolveRuntimeJoinIdentity(ctx, toolParams, (sessionId) => registry.hasActiveTransport(sessionId))
+                      .joinName
                   : typeof requestedName === "string"
                     ? requestedName
                     : null

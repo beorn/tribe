@@ -1587,35 +1587,36 @@ if (CWD_EVAL.kind === "warn" || CWD_EVAL.kind === "refuse") {
 
 // Watch transcript file for /rename slug changes and auto-sync to tribe
 import { resolveTranscriptPath, readTranscriptSlug } from "./lib/transcript.ts"
+import { createTranscriptSlugSync } from "./lib/transcript-slug-sync.ts"
 {
   const transcriptPath = resolveTranscriptPath(CLAUDE_SESSION_ID)
   if (transcriptPath) {
-    let lastSlug: string | null = null
-    const checkSlug = () => {
-      const slug = readTranscriptSlug(transcriptPath)
-      if (!slug || slug === lastSlug || slug === myName) return
-      lastSlug = slug
-      autoRenamed = true
-      daemon
-        ?.call("tribe.rename", { new_name: slug })
-        .then((result) => {
-          const r = result as { content: Array<{ type: string; text: string }> }
-          try {
-            const data = JSON.parse(r.content[0]?.text ?? "{}") as Record<string, string>
-            if (data.name) {
-              myName = data.name
-              reportSupervisedIdentity(myName)
-            }
-            log.info?.(`auto-renamed from /rename slug: ${myName}`)
-          } catch {
-            /* ignore */
-          }
-          return undefined
-        })
-        .catch(() => {
-          /* rename failed — name taken or similar */
-        })
-    }
+    // wire-rename-refuse (@cto 5d2291ef item c): this adapter cannot know whether its session is verified, so the call
+    // stays; a refusal is logged once per slug and autoRenamed is set only after the daemon applied the rename.
+    const checkSlug = createTranscriptSlugSync({
+      readSlug: () => readTranscriptSlug(transcriptPath),
+      currentName: () => myName,
+      rename: async (slug) => {
+        if (!daemon) throw new Error("the tribe daemon is not connected")
+        const result = (await daemon.call("tribe.rename", { new_name: slug })) as {
+          content: Array<{ type: string; text: string }>
+        }
+        const text = result.content[0]?.text ?? "{}"
+        try {
+          const data = JSON.parse(text) as { name?: string; new_name?: string; error?: string }
+          return { name: data.new_name ?? data.name, error: data.error }
+        } catch {
+          return { error: `unparseable tribe.rename answer: ${text.slice(0, 200)}` }
+        }
+      },
+      onRenamed: (name) => {
+        autoRenamed = true
+        myName = name
+        reportSupervisedIdentity(myName)
+        log.info?.(`auto-renamed from /rename slug: ${myName}`)
+      },
+      warn: (message) => log.warn?.(message),
+    })
     // Check periodically (file watch is unreliable for appended JSONL files)
     timers.setInterval(checkSlug, 5_000)
   }

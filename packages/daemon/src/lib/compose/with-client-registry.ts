@@ -53,6 +53,8 @@ export type ClientSession = {
   launchParentPid: number | null
   /** Verified habitat of this connected launch, held only while its socket is attached. */
   verifiedHabitatRoot?: string
+  /** The persona this connection's identity token verified at register; absent when it presented no verified token. */
+  verifiedName?: string
   /** Set by the socket-level `leave` method when the adapter announces WHY it
    *  is about to close (its harness exited). Read once, by the disconnect
    *  handler, into the `session.left` fact's `reason`. Absent means the
