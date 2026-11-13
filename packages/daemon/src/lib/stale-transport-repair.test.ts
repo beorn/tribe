@@ -715,6 +715,74 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     )
   })
 
+  it("keeps a watcher's incident alarm working after the watcher's row is reaped (@chief condition 4)", () => {
+    const deadPid = spawnSync("true").pid
+    if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")
+    const watcher = addSession(db, stmts, "watcher", "attention-watch", { id: "launch-watcher", parentPid: deadPid })
+    const chief = makeContext(db, stmts, "chief", "@chief")
+    const opts = {
+      cleanup: () => {},
+      userRenamed: false,
+      setUserRenamed: () => {},
+      getActiveSessionIds: () => new Set<string>(),
+      hasActiveTransport: () => false,
+      getActiveSessionInfo: () => [],
+    } as HandlerOpts
+    const raise = () =>
+      parseToolJson(
+        handleToolCall(
+          watcher,
+          "tribe.send",
+          {
+            to: "@chief",
+            type: "notify",
+            message: "attention-watch: @dev/9 silent",
+            incident: { emitter: "attention-watch", subject: "@dev/9", condition: "silent" },
+          },
+          opts,
+        ),
+      ) as { request_id?: string; incident?: { transition: string } }
+    const incidentId = raise().request_id as string
+    const quietUntil = () =>
+      (
+        db
+          .prepare("SELECT expires_at FROM pending_request WHERE request_id = ? AND recipient = '@chief'")
+          .get(incidentId) as { expires_at: number | null } | null
+      )?.expires_at ?? null
+
+    reapStaleTransportRows(db, {
+      hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
+      judgeLaunchParent: judgeLaunchParentSafely,
+    })
+    expect(db.prepare("SELECT id FROM sessions WHERE id = 'watcher'").get()).toBeNull()
+
+    // The owner's taking receipt still lands on the incident ball and still sets
+    // the quiet-until, even though the emitter name has no sessions row left —
+    // and the watcher's next assertion is the SAME ball, so a reap can neither
+    // orphan an alarm nor re-page the owner on every tick.
+    const before = Date.now()
+    const taking = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: "attention-watch",
+          type: "status",
+          ref: incidentId,
+          message: `TAKING ${incidentId}`,
+          expires_in_ms: 600_000,
+        },
+        opts,
+      ),
+    )
+    expect(taking.error).toBeUndefined()
+    const until = quietUntil()
+    expect(until).toBeGreaterThanOrEqual(before + 600_000)
+    expect(raise().incident?.transition).toBe("repeated")
+    expect(quietUntil()).toBe(until)
+  })
+
   it("previews a bulk reap without deleting anything (@cto item 3)", () => {
     const deadPid = spawnSync("true").pid
     if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")
