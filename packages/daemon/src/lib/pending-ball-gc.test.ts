@@ -204,67 +204,77 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
-  // 33650: empty reads skip enrichment; nonempty reads need transport facts,
-  // but not the send-only directory of every recently active sender.
+  /**
+   * @failure Unrelated receipts slow empty reads, or notifications slow nonempty reads.
+   * @level l2
+   * @consumer Callers reading tribe.pending with or without an owned ball.
+   * Empty reads skip enrichment; nonempty reads need transport facts, but not
+   * the send-only directory of every recently active sender (33650).
+   */
   // Syscall measurement needs Linux procfs; result and failure checks remain portable.
   it.skipIf(process.platform !== "linux").each([
-    { scope: "empty owner", hasOwnBall: false },
-    { scope: "nonempty owner", hasOwnBall: true },
-  ])("$scope pending read cost stays independent of unrelated recent traffic", ({ hasOwnBall }) => {
-      const { db, stmts } = setup()
-      try {
-        const now = Date.now()
-        const owner = "@dev/read-cost"
-        const ctx = makeContext(db, stmts, owner)
-        insertBallMessage(stmts, { id: "unrelated", openedAt: now - 1_000 })
-        openBall(stmts, { id: "unrelated", recipient: "@agent/9", openedAt: now - 1_000 })
-        if (hasOwnBall) {
-          insertBallMessage(stmts, { id: "own", openedAt: now - 1_000, recipient: owner })
-          openBall(stmts, { id: "own", recipient: owner, openedAt: now - 1_000 })
-        }
-        db.run("PRAGMA cache_size = 32")
-        const reads = () => {
-          const io = readFileSync("/proc/self/io", "utf8")
-          const field = /syscr:\s*(\d+)/.exec(io)
-          if (!field) throw new Error("/proc/self/io lacks syscr; pending read cost is unmeasured")
-          return Number(field[1])
-        }
-        const readPending = () => {
-          expect(parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts()))).toMatchObject({
-            owner,
-            count: hasOwnBall ? 1 : 0,
-            pending: hasOwnBall ? [expect.objectContaining({ request_id: "own", recipient: owner })] : [],
-            expired: false,
-          })
-        }
-        const cost = () => {
-          readPending()
-          const before = reads()
-          for (let i = 0; i < 3; i++) readPending()
-          return (reads() - before) / 3
-        }
-        const lean = cost()
-        db.transaction(() => {
-          for (let i = 0; i < 2_000; i++) {
+    { scope: "empty owner", traffic: "status receipts", hasOwnBall: false },
+    { scope: "nonempty owner", traffic: "notifications", hasOwnBall: true },
+  ])("$scope pending read cost stays independent of unrelated $traffic", ({ hasOwnBall }) => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      const owner = "@dev/read-cost"
+      const ctx = makeContext(db, stmts, owner)
+      const traffic = makeContext(db, stmts, "@agent/9")
+      insertBallMessage(stmts, { id: "unrelated", openedAt: now - 1_000 })
+      openBall(stmts, { id: "unrelated", recipient: "@agent/9", openedAt: now - 1_000 })
+      if (hasOwnBall) {
+        insertBallMessage(stmts, { id: "own", openedAt: now - 1_000, recipient: owner })
+        openBall(stmts, { id: "own", recipient: owner, openedAt: now - 1_000 })
+      }
+      db.run("PRAGMA cache_size = 32")
+      const reads = () => {
+        const io = readFileSync("/proc/self/io", "utf8")
+        const field = /syscr:\s*(\d+)/.exec(io)
+        if (!field) throw new Error("/proc/self/io lacks syscr; pending read cost is unmeasured")
+        return Number(field[1])
+      }
+      const readPending = () => {
+        expect(parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts()))).toMatchObject({
+          owner,
+          count: hasOwnBall ? 1 : 0,
+          pending: hasOwnBall ? [expect.objectContaining({ request_id: "own", recipient: owner })] : [],
+          expired: false,
+        })
+      }
+      const cost = () => {
+        readPending()
+        const before = reads()
+        for (let i = 0; i < 3; i++) readPending()
+        return (reads() - before) / 3
+      }
+      const lean = cost()
+      db.transaction(() => {
+        for (let i = 0; i < 2_000; i++) {
+          if (hasOwnBall) {
+            // Notifications grow the sender directory without also growing
+            // the separate, unchanged status-receipt queries.
+            sendMessage(traffic, "*", `unrelated notification ${i}`, "notify")
+          } else {
             insertTaking(stmts, {
               id: `unrelated-receipt-${i}`,
-              // The empty case retains its receipt-growth regression. The
-              // nonempty case isolates sender traffic, not receipt-query cost.
-              ballId: hasOwnBall ? `untracked-traffic-${i}` : "unrelated",
+              ballId: "unrelated",
               owner: "@agent/9",
               requester: "@chief",
               ts: now,
             })
           }
-        })()
-        const busy = cost()
-        expect(busy, `read syscalls: owner ${lean}, with unrelated recent traffic ${busy}`).toBeLessThan(
-          Math.max(lean, 1) * 1.5,
-        )
-      } finally {
-        db.close()
-      }
-    })
+        }
+      })()
+      const busy = cost()
+      expect(busy, `read syscalls: owner ${lean}, with unrelated recent traffic ${busy}`).toBeLessThan(
+        Math.max(lean, 1) * 1.5,
+      )
+    } finally {
+      db.close()
+    }
+  })
 
   // AC1/AC4: full pending must expose absence and zero without letting timestamps
   // replace sequence, or unrelated status/reply messages manufacture attendance.

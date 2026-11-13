@@ -783,8 +783,13 @@ describe("generic direct-message delivery resolution", () => {
     expect(db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = 'do work'").get()).toBeNull()
   })
 
+  /**
+   * @failure Multi-send admission rereads activity changed by a policy callback.
+   * @level l2
+   * @consumer Senders relying on one pre-resolution admission snapshot.
+   */
   it.each(["hot", "archived"] as const)(
-    "keeps the sender directory and policy snapshot before multi-send writes with %s activity",
+    "keeps the pre-resolution sender directory for multi-send with %s activity",
     (tier) => {
       const recent = makeContext(db, stmts, "@recent", "departed-recent-snapshot")
       logEvent(recent, "session.left", undefined, { name: "@recent", reason: "peer-close" })
@@ -807,6 +812,12 @@ describe("generic direct-message delivery resolution", () => {
           {
             ...opts(),
             resolveDelivery: ({ recipient }) => {
+              // The send's directory already includes @recent. A policy
+              // callback changing the journal must not change that snapshot.
+              if (recipient === "@recent") {
+                db.prepare("DELETE FROM messages WHERE sender=?").run("@recent")
+                db.prepare("DELETE FROM messages_archive WHERE sender=?").run("@recent")
+              }
               const row = db.prepare("SELECT COUNT(*) AS count FROM messages WHERE content=?").get(message) as {
                 count: number
               }
@@ -833,6 +844,11 @@ describe("generic direct-message delivery resolution", () => {
     },
   )
 
+  /**
+   * @failure Required send admission SQL errors disappear into successful delivery.
+   * @level l2
+   * @consumer Senders who need the real directory-read failure and no delivery.
+   */
   it("propagates a required sender-directory read failure without delivering mail", () => {
     const prepare = db.prepare.bind(db)
     const failure = new Error("sender directory unavailable")
@@ -844,12 +860,7 @@ describe("generic direct-message delivery resolution", () => {
     })
     try {
       expect(() =>
-        handleToolCall(
-          sender,
-          "tribe.send",
-          { to: "@sender", message: "directory-failure", type: "request" },
-          opts(),
-        ),
+        handleToolCall(sender, "tribe.send", { to: "@sender", message: "directory-failure", type: "request" }, opts()),
       ).toThrow(failure)
     } finally {
       spy.mockRestore()

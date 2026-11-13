@@ -434,10 +434,11 @@ function readLastMailboxReadAt(stmts: TribeContext["stmts"], name: string): numb
   return row?.last_attention_read_at ?? null
 }
 
-function ownerTransportObservationProjector(
+function ownerTransportObservationProjector<IncludeRecipientDirectory extends boolean>(
   ctx: TribeContext,
   opts: Pick<HandlerOpts, "getActiveSessionInfo" | "inboxWait">,
   observedAt: number,
+  includeRecipientDirectory: IncludeRecipientDirectory,
 ) {
   const sessionRows = ctx.db
     .prepare("SELECT id, name, identity_sid, updated_at, filter_mode FROM sessions")
@@ -475,18 +476,22 @@ function ownerTransportObservationProjector(
   // Untracked notify still delivers. The union below additionally covers
   // names that have since left `sessions` entirely (superseded/reaped rows)
   // but were active recently enough to deserve a grace period.
-  const mailboxRecipientNames = new Set(knownNames)
-  const recentSince = observedAt - DEFAULT_MAX_SILENCE_SEC * 1_000
-  const recentActivity = ctx.db
-    .prepare(
-      `
+  // Only send admission consumes this directory. Keep its eager snapshot here,
+  // before any recipient write; observers must not enumerate recent senders.
+  const mailboxRecipientNames = includeRecipientDirectory ? new Set(knownNames) : undefined
+  if (mailboxRecipientNames !== undefined) {
+    const recentSince = observedAt - DEFAULT_MAX_SILENCE_SEC * 1_000
+    const recentActivity = ctx.db
+      .prepare(
+        `
         SELECT sender AS name FROM messages WHERE ts >= $since
         UNION
         SELECT sender AS name FROM messages_archive WHERE ts >= $since
       `,
-    )
-    .all({ $since: recentSince }) as Array<{ name: string }>
-  for (const row of recentActivity) mailboxRecipientNames.add(row.name)
+      )
+      .all({ $since: recentSince }) as Array<{ name: string }>
+    for (const row of recentActivity) mailboxRecipientNames.add(row.name)
+  }
   const activeByName = new Map<string, ActiveSessionInfo[]>()
   for (const info of opts.getActiveSessionInfo()) {
     const siblings = activeByName.get(info.name) ?? []
@@ -582,13 +587,12 @@ function ownerTransportObservationProjector(
     return projected
   }
 
-  return {
+  const projection = {
     observe: (name: string): OwnerTransportObservation => project(name).observation,
     deliveryTarget: (name: string): { consumers: readonly MailboxConsumer[]; filterMode: string } => {
       const p = project(name)
       return { consumers: p.consumers, filterMode: p.filterMode }
     },
-    mailboxRecipientNames,
     mailboxDeafNames,
     mailboxDeafReasons,
     /**
@@ -605,6 +609,11 @@ function ownerTransportObservationProjector(
       return Math.max(0, Math.round((observedAt - ts) / 60_000))
     },
   }
+  // The flag and returned capability are tied at this private factory boundary.
+  // An observer has no directory property, rather than an empty admission set.
+  return (
+    mailboxRecipientNames === undefined ? projection : { ...projection, mailboxRecipientNames }
+  ) as typeof projection & (IncludeRecipientDirectory extends true ? { mailboxRecipientNames: Set<string> } : unknown)
 }
 
 type AcceptedDirectDeliveryResolution = Extract<DirectDeliveryResolution, { readonly status: "accepted" }>
@@ -1068,7 +1077,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     ...(typeof messageIdArg === "string" ? { messageId: messageIdArg.trim() } : {}),
   }
   const observedAt = Date.now()
-  const transport = ownerTransportObservationProjector(ctx, opts, observedAt)
+  const transport = ownerTransportObservationProjector(ctx, opts, observedAt, true)
   // An incident edge stays a tracked ball but promises no answer, so the 24581
   // mailbox-readability gate does not apply to it (@cto 2026-09-16, 24644).
   const resolveRecipient = (recipient: string, tracked: boolean): DirectDeliveryResolution =>
@@ -1444,11 +1453,11 @@ function handleMultiSend(input: {
   })
 }
 
-type OwnerTransportProjector = ReturnType<typeof ownerTransportObservationProjector>
+type OwnerTransportProjector = ReturnType<typeof ownerTransportObservationProjector<false>>
 
 function resolveDirectDelivery(
   recipient: string,
-  transport: OwnerTransportProjector,
+  transport: ReturnType<typeof ownerTransportObservationProjector<true>>,
   resolver: DirectDeliveryResolver | undefined,
   answerPromising: boolean,
   explicitDelivery: Delivery | undefined,
@@ -2905,7 +2914,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
   }
   const withOwnerTransport = <T extends PendingBall>(rows: readonly T[]): Array<T & OwnerTransportObservation> => {
     if (rows.length === 0) return []
-    const transport = ownerTransportObservationProjector(ctx, opts, now)
+    const transport = ownerTransportObservationProjector(ctx, opts, now, false)
     return rows.map((row) => ({ ...row, ...transport.observe(row.recipient) }))
   }
 
@@ -2984,7 +2993,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
       })
     }
     const ids = closeBatch as string[]
-    const transport = ownerTransportObservationProjector(ctx, opts, now)
+    const transport = ownerTransportObservationProjector(ctx, opts, now, false)
     const authorityRefusal = pendingCloseAuthorityRefusalResult(ctx, owner, ids, now, transport)
     if (authorityRefusal !== undefined) return authorityRefusal
     const refusal = incidentCloseRefusal(ctx, owner, ids)
@@ -3021,7 +3030,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
   if (closeId) {
     // The evidence-bearing incident exception is independent of offline
     // deadline custody. All ordinary and batch authority stays on its path.
-    const transport = ownerTransportObservationProjector(ctx, opts, now)
+    const transport = ownerTransportObservationProjector(ctx, opts, now, false)
     const authorityRefusal =
       closeEvidence !== undefined && evidenceKind?.request_kind === "incident" && ctx.getName() === ANDON_OWNER
         ? undefined
@@ -4483,7 +4492,7 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
   const takingReceipts = takingReceiptsForOpenBalls(ctx)
   const pendingOwners = pendingOwnerSummaries(pending, takingReceipts)
   const requests = pending.filter((ball) => ball.request_kind === "request")
-  const transport = ownerTransportObservationProjector(ctx, opts, now)
+  const transport = ownerTransportObservationProjector(ctx, opts, now, false)
   const requestOwners = pendingOwnerGroups(
     requests.map((ball) => ({
       ...ball,
@@ -5430,7 +5439,7 @@ export function readAttentionProjection(
   const transport =
     sentRows.length === 0 || transportOpts === undefined
       ? null
-      : ownerTransportObservationProjector(ctx, transportOpts, now)
+      : ownerTransportObservationProjector(ctx, transportOpts, now, false)
   // With no transport source wired, liveness was not measured. Serve the sent
   // rows with an explicit `unknown` state instead of refusing the read: the
   // alternative is that a seat sees none of what it sent.
