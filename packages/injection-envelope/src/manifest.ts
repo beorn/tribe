@@ -19,9 +19,10 @@
  * `~/.claude/bearly-sessions/`). One file per session.
  */
 
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { atomicWriteFileSync } from "@bearly/durable-file"
 
 /** Metadata about one injected span surfaced this turn. */
 export interface InjectedSpan {
@@ -87,7 +88,7 @@ export function turnManifestPathForSession(sessionId: string): string {
 /**
  * Persist the manifest for a session. Overwrites any prior manifest —
  * the "current" turn is always the most recent write, replaced ATOMICALLY
- * via temp+rename so a concurrent gate read (the PreToolUse hook is a
+ * by the durable writer (synced temp + rename + folder sync) so a concurrent gate read (the PreToolUse hook is a
  * separate process) sees the old manifest or the new one, never a torn
  * write (@km/all/21206-atomicity-sweep/21207). Best-effort: failures do
  * not throw (never block a user prompt) — with the tri-state reader an
@@ -96,15 +97,7 @@ export function turnManifestPathForSession(sessionId: string): string {
 export function writeTurnManifest(sessionId: string, manifest: TurnManifest): void {
   try {
     mkdirSync(sessionsDir(), { recursive: true })
-    const p = turnManifestPathForSession(sessionId)
-    const tmp = `${p}.tmp-${process.pid}-${Date.now().toString(36)}`
-    try {
-      writeFileSync(tmp, JSON.stringify(manifest), { mode: 0o600 })
-      renameSync(tmp, p)
-    } catch (err) {
-      rmSync(tmp, { force: true })
-      throw err
-    }
+    atomicWriteFileSync(turnManifestPathForSession(sessionId), JSON.stringify(manifest), 0o600)
   } catch {
     // Never block the hook over manifest IO — see docstring for how the
     // reader degrades.

@@ -24,8 +24,9 @@
  * A missing file is a fresh window (a first run is not a gap), and the window's
  * own `windowStartMs`/`restarts` expose how far the counts reach.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { atomicWriteFileSync } from "@bearly/durable-file"
 import { HAB_SESSION_HABITAT_ROOT_ENV } from "./hab-session-env.ts"
 import type { DeliveryCounters, PendingBallSummaryState } from "./replay-cap.ts"
 
@@ -398,10 +399,8 @@ export function openDeliveryLedgerWindow(input: {
   }
 }
 
-/** Atomic single-file write (temp + rename); bounded by the caller's id cap. */
+/** Durable single-file write (synced temp + rename + folder sync); bounded by the caller's id cap. */
 export function saveDeliveryLedger(path: string, state: DeliveryLedgerState): void {
   mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.tmp-${process.pid}`
-  writeFileSync(tmp, JSON.stringify(state), "utf8")
-  renameSync(tmp, path)
+  atomicWriteFileSync(path, JSON.stringify(state), 0o666)
 }

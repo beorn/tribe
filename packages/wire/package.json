@@ -226,6 +226,7 @@
     "prepack": "bun run build"
   },
   "dependencies": {
+    "@bearly/durable-file": "0.1.0",
     "@bearly/flock": "^0.1.0",
     "@bearly/pacing": "^0.2.0 || ^0.3.0",
     "@modelcontextprotocol/sdk": "1.32.1",

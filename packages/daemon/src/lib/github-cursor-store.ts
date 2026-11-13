@@ -1,7 +1,7 @@
 /** Machine-local, fail-loud persistence for the daemon GitHub poll cursor. */
 import { acquireFlockBlocking } from "@bearly/flock"
-import { randomUUID } from "node:crypto"
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { atomicWriteFileSync } from "@bearly/durable-file"
+import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, resolve } from "node:path"
 
@@ -180,24 +180,9 @@ function readCursor(path: string): GitHubCursorState {
 function writeCursorAtomic(path: string, state: GitHubCursorState): void {
   const parent = dirname(path)
   mkdirSync(parent, { recursive: true })
-  const temporary = resolve(parent, `.${path.slice(path.lastIndexOf("/") + 1)}.${process.pid}.${randomUUID()}.tmp`)
   try {
-    writeFileSync(temporary, canonicalCursorJson(state), { encoding: "utf8", mode: 0o600, flag: "wx" })
-    const file = openSync(temporary, "r")
-    try {
-      fsyncSync(file)
-    } finally {
-      closeSync(file)
-    }
-    renameSync(temporary, path)
-    const directory = openSync(parent, "r")
-    try {
-      fsyncSync(directory)
-    } finally {
-      closeSync(directory)
-    }
+    atomicWriteFileSync(path, canonicalCursorJson(state), 0o600)
   } catch (error) {
-    safeRemoveSync(temporary, { within: parent, allowMissing: true })
     throw cursorError(
       path,
       `could not be written atomically: ${error instanceof Error ? error.message : String(error)}`,
