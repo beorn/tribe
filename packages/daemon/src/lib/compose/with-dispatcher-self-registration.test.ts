@@ -779,6 +779,15 @@ describe("dispatcher operational logging", () => {
       client.connId,
     )
     expect(logs.find((event) => event.message === "operation.received" && event.props?.operation === "fixture.new_reader")?.level).toBe("info")
+    // These complete the quiet-route coverage beside cli_status and tribe.send below.
+    for (const method of ["cli_protocol", "cli_daemon", "subscribe", "tribe.debug"]) {
+      const response = JSON.parse(await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: method, method, params: {} },
+        client.connId,
+      )) as { error?: unknown }
+      expect(response.error, method).toBeUndefined()
+      expect(logs.find((event) => event.message === "operation.received" && event.props?.operation === method)?.level, method).toBe("debug")
+    }
     parseResult<{ structuredContent: SendResult }>(
       await harness.dispatcher.handleRequest(
         {
