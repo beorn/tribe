@@ -230,12 +230,20 @@ describe("refreshVaultEmbeddings", () => {
       .prepare("SELECT vec FROM vault_doc_embed WHERE fs_path = ? AND input_key = ?")
       .get("b.md", movedInputKey) as { vec: Uint8Array } | null
     expect(movedRow?.vec).toEqual(oldMovedVector.vec)
-    expect(new Set(rows().filter((row) => row.fs_path === "a.md").map((row) => row.doc_hash))).toEqual(
-      new Set([sha256("Title\n\nkeep")]),
-    )
-    expect(new Set(rows().filter((row) => row.fs_path === "b.md").map((row) => row.doc_hash))).toEqual(
-      new Set([sha256("Title\n\nmove")]),
-    )
+    expect(
+      new Set(
+        rows()
+          .filter((row) => row.fs_path === "a.md")
+          .map((row) => row.doc_hash),
+      ),
+    ).toEqual(new Set([sha256("Title\n\nkeep")]))
+    expect(
+      new Set(
+        rows()
+          .filter((row) => row.fs_path === "b.md")
+          .map((row) => row.doc_hash),
+      ),
+    ).toEqual(new Set([sha256("Title\n\nmove")]))
     expect(rows().some((row) => row.fs_path === "c.md")).toBe(false)
     expect(calls).toEqual([["doc: C | C", "doc: C | unique"]])
   })

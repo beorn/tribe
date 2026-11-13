@@ -238,7 +238,45 @@ describe("runVaultEmbedPass", () => {
       })
       const modelHashStreams = stream.mock.calls.filter(([file]) => file === modelPath).length
       expect(report).toMatchObject({ generation: 1, embeddedDocuments: 1, coveredDocuments: 1 })
-      expect({ modelHashStreams, runtimeBuilds, embedCalls }).toEqual({ modelHashStreams: 0, runtimeBuilds: 1, embedCalls: 2 })
+      expect({ modelHashStreams, runtimeBuilds, embedCalls }).toEqual({
+        modelHashStreams: 0,
+        runtimeBuilds: 1,
+        embedCalls: 2,
+      })
+    } finally {
+      stream.mockClear()
+    }
+  })
+
+  // Warm-cache integrity is distinct from the cold pin test: no-work coverage must not bypass validation.
+  test("a verified cache rehashes changed path, stat, or contract and still rejects a missing or wrong model", async () => {
+    addDoc("a.md", "A\n\na", 1)
+    const stream = vi.mocked(fs.createReadStream)
+    stream.mockClear()
+    try {
+      await pass()
+      expect(stream).toHaveBeenCalledTimes(1)
+
+      modelPath = join(root, "moved-model.gguf")
+      writeFileSync(modelPath, "model one")
+      await pass()
+      expect(stream).toHaveBeenCalledTimes(2)
+
+      utimesSync(modelPath, 1_000, 2_000)
+      await pass()
+      expect(stream).toHaveBeenCalledTimes(3)
+
+      const changedContract = { ...CONTRACT, documentPrefix: "changed: " }
+      await pass(Number.POSITIVE_INFINITY, changedContract)
+      expect(stream).toHaveBeenCalledTimes(4)
+
+      writeFileSync(modelPath, "not the ruled model")
+      await expect(pass(Number.POSITIVE_INFINITY, changedContract)).rejects.toThrow(/contract pins/)
+      expect(stream).toHaveBeenCalledTimes(5)
+
+      unlinkSync(modelPath)
+      await expect(pass(Number.POSITIVE_INFINITY, changedContract)).rejects.toThrow(/does not exist/)
+      expect(stream).toHaveBeenCalledTimes(5)
     } finally {
       stream.mockClear()
     }
