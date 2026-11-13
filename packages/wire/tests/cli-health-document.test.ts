@@ -99,7 +99,7 @@ async function runHealthReply(
 }
 
 describe("health service-probe and full diagnostic capture contracts", () => {
-  // Hab only needs control-path liveness. A full cli_health diagnostic here
+  // Keep authority health on the cheap control path: full cli_health diagnostics
   // read 849 MB per probe on the live store (29521).
   it.each([
     ["healthy", undefined],
@@ -111,7 +111,13 @@ describe("health service-probe and full diagnostic capture contracts", () => {
       ["--json"],
       errorCode
         ? { error: { code: errorCode, message: "probe condition" } }
-        : { result: { daemon: { pid: 42, uptime: 100, clients: 2 }, sessions: [{ name: "a" }] } },
+        : {
+            result: {
+              daemon: { pid: 42, uptime: 100, clients: 2 },
+              sessions: [{ name: "a" }],
+              authority_issues: [],
+            },
+          },
     )
     expectOneDocument(stdout, code)
     const document = JSON.parse(stdout) as { state: string; facts?: Record<string, unknown> }
@@ -120,6 +126,37 @@ describe("health service-probe and full diagnostic capture contracts", () => {
     if (state === "healthy") {
       expect(document.facts).toEqual({ pid: 42, uptime: 100, clients: 2, sessions: 1 })
     }
+  })
+
+  // An older producer or malformed authority fact cannot establish healthy mailbox access.
+  it.each([
+    ["old producer", {}],
+    ["null fact", { authority_issues: null }],
+    ["non-array fact", { authority_issues: "unavailable" }],
+    ["non-string issue", { authority_issues: [42] }],
+    ["empty issue", { authority_issues: [""] }],
+  ])("keeps %s authority observations unknown", async (_name, authority) => {
+    const response = await runHealthReply(["--json"], {
+      result: { daemon: { pid: 42, uptime: 100, clients: 2 }, sessions: [], ...authority },
+    })
+    expectOneDocument(response.stdout, response.code)
+    expect(response.code).toBe(3)
+    expect(JSON.parse(response.stdout)).toMatchObject({
+      state: "unknown",
+      verdict: { kind: "unknown", reason: "unparsed" },
+    })
+    expect(response.methods).toEqual(["cli_status"])
+  })
+
+  it("reports the named authority fault without a full diagnostic call", async () => {
+    const cause = "mailbox read unavailable for @dev/5: no verified authority to read its inbox"
+    const response = await runHealthReply(["--json"], {
+      result: { daemon: { pid: 42, uptime: 100, clients: 2 }, sessions: [], authority_issues: [cause] },
+    })
+    expectOneDocument(response.stdout, response.code)
+    expect(response.code).toBe(2)
+    expect(JSON.parse(response.stdout)).toMatchObject({ state: "unhealthy", error: { cause } })
+    expect(response.methods).toEqual(["cli_status"])
   })
 
   // The existing liveness cases cannot detect a dropped diagnostic body or a raw malformed dump.

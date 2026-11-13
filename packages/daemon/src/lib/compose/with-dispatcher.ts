@@ -70,6 +70,7 @@ import {
   fetchEvent,
   handleToolCall,
   isRemovedTribeMethod,
+  projectMailboxReadIssues,
   projectSessionRowTransport,
   readAttentionProjection,
   readUnackedAttentionRows,
@@ -3221,6 +3222,23 @@ export function withDispatcher<
           case "cli_status": {
             const now = Date.now()
             const sessions = canonicalSessionRows(now)
+            const authorityIssues = projectMailboxReadIssues(
+              registry.getActiveSessionInfo().map((member) => {
+                const stored = stmts.selectSessionAuthority.get({ $id: member.id }) as {
+                  identity_sid: string | null
+                } | null
+                return {
+                  name: member.name,
+                  launch_id: member.launchId,
+                  launch_parent_pid: member.launchParentPid,
+                  identity_sid: stored?.identity_sid,
+                }
+              }),
+            )
+            if (DAEMON_HANDLER_OPTS.getIdentityVerifierFault() !== null) {
+              // Detailed verifier diagnostics may contain paths; the cheap service cause must not.
+              authorityIssues.push("wire: the configured identity verifier reports an authority fault")
+            }
             // 25663 P3 (@cto bf0417a0): the list a reloading adapter ranks itself in. The declared roster is the same
             // for every adapter whenever it reads; sessions[] holds only those rejoined so far.
             const declared = [...(hooks.getExpectedMembers?.()?.byName.keys() ?? [])].sort()
@@ -3230,6 +3248,7 @@ export function withDispatcher<
               .sort()
             return makeResponse(id, {
               sessions,
+              authority_issues: authorityIssues,
               reload_peers: { declared, live_undeclared: liveUndeclared },
               daemon: {
                 pid: process.pid,
