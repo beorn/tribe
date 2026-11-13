@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
+import * as processParent from "tribe-wire/lib/process-parent"
 import {
+  judgeLaunchParent,
   projectSessionLiveness,
   projectSessionTransportEvidence,
   projectSessionTransportState,
@@ -250,5 +252,28 @@ describe("daemon-authoritative session transport state", () => {
       answer_reason: "mailbox-read-unavailable",
       last_mailbox_read_age_ms: 60_000,
     })
+  })
+})
+
+// @failure Relocating the parent judgment changes the old-row or unsupported-platform conservative policy.
+// @level l1 @consumer Both durable launch protection and persisted promotion use one unchanged judgment (33946).
+describe("launch parent judgment", () => {
+  it("keeps the pid-only rule when the stored row has no parent birth", () => {
+    const result = judgeLaunchParent(process.pid, null)
+    expect(result).toEqual({
+      alive: true,
+      comparison: "unsupported" in processParent.readProcessStat(process.pid) ? "pid-only-platform" : "pid-only-row",
+    })
+  })
+
+  it("keeps the existing pid-only platform rule when process birth is unsupported", () => {
+    const probe = vi
+      .spyOn(processParent, "readProcessStat")
+      .mockReturnValue({ kind: "unavailable", unsupported: true, reason: "test platform has no procfs" })
+    try {
+      expect(judgeLaunchParent(process.pid, "stored-birth")).toEqual({ alive: true, comparison: "pid-only-platform" })
+    } finally {
+      probe.mockRestore()
+    }
   })
 })

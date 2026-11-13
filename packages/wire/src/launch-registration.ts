@@ -2,7 +2,11 @@
 import { connectToDaemon, createReconnectingClient, type DaemonClient, type ReconnectingClientOpts } from "./client.ts"
 import { createLogger } from "loggily"
 import { resolveSocketPath } from "./paths.ts"
-import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "./lib/persona-launch-identity.ts"
+import {
+  deriveTribePersonaLaunchIdentity,
+  formatInstanceId,
+  providerLaunchIdOf,
+} from "./lib/persona-launch-identity.ts"
 import { readUnverifiedTokenClaims } from "./lib/identity-token.ts"
 import {
   TRIBE_LAUNCH_PARENT_PID_ENV,
@@ -106,12 +110,12 @@ export async function connectTribeLaunch(
 ): Promise<TribeLaunchConnection> {
   const providerLaunchId = launchIdFor(request)
   const first = await registerLaunch(request, deps, providerLaunchId)
-  let current = first.client
+  let current = first
   let watch: DaemonClient | null = null
   let closed = false
   async function reregisterUnlessAnswering(): Promise<void> {
-    if (await ownerTransportAnswers(current)) return
-    current.close()
+    if (await ownerTransportAnswers(current.client)) return
+    current.client.close()
     const startedAt = Date.now()
     const deadline = startedAt + REREGISTER_WINDOW_MS
     for (let delayMs = 250; ; delayMs = Math.min(delayMs * 2, 5_000)) {
@@ -130,45 +134,66 @@ export async function connectTribeLaunch(
         await deps.sleep(delayMs)
         continue
       }
-      // A different launch or pid is a wrong answer, not a transient fault: retrying it for the window only hides it.
-      if (next.launchId !== first.launchId || next.processId !== first.processId) {
+      // The same original token may be promoted once from its claimed key to its exact verified instance.
+      // A verified key never changes again, including back to a claimed key.
+      let sameLaunch = next.launchId === current.launchId
+      if (
+        !sameLaunch &&
+        next.processId === first.processId &&
+        current.launchId === deriveTribePersonaLaunchIdentity(request.name, providerLaunchId).providerLaunchKey &&
+        request.idToken !== undefined
+      ) {
+        try {
+          const claims = readUnverifiedTokenClaims(request.idToken, { generation: true })
+          sameLaunch = next.launchId === formatInstanceId(claims.sid, claims.gen)
+        } catch (error) {
+          next.client.close()
+          throw error
+        }
+      }
+      if (!sameLaunch || next.processId !== first.processId) {
         next.client.close()
         throw new Error(
           `Tribe re-registered ${request.name} as launch ${next.launchId} under pid ${next.processId}, ` +
-            `not its own ${first.launchId} under pid ${first.processId}`,
+            `not its own ${current.launchId} under pid ${first.processId}`,
         )
       }
-      current = next.client
+      current = next
       return
+    }
+  }
+  async function ensureRegistered(): Promise<void> {
+    if (closed) throw new Error(`Tribe launch ${first.launchId} (${request.name}) was closed by its owner`)
+    // The launch socket and the client's timers are unref'd, so a caller whose only handle is this launch would
+    // drain the event loop mid-wait and exit 0. Hold the loop for the whole wait, released on return or throw.
+    const hold = setTimeout(() => {}, REREGISTER_WINDOW_MS + OWNER_PROBE_TIMEOUT_MS + 5_000)
+    try {
+      await reregisterUnlessAnswering()
+    } finally {
+      clearTimeout(hold)
     }
   }
   return {
     joinRetries: first.joinRetries,
     launchParentPid: first.processId,
-    launchId: first.launchId,
-    sessionId: first.sessionId,
+    get launchId() {
+      return current.launchId
+    },
+    get sessionId() {
+      return current.sessionId
+    },
     environment: {
       ...Object.fromEntries(tribeSessionIdentityEnvironmentNames().map((key) => [key, undefined])),
       [TRIBE_LAUNCH_PARENT_PID_ENV]: String(first.processId),
       [TRIBE_NAME_ENV]: request.name,
       [TRIBE_SESSION_NAME_ENV]: request.name,
     },
-    isConnected: () => current.socket.destroyed !== true,
-    async ensureRegistered() {
-      if (closed) throw new Error(`Tribe launch ${first.launchId} (${request.name}) was closed by its owner`)
-      // The launch socket and the client's timers are unref'd, so a caller whose only handle is this launch would
-      // drain the event loop mid-wait and exit 0. Hold the loop for the whole wait, released on return or throw.
-      const hold = setTimeout(() => {}, REREGISTER_WINDOW_MS + OWNER_PROBE_TIMEOUT_MS + 5_000)
-      try {
-        await reregisterUnlessAnswering()
-      } finally {
-        clearTimeout(hold)
-      }
-    },
+    isConnected: () => current.client.socket.destroyed !== true,
+    ensureRegistered,
     async attachWatch(onNotification, onReconnectExhausted) {
       if (closed) throw new Error(`Tribe launch ${first.launchId} (${request.name}) was closed by its owner`)
       if (watch !== null) throw new Error(`Tribe watch already attached to ${request.name} launch ${first.launchId}`)
-      if (request.idToken === undefined || first.sessionId === undefined) {
+      if (request.idToken === undefined || current.sessionId === undefined) {
         throw new Error(
           `Tribe cannot attach ${request.name}'s watch: a verified token and daemon session id are required`,
         )
@@ -197,6 +222,10 @@ export async function connectTribeLaunch(
               }
             })
           })
+          await ensureRegistered()
+          if (current.sessionId === undefined) {
+            throw new Error(`Tribe cannot attach ${request.name}'s watch: the current owner has no daemon session id`)
+          }
           const registration = (await client.call("register", {
             name: request.name,
             role: "watch",
@@ -223,14 +252,14 @@ export async function connectTribeLaunch(
           }
           if (
             registration.name !== request.name ||
-            registration.sessionId !== first.sessionId ||
-            registration.launchId !== first.launchId ||
+            registration.sessionId !== current.sessionId ||
+            registration.launchId !== current.launchId ||
             registration.launchParentPid !== first.processId ||
             registration.transportDelivery !== "push"
           ) {
             throw new Error(
-              `Tribe watch for ${request.name} did not attach to its owner session ${first.sessionId} ` +
-                `under launch ${first.launchId}/${first.processId}: ${JSON.stringify(registration)}`,
+              `Tribe watch for ${request.name} did not attach to its owner session ${current.sessionId} ` +
+                `under launch ${current.launchId}/${first.processId}: ${JSON.stringify(registration)}`,
             )
           }
           client.socket.unref()
@@ -245,7 +274,7 @@ export async function connectTribeLaunch(
     close: () => {
       closed = true
       watch?.close()
-      current.close()
+      current.client.close()
     },
   }
 }

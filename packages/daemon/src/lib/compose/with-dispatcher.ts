@@ -92,7 +92,7 @@ import {
   sendMessage,
 } from "../messaging.ts"
 import { registerSession, NameConflictError, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
-import { foreignTransportView, readProcessStartTime } from "../session-transport-state.ts"
+import { foreignTransportView, judgeLaunchParent, readProcessStartTime } from "../session-transport-state.ts"
 import {
   adoptByPidCwd,
   adoptIdentity,
@@ -1486,14 +1486,23 @@ export function withDispatcher<
       authority: SessionAuthority
       sid: string | null
       gen: number | null
+      birth: string | null
     } {
-      const row = db.prepare("SELECT identity_sid, identity_gen FROM sessions WHERE id = ?").get(sessionId) as {
+      const row = db
+        .prepare("SELECT identity_sid, identity_gen, launch_parent_start_time FROM sessions WHERE id = ?")
+        .get(sessionId) as {
         identity_sid: string | null
         identity_gen: number | null
+        launch_parent_start_time: string | null
       } | null
       return row === null
-        ? { authority: "claimed", sid: null, gen: null }
-        : { authority: sessionAuthority(row), sid: row.identity_sid, gen: row.identity_gen }
+        ? { authority: "claimed", sid: null, gen: null, birth: null }
+        : {
+            authority: sessionAuthority(row),
+            sid: row.identity_sid,
+            gen: row.identity_gen,
+            birth: row.launch_parent_start_time,
+          }
     }
 
     function findSamePidNameHolder(name: string, clientPid: number, connId: string): ClientSession | null {
@@ -1595,6 +1604,21 @@ export function withDispatcher<
       return result.changes > 0
     }
 
+    // The verifier supplies promotion authority. Callers select the same resolved name before this check.
+    function canPromoteFallbackLaunch(
+      verifiedSid: string | null,
+      target: LaunchIdentity | null,
+      source: LaunchIdentity | null,
+      authority: SessionAuthority,
+      birth: string | null,
+    ): boolean {
+      if (verifiedSid === null || target === null) return false
+      if (authority !== "claimed" || source === null) return false
+      if (providerLaunchIdOf(source.id) !== verifiedSid || source.parentPid !== target.parentPid) return false
+      // Existing live fan-in has only its matching parent tuple when an old row has no birth.
+      return birth === null || judgeLaunchParent(source.parentPid, birth).alive
+    }
+
     function findLaunchFanIn(
       name: string,
       clientPid: number,
@@ -1627,13 +1651,11 @@ export function withDispatcher<
         // bearer under the launch id, whose provider part IS the token's sid, from the same launcher pid. The holder is
         // promoted in place to `<sid>@<gen>`. Another launcher pid is a previous generation and is not fanned into; a
         // verified holder is 3c-2a's fence's to judge.
+        const held = holderIdentity(holder.ctx.sessionId)
         if (
-          tokenSid !== null &&
           launchIdentity !== null &&
           holderLaunch !== null &&
-          providerLaunchIdOf(holderLaunch.id) === tokenSid &&
-          holderLaunch.parentPid === launchIdentity.parentPid &&
-          holderIdentity(holder.ctx.sessionId).authority !== "verified"
+          canPromoteFallbackLaunch(tokenSid, launchIdentity, holderLaunch, held.authority, held.birth)
         ) {
           return {
             holder,
@@ -1685,7 +1707,7 @@ export function withDispatcher<
      * later promoted stays visible (@cto def441bf).
      */
     function rekeyPromotedFallbackLaunch(
-      holder: ClientSession,
+      holder: Pick<ClientSession, "name" | "ctx">,
       from: LaunchIdentity,
       to: LaunchIdentity,
       token: { readonly sid: string; readonly gen: number },
@@ -2071,13 +2093,38 @@ export function withDispatcher<
               launchIdentity && typeof p.name === "string"
                 ? (db
                     .prepare(
-                      `SELECT id, name, role FROM sessions
-                       WHERE name = ? AND launch_id = ? AND launch_parent_pid = ?
-                       LIMIT 1`,
+                      `SELECT id, name, role, launch_id, launch_parent_pid, launch_parent_start_time, identity_sid, identity_gen
+                       FROM sessions WHERE name = ? AND launch_parent_pid = ? AND launch_id IS NOT NULL LIMIT 1`,
                     )
-                    .get(p.name, launchIdentity.id, launchIdentity.parentPid) as PriorSession | null)
+                    .get(p.name, launchIdentity.parentPid) as
+                    | (PriorSession & {
+                        launch_id: string
+                        launch_parent_pid: number
+                        launch_parent_start_time: string | null
+                        identity_sid: string | null
+                        identity_gen: number | null
+                      })
+                    | null)
                 : null
-            const launchAdopted = launchPersisted && !isActive(launchPersisted.id) ? launchPersisted : null
+            const inactiveLaunch = launchPersisted && !isActive(launchPersisted.id) ? launchPersisted : null
+            let launchAdopted = inactiveLaunch?.launch_id === launchIdentity?.id ? inactiveLaunch : null
+            let persistedPromotionFrom: LaunchIdentity | null = null
+            if (inactiveLaunch !== null && launchIdentity !== null && launchAdopted === null) {
+              const from = { id: inactiveLaunch.launch_id, parentPid: inactiveLaunch.launch_parent_pid }
+              if (
+                canPromoteFallbackLaunch(
+                  verifiedSid,
+                  launchIdentity,
+                  from,
+                  sessionAuthority(inactiveLaunch),
+                  inactiveLaunch.launch_parent_start_time,
+                ) &&
+                judgeLaunchParent(from.parentPid, inactiveLaunch.launch_parent_start_time).alive
+              ) {
+                launchAdopted = inactiveLaunch
+                persistedPromotionFrom = from
+              }
+            }
             // A validated launch identity is stronger than the legacy weak
             // identity token. Never let a new launch with different provenance
             // adopt a dead member merely because cwd/role hashed the same.
@@ -2636,6 +2683,17 @@ export function withDispatcher<
                     identity_gen: number | null
                   } | null)
                 : null
+            if (
+              persistedPromotionFrom !== null &&
+              launchIdentity !== null &&
+              verifiedSid !== null &&
+              verifiedGen !== null
+            ) {
+              rekeyPromotedFallbackLaunch({ name, ctx: clientCtx }, persistedPromotionFrom, launchIdentity, {
+                sid: verifiedSid,
+                gen: verifiedGen,
+              })
+            }
             registerSession(
               clientCtx,
               projectId,

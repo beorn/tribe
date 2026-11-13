@@ -3619,41 +3619,136 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
         .all() as Array<{ content: string }>
     ).map((row) => JSON.parse(row.content) as Record<string, unknown>)
 
-  it("a token-only adapter promotes its own fallback bootstrap's session in place, and says so", async () => {
-    const harness = createDispatcherHarness({ identityVerifier })
-    cleanup = harness.dispose
-    const bootstrap = await fallbackBootstrap(harness, "sid-dev7::%40dev%2F7", 5600)
-    harness.addPendingClient("conn-adapter")
-    const adapter = parseResult<RegisterResult>(
-      await harness.register("conn-adapter", {
-        name: "@dev/7",
-        pid: 5602,
-        project: "/tmp/p",
-        takeover: true,
-        launchParentPid: 5600,
-        idToken: "token-g3",
-      }),
-    )
+  it.each(["live", "inactive", "inactive-old-row"] as const)(
+    "a token-only adapter promotes its own fallback bootstrap in place (%s)",
+    async (state) => {
+      const harness = createDispatcherHarness({ identityVerifier })
+      cleanup = harness.dispose
+      const parent = state === "live" ? 5600 : process.pid
+      const bootstrap = await fallbackBootstrap(harness, "sid-dev7::%40dev%2F7", parent)
+      if (state !== "live") harness.dropClient("conn-bootstrap")
+      if (state === "inactive-old-row") {
+        harness.db
+          .prepare("UPDATE sessions SET launch_parent_start_time = NULL WHERE id = ?")
+          .run(bootstrap.registered.sessionId)
+      }
+      harness.addPendingClient("conn-adapter")
+      const adapter = parseResult<RegisterResult>(
+        await harness.register("conn-adapter", {
+          name: "@dev/7",
+          pid: 5602,
+          project: "/tmp/p",
+          takeover: true,
+          launchParentPid: parent,
+          idToken: "token-g3",
+        }),
+      )
 
-    expect(adapter.sessionId).toBe(bootstrap.registered.sessionId)
-    expect(bootstrap.socket.destroyedByDispatcher).toBe(false)
-    expect(harness.supersededEvents("@dev/7")).toEqual([])
-    expect(sessionRow(harness, adapter.sessionId)).toMatchObject({
-      launch_id: "sid-dev7@3",
-      launch_parent_pid: 5600,
-      identity_sid: "sid-dev7",
-    })
-    expect(promotions(harness)).toEqual([
-      expect.objectContaining({
-        name: "@dev/7",
-        sid: "sid-dev7",
-        gen: 3,
-        parent_pid: 5600,
-        from_launch_id: "sid-dev7::%40dev%2F7",
-        transport_class: "bootstrap-fallback-promoted",
-      }),
-    ])
-  })
+      expect(adapter.sessionId).toBe(bootstrap.registered.sessionId)
+      expect(bootstrap.socket.destroyedByDispatcher).toBe(false)
+      expect(harness.supersededEvents("@dev/7")).toEqual([])
+      expect(sessionRow(harness, adapter.sessionId)).toMatchObject({
+        launch_id: "sid-dev7@3",
+        launch_parent_pid: parent,
+        identity_sid: "sid-dev7",
+      })
+      expect(promotions(harness)).toEqual([
+        expect.objectContaining({
+          name: "@dev/7",
+          sid: "sid-dev7",
+          gen: 3,
+          parent_pid: parent,
+          from_launch_id: "sid-dev7::%40dev%2F7",
+          transport_class: "bootstrap-fallback-promoted",
+        }),
+      ])
+    },
+  )
+
+  // @failure An inactive claimed row is promoted without its own verified SID/name/parent, or a verified row is adopted as claimed.
+  // @level l2 @consumer Reboot promotion retains the original authority fences (33946).
+  it.each(["tokenless", "contradicted", "undecided", "foreign-sid", "foreign-parent", "verified-holder"] as const)(
+    "does not promote a persisted bootstrap for %s",
+    async (mode) => {
+      const verifier = {
+        ...identityVerifier,
+        verify: async (token: string): Promise<IdentityVerdict> => {
+          if (token === "token-wait") return { result: "undecided", reason: "bounded probe still running" }
+          if (token === "token-other") return { result: "verified", actor: "@dev/7", sid: "sid-other", gen: 3 }
+          return identityVerifier.verify(token)
+        },
+      }
+      const harness = createDispatcherHarness({ identityVerifier: verifier })
+      cleanup = harness.dispose
+      const bootstrap = await fallbackBootstrap(harness, "sid-dev7::%40dev%2F7", process.pid)
+      harness.dropClient("conn-bootstrap")
+      if (mode === "verified-holder") {
+        harness.db
+          .prepare("UPDATE sessions SET identity_sid = 'sid-dev7', identity_gen = 3 WHERE id = ?")
+          .run(bootstrap.registered.sessionId)
+      }
+      const before = sessionRow(harness, bootstrap.registered.sessionId)
+      harness.addPendingClient("conn-refused")
+      const token =
+        mode === "tokenless"
+          ? undefined
+          : mode === "contradicted"
+            ? "token-dead"
+            : mode === "undecided"
+              ? "token-wait"
+              : mode === "foreign-sid"
+                ? "token-other"
+                : "token-g3"
+      const refusal = parseError(
+        await harness.register("conn-refused", {
+          name: "@dev/7",
+          pid: process.pid,
+          project: "/tmp/p",
+          launchId: mode === "foreign-sid" ? undefined : "sid-dev7::%40dev%2F7",
+          launchParentPid: mode === "foreign-parent" ? process.ppid : process.pid,
+          idToken: token,
+        }),
+      )
+      if (mode === "tokenless") expect(refusal).toMatchObject({ data: { kind: "identity-token-missing" } })
+      else if (mode === "contradicted") expect(refusal).toMatchObject({ data: { kind: "identity-contradicted" } })
+      else if (mode === "undecided") expect(refusal).toMatchObject({ data: { kind: "identity-undecided" } })
+      else {
+        expect(refusal).toMatchObject({
+          code: -32000,
+          message: expect.stringContaining("belongs to launch sid-dev7::%40dev%2F7"),
+        })
+      }
+      expect(sessionRow(harness, bootstrap.registered.sessionId)).toEqual(before)
+      expect(promotions(harness)).toEqual([])
+    },
+  )
+
+  // @failure A recycled parent PID promotes the old context instead of taking the existing parent-gone path.
+  // @level l2 @consumer The stored kernel birth fences both live and inactive claimed promotion (33946).
+  it.skipIf(readProcessStartTime(process.pid) === "unsupported").each(["live", "inactive"] as const)(
+    "does not adopt a claimed row with a mismatched parent birth (%s)",
+    async (state) => {
+      const harness = createDispatcherHarness({ identityVerifier })
+      cleanup = harness.dispose
+      const bootstrap = await fallbackBootstrap(harness, "sid-dev7::%40dev%2F7", process.pid)
+      harness.db
+        .prepare("UPDATE sessions SET launch_parent_start_time = 'another-birth' WHERE id = ?")
+        .run(bootstrap.registered.sessionId)
+      if (state === "inactive") harness.dropClient("conn-bootstrap")
+      harness.addPendingClient("conn-birth")
+      const registered = parseResult<RegisterResult>(
+        await harness.register("conn-birth", {
+          name: "@dev/7",
+          pid: process.pid + 1,
+          project: "/tmp/p",
+          launchParentPid: process.pid,
+          idToken: "token-g3",
+        }),
+      )
+      expect(registered.sessionId).not.toBe(bootstrap.registered.sessionId)
+      expect(promotions(harness)).toEqual([])
+    },
+  )
 
   // 25074 08:06 PDT outage: a daemon restarted WITHOUT the verifier inherits authority rows a verifier daemon keyed
   // `<sid>@<gen>`. The seat's tokenless re-register presents `<sid>::<persona>`; it must read as the same provider

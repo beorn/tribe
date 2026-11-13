@@ -441,7 +441,10 @@ describe("ensureRegistered re-registers a launch the daemon dropped (25074 accep
   // @level l2 @consumer Managed seats recover from a verifierless daemon without relaunch (33946).
   it("recovers when the replacement daemon verifies its previously claimed token", async () => {
     const daemon = restartableDaemon()
-    const request = { ...REQUEST, idToken: tokenWithClaims({ sid: REQUEST.launchId, gen: 3 }) }
+    const request = {
+      ...REQUEST,
+      idToken: tokenWithClaims({ sid: REQUEST.launchId, gen: 3, act: { sub: REQUEST.name } }),
+    }
     const joined = await connectTribeLaunch(request, daemon.deps)
     expect(joined.launchId).toBe(DERIVED)
     daemon.restart(0)
@@ -452,7 +455,34 @@ describe("ensureRegistered re-registers a launch the daemon dropped (25074 accep
       expect(joined.launchId).toBe("sid-dev7@3")
       expect(daemon.registers).toHaveLength(2)
       expect(daemon.registers[1]).toEqual(daemon.registers[0])
+      daemon.restart(0)
+      daemon.certifyLaunch(DERIVED)
+      await expect(joined.ensureRegistered()).rejects.toThrow("not its own sid-dev7@3")
+      expect(joined.launchId).toBe("sid-dev7@3")
     } finally {
+      joined.close()
+    }
+  })
+
+  // @failure A same-prefix ACK changes the token's generation, or an unrelated SID becomes this owner.
+  // @level l2 @consumer A recovering launch keeps the original signed instance (33946).
+  it.each([
+    ["sid-other@3", "the daemon keyed launch sid-other@3"],
+    ["sid-dev7@4", `not its own ${DERIVED}`],
+  ])("refuses a changed certificate for %s", async (key, reason) => {
+    const daemon = restartableDaemon()
+    const joined = await connectTribeLaunch(
+      { ...REQUEST, idToken: tokenWithClaims({ sid: REQUEST.launchId, gen: 3, act: { sub: REQUEST.name } }) },
+      daemon.deps,
+    )
+    daemon.restart(0)
+    daemon.certifyLaunch(key)
+    daemon.startClock()
+    try {
+      await expect(joined.ensureRegistered()).rejects.toThrow(reason)
+      expect(joined.launchId).toBe(DERIVED)
+    } finally {
+      vi.useRealTimers()
       joined.close()
     }
   })

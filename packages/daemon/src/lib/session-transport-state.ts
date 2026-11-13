@@ -304,3 +304,18 @@ export function projectSessionTransportEvidence(input: {
       input.lastMailboxReadAt === null ? null : (input.now ?? Date.now()) - input.lastMailboxReadAt,
   }
 }
+
+/** How the existing durable launch check judged its parent: kernel birth where available, otherwise pid-only. */
+export type LaunchParentComparison = "start-time" | "pid-only-row" | "pid-only-platform"
+
+/** Whether a durable row's launch parent is still the process that registered it. A row carrying a start time is
+ *  judged by it (a reused pid differs); one without, or on a platform without /proc, by pid alone. */
+export function judgeLaunchParent(
+  pid: number,
+  storedStartTime: string | null,
+): { alive: boolean; comparison: LaunchParentComparison } {
+  const current = readProcessStartTime(pid)
+  if (current === "unsupported") return { alive: probeProcessState(pid) !== "dead", comparison: "pid-only-platform" }
+  if (storedStartTime === null) return { alive: probeProcessState(pid) !== "dead", comparison: "pid-only-row" }
+  return { alive: current === storedStartTime, comparison: "start-time" }
+}

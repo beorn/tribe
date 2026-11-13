@@ -44,6 +44,8 @@ import { once } from "node:events"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { safeRemoveSync } from "removely"
 import { createStatements, openDatabase } from "../../daemon/src/lib/database.ts"
+import { createTribeContext } from "../../daemon/src/lib/context.ts"
+import { sendMessage } from "../../daemon/src/lib/messaging.ts"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 import { connectTribeLaunch } from "../src/launch-registration.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
@@ -783,7 +785,6 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const launchId = "sid-reboot-recovery"
     daemonProc = spawnDaemon(socketPath, dbPath)
     await waitForDaemonSocket(daemonProc, socketPath)
-    console.info("33946 repro: verifierless daemon socket ready")
     const owner = await connectTribeLaunch(
       {
         name: NAME,
@@ -801,19 +802,77 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         processId: () => process.pid,
       },
     )
-    console.info("33946 repro: initial owner registered", owner.launchId)
     try {
       expect(owner.launchId).toBe(`${launchId}::${encodeURIComponent(NAME)}`)
+      const firstSession = owner.sessionId
+      const fixtureDb = openDatabase(dbPath)
+      let queuedId: string
+      try {
+        fixtureDb.prepare("UPDATE sessions SET filter_mode = 'focus' WHERE id = ?").run(firstSession)
+        const fixtureCtx = createTribeContext({
+          db: fixtureDb,
+          stmts: createStatements(fixtureDb),
+          sessionId: "recovery-fixture",
+          sessionRole: "daemon",
+          initialName: "daemon",
+          domains: [],
+          claudeSessionId: null,
+          claudeSessionName: null,
+          onMessageInserted: undefined,
+        })
+        const queued = sendMessage(fixtureCtx, NAME, "queued before verified recovery", "request")
+        queuedId = queued.id
+        fixtureDb
+          .prepare(
+            "INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at) VALUES (?, ?, ?) ON CONFLICT(recipient) DO UPDATE SET last_actionable_seq = excluded.last_actionable_seq",
+          )
+          .run(NAME, queued.rowid - 1, Date.now())
+      } finally {
+        fixtureDb.close()
+      }
+      const readStored = () => {
+        const db = openDatabase(dbPath)
+        try {
+          return {
+            session: db.prepare("SELECT id, delivery, filter_mode FROM sessions WHERE name = ?").get(NAME),
+            cursor: db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ?").get(NAME),
+            queued: db.prepare("SELECT id, content, recipient FROM messages WHERE id = ?").get(queuedId),
+          }
+        } finally {
+          db.close()
+        }
+      }
+      const before = readStored()
+      expect(before.session).toMatchObject({ id: firstSession, delivery: "pull", filter_mode: "focus" })
+      expect(before.queued).toMatchObject({ id: queuedId, content: "queued before verified recovery", recipient: NAME })
       await stopChild(daemonProc, "verifierless daemon")
       await waitForCondition(() => !existsSync(socketPath), "verifierless socket removal")
       const verifierPath = join(tmpDir, "verified-recovery.ts")
       writeClaimsVerifier(verifierPath)
       daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: verifierPath })
       await waitForDaemonSocket(daemonProc, socketPath, "verified replacement daemon")
-      console.info("33946 repro: verified replacement socket ready")
       await owner.ensureRegistered()
       expect(owner.launchId).toBe(`${launchId}@1`)
       expect(owner.isConnected()).toBe(true)
+      expect(owner.sessionId).toBe(firstSession)
+      expect(readStored()).toEqual(before)
+      const promotedDb = openDatabase(dbPath)
+      try {
+        const event = promotedDb
+          .prepare("SELECT content FROM messages WHERE type = 'event.session.identity-promoted'")
+          .get() as { content: string }
+        expect(JSON.parse(event.content)).toMatchObject({
+          session_id: firstSession,
+          from_launch_id: `${launchId}::${encodeURIComponent(NAME)}`,
+          sid: launchId,
+          gen: 1,
+        })
+      } finally {
+        promotedDb.close()
+      }
+      await owner.attachWatch(() => {})
+      expect(owner.sessionId).toBe(firstSession)
+      expect(readStored()).toEqual(before)
     } finally {
       owner.close()
     }
@@ -1304,7 +1363,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     // The daemon learns of the closed socket asynchronously; poll the real read.
     let dead = await runCli(["inbox-status", "--json"], cliEnv, { throughParent: true })
-    for (const deadline = Date.now() + 15_000; Date.now() < deadline; ) {
+    for (const deadline = Date.now() + 15_000; Date.now() < deadline;) {
       if (dead.exitCode === 0 && "transport_state" in (JSON.parse(dead.stdout) as object)) break
       await Bun.sleep(250)
       dead = await runCli(["inbox-status", "--json"], cliEnv, { throughParent: true })

@@ -7,7 +7,12 @@ import { createLogger } from "loggily"
 import type { Database } from "bun:sqlite"
 import { readTranscriptSlug } from "tribe-wire/lib/transcript"
 import type { TribeContext } from "./context.ts"
-import { probeProcessState, readProcessStartTime } from "./session-transport-state.ts"
+import {
+  judgeLaunchParent,
+  probeProcessState,
+  readProcessStartTime,
+  type LaunchParentComparison,
+} from "./session-transport-state.ts"
 
 const log = createLogger("tribe:session")
 import { sendMessage, logEvent, logSessionLeft, settlePendingRows, type PendingSettlementRow } from "./messaging.ts"
@@ -38,9 +43,6 @@ export class NameConflictError extends Error {
     this.name = "NameConflictError"
   }
 }
-
-/** How a durable holder's launch parent was judged alive: by its start time, or by pid alone (named in the text). */
-export type LaunchParentComparison = "start-time" | "pid-only-row" | "pid-only-platform"
 
 /** A registration refused because the name's row belongs to another launch whose parent process is alive (24604 (a),
  *  @cto cdb79aad). The row's transport is only between connections: that is never proof the launch is over. */
@@ -367,18 +369,6 @@ function parseDomains(raw: string): string[] {
   const parsed = JSON.parse(raw) as unknown
   if (!Array.isArray(parsed)) throw new Error(`session domains is not a JSON array: ${raw}`)
   return parsed.map(String)
-}
-
-/** Whether a durable row's launch parent is still the process that registered it. A row carrying a start time is
- *  judged by it (a reused pid differs); one without, or on a platform without /proc, by pid alone. */
-function judgeLaunchParent(
-  pid: number,
-  storedStartTime: string | null,
-): { alive: boolean; comparison: LaunchParentComparison } {
-  const current = readProcessStartTime(pid)
-  if (current === "unsupported") return { alive: isPidAlive(pid), comparison: "pid-only-platform" }
-  if (storedStartTime === null) return { alive: isPidAlive(pid), comparison: "pid-only-row" }
-  return { alive: current === storedStartTime, comparison: "start-time" }
 }
 
 /**
