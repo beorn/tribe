@@ -44,9 +44,9 @@ export const uncoveredTooLarge = (needs: number, fits: number) =>
 export const VAULT_EMBED_PILOT_CHUNKS_PER_MS = 250 / 873_480
 /**
  * Chunks per embed call. The budget is checked between calls, so one call is the most a pass can overrun its budget:
- * at the measured pilot rate (0.2862 chunks/s) eight chunks take about 28 s, inside the 600 s ceiling's margin.
+ * the CPU trial admits one text per call. Native setup/calls can still exceed the cooperative deadline.
  */
-export const VAULT_EMBED_BATCH = 8
+export const VAULT_EMBED_BATCH = 1
 
 export interface VaultEmbedRefreshReport {
   readonly documents: number

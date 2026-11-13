@@ -9,7 +9,7 @@
  * fs_content_hash; it writes one transaction per document and prunes that path's older rows after the commit; it
  * takes documents oldest fs_mtime first, so a spent budget leaves the newest documents uncovered and reported.
  * CTO verdict 0edff0e3 fixes 6 and 7: the budget is checked between embedding batches inside a document, so one huge
- * document cannot overrun the 600 s limit (it is abandoned unwritten and reported); a file km lists that cannot be
+ * document can be abandoned unwritten and reported between calls (native calls remain cooperative); a file km lists that cannot be
  * read is one uncovered document with a named reason, never a failed pass; an empty document is named, never silent.
  * CTO r2 change 4 (b7e7f718): before a document's first batch its pending chunks are compared with what the time left
  * can embed, at the rate measured so far in this pass or the pilot rate before any measurement; a document that does
@@ -165,6 +165,8 @@ describe("refreshVaultEmbeddings", () => {
     const embedder = recordingEmbedder()
     const first = await run(embedder)
     expect(first).toMatchObject({ embeddedDocuments: 1, embeddedChunks: 3, reusedChunks: 0 })
+    // CPU trial: each native call gets one input, bounding concurrency and the cooperative overrun unit.
+    expect(embedder.calls.map((call) => call.length)).toEqual([1, 1, 1])
     const stored = rows()
     expect(stored.map((r) => [r.fs_path, r.doc_hash, r.chunk])).toEqual([
       ["a.md", sha256("Alpha\n\none\n\ntwo"), 0],
@@ -184,7 +186,7 @@ describe("refreshVaultEmbeddings", () => {
     ).length
     prepare.mockRestore()
     expect(second).toMatchObject({ embeddedDocuments: 0, embeddedChunks: 0, coveredDocuments: 1 })
-    expect(embedder.calls).toHaveLength(1)
+    expect(embedder.calls).toHaveLength(3)
     expect(generationVectorLoads).toBe(0)
   })
 
@@ -195,7 +197,7 @@ describe("refreshVaultEmbeddings", () => {
     putFile("a.md", "Alpha\n\none\n\nTWO", 20)
     const report = await run(embedder)
     expect(report).toMatchObject({ embeddedDocuments: 1, embeddedChunks: 1, reusedChunks: 2 })
-    expect(embedder.calls[1]).toEqual(["doc: Alpha | TWO"])
+    expect(embedder.calls.at(-1)).toEqual(["doc: Alpha | TWO"])
     expect(new Set(rows().map((r) => r.doc_hash))).toEqual(new Set([sha256("Alpha\n\none\n\nTWO")]))
   })
 
@@ -245,7 +247,7 @@ describe("refreshVaultEmbeddings", () => {
       ),
     ).toEqual(new Set([sha256("Title\n\nmove")]))
     expect(rows().some((row) => row.fs_path === "c.md")).toBe(false)
-    expect(calls).toEqual([["doc: C | C", "doc: C | unique"]])
+    expect(calls).toEqual([["doc: C | C"], ["doc: C | unique"]])
   })
 
   test("bytes that do not hash to km's current fs_content_hash are not embedded and are reported", async () => {
@@ -268,8 +270,8 @@ describe("refreshVaultEmbeddings", () => {
     putFile("old.md", "Old\n\no", 100)
     putFile("mid.md", "Mid\n\nm", 200)
     const embedder = recordingEmbedder()
-    const report = await run(embedder, { budgetCalls: 2 })
-    expect(embedder.calls.map((call) => call[0])).toEqual(["doc: Old | Old", "doc: Mid | Mid"])
+    const report = await run(embedder, { budgetCalls: 4 })
+    expect(embedder.calls.flat()).toEqual(["doc: Old | Old", "doc: Old | o", "doc: Mid | Mid", "doc: Mid | m"])
     expect(report).toMatchObject({ embeddedDocuments: 2, stoppedEarly: true })
     expect(report.uncovered).toEqual({ "refresh budget spent before this document": 1 })
     expect(new Set(rows().map((r) => r.fs_path))).toEqual(new Set(["old.md", "mid.md"]))
@@ -306,8 +308,8 @@ describe("refreshVaultEmbeddings", () => {
 
   test("an embedder that returns the wrong number of vectors is refused loudly", async () => {
     putFile("a.md", "A\n\na", 10)
-    const short: VaultEmbedder = { embed: async () => [new Float32Array(4)] }
-    await expect(run(short)).rejects.toThrow(/2 inputs.*1 vector/)
+    const short: VaultEmbedder = { embed: async () => [] }
+    await expect(run(short)).rejects.toThrow(/1 inputs.*0 vector/)
     expect(rows()).toEqual([])
   })
 
@@ -369,15 +371,15 @@ describe("refreshVaultEmbeddings", () => {
 
   test("a document admitted at the pilot rate on a slower host is skipped mid-way by name, and newer documents still embed (CTO r3)", async () => {
     // 10 s per chunk is slower than the pilot (about 3.5 s). With 100 s left the pilot admits big.md's 20 chunks; after
-    // its first batch (80 s) the measured rate fits 2 of the 12 left, so big.md is skipped without stopping the pass,
-    // and later.md's 2 chunks fit the last 20 s.
+    // its first single-chunk call (10 s) the measured rate fits 9 of the 19 left, so big.md is skipped without
+    // stopping the pass, and later.md's 2 chunks fit the remaining 90 s.
     putFile("big.md", Array.from({ length: 20 }, (_, i) => `p${i}`).join("\n\n"), 10)
     putFile("later.md", "L\n\nl", 20)
     const clock = fixedClock(100_000, 10_000)
     const report = await run(clock.embedder, { timeLeftMs: clock.timeLeftMs })
-    expect(report.uncovered).toEqual({ [uncoveredTooLarge(20, VAULT_EMBED_BATCH + 2)]: 1 })
+    expect(report.uncovered).toEqual({ [uncoveredTooLarge(20, 10)]: 1 })
     expect(report).toMatchObject({ embeddedDocuments: 1, stoppedEarly: false })
-    // Slice 5 reports these as numbers: one document too large (20 chunks); calls of 8 chunks then 2, each 10 s a chunk.
+    // One document too large (20 chunks); each single-chunk call takes 10 s.
     expect(report.tooLarge).toEqual({ documents: 1, largestChunks: 20 })
     expect(report.msPerChunk).toEqual({ first: 10_000, steadyMedian: 10_000 })
     expect(new Set(rows().map((r) => r.fs_path))).toEqual(new Set(["later.md"]))

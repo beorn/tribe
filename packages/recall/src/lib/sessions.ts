@@ -23,8 +23,8 @@ import { getVaultDbPath } from "../history/vault-fts.ts"
 export const RECALL_INDEX_BUSY_EXIT = 4
 /** The incremental share-cap prune was refused: report the incomplete provenance (25462). */
 export const RECALL_INDEX_PRUNE_REFUSED_EXIT = 5
-/** The vault embedding pass takes no new document after this much of the run (hourly unit ceiling: 600 s). */
-export const RECALL_VAULT_EMBED_STOP_MS = 540_000
+/** CPU trial: cooperative embedding budget measured from the whole index start, including transcripts. */
+export const RECALL_VAULT_EMBED_STOP_MS = 60_000
 
 export async function cmdIndex(opts: {
   incremental?: boolean
@@ -67,6 +67,7 @@ export async function cmdIndex(opts: {
         }
       },
     })
+    const transcriptMs = Date.now() - startedAt
     process.stdout.write("\r" + " ".repeat(60) + "\r")
 
     console.log(`\n\n\u2713 Indexed content:`)
@@ -136,7 +137,7 @@ export async function cmdIndex(opts: {
     }
 
     // @ag/recall/three-dark-search-paths: vault embeddings refresh only for a bound --vault-db, inside the same
-    // writer lock, and stop taking documents 60 s before the hourly unit's 600 s ceiling.
+    // writer lock. The cooperative budget includes transcripts; native setup/calls may overrun it.
     const vaultDbPath = getVaultDbPath()
     if (vaultDbPath !== null) {
       // Loaded only here: qmd and node-llama-cpp never load on an unbound index or any other command.
@@ -152,21 +153,27 @@ export async function cmdIndex(opts: {
             (skipped ? `; not seeded: ${skipped}` : ""),
         )
       }
+      const embedWindowMs = startedAt + RECALL_VAULT_EMBED_STOP_MS - Date.now()
+      console.log(`  transcript phase ${transcriptMs} ms; embed window remaining ${Math.max(0, embedWindowMs)} ms`)
       const vault = await runVaultEmbedPass({
         db,
         vaultDbPath,
         timeLeftMs: () => startedAt + RECALL_VAULT_EMBED_STOP_MS - Date.now(),
       })
+      const uncoveredCount = Object.values(vault.uncovered).reduce((sum, count) => sum + count, 0)
       const uncovered = Object.entries(vault.uncovered)
         .map(([reason, count]) => `${count} ${reason}`)
         .join("; ")
       console.log(
         `  vault embeddings (generation ${vault.generation}${vault.published ? "" : ", building"}): ` +
           `${vault.coveredDocuments + vault.embeddedDocuments} of ${vault.documents} documents covered, ` +
-          `${vault.embeddedChunks} chunks embedded, ${vault.reusedChunks} reused` +
+          `${vault.embeddedChunks} chunks embedded, ${vault.reusedChunks} reused; ${uncoveredCount} uncovered` +
           (uncovered ? `; uncovered: ${uncovered}` : "") +
           (vault.stoppedEarly ? " (stopped at the time budget)" : ""),
       )
+      if (embedWindowMs <= 0 && vault.embeddedChunks === 0) {
+        console.log(`  embed window spent before embedding started; 0 embedded, ${uncoveredCount} uncovered`)
+      }
       console.log(
         `  vault embedding times: ms per chunk, first embed call ${vault.msPerChunk.first ?? "none"}, steady median ` +
           `${vault.msPerChunk.steadyMedian ?? "none"}; ${vault.tooLarge.documents} documents too large for this pass` +

@@ -133,10 +133,28 @@ describe("runVaultEmbedPass", () => {
   test("the first pass publishes its generation at once, keyed to the realpath vault id and the GGUF digest", async () => {
     addDoc("a.md", "A\n\na", 1)
     addDoc("b.md", "B\n\nb", 2)
-    const report = await pass(1)
+    const report = await pass(2)
     expect(report).toMatchObject({ generation: 1, published: true, embeddedDocuments: 1, stoppedEarly: true })
     expect(generations()).toEqual([{ id: 1, gguf_sha256: sha256("model one"), state: "published" }])
     expect(db.prepare("SELECT DISTINCT vault_id FROM vault_doc_embed").all()).toEqual([{ vault_id: statePath }])
+    // An index whose transcript phase spent the window must retain coverage and start no native runtime.
+    const runtime = vi.fn(() => fixtureRuntime())
+    const spent = await runVaultEmbedPass({
+      db,
+      vaultDbPath: statePath,
+      timeLeftMs: () => 0,
+      env: { RECALL_EMBED_MODEL: modelPath },
+      contract: CONTRACT,
+      runtime,
+    })
+    expect(spent).toMatchObject({
+      coveredDocuments: 1,
+      embeddedDocuments: 0,
+      embeddedChunks: 0,
+      stoppedEarly: true,
+      uncovered: { "refresh budget spent before this document": 1 },
+    })
+    expect(runtime).not.toHaveBeenCalled()
     const second = await pass()
     expect(second).toMatchObject({ generation: 1, embeddedDocuments: 1, coveredDocuments: 1 })
   })
@@ -289,7 +307,7 @@ describe("runVaultEmbedPass", () => {
     writeFileSync(modelPath, "model two")
     const two = { ...CONTRACT, modelSha256: sha256("model two") }
 
-    const partial = await pass(1, two)
+    const partial = await pass(2, two)
     expect(partial).toMatchObject({ generation: 2, published: false, stoppedEarly: true })
     expect(generations()).toEqual([
       { id: 1, gguf_sha256: sha256("model one"), state: "published" },
@@ -360,9 +378,9 @@ describe("runVaultEmbedPass", () => {
     await pass()
     writeFileSync(modelPath, "model two")
     const two = { ...CONTRACT, modelSha256: sha256("model two") }
-    await pass(1, two)
+    await pass(2, two)
     utimesSync(modelPath, 1_000, 2_000)
-    await pass(1, two)
+    await pass(2, two)
     const stat = db.prepare("SELECT gguf_stat FROM vault_embed_generation WHERE id = 2").get() as { gguf_stat: string }
     expect(stat.gguf_stat).toBe(`${modelPath}:${statSync(modelPath).size}:${statSync(modelPath).mtimeMs}`)
     expect(stat.gguf_stat).toMatch(/:2000000$/)

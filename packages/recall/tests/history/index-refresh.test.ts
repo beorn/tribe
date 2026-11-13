@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 
 const corpus = vi.hoisted(() => ({
   projects: "",
+  vaultDb: null as string | null,
   plans: [] as string[],
   todos: [] as string[],
   legacyEntries: [] as Array<{ sessionId: string; summary: string; firstPrompt: string }>,
@@ -36,6 +37,14 @@ vi.mock("../../src/history/db", async (original) => ({
   findTodoFiles: () => corpus.todos,
 }))
 
+// The command owns the whole-index clock and reporting; refresh behavior stays in its own fixture suites.
+vi.mock("../../src/history/vault-fts.ts", async (original) => ({
+  ...(await original<typeof import("../../src/history/vault-fts.ts")>()),
+  getVaultDbPath: () => corpus.vaultDb,
+}))
+vi.mock("../../src/history/vault-embed-index.ts", () => ({ runVaultEmbedPass: vi.fn(), runVaultEmbedSeed: vi.fn() }))
+const { runVaultEmbedPass } = await import("../../src/history/vault-embed-index.ts")
+
 const { rebuildIndex, indexSessionFile } = await import("../../src/history/indexer")
 const { cmdIndex, RECALL_INDEX_BUSY_EXIT } = await import("../../src/lib/sessions")
 const { ensureProjectSourcesIndexed, ProjectSourcesBusyError } = await import("../../src/history/project-sources")
@@ -47,6 +56,8 @@ let dbPath: string
 
 beforeEach(() => {
   root = mkdtempSync(join(realpathSync(tmpdir()), "recall-refresh-"))
+  corpus.vaultDb = null
+  vi.mocked(runVaultEmbedPass).mockReset()
   corpus.projects = join(root, "projects")
   mkdirSync(corpus.projects)
   corpus.plans = []
@@ -71,6 +82,41 @@ afterEach(() => {
 })
 
 describe("Recall refresh completion", () => {
+  /** @failure The CPU trial restarted the 60-second window after transcripts or hid a pass that embedded nothing. */
+  test.each([15_000, 65_000])("transcripts use %i ms of the whole-index embedding window", async (transcriptMs) => {
+    corpus.vaultDb = dbPath
+    vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(transcriptMs)
+    vi.mocked(runVaultEmbedPass).mockImplementation(async ({ timeLeftMs }) => {
+      expect(timeLeftMs()).toBe(60_000 - transcriptMs)
+      return {
+        generation: 1,
+        published: true,
+        documents: 280,
+        coveredDocuments: 5,
+        embeddedDocuments: 0,
+        embeddedChunks: 0,
+        reusedChunks: 0,
+        uncovered: { "refresh budget spent before this document": 275 },
+        stoppedEarly: true,
+        tooLarge: { documents: 0, largestChunks: 0 },
+        msPerChunk: { first: null, steadyMedian: null },
+      }
+    })
+    await cmdIndex({ incremental: true })
+    expect(runVaultEmbedPass).toHaveBeenCalledOnce()
+    const output = vi.mocked(console.log).mock.calls.flat().join("\n")
+    expect(output).toContain(
+      `transcript phase ${transcriptMs} ms; embed window remaining ${Math.max(0, 60_000 - transcriptMs)} ms`,
+    )
+    expect(output).toContain("0 chunks embedded")
+    expect(output).toContain("275 uncovered")
+    if (transcriptMs >= 60_000) {
+      expect(output).toContain("embed window spent before embedding started; 0 embedded, 275 uncovered")
+    } else {
+      expect(output).not.toContain("embed window spent before embedding started")
+    }
+  })
+
   /** @failure Diagnostic metadata failed after publishing a fresh success marker. */
   test.each(["last_codex_failures", "last_codex_reason_counts"])(
     "%s write failure preserves the prior successful rebuild marker",
