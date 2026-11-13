@@ -1045,7 +1045,15 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         expect(result.stderr).toContain(`socket=${socketPath}`)
         expect(result.stderr).toContain("budget=25000ms")
         expect(result.stderr).toMatch(/elapsed=\d+ms/)
-        expect(result.stderr.trim().split("\n")).toHaveLength(1)
+        // A delayed connect retries an absent socket, and the client logs that once when it connects
+        // (client.ts). Whether it does depends on whether the child started before the socket appeared,
+        // so that one notice is allowed here; the failure itself is still exactly one line.
+        const retryNotice = /INFO tribe-client:client connected to .* after \d+ ms and \d+ attempts/
+        const failureLines = result.stderr
+          .trim()
+          .split("\n")
+          .filter((line) => !(mode === "delayed-connect" && retryNotice.test(line)))
+        expect(failureLines).toHaveLength(1)
         expect(deadlineElapsedMs).toBeGreaterThanOrEqual(24_000)
         expect(deadlineElapsedMs).toBeLessThan(mode === "delayed-connect" ? 30_000 : 35_000)
       } finally {
