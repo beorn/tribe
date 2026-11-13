@@ -715,6 +715,8 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
 })
 
 describe("dispatcher operational logging", () => {
+  // @failure 33650: all-method INFO obscures journal-reader diagnostics; other receipt metadata belongs at DEBUG.
+  // @level l1 @consumer the existing daemon journal and pending/registered dispatcher request paths.
   it("binds a connection to its named seat and records operations and peer-close reason without payloads", async () => {
     const logs = captureDispatcherLogs()
     const harness = createDispatcherHarness()
@@ -744,11 +746,18 @@ describe("dispatcher operational logging", () => {
       ),
     ) as { error?: unknown }
     expect(refused.error).toBeDefined()
+    await harness.dispatcher.handleRequest(
+      { jsonrpc: "2.0", id: "pending-journal", method: "cli_log", params: { limit: 1 } },
+      client.connId,
+    )
     const pendingOperations = logs.filter((event) => event.message === "operation.received")
     expect(pendingOperations.map((event) => event.props)).toEqual([
       { connection_id: client.connId, direction: "inbound", operation: "cli_status" },
       { connection_id: client.connId, direction: "inbound", operation: "cli_unrecognized" },
+      { connection_id: client.connId, direction: "inbound", operation: "cli_log" },
     ])
+    // A well-formed unknown stays loud without maintaining a second route inventory.
+    expect(pendingOperations.map((event) => event.level)).toEqual(["debug", "info", "info"])
     expect(pendingOperations.every((event) => typeof event.time === "number")).toBe(true)
 
     const registered = parseResult<RegisterResult>(
@@ -763,6 +772,29 @@ describe("dispatcher operational logging", () => {
     expect(
       logs.find((event) => event.message === "operation.received" && event.props?.operation === "register")?.props,
     ).toEqual({ connection_id: client.connId, direction: "inbound", operation: "register" })
+    expect(
+      logs.find((event) => event.message === "operation.received" && event.props?.operation === "register")?.level,
+    ).toBe("info")
+    harness.dispatcher.register("fixture.new_reader", async () => ({ read: true }))
+    await harness.dispatcher.handleRequest(
+      { jsonrpc: "2.0", id: "new-reader", method: "fixture.new_reader", params: {} },
+      client.connId,
+    )
+    expect(
+      logs.find((event) => event.message === "operation.received" && event.props?.operation === "fixture.new_reader")
+        ?.level,
+    ).toBe("info")
+    // These complete the quiet-route coverage beside cli_status and tribe.send below.
+    for (const method of ["cli_protocol", "cli_daemon", "subscribe", "tribe.debug"]) {
+      const response = JSON.parse(
+        await harness.dispatcher.handleRequest({ jsonrpc: "2.0", id: method, method, params: {} }, client.connId),
+      ) as { error?: unknown }
+      expect(response.error, method).toBeUndefined()
+      expect(
+        logs.find((event) => event.message === "operation.received" && event.props?.operation === method)?.level,
+        method,
+      ).toBe("debug")
+    }
     parseResult<{ structuredContent: SendResult }>(
       await harness.dispatcher.handleRequest(
         {
@@ -803,7 +835,7 @@ describe("dispatcher operational logging", () => {
 
     const operation = logs.find(
       (event) =>
-        event.level === "info" && event.message === "operation.received" && event.props?.operation === "tribe.send",
+        event.level === "debug" && event.message === "operation.received" && event.props?.operation === "tribe.send",
     )
     expect(operation?.props).toMatchObject({
       connection_id: client.connId,
@@ -815,7 +847,7 @@ describe("dispatcher operational logging", () => {
     expect(
       logs.find(
         (event) =>
-          event.level === "info" && event.message === "operation.received" && event.props?.operation === "<invalid>",
+          event.level === "debug" && event.message === "operation.received" && event.props?.operation === "<invalid>",
       ),
     ).toBeDefined()
 
