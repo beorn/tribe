@@ -815,6 +815,40 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     )
   })
 
+  it("previews only rows the real pass would still reap: a transport connecting between probes is dropped (@dev/6)", () => {
+    const deadPid = spawnSync("true").pid
+    if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")
+    addSession(db, stmts, "racy", "@dev/racy", { id: "launch-racy", parentPid: deadPid })
+    // The preview runs the classification pass and then the delete's own final
+    // fence. A transport that appears between those two probes must survive:
+    // announcing it in `would_reap_sessions` would promise a delete the real
+    // pass refuses to make.
+    let probes = 0
+    const report = reapStaleTransportRows(db, {
+      nowMs: 50_000,
+      hasActiveTransport: () => {
+        probes++
+        return probes > 1
+      },
+      isReconnectGraceProtected: () => false,
+      judgeLaunchParent: judgeLaunchParentSafely,
+      dryRun: true,
+    })
+
+    expect(probes).toBeGreaterThanOrEqual(2)
+    expect(report.would_reap_sessions).toEqual([])
+    expect(report.reason_counts.active_transport).toBeGreaterThanOrEqual(1)
+    expect(report.reason_counts.reaped_owner_gone).toBe(0)
+    // And the promise held: the real pass preserves the same row.
+    const real = reapStaleTransportRows(db, {
+      hasActiveTransport: () => true,
+      isReconnectGraceProtected: () => false,
+      judgeLaunchParent: judgeLaunchParentSafely,
+    })
+    expect(real.reaped).toBe(0)
+    expect(db.prepare("SELECT id FROM sessions WHERE id = 'racy'").get()).toEqual({ id: "racy" })
+  })
+
   it("keeps a parked seat addressable, and its balls live, across an owner-gone reap (@cto item 2)", () => {
     const deadPid = spawnSync("true").pid
     if (typeof deadPid !== "number" || deadPid <= 0) throw new Error("expected a real dead pid")

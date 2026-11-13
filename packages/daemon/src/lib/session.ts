@@ -249,14 +249,35 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
     row.launch_parent_pid === null || opts.judgeLaunchParent === undefined
       ? null
       : opts.judgeLaunchParent(row.launch_parent_pid, row.launch_parent_start_time)
-  const candidates: Array<
-    (typeof rows)[number] & { superseded: boolean; ownerGone: boolean; ownerComparison: LaunchParentComparison | null }
-  > = []
-
-  for (const row of rows) {
+  type ReapableRow = {
+    id: string
+    name: string
+    role: string
+    domains: string
+    launch_id: string | null
+    launch_parent_pid: number | null
+    launch_parent_start_time: string | null
+  }
+  type ReapVerdict = {
+    superseded: boolean
+    ownerGone: boolean
+    ownerComparison: LaunchParentComparison | null
+    ownerComparisonJudgement: { state: "alive" | "gone"; comparison: LaunchParentComparison } | null
+  }
+  /**
+   * The ONE fence a preview and a real pass both walk: classify a row and say
+   * either why it survives or what justifies deleting it. Called on the scan
+   * pass, and again — read-only — per candidate immediately before the delete,
+   * so `--dry-run` cannot advertise a row that the delete would preserve: the
+   * two-probe race (a transport that connects between probes, a row that is
+   * rewritten, a parent that starts answering) resolves the same way in both.
+   */
+  const classifyReapable = (row: ReapableRow): ReapVerdict | null => {
+    // The no-await registry read: the race fence for a sibling that connected
+    // after the previous pass.
     if (opts.hasActiveTransport(row.id)) {
       reasonCounts.active_transport++
-      continue
+      return null
     }
     const lifetime = classifySessionRegistrationLifetime({
       launchId: row.launch_id,
@@ -266,33 +287,57 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
     const judgement = lifetime === "durable-launch" ? judgeOwner(row) : null
     if (lifetime === "durable-launch" && judgement?.state === "unjudged") {
       reasonCounts.launch_parent_unjudged++
-      continue
+      return null
     }
     const ownerGone = lifetime === "durable-launch" && judgement?.state === "gone"
     const ownerComparison = judgement !== null && judgement.state !== "unjudged" ? judgement.comparison : null
+    const ownerComparisonJudgement = judgement !== null && judgement.state === "gone" ? judgement : null
     if (lifetime === "durable-launch" && !superseded && !ownerGone) {
       reasonCounts.durable_launch++
-      continue
+      return null
     }
     if (lifetime === "malformed-launch-identity" && !superseded) {
       reasonCounts.malformed_launch_identity++
-      continue
+      return null
     }
     if (opts.isReconnectGraceProtected(row.id, nowMs)) {
       reasonCounts.reconnect_grace++
-      continue
+      return null
     }
-    candidates.push({ ...row, superseded, ownerGone, ownerComparison })
+    return {
+      superseded,
+      ownerGone,
+      ownerComparison,
+      ownerComparisonJudgement,
+    }
+  }
+  const getCurrent = db.prepare(
+    "SELECT id, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time FROM sessions WHERE id = $id LIMIT 1",
+  )
+  const readCurrent = (memberId: string): ReapableRow | null =>
+    (getCurrent.get({ $id: memberId }) as ReapableRow | null) ?? null
+  const candidates: Array<ReapableRow & ReapVerdict> = []
+  for (const row of rows as ReapableRow[]) {
+    const verdict = classifyReapable(row)
+    if (verdict !== null) candidates.push({ ...row, ...verdict })
   }
 
   const reapedSessions: Array<{ member_id: string; name: string }> = []
   if (opts.dryRun === true) {
     // The counters describe what the same call WOULD do, so a preview reads
-    // exactly like the run it previews — `reaped` itself stays 0.
+    // exactly like the run it previews — `reaped` itself stays 0. Each candidate
+    // walks the same final fence the delete walk: read the row again, and let
+    // classifyReapable decide on what is there NOW.
+    const wouldReap: Array<{ member_id: string; name: string }> = []
     for (const candidate of candidates) {
-      if (candidate.superseded) reasonCounts.reaped_superseded_launch++
-      else if (candidate.ownerGone) reasonCounts.reaped_owner_gone++
+      const current = readCurrent(candidate.id)
+      if (current === null) continue
+      const verdict = classifyReapable(current)
+      if (verdict === null) continue
+      if (verdict.superseded) reasonCounts.reaped_superseded_launch++
+      else if (verdict.ownerGone) reasonCounts.reaped_owner_gone++
       else reasonCounts.reaped_connection_scoped++
+      wouldReap.push({ member_id: current.id, name: current.name })
     }
     return {
       examined: rows.length,
@@ -300,62 +345,25 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
       reason_counts: reasonCounts,
       reaped_sessions: [],
       dry_run: true,
-      would_reap_sessions: candidates.map((candidate) => ({ member_id: candidate.id, name: candidate.name })),
+      would_reap_sessions: wouldReap,
     }
   }
-  const getCurrent = db.prepare(
-    "SELECT id, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time FROM sessions WHERE id = $id LIMIT 1",
-  )
   const deleteRoomMembers = db.prepare("DELETE FROM room_members WHERE session_id = $id")
   const deleteSession = db.prepare("DELETE FROM sessions WHERE id = $id")
 
   db.transaction(() => {
     for (const candidate of candidates) {
-      // The daemon dispatcher is single-threaded between awaits. This final
-      // no-await registry read is the race fence for a sibling that connected
-      // after the first classification pass.
-      if (opts.hasActiveTransport(candidate.id)) {
-        reasonCounts.active_transport++
-        continue
-      }
-      const current = getCurrent.get({ $id: candidate.id }) as {
-        id: string
-        name: string
-        role: string
-        domains: string
-        launch_id: string | null
-        launch_parent_pid: number | null
-        launch_parent_start_time: string | null
-      } | null
-      if (!current) continue
-      const currentLifetime = classifySessionRegistrationLifetime({
-        launchId: current.launch_id,
-        launchParentPid: current.launch_parent_pid,
-      })
-      const currentSuperseded = isSupersededLaunch(current.launch_id)
-      const currentJudgement = currentLifetime === "durable-launch" ? judgeOwner(current) : null
-      if (currentLifetime === "durable-launch" && currentJudgement?.state === "unjudged") {
-        reasonCounts.launch_parent_unjudged++
-        continue
-      }
-      const currentOwnerGone = currentLifetime === "durable-launch" && currentJudgement?.state === "gone"
-      if (currentLifetime === "durable-launch" && !currentSuperseded && !currentOwnerGone) {
-        reasonCounts.durable_launch++
-        continue
-      }
-      if (currentLifetime === "malformed-launch-identity" && !currentSuperseded) {
-        reasonCounts.malformed_launch_identity++
-        continue
-      }
-      if (opts.isReconnectGraceProtected(current.id, nowMs)) {
-        reasonCounts.reconnect_grace++
-        continue
-      }
+      // Re-read and re-judge against the same fence, so a row that changed
+      // between the scan pass and this one is preserved, not deleted.
+      const current = readCurrent(candidate.id)
+      if (current === null) continue
+      const verdict = classifyReapable(current)
+      if (verdict === null) continue
       deleteRoomMembers.run({ $id: current.id })
       const deleted = deleteSession.run({ $id: current.id })
       if (Number(deleted.changes ?? 0) === 1) {
-        if (currentSuperseded) reasonCounts.reaped_superseded_launch++
-        else if (currentOwnerGone && currentJudgement !== null) {
+        if (verdict.superseded) reasonCounts.reaped_superseded_launch++
+        else if (verdict.ownerGone && verdict.ownerComparisonJudgement !== null) {
           reasonCounts.reaped_owner_gone++
           // Inside the transaction, after the delete landed: a rolled-back
           // delete takes its attribution with it, and no departure is ever
@@ -368,7 +376,7 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
             launchId: current.launch_id,
             launchParentPid: current.launch_parent_pid as number,
             launchParentStartTime: current.launch_parent_start_time,
-            comparison: currentJudgement.comparison,
+            comparison: verdict.ownerComparisonJudgement.comparison,
           })
         } else reasonCounts.reaped_connection_scoped++
         reapedSessions.push({ member_id: current.id, name: current.name })
