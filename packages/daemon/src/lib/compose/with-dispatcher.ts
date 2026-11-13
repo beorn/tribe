@@ -123,6 +123,15 @@ import {
 } from "../identity-verifier.ts"
 
 const log = createLogger("tribe:dispatcher")
+// Known non-journal operations only: new routes stay visible until classified.
+const QUIET_RECEIPT_METHODS: ReadonlySet<string> = new Set([
+  "cli_protocol", // Published version constants.
+  "cli_status", // Connected registry snapshot, not message/ball/lifecycle history.
+  "cli_daemon", // Process and socket configuration already in memory.
+  "subscribe", // Acknowledges subscription; does not replay the journal.
+  TRIBE_COORD_METHODS.send, // Message publication, rather than a journal-reading operation.
+  TRIBE_COORD_METHODS.debug, // Connected clients and the in-memory cursor map.
+])
 const IDENTITY_VERIFIER_INCIDENT = { emitter: "wire", subject: "identity-verifier", condition: "fault" } as const
 
 export interface DispatcherRuntimeHooks {
@@ -1881,10 +1890,12 @@ export function withDispatcher<
       // Spec: @km/tribe/15588-tribe-list-sessions.
       const liveClient = clients.get(connId)
       if (liveClient) liveClient.lastActivityAt = Date.now()
-      log.info?.("operation.received", {
+      const operation = operationLogName(method)
+      const receiptLevel = operation === "<invalid>" || QUIET_RECEIPT_METHODS.has(method) ? "debug" : "info"
+      log[receiptLevel]?.("operation.received", {
         ...connectionLogIdentity(liveClient, connId),
         direction: "inbound",
-        operation: operationLogName(method),
+        operation,
       })
 
       try {
