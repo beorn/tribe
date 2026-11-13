@@ -85,6 +85,7 @@ function makeOpts(activeIds: () => Set<string>, db: Database): HandlerOpts {
     setUserRenamed: () => {},
     getActiveSessionIds: activeIds,
     hasActiveTransport: (sessionId) => activeIds().has(sessionId),
+    isReconnectGraceProtected: () => false,
     getActiveSessionInfo: () =>
       [...activeIds()].flatMap((id) => {
         const row = db.prepare("SELECT name FROM sessions WHERE id = ?").get(id) as { name: string } | null

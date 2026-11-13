@@ -1016,7 +1016,13 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           stale_transport_rows: {
             type: "object",
             description:
-              "Disconnected durable rows whose launch parent process is provably gone: litter awaiting the reap sweep, never counted as wedges. Always present; count 0 is a measured zero.",
+              "Disconnected rows the reap sweep would remove on its next pass, judged by the same classifier the sweep and its preview walk. Never counted as wedges. Always present; count 0 is a measured zero.",
+            additionalProperties: true,
+          },
+          reconnect_grace_rows: {
+            type: "object",
+            description:
+              "Disconnected rows the classifier keeps only because the reconnect grace still holds them: neither wedges nor litter. Always present; count 0 is a measured zero.",
             additionalProperties: true,
           },
           anonymous_disconnected: {

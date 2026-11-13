@@ -161,6 +161,7 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
       setUserRenamed: () => undefined,
       getActiveSessionIds: () => new Set(active.map((session) => session.id)),
       hasActiveTransport: (sessionId) => active.some((session) => session.id === sessionId),
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => active,
       inboxWait: manager,
       ...overrides,

@@ -52,6 +52,7 @@ function makeOpts(activeIds: Set<string>): HandlerOpts {
     setUserRenamed: () => {},
     getActiveSessionIds: () => activeIds,
     hasActiveTransport: (sessionId) => activeIds.has(sessionId),
+    isReconnectGraceProtected: () => false,
     getActiveSessionInfo: () => [],
   }
 }

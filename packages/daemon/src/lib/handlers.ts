@@ -59,11 +59,14 @@ import {
 } from "./messaging.ts"
 import { ACTIONABLE_TYPES_SET, AUTO_TRACK_TYPES_SET } from "./database.ts"
 import {
+  activeLaunchIds,
+  classifyTransportRow,
   classifySessionRegistrationLifetime,
   isPidAlive as pidStillAlive,
   persistRuntimeRename,
   registerSession,
   type StaleTransportReapReport,
+  type TransportRowClassifyContext,
 } from "./session.ts"
 import { incidentConditionSummary, incidentKey, parseIncidentKey, type IncidentIdentity } from "tribe-wire"
 import { gatherCodePin } from "./code-pin.ts"
@@ -294,7 +297,13 @@ export type HandlerOpts = {
   hasActiveTransport: (sessionId: string) => boolean
   /** Probe whether a process is still alive. Defaults to pidStillAlive (process.kill(pid, 0)). */
   isPidAlive?: (pid: number) => boolean
-  isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
+  /**
+   * 34069 — the registry's reconnect-grace predicate, REQUIRED so a builder that
+   * forgets it is a compile error rather than a silent `false`. `tribe health`,
+   * its ladder preview and the reap sweep judge a disconnected row by this one
+   * rule; defaulting it away is how health came to call grace-held rows litter.
+   */
+  isReconnectGraceProtected: (sessionId: string, nowMs: number) => boolean
   /**
    * 24284 — whether the caller can still receive the response this handler is
    * about to build. A one-shot CLI (`cli_self_inbox_v1` / `cli_inbox_drain*`)
@@ -3989,7 +3998,6 @@ function handleRename(
     getActiveSessionIds: () => Set<string>
     /** All connected transports, used to authorize destructive name reclaim. */
     hasActiveTransport: (sessionId: string) => boolean
-    isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
     /** Optional: opportunistic socket wakeup after a name-claim replay rewind. */
     notifyWakeupForReplay?: (sessionId: string, claimedName: string, targetConnId?: string) => void
   },
@@ -4027,10 +4035,11 @@ function handleRename(
     const holderIsActive = opts.hasActiveTransport(existing.id)
     const isDifferentLiveProcess =
       existingPid > 0 && (selfPid === 0 || existingPid !== selfPid) && pidStillAlive(existingPid)
-    const holderIsAlive =
-      holderIsActive ||
-      isDifferentLiveProcess ||
-      (opts.isReconnectGraceProtected ? opts.isReconnectGraceProtected(existing.id, Date.now()) : false)
+    // Rename decides on transport + pid, never on reconnect grace: the registry's
+    // grace also covers daemon-startup adoption, where every row is protected, so
+    // consulting it would refuse a legitimate reclaim of a dead holder's name
+    // (34069 — this hook was never wired in production and stays out).
+    const holderIsAlive = holderIsActive || isDifferentLiveProcess
     if (holderIsAlive) {
       const activeIds = opts.getActiveSessionIds()
       const existing_names = listActiveSessionNames(ctx, activeIds)
@@ -4172,10 +4181,8 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     const takenPid = takenRow?.pid ?? 0
     const holderIsActive = opts.hasActiveTransport(taken.id)
     const isDifferentLiveProcess = takenPid > 0 && (selfPid === 0 || takenPid !== selfPid) && pidStillAlive(takenPid)
-    const holderIsAlive =
-      holderIsActive ||
-      isDifferentLiveProcess ||
-      (opts.isReconnectGraceProtected ? opts.isReconnectGraceProtected(taken.id, Date.now()) : false)
+    // See the reclaim arm above: rename never consults reconnect grace.
+    const holderIsAlive = holderIsActive || isDifferentLiveProcess
     if (!holderIsAlive) {
       // Dead session — tombstone and reclaim.
       const tombstoneName = `${joinName}-dead-${taken.id.slice(0, 8)}`
@@ -4390,29 +4397,48 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
     diagnosticDisconnected,
     discrepancy: membershipDiscrepancy,
   } = projectHealthMembership(ctx, opts)
-  const transportWedges = diagnosticDisconnected.flatMap((session) => {
+  // 21669, @cto 5a5a3914 — one rule in one place: every disconnected row is
+  // judged by the SAME classifier the reap sweep and its preview walk, so this
+  // document cannot call a row litter that the delete walk would preserve.
+  const classifyCtx: TransportRowClassifyContext = {
+    hasActiveTransport: (sessionId) => opts.hasActiveTransport(sessionId),
+    // 34069 (@cto): required by `HandlerOpts`, so the wiring cannot be missing;
+    // the type carries the guarantee that the runtime throw used to carry.
+    isReconnectGraceProtected: (sessionId, atMs) => opts.isReconnectGraceProtected(sessionId, atMs),
+    getActiveLaunchIds: () => activeLaunchIds(opts.getActiveSessionInfo()),
+    judgeLaunchParent: judgeLaunchParentSafely,
+  }
+  const classified = diagnosticDisconnected.map((session) => {
     const lifetime = classifySessionRegistrationLifetime({
       launchId: session.launch_id,
       launchParentPid: session.launch_parent_pid,
     })
-    if (lifetime === "connection-scoped") return []
-    const transport = projectSessionTransportState({
-      transportConnected: false,
-    })
-    // 21669 — a disconnected durable row is a WEDGE only while its launch may
-    // still be running. `judgeLaunchParent` is the probe registration already
-    // trusts to decide `replaced-parent-gone`: a gone parent means the launch
-    // ended, so the row is litter awaiting the reap sweep, never evidence of a
-    // live seat that lost its transport. Malformed identities carry no launch
-    // parent to judge, so they stay wedges exactly as before.
-    const launchParentPid = session.launch_parent_pid
-    const owner =
-      lifetime === "durable-launch" && launchParentPid !== null
-        ? judgeLaunchParentSafely(launchParentPid, session.launch_parent_start_time)
-        : null
-    const ownerJudged = owner !== null && owner.state !== "unjudged"
-    return [
-      {
+    const row = {
+      id: session.id,
+      launch_id: session.launch_id,
+      launch_parent_pid: session.launch_parent_pid,
+      launch_parent_start_time: session.launch_parent_start_time,
+    }
+    return { session, lifetime, verdict: classifyTransportRow(row, classifyCtx, now) }
+  })
+  // A wedge is a seat whose launch may still be running — durable or malformed
+  // identity the classifier KEEPS. A row the classifier would reap is litter,
+  // and a row the reconnect grace holds is neither: it is not evidence of a
+  // live seat, and it is not litter either, so it is reported on its own line
+  // rather than being called one of the other two.
+  const transportWedges = classified
+    .filter(
+      ({ verdict }) =>
+        verdict.disposition === "keep" &&
+        verdict.reason !== "reconnect_grace" &&
+        // @cto: a row the classifier keeps because a transport is live is not a
+        // wedge, even if the disconnected projection and the registry disagree.
+        verdict.reason !== "active_transport",
+    )
+    .map(({ session, lifetime, verdict }) => {
+      const owner = verdict.owner
+      const ownerJudged = owner !== null && owner.state !== "unjudged"
+      return {
         member_id: session.id,
         name: session.name,
         pid: session.pid,
@@ -4426,20 +4452,30 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
         ...(ownerJudged ? { owner_process_comparison: owner.comparison } : {}),
         ...(owner !== null && owner.state === "unjudged" ? { owner_process_unjudged_reason: owner.reason } : {}),
         registration_age_ms: Math.max(0, now - session.started_at),
-        ...transport,
-      },
-    ]
-  })
-  const liveTransportWedges = transportWedges.filter((wedge) => wedge.owner_process !== "gone")
-  const ownerGoneWedges = transportWedges.filter((wedge) => wedge.owner_process === "gone")
+        ...projectSessionTransportState({ transportConnected: false }),
+      }
+    })
+  const liveTransportWedges = transportWedges
+  const reapableRows = classified.filter(({ verdict }) => verdict.disposition === "reap")
+  const graceKeptRows = classified.filter(
+    ({ verdict }) => verdict.disposition === "keep" && verdict.reason === "reconnect_grace",
+  )
+  const ages = (rows: typeof classified): number =>
+    rows.reduce((oldest, { session }) => Math.max(oldest, Math.max(0, now - session.started_at)), 0)
   // Always present, even at zero: an absent key cannot be told apart from a
   // projection that never ran, and this count is the evidence that the wedge
   // list was filtered rather than simply short.
   const staleTransportRows = {
-    count: ownerGoneWedges.length,
-    oldest_age_ms: ownerGoneWedges.reduce((oldest, wedge) => Math.max(oldest, wedge.registration_age_ms), 0),
-    names: ownerGoneWedges.map((wedge) => wedge.name),
-    meaning: "launch parent process is gone; these rows are litter reaped by the sweep, not wedges",
+    count: reapableRows.length,
+    oldest_age_ms: ages(reapableRows),
+    names: reapableRows.map(({ session }) => session.name),
+    meaning: "the reap sweep removes these rows on its next pass — the classifier keeps nothing here",
+  }
+  const reconnectGraceRows = {
+    count: graceKeptRows.length,
+    oldest_age_ms: ages(graceKeptRows),
+    names: graceKeptRows.map(({ session }) => session.name),
+    meaning: "launch parent is gone or the row is transport-only, but the reconnect grace still holds it",
   }
   const members = liveSessions.map((s) => {
     const active = byId.get(s.id)
@@ -4616,6 +4652,7 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
     },
     transport_wedges: liveTransportWedges,
     stale_transport_rows: staleTransportRows,
+    reconnect_grace_rows: reconnectGraceRows,
     // Retain unidentified durable history without manufacturing named-seat
     // alarms. One known producer is @ag/tribe/no-tribe-flag-does-not-gate-the-join.
     anonymous_disconnected: disconnected.anonymousDurable.length,

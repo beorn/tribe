@@ -78,6 +78,7 @@ function optsWithLive(info: ActiveSessionInfo[]): HandlerOpts {
     setUserRenamed: () => undefined,
     getActiveSessionIds: () => ids,
     hasActiveTransport: (id) => ids.has(id),
+    isReconnectGraceProtected: () => false,
     getActiveSessionInfo: () => info,
   }
 }

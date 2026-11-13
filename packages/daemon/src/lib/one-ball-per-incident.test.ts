@@ -243,6 +243,7 @@ describe("one ball per incident (habwire stage 2(d))", () => {
         setUserRenamed: () => undefined,
         getActiveSessionIds: () => new Set(["sess-@fleet", "sess-@chief"]),
         hasActiveTransport: () => true,
+        isReconnectGraceProtected: () => false,
         getActiveSessionInfo: () =>
           ["@fleet", "@chief"].map((name) => ({
             id: `sess-${name}`,

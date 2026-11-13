@@ -265,6 +265,7 @@ describe("health projection reads the archive through an index", () => {
       setUserRenamed: () => undefined,
       getActiveSessionIds: () => new Set(),
       hasActiveTransport: () => false,
+      isReconnectGraceProtected: () => false,
       getActiveSessionInfo: () => [],
     }
     const health = (args: Record<string, unknown>) => {
