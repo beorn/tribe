@@ -159,6 +159,8 @@ describe("openDatabase", () => {
         }>
         // The same historical fixture works before and after the v38 repair.
         if (columns.some((column) => column.name === "is_incident")) {
+          // 34009: a v37 journal has no incident index either, and SQLite refuses to drop a column an index names.
+          db.run(assertSingleStatement(`DROP INDEX IF EXISTS idx_${table}_incident_request`))
           db.run(assertSingleStatement(`ALTER TABLE ${table} DROP COLUMN is_incident`))
         }
         const sequence = table === "messages_archive" ? "seq, archived_at, " : ""

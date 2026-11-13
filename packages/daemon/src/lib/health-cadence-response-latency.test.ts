@@ -138,6 +138,8 @@ type MessageRow = {
   ts: number
   request?: string | null
   reply?: string | null
+  /** The request row is an incident edge (34009). */
+  incident?: boolean
   /** Land in messages_archive instead of the live messages table. */
   archive?: boolean
   seq?: number
@@ -145,12 +147,12 @@ type MessageRow = {
 
 function insertMessages(db: Database, rows: MessageRow[]): void {
   const live = db.prepare(
-    `INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, request, reply)
-     VALUES ($id, $type, $sender, $recipient, 'direct', $id, $ts, 'push', $request, $reply)`,
+    `INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, request, reply, is_incident)
+     VALUES ($id, $type, $sender, $recipient, 'direct', $id, $ts, 'push', $request, $reply, $incident)`,
   )
   const archived = db.prepare(
-    `INSERT INTO messages_archive (seq, id, type, sender, recipient, kind, content, ts, delivery, request, reply, archived_at)
-     VALUES ($seq, $id, $type, $sender, $recipient, 'direct', $id, $ts, 'push', $request, $reply, $ts)`,
+    `INSERT INTO messages_archive (seq, id, type, sender, recipient, kind, content, ts, delivery, request, reply, is_incident, archived_at)
+     VALUES ($seq, $id, $type, $sender, $recipient, 'direct', $id, $ts, 'push', $request, $reply, $incident, $ts)`,
   )
   let seq = 1
   for (const row of rows) {
@@ -162,6 +164,7 @@ function insertMessages(db: Database, rows: MessageRow[]): void {
       $ts: row.ts,
       $request: row.request ?? null,
       $reply: row.reply ?? null,
+      $incident: row.incident === true ? 1 : 0,
       $seq: row.seq ?? seq++,
     }
     if (row.archive) archived.run(params as never)
@@ -280,6 +283,72 @@ describe("24284 response-latency projection is bounded by its window", () => {
 })
 
 describe("24284 response-latency projection keeps its answers", () => {
+  it("34009: incident pairs leave every series and are counted, and a plain pair keeps its numbers exactly", () => {
+    const plainOnly = fixture()
+    insertSession(plainOnly.db, "@chief", "chief")
+    insertMessages(plainOnly.db, [
+      { id: "q1", type: "request", sender: "@operator", recipient: "@chief", ts: NOW - HOUR, request: "r1" },
+      {
+        id: "s1",
+        type: "response",
+        sender: "@chief",
+        recipient: "@operator",
+        ts: NOW - HOUR + 10 * MINUTE,
+        reply: "r1",
+      },
+    ])
+
+    const withIncident = fixture()
+    insertSession(withIncident.db, "@chief", "chief")
+    insertMessages(withIncident.db, [
+      { id: "q1", type: "request", sender: "@operator", recipient: "@chief", ts: NOW - HOUR, request: "r1" },
+      {
+        id: "s1",
+        type: "response",
+        sender: "@chief",
+        recipient: "@operator",
+        ts: NOW - HOUR + 10 * MINUTE,
+        reply: "r1",
+      },
+      // A standing alarm that ran 20 hours: counting this as an answer latency is
+      // what turned the reported p95 into days and made its warning unclearable.
+      {
+        id: "i1",
+        type: "request",
+        sender: "watch",
+        recipient: "@chief",
+        ts: NOW - 21 * HOUR,
+        request: "inc1",
+        incident: true,
+      },
+      { id: "i2", type: "response", sender: "@chief", recipient: "watch", ts: NOW - HOUR, reply: "inc1" },
+    ])
+
+    const before = responseLatencyProjection(plainOnly.db, NOW)
+    const after = responseLatencyProjection(withIncident.db, NOW)
+
+    // The plain pair's numbers are IDENTICAL with the alarm present: exclusion is
+    // the only difference, never a re-weighting of what stays.
+    expect({
+      count: after.summary.count,
+      p50_ms: after.summary.p50_ms,
+      p95_ms: after.summary.p95_ms,
+      max_ms: after.summary.max_ms,
+    }).toEqual({
+      count: before.summary.count,
+      p50_ms: before.summary.p50_ms,
+      p95_ms: before.summary.p95_ms,
+      max_ms: before.summary.max_ms,
+    })
+    expect(after.summary.by_role_and_type).toEqual(before.summary.by_role_and_type)
+    // The excluded population is counted, never silently filtered.
+    expect(before.summary.incident_pairs_excluded).toBe(0)
+    expect(after.summary.incident_pairs_excluded).toBe(1)
+    // And the warning that a 20-hour pair would raise is gone.
+    expect(before.warnings).toEqual([])
+    expect(after.warnings).toEqual([])
+  })
+
   it("returns exactly the rows the pre-fix journal join returned", () => {
     const { db } = fixture()
     insertSession(db, "@chief", "chief")
@@ -381,12 +450,15 @@ describe("24284 response-latency projection keeps its answers", () => {
       .all({ $cutoff: NOW - DAY, $now: NOW }) as LatencyRow[]
 
     const projection = responseLatencyProjection(db, NOW)
-    expect(projection.rows).toEqual(expected)
+    // `is_incident` is the pair classification 34009 added on top of the oracle's
+    // columns; nothing in this fixture is an incident edge.
+    expect(projection.rows).toEqual(expected.map((row) => ({ ...row, is_incident: 0 })))
     expect(oracle).toEqual(expected)
 
     expect(projection.summary).toEqual({
       as_of_ms: NOW,
       window_ms: DAY,
+      incident_pairs_excluded: 0,
       count: 6,
       p50_ms: 10 * MINUTE,
       p95_ms: 20 * MINUTE,

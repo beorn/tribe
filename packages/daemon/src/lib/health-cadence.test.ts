@@ -359,6 +359,7 @@ describe("20876 Tribe health cadence", () => {
     expect(first.response_latency).toEqual({
       as_of_ms: now,
       window_ms: DAY,
+      incident_pairs_excluded: 0,
       count: 5,
       p50_ms: 10 * MINUTE,
       p95_ms: 60 * MINUTE,

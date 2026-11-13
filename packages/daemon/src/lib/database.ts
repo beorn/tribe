@@ -426,6 +426,16 @@ export function openDatabase(path: string): Database {
   db.run(
     "CREATE INDEX IF NOT EXISTS idx_messages_archive_request_cover ON messages_archive(request, ts, type) WHERE request IS NOT NULL",
   )
+  // 34009: the response-latency projection excludes pairs whose request is an incident edge. Incident edges are a
+  // tiny population (measured 28,348 rows against a 1.79 GB store), so a partial index over them lets the
+  // projection test a pair with an index-only probe instead of reading the request row (whose `content` sits before
+  // `is_incident` and would walk an overflow chain). Migration v44 declares the same pair.
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_messages_incident_request ON messages(request) WHERE is_incident = 1 AND request IS NOT NULL",
+  )
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_messages_archive_incident_request ON messages_archive(request) WHERE is_incident = 1 AND request IS NOT NULL",
+  )
 
   return db
 }
@@ -1612,6 +1622,29 @@ const MIGRATIONS: readonly Migration[] = [
       if (["recipient", "seq", "kind", "sender", "ts"].every((column) => present.has(column))) {
         db.run(
           "CREATE INDEX IF NOT EXISTS idx_messages_archive_inbox_lag ON messages_archive(recipient, seq, kind, sender, ts) WHERE kind IN ('direct', 'broadcast')",
+        )
+      }
+    },
+  },
+  {
+    version: 44,
+    name: "incident-request-index",
+    /**
+     * 34009: `responseLatencyProjection` excludes request/response pairs whose request is an incident edge, because an
+     * alarm's lifetime is not an answer latency and counting the two together produced a p95 of days that no fleet
+     * change could lower. The exclusion tests each pair against the incident population; without this index that
+     * test reads the request row whole (`content` precedes `is_incident`). Guarded on each table's own columns, as
+     * v42 is, and idempotent, so a database killed halfway reruns the remainder.
+     */
+    up(db) {
+      for (const table of ["messages", "messages_archive"]) {
+        const present = tableColumnNames(db, table)
+        if (!["request", "is_incident"].every((column) => present.has(column))) continue
+        db.run(
+          assertSingleStatement(
+            `CREATE INDEX IF NOT EXISTS idx_${table === "messages" ? "messages" : "messages_archive"}_incident_request` +
+              ` ON ${table}(request) WHERE is_incident = 1 AND request IS NOT NULL`,
+          ),
         )
       }
     },
