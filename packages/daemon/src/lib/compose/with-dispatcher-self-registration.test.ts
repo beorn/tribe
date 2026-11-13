@@ -715,6 +715,8 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
 })
 
 describe("dispatcher operational logging", () => {
+  // @failure 33650: all-method INFO obscures journal-reader diagnostics; other receipt metadata belongs at DEBUG.
+  // @level l1 @consumer the existing daemon journal and pending/registered dispatcher request paths.
   it("binds a connection to its named seat and records operations and peer-close reason without payloads", async () => {
     const logs = captureDispatcherLogs()
     const harness = createDispatcherHarness()
@@ -744,11 +746,17 @@ describe("dispatcher operational logging", () => {
       ),
     ) as { error?: unknown }
     expect(refused.error).toBeDefined()
+    await harness.dispatcher.handleRequest(
+      { jsonrpc: "2.0", id: "pending-journal", method: "cli_log", params: { limit: 1 } },
+      client.connId,
+    )
     const pendingOperations = logs.filter((event) => event.message === "operation.received")
     expect(pendingOperations.map((event) => event.props)).toEqual([
       { connection_id: client.connId, direction: "inbound", operation: "cli_status" },
       { connection_id: client.connId, direction: "inbound", operation: "cli_unrecognized" },
+      { connection_id: client.connId, direction: "inbound", operation: "cli_log" },
     ])
+    expect(pendingOperations.map((event) => event.level)).toEqual(["debug", "debug", "info"])
     expect(pendingOperations.every((event) => typeof event.time === "number")).toBe(true)
 
     const registered = parseResult<RegisterResult>(
@@ -803,7 +811,7 @@ describe("dispatcher operational logging", () => {
 
     const operation = logs.find(
       (event) =>
-        event.level === "info" && event.message === "operation.received" && event.props?.operation === "tribe.send",
+        event.level === "debug" && event.message === "operation.received" && event.props?.operation === "tribe.send",
     )
     expect(operation?.props).toMatchObject({
       connection_id: client.connId,
@@ -815,7 +823,7 @@ describe("dispatcher operational logging", () => {
     expect(
       logs.find(
         (event) =>
-          event.level === "info" && event.message === "operation.received" && event.props?.operation === "<invalid>",
+          event.level === "debug" && event.message === "operation.received" && event.props?.operation === "<invalid>",
       ),
     ).toBeDefined()
 
