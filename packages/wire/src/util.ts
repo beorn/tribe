@@ -12,7 +12,8 @@ import * as daemonClient from "./client.ts"
 
 export type DaemonCallOutcome<T> =
   | { kind: "ok"; value: T }
-  | { kind: "timeout" }
+  /** How long the caller waited and what it was reading; describeDaemonOutcome writes the sentence (33937). */
+  | { kind: "timeout"; afterMs: number; reading: string }
   | { kind: "no-daemon" }
   | { kind: "error"; message: string }
 
@@ -20,6 +21,8 @@ export type WithDaemonCallOpts = {
   socketPath: string
   /** Hard deadline for the whole connect+call+close cycle. */
   deadlineMs: number
+  /** The daemon call this read is for, as a timeout names it (e.g. `tribe.pending`). */
+  reading: string
   /** Per-call timeout for the underlying client. Defaults to `deadlineMs`. */
   callTimeoutMs?: number
 }
@@ -32,6 +35,7 @@ export async function withDaemonCall<T>(
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null
   let client: DaemonClient | undefined
   let timedOut = false
+  const timeout: DaemonCallOutcome<never> = { kind: "timeout", afterMs: opts.deadlineMs, reading: opts.reading }
   const closeClient = (): void => {
     const open = client
     client = undefined
@@ -44,7 +48,7 @@ export async function withDaemonCall<T>(
       })
       if (timedOut) {
         connected.close()
-        return { kind: "timeout" }
+        return timeout
       }
       client = connected
       try {
@@ -53,20 +57,20 @@ export async function withDaemonCall<T>(
         closeClient()
       }
     })()
-    const timeout = new Promise<DaemonCallOutcome<T>>((resolve) => {
+    const deadlineReached = new Promise<DaemonCallOutcome<T>>((resolve) => {
       timeoutHandle = setTimeout(
         () => {
           timedOut = true
           closeClient()
-          resolve({ kind: "timeout" })
+          resolve(timeout)
         },
         Math.max(50, deadline - Date.now()),
       )
     })
-    return await Promise.race([racePromise, timeout])
+    return await Promise.race([racePromise, deadlineReached])
   } catch (err) {
     closeClient()
-    if (daemonClient.isDaemonCallTimeoutError(err)) return { kind: "timeout" }
+    if (daemonClient.isDaemonCallTimeoutError(err)) return { ...timeout, afterMs: err.timeoutMs }
     const code = (err as NodeJS.ErrnoException).code
     if (code === "ECONNREFUSED" || code === "ENOENT") return { kind: "no-daemon" }
     return { kind: "error", message: err instanceof Error ? err.message : String(err) }

@@ -703,7 +703,7 @@ describe("withDaemonCall", () => {
     let clientFailure: unknown
     try {
       const outcome = await withDaemonCall(
-        { socketPath: sock, deadlineMs: 5_000, callTimeoutMs: 20 },
+        { socketPath: sock, deadlineMs: 5_000, callTimeoutMs: 20, reading: "slow.call" },
         async (client) => {
           try {
             return await client.call("never")
@@ -714,7 +714,7 @@ describe("withDaemonCall", () => {
         },
       )
       expect(clientFailure).toMatchObject({ code: "TRIBE_DAEMON_CALL_TIMEOUT", method: "never", timeoutMs: 20 })
-      expect(outcome).toEqual({ kind: "timeout" })
+      expect(outcome).toEqual({ kind: "timeout", afterMs: 20, reading: "slow.call" })
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
     }
@@ -731,7 +731,7 @@ describe("withDaemonCall", () => {
       socket.write(makeError(request.id, -32000, "fixture service failure"))
     })
     try {
-      const outcome = await withDaemonCall({ socketPath: sock, deadlineMs: 5_000 }, (client) =>
+      const outcome = await withDaemonCall({ socketPath: sock, deadlineMs: 5_000, reading: "fixture.call" }, (client) =>
         client.call("fixture_failure"),
       )
       expect(outcome).toEqual({ kind: "error", message: expect.stringContaining("fixture service failure") })
@@ -747,7 +747,7 @@ describe("withDaemonCall", () => {
       let closed = 0
       let lateSend = false
       const outcome = await withDaemonCall(
-        { socketPath: sock, deadlineMs: 80, callTimeoutMs: 5_000 },
+        { socketPath: sock, deadlineMs: 80, callTimeoutMs: 5_000, reading: "slow.call" },
         async (client) => {
           const originalClose = client.close.bind(client)
           client.close = () => {
@@ -759,7 +759,7 @@ describe("withDaemonCall", () => {
           return await client.call("echo", { late: true })
         },
       )
-      expect(outcome).toEqual({ kind: "timeout" })
+      expect(outcome).toEqual({ kind: "timeout", afterMs: 80, reading: "slow.call" })
       const deadline = Date.now() + 400
       while (closed === 0 && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 20))
@@ -779,15 +779,18 @@ describe("withDaemonCall", () => {
     try {
       let invoked = 0
       const started = Date.now()
-      const outcome = await withDaemonCall({ socketPath: sock, deadlineMs: 80, callTimeoutMs: 5_000 }, async () => {
-        invoked += 1
-        return "fn-ran"
-      })
+      const outcome = await withDaemonCall(
+        { socketPath: sock, deadlineMs: 80, callTimeoutMs: 5_000, reading: "slow.call" },
+        async () => {
+          invoked += 1
+          return "fn-ran"
+        },
+      )
       expect(
         Date.now() - started,
         "deadline must elapse; a 21ms ok means the delay never wrapped connect",
       ).toBeGreaterThanOrEqual(80)
-      expect(outcome).toEqual({ kind: "timeout" })
+      expect(outcome).toEqual({ kind: "timeout", afterMs: 80, reading: "slow.call" })
       expect(invoked).toBe(0)
       const deadline = Date.now() + 500
       while (invoked === 0 && Date.now() < deadline) {

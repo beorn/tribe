@@ -64,19 +64,27 @@ export function tribeDaemonCalls(
     } catch (error) {
       return { kind: "error", message: error instanceof Error ? error.message : String(error) }
     }
-    const outcome = await withDaemonCall({ socketPath, deadlineMs, callTimeoutMs: deadlineMs }, async (client) => {
-      await registerLaunchSender(client, sender, { producer, socketPath })
-      return client.call(method, params)
-    })
+    const outcome = await withDaemonCall(
+      { socketPath, deadlineMs, callTimeoutMs: deadlineMs, reading: method },
+      async (client) => {
+        await registerLaunchSender(client, sender, { producer, socketPath })
+        return client.call(method, params)
+      },
+    )
     if (outcome.kind !== "ok") return outcome
     const refusal = (mcpJsonContent(outcome.value) as { readonly error?: unknown } | null)?.error
     return typeof refusal === "string" && refusal.length > 0 ? { kind: "refused", refusal } : outcome
   }
   return {
     pendingFor: (owner) =>
-      withDaemonCall({ socketPath, deadlineMs }, (client) => client.call("tribe.pending", { owner })),
+      withDaemonCall({ socketPath, deadlineMs, reading: "tribe.pending" }, (client) =>
+        client.call("tribe.pending", { owner }),
+      ),
     pendingForEmitter: (emitter) => authenticatedCall("tribe.pending", { emitter }),
-    members: () => withDaemonCall({ socketPath, deadlineMs }, (client) => client.call("tribe.members", { all: true })),
+    members: () =>
+      withDaemonCall({ socketPath, deadlineMs, reading: "tribe.members" }, (client) =>
+        client.call("tribe.members", { all: true }),
+      ),
     sendAs: (params) => authenticatedCall("tribe.send", params),
   }
 }
@@ -199,12 +207,17 @@ export async function registerLaunchSender(
   return seat.session
 }
 
+/** Milliseconds as seconds for a sentence: 300 is "0.3 s", 10000 is "10 s". */
+function seconds(ms: number): string {
+  return `${Number((ms / 1000).toFixed(1))} s`
+}
+
 export function describeDaemonOutcome(outcome: SendOutcome): string {
   switch (outcome.kind) {
     case "ok":
       return "ok"
     case "timeout":
-      return "timed out"
+      return `timed out after ${seconds(outcome.afterMs)} reading ${outcome.reading}`
     case "no-daemon":
       return "no daemon (socket refused or absent)"
     case "error":
@@ -233,11 +246,13 @@ export async function resolveLaunchSeatFromEnvironment(
   }
   const socketPath = opts.socketPath ?? resolveSocketPath()
   const deadlineMs = opts.deadlineMs ?? TRIBE_DAEMON_DEADLINE_MS
-  return withDaemonCall({ socketPath, deadlineMs, callTimeoutMs: deadlineMs }, (client) =>
-    resolveLaunchSeat((method, params) => client.call(method, params), {
-      launchId: target.launchId,
-      idToken: target.idToken,
-      persona: target.persona ?? null,
-    }),
+  return withDaemonCall(
+    { socketPath, deadlineMs, callTimeoutMs: deadlineMs, reading: "cli_inbox_status_by_launch_v1" },
+    (client) =>
+      resolveLaunchSeat((method, params) => client.call(method, params), {
+        launchId: target.launchId,
+        idToken: target.idToken,
+        persona: target.persona ?? null,
+      }),
   )
 }

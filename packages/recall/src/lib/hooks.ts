@@ -33,6 +33,7 @@ import { roundSteps, timeStepAsync } from "./inject-core"
 import { createDeadlineRecall } from "./recall-deadline.ts"
 import { withDaemonCall } from "../../../../plugins/claude/recall/lib/socket.ts"
 import { resolveSocketPath } from "../../../wire/src/paths.ts"
+import { describeDaemonOutcome } from "../../../wire/src/service-send.ts"
 import { TRIBE_METHODS, RECALL_PROTOCOL_VERSION } from "../../../../plugins/claude/recall/lib/rpc.ts"
 // Route every UserPromptSubmit emission through the envelope so the unified
 // activity log catches it (km-tribe.activity-log phase 2).
@@ -241,7 +242,7 @@ async function registerWithRecallDaemon(input: {
   cwd: string
 }): Promise<string> {
   const outcome = await withDaemonCall(
-    { socketPath: resolveSocketPath(), deadlineMs: 1500, callTimeoutMs: 1000 },
+    { socketPath: resolveSocketPath(), deadlineMs: 1500, callTimeoutMs: 1000, reading: TRIBE_METHODS.sessionRegister },
     async (client) => {
       await client.call(TRIBE_METHODS.hello, {
         clientName: "recall-hook",
@@ -257,7 +258,7 @@ async function registerWithRecallDaemon(input: {
     case "no-daemon":
       return "no-daemon"
     case "timeout":
-      return "err(timeout)"
+      return `err(${describeDaemonOutcome(outcome)})`
     case "error":
       return `err(${outcome.message})`
   }

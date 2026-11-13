@@ -334,3 +334,53 @@ describe("the one sender registers as what its launch's token names (25074 3d-1c
     expect(calls).toEqual([])
   })
 })
+
+/** A daemon that accepts the connection and never answers: every call on it times out. */
+async function silentDaemon(): Promise<string> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "tribe-silent-"))
+  const socketPath = join(root, "tribe.sock")
+  const server: Server = createServer(() => {})
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject)
+    server.listen(socketPath, () => resolve())
+  })
+  cleanups.push(() => {
+    server.close()
+    safeRemoveSync(root, { within: realpathSync(tmpdir()), allowMissing: true })
+  })
+  return socketPath
+}
+
+describe("a timed-out read says how long it waited and what it was reading (33937)", () => {
+  /**
+   * @failure A read that times out prints only "timed out": no duration and no call, so whoever reads the failure
+   *          cannot tell a slow daemon from a dead one or which read stalled (19:41 longproc-reading occurrence).
+   * @level l1
+   * @consumer longproc-reading's incidents read and every tribeDaemonCalls caller, through describeDaemonOutcome
+   * @testonly none
+   */
+  it.each([
+    ["members", "tribe.members", (calls: ReturnType<typeof tribeDaemonCalls>) => calls.members()],
+    [
+      "pendingForEmitter",
+      "tribe.pending",
+      (calls: ReturnType<typeof tribeDaemonCalls>) => calls.pendingForEmitter("x"),
+    ],
+    [
+      "sendAs",
+      "tribe.send",
+      (calls: ReturnType<typeof tribeDaemonCalls>) => calls.sendAs({ to: "@chief", message: "m" }),
+    ],
+  ])("%s names the wait and the call", async (_name, call, run) => {
+    const socketPath = await silentDaemon()
+    const outcome = await run(
+      tribeDaemonCalls("longproc-reading", {
+        socketPath,
+        deadlineMs: 300,
+        env: { HAB_ID_TOKEN: launchToken("longproc-reading:probe", "longproc-reading", "service") },
+      }),
+    )
+    expect(outcome.kind).toBe("timeout")
+    expect(describeDaemonOutcome(outcome)).toBe(`timed out after 0.3 s reading ${call}`)
+  })
+})

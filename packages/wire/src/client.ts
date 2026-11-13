@@ -106,8 +106,15 @@ export function isClosedConnectionError(err: unknown): boolean {
   return code === "ECONNRESET" || code === "EPIPE"
 }
 
+/** A per-call deadline expiry: which call, and how long it waited. */
+export type DaemonCallTimeout = Error & {
+  readonly code: "TRIBE_DAEMON_CALL_TIMEOUT"
+  readonly method: string
+  readonly timeoutMs: number
+}
+
 /** This module's per-call deadline expiry, by class or by its name+code pair. */
-export function isDaemonCallTimeoutError(err: unknown): boolean {
+export function isDaemonCallTimeoutError(err: unknown): err is DaemonCallTimeout {
   if (err instanceof DaemonCallTimeoutError) return true
   return (
     err instanceof Error &&
