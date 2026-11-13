@@ -756,7 +756,8 @@ describe("dispatcher operational logging", () => {
       { connection_id: client.connId, direction: "inbound", operation: "cli_unrecognized" },
       { connection_id: client.connId, direction: "inbound", operation: "cli_log" },
     ])
-    expect(pendingOperations.map((event) => event.level)).toEqual(["debug", "debug", "info"])
+    // A well-formed unknown stays loud without maintaining a second route inventory.
+    expect(pendingOperations.map((event) => event.level)).toEqual(["debug", "info", "info"])
     expect(pendingOperations.every((event) => typeof event.time === "number")).toBe(true)
 
     const registered = parseResult<RegisterResult>(
@@ -771,6 +772,13 @@ describe("dispatcher operational logging", () => {
     expect(
       logs.find((event) => event.message === "operation.received" && event.props?.operation === "register")?.props,
     ).toEqual({ connection_id: client.connId, direction: "inbound", operation: "register" })
+    expect(logs.find((event) => event.message === "operation.received" && event.props?.operation === "register")?.level).toBe("info")
+    harness.dispatcher.register("fixture.new_reader", async () => ({ read: true }))
+    await harness.dispatcher.handleRequest(
+      { jsonrpc: "2.0", id: "new-reader", method: "fixture.new_reader", params: {} },
+      client.connId,
+    )
+    expect(logs.find((event) => event.message === "operation.received" && event.props?.operation === "fixture.new_reader")?.level).toBe("info")
     parseResult<{ structuredContent: SendResult }>(
       await harness.dispatcher.handleRequest(
         {
