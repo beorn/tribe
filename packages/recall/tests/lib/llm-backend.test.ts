@@ -86,12 +86,15 @@ describe("selectAvailableCheapModels", () => {
     const llm: LlmBackend = {
       ...selectionBackend({ preferred, candidates: [haiku, preferred], available: ["anthropic", "openai"] }),
       providerFacts: [],
-      selectModels: ({ candidates }) => ({
-        candidates,
-        selected: [preferred, haiku].filter((model) => candidates.includes(model)).slice(0, 1),
-        excluded: [],
-        evidence: [],
-      }),
+      selectModels: ({ candidates }) => {
+        if (!candidates) throw new Error("summary selector must supply its candidate pool")
+        return {
+          candidates: [...candidates],
+          selected: [preferred, haiku].filter((model) => candidates.includes(model)).slice(0, 1),
+          excluded: [],
+          evidence: [],
+        }
+      },
     }
     expect(pickSummaryModel("haiku", llm)).toEqual(haiku)
   })
