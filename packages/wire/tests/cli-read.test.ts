@@ -18,6 +18,7 @@ import {
   formatInboxStatus,
   formatInboxWaitTimeoutLine,
   registerReadCommands,
+  renderInboxDrainFailure,
   resolveRepairOptions,
   tribeFetchScope,
   tribeLogScope,
@@ -1148,5 +1149,18 @@ describe("tribeLogScope", () => {
   test("an empty bounded window warns that older messages may exist; an empty --all read does not", () => {
     expect(tribeLogScope(0, 20, false)).toBe("No messages in the last 20. Older messages may exist — use --all.")
     expect(tribeLogScope(0, 20, true)).toBe("No messages in tribe log.")
+  })
+})
+
+describe("renderInboxDrainFailure (01M3E1QX)", () => {
+  test("names the journal recovery command when a non-JSON inbox-drain fails", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      renderInboxDrainFailure(new Error("authority rejected"), false)
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0]?.[0]).toContain("recover already-consumed rows with: tribe log --all --json")
+    } finally {
+      spy.mockRestore()
+    }
   })
 })
