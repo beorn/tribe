@@ -2342,17 +2342,19 @@ function pendingCloseMissWarning(
 }
 
 /**
- * Settle one ball for `owner`. The single and batch close paths share this so
- * the two can never diverge on what "closed" means. Must be called inside a
- * transaction by its caller — the batch opens one for the whole list.
+ * The balls a declared roster makes unanswerable (24588 row 4): neither end has a
+ * live launch and the deadline has passed. This is the READ half of the settle,
+ * separated so a `tribe.pending` call can find out whether it has anything to
+ * settle WITHOUT opening a write transaction (34154) — the write runs only for
+ * the rows returned here.
  */
-function settleDeclaredUnrunPairs(
+function declaredUnrunRows(
   ctx: TribeContext,
   opts: HandlerOpts,
   roster: DeclaredRoster | undefined,
   now: number,
-): number {
-  if (roster === undefined) return 0
+): PendingSettlementRow[] {
+  if (roster === undefined) return []
   const open = ctx.stmts.selectAllPendingRequests.all() as Array<{
     request_id: string
     recipient: string
@@ -2390,9 +2392,9 @@ function settleDeclaredUnrunPairs(
       summary: row.summary,
     })
   }
-  if (rows.length === 0) return 0
-  return settlePendingRows(ctx, rows, "gc-expired", "declared-roster", now)
+  return rows
 }
+
 
 /** M1 (25057): what an offline-owner close owes its original sender — one
  * direct notice, dispatched after the close transaction commits. */
@@ -2956,9 +2958,14 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
   // owner close (24563). Incident balls stay emitter-owned.
   const declaredRoster = expired ? undefined : opts.getExpectedMembers?.()
   if (declaredRoster !== undefined) {
-    ctx.db.transaction(() => {
-      settleDeclaredUnrunPairs(ctx, opts, declaredRoster, now)
-    })()
+    // Eligibility first, transaction second: a read that finds nothing to settle
+    // must not open one (34154).
+    const due = declaredUnrunRows(ctx, opts, declaredRoster, now)
+    if (due.length > 0) {
+      ctx.db.transaction(() => {
+        settlePendingRows(ctx, due, "gc-expired", "declared-roster", now)
+      })()
+    }
   }
 
   // Explicit bounded repair path (@km/tribe/20008): prune stale balls for
