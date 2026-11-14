@@ -468,7 +468,11 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
 
       // Recall quality recommendations
       if (!recallTest.synthesisOk) {
-        recommendations.push("LLM synthesis failed — check API keys (OPENAI_API_KEY, etc.)")
+        const exclusions = result.synthesisFailure?.excludedProviders ?? []
+        const reason = exclusions.length > 0
+          ? exclusions.map((entry) => `${entry.modelId} (${entry.provider}): ${entry.reason}`).join("; ")
+          : result.synthesisFailure?.summary ?? `no synthesized answer for "${testQuery}" from ${result.results.length} lexical results`
+        recommendations.push(`LLM synthesis failed — ${reason}`)
       } else {
         if (recallTest.synthesisLength < 50) {
           recommendations.push(`Synthesis too short (${recallTest.synthesisLength} chars) — may not be useful`)
@@ -492,8 +496,8 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
           )
         }
       }
-    } catch {
-      recommendations.push("Recall test threw an error — check DB and LLM setup")
+    } catch (error) {
+      recommendations.push(`Recall test failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
