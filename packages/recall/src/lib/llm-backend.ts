@@ -113,9 +113,13 @@ export type LlmQueryOpts = {
   systemPrompt?: string
   stream?: boolean
   abortSignal?: AbortSignal
+  allowMetered?: boolean
 }
 
 export type LlmBackend = {
+  /** Set only on an invocation view, never on the cached host backend. */
+  readonly allowMetered?: boolean
+  resolveQueryRoute?: (model: LlmModel, context?: { hasImage?: boolean }) => { kind: "local" | "subscription" | "metered" }
   queryModel: (opts: LlmQueryOpts) => Promise<LlmQueryResult>
   getModel: (idOrName: string) => LlmModel | undefined
   getCheapModel: () => LlmModel | undefined
@@ -169,6 +173,12 @@ export type LlmBackend = {
 
 export type CheapModelSelectionOrder = "preferred" | "registry"
 
+function unpaidRouteRefusal(llm: LlmBackend, model: LlmModel, allowMetered: boolean): string | undefined {
+  if (allowMetered) return undefined
+  const route = llm.resolveQueryRoute?.(model)
+  return route && route.kind !== "metered" ? undefined : `no unpaid route for ${model.modelId}`
+}
+
 export type RejectedCheapModel = LlmModel & {
   reason: string
   status?: "refusing" | "excluded"
@@ -219,10 +229,12 @@ export function selectAvailableCheapModels(
       : "caller candidates only"
     : baseOrder
   const candidates: LlmModel[] = []
-  const seenProviders = new Set<string>()
+  const seenModels = new Set<string>()
   const add = (model: LlmModel | undefined): void => {
-    if (!model || seenProviders.has(model.provider)) return
-    seenProviders.add(model.provider)
+    if (!model) return
+    const key = `${model.provider}/${model.modelId}`
+    if (seenModels.has(key)) return
+    seenModels.add(key)
     candidates.push(model)
   }
 
@@ -231,6 +243,14 @@ export function selectAvailableCheapModels(
     if (selectionOrder === "preferred") add(llm.getCheapModel())
     for (const model of llm.getCheapModels(Number.MAX_SAFE_INTEGER)) add(model)
   }
+
+  const routeRejected: RejectedCheapModel[] = []
+  const eligible = candidates.filter((model) => {
+    const reason = llm.allowMetered === false ? unpaidRouteRefusal(llm, model, false) : undefined
+    if (!reason) return true
+    routeRejected.push({ ...model, reason, status: "excluded" })
+    return false
+  })
 
   const hasSharedSelector = llm.selectModels !== undefined
   const hasSharedFacts = llm.providerFacts !== undefined
@@ -241,20 +261,20 @@ export function selectAvailableCheapModels(
   }
   if (llm.selectModels && llm.providerFacts) {
     const shared = llm.selectModels({
-      candidates,
+      candidates: eligible,
       facts: llm.providerFacts,
       now: Date.now(),
       distinctProviders: true,
       limit,
     })
     const models = shared.selected
-    const rejected: RejectedCheapModel[] = shared.excluded.map((entry) => ({
+    const rejected: RejectedCheapModel[] = [...routeRejected, ...shared.excluded.map((entry) => ({
       ...entry.model,
       reason: entry.reason,
       status: entry.status,
       ...(entry.kind !== undefined ? { kind: entry.kind } : {}),
       ...(entry.ageMs !== undefined ? { ageMs: entry.ageMs } : {}),
-    }))
+    }))]
     const sharedOrder = `${order}; shared facts rank available before unknown, then typicalLatencyMs`
     const failure =
       models.length > 0
@@ -268,10 +288,13 @@ export function selectAvailableCheapModels(
   }
 
   const models: LlmModel[] = []
-  const rejected: RejectedCheapModel[] = []
-  for (const model of candidates) {
+  const rejected: RejectedCheapModel[] = [...routeRejected]
+  const selectedProviders = new Set<string>()
+  for (const model of eligible) {
+    if (selectedProviders.has(model.provider)) continue
     if (llm.isProviderAvailable(model.provider)) {
       if (models.length < limit) models.push(model)
+      selectedProviders.add(model.provider)
       continue
     }
     rejected.push({
@@ -351,7 +374,11 @@ export function resolveAvailableCheapModel(llm: LlmBackend | null): CheapModelRe
   return { backend: null, model: null, failure: selection.failure }
 }
 
-let probe: Promise<LlmBackend | null> | undefined
+type LlmHost = LlmBackend & {
+  readProviderFact?: (provider: string, requireApiKey: boolean) => Promise<LlmProviderAvailabilityFact>
+}
+
+let probe: Promise<LlmHost | null> | undefined
 let warned = false
 let unavailableReason: string | undefined
 
@@ -370,11 +397,12 @@ type LlmBarrelModule = Pick<
   | "serializeCost"
   | "deserializeCost"
 > & {
+  resolveQueryRoute: NonNullable<LlmBackend["resolveQueryRoute"]>
   isProviderAvailable: (provider: string) => boolean
   createProviderObservationStore: () => unknown
   readProviderAvailability: (
     provider: string,
-    options: { store: unknown; now: number; env?: Readonly<Record<string, string | undefined>> },
+    options: { store: unknown; now: number; env?: Readonly<Record<string, string | undefined>>; requireApiKey?: boolean },
   ) => Promise<LlmProviderAvailabilityFact>
   selectModels: NonNullable<LlmBackend["selectModels"]>
   describeDispatchFailure: (
@@ -385,6 +413,7 @@ type LlmBarrelModule = Pick<
 
 const REQUIRED_LLM_BARREL_FUNCTIONS = [
   "queryModel",
+  "resolveQueryRoute",
   "getModel",
   "getCheapModel",
   "getCheapModels",
@@ -454,9 +483,9 @@ export function buildFormatProviderError(
  * policy input, but is passed to the selector as an explicit exclusion set;
  * it no longer falsifies the source-compatible credential-presence boolean.
  */
-export async function loadLlm(): Promise<LlmBackend | null> {
-  if (probe !== undefined) return probe
-  probe = (async () => {
+export async function loadLlm(options: { allowMetered?: boolean; backend?: LlmBackend } = {}): Promise<LlmBackend | null> {
+  if (options.backend) return invocationBackend(options.backend, options.allowMetered ?? false)
+  probe ??= (async () => {
     const dir = process.env.TRIBE_LLM_DIR
     if (!dir) {
       warnOnce("TRIBE_LLM_DIR is unset")
@@ -469,32 +498,15 @@ export async function loadLlm(): Promise<LlmBackend | null> {
       if (denied.size > 0) {
         process.stderr.write(`[recall:llm-backend] RECALL_LLM_DENY_PROVIDERS excludes: ${[...denied].join(", ")}\n`)
       }
-      const candidates = bearly.getCheapModels(Number.MAX_SAFE_INTEGER)
-      const providers = [...new Set(candidates.map((model) => model.provider))]
       const observationStore = bearly.createProviderObservationStore()
-      const providerFacts = await Promise.all(
-        providers.map((provider) =>
-          bearly.readProviderAvailability(provider, {
-            store: observationStore,
-            now: Date.now(),
-          }),
-        ),
-      )
-      const refreshProviderFact = async (provider: string): Promise<void> => {
-        const fact = await bearly.readProviderAvailability(provider, {
+      return {
+        queryModel: bearly.queryModel,
+        resolveQueryRoute: bearly.resolveQueryRoute,
+        readProviderFact: (provider, requireApiKey) => bearly.readProviderAvailability(provider, {
           store: observationStore,
           now: Date.now(),
-        })
-        const index = providerFacts.findIndex((candidate) => candidate.provider === provider)
-        if (index === -1) providerFacts.push(fact)
-        else providerFacts[index] = fact
-      }
-      return {
-        queryModel: async (options) => {
-          const result = await bearly.queryModel(options)
-          await refreshProviderFact(options.model.provider)
-          return result
-        },
+          requireApiKey,
+        }),
         getModel: bearly.getModel,
         getCheapModel: bearly.getCheapModel,
         getCheapModels: bearly.getCheapModels,
@@ -505,7 +517,7 @@ export async function loadLlm(): Promise<LlmBackend | null> {
         serializeCost: bearly.serializeCost,
         deserializeCost: bearly.deserializeCost,
         isProviderAvailable: bearly.isProviderAvailable,
-        providerFacts,
+        providerFacts: [],
         selectModels: (options) =>
           bearly.selectModels({
             ...options,
@@ -521,11 +533,10 @@ export async function loadLlm(): Promise<LlmBackend | null> {
               `(host override — the API key may be present, but this provider was flagged broken on this host)`
             )
           }
-          const fact = providerFacts.find((candidate) => candidate.provider === provider)
-          return fact?.reason ?? `no provider fact available for "${provider}"`
+          return `no provider fact available for "${provider}"`
         },
         formatProviderError: buildFormatProviderError(bearly),
-      } as LlmBackend
+      } as LlmHost
     } catch (err) {
       warnOnce(`backend FAILED to load from TRIBE_LLM_DIR=${dir}: ${err instanceof Error ? err.message : String(err)}`)
       // silent-fallback-allow: loud-by-design — warnOnce() above logs the load
@@ -533,7 +544,61 @@ export async function loadLlm(): Promise<LlmBackend | null> {
       return null
     }
   })()
-  return probe
+  const host = await probe
+  return host ? invocationBackend(host, options.allowMetered ?? false) : null
+}
+
+/** Read route-specific observations once into this invocation, keeping consent out of the host cache. */
+async function invocationBackend(host: LlmHost, allowMetered: boolean): Promise<LlmBackend> {
+  const candidates = [
+    ...host.getCheapModels(Number.MAX_SAFE_INTEGER),
+    ...Object.values(BUDGETED_MODEL_IDS).flat().map((id) => host.getModel(id)).filter((model): model is LlmModel => !!model),
+  ]
+  const factsByModel = new Map<string, LlmProviderAvailabilityFact>()
+  const key = (model: LlmModel): string => `${model.provider}/${model.modelId}`
+  const readFact = async (model: LlmModel): Promise<void> => {
+    if (!host.readProviderFact) return
+    const requireApiKey = host.resolveQueryRoute?.(model).kind === "metered"
+    factsByModel.set(key(model), await host.readProviderFact(model.provider, requireApiKey))
+  }
+  await Promise.all(candidates.map(readFact))
+  // The shared selector accepts one real observation per provider, even when
+  // several route-eligible models belong to that provider.
+  const factsForModels = (models: readonly LlmModel[]): LlmProviderAvailabilityFact[] => [
+    ...new Map(models.flatMap((model) => {
+      const fact = factsByModel.get(key(model))
+      return fact ? [[fact.provider, fact] as const] : []
+    })).values(),
+  ]
+  const providerFacts = host.readProviderFact ? factsForModels(candidates) : [...(host.providerFacts ?? [])]
+  const view: LlmBackend = {
+    ...host,
+    allowMetered,
+    ...(host.providerFacts ? { providerFacts } : {}),
+    queryModel: async (options) => {
+      const permit = options.allowMetered ?? allowMetered
+      const reason = unpaidRouteRefusal(host, options.model, permit)
+      if (reason) return { response: { model: options.model, content: "", error: reason } }
+      const result = await host.queryModel({ ...options, allowMetered: permit })
+      await readFact(options.model)
+      return result
+    },
+  }
+  if (host.selectModels) {
+    view.selectModels = (options) => {
+      const refused: LlmModelSelectionResult["excluded"] = []
+      const eligible = (options.candidates ?? candidates).filter((model) => {
+        const fact = factsByModel.get(key(model))
+        if (fact?.status !== "refusing" || fact.kind !== "credential-missing") return true
+        refused.push({ model, provider: model.provider, status: "refusing", source: fact.source, reason: fact.reason, kind: fact.kind })
+        return false
+      })
+      const facts = factsForModels(eligible)
+      const selected = host.selectModels!({ ...options, candidates: eligible, facts: host.readProviderFact ? facts : options.facts })
+      return { ...selected, excluded: [...refused, ...selected.excluded] }
+    }
+  }
+  return view
 }
 
 /**
