@@ -436,6 +436,13 @@ export function openDatabase(path: string): Database {
   db.run(
     "CREATE INDEX IF NOT EXISTS idx_messages_archive_incident_request ON messages_archive(request) WHERE is_incident = 1 AND request IS NOT NULL",
   )
+  // 33650: the owed expired view seeks one obligation's outcome facts by their
+  // payload request_id and its replies by the ids they answer, in both tiers,
+  // instead of folding the whole journal. Migration v45 declares the same four.
+  for (const table of ["messages", "messages_archive"] as const) {
+    db.run(assertSingleStatement(ballFactRequestIndexSql(table)))
+    db.run(assertSingleStatement(directReplyIndexSql(table)))
+  }
 
   return db
 }
@@ -1649,6 +1656,28 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 45,
+    name: "owed-fold-seek-indexes",
+    /**
+     * 33650: `pending --expired --owed` folded every ball outcome fact and every reply in the store on the daemon's
+     * one thread (13 s on the live store, past the 10 s client limit, and every other caller waited behind it). The
+     * owed view only needs its live obligations' generations: these indexes seek outcome facts by payload request_id
+     * and replies by the id they answer. Building them reads each table once at upgrade; rollback is DROP INDEX, and
+     * an older daemon ignores them. Idempotent and guarded on each table's own columns, as v44 is.
+     */
+    up(db) {
+      for (const table of ["messages", "messages_archive"] as const) {
+        const present = tableColumnNames(db, table)
+        if (["kind", "type", "content", "ts"].every((column) => present.has(column))) {
+          db.run(assertSingleStatement(ballFactRequestIndexSql(table)))
+        }
+        if (["kind", "reply", "sender"].every((column) => present.has(column))) {
+          db.run(assertSingleStatement(directReplyIndexSql(table)))
+        }
+      }
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1688,6 +1717,24 @@ export const CORRELATED_REPLY_TYPES_SQL = CORRELATED_REPLY_TYPES.map((type) => `
 /** One canonical durable-attention classification: default-wake actionables
  * plus rows atomically classified at insertion (currently direct responses). */
 export const ATTENTION_PREDICATE_SQL = `(type IN (${ACTIONABLE_TYPES_SQL}) OR attention_required = 1)`
+
+/** 33650: a ball outcome fact's obligation identity is its PAYLOAD request_id —
+ * `ref` usually equals it, but legacy facts carry a third id there. A fact with
+ * no usable identity (content not JSON, request_id missing, not a string or
+ * empty) indexes as NULL: the UNASSIGNABLE bucket, never "unrelated", which a
+ * scoped reader probes and replays through the shared parser so it fails loud
+ * (@cto 2c7f2ee1). The write that carries such a fact still succeeds. The
+ * index and every statement that seeks it must spell this expression and
+ * predicate exactly, or the planner cannot use the index. */
+const BALL_FACT_REQUEST_ID_SQL =
+  "(CASE WHEN json_valid(content) AND json_type(content, '$.request_id') = 'text' AND json_extract(content, '$.request_id') <> '' THEN json_extract(content, '$.request_id') END)"
+const BALL_FACT_PREDICATE_SQL = "kind = 'event' AND type IN ('event.ball.expired', 'event.ball.settled')"
+const ballFactRequestIndexSql = (table: "messages" | "messages_archive"): string =>
+  `CREATE INDEX IF NOT EXISTS idx_${table}_ball_fact_request ON ${table}(${BALL_FACT_REQUEST_ID_SQL}, ts) WHERE ${BALL_FACT_PREDICATE_SQL}`
+/** 33650: replies seek by the id they answer. No existing index leads with
+ * `reply`, so the owed fold's reply read walked every direct row. */
+const directReplyIndexSql = (table: "messages" | "messages_archive"): string =>
+  `CREATE INDEX IF NOT EXISTS idx_${table}_direct_reply ON ${table}(reply, sender) WHERE kind = 'direct' AND reply IS NOT NULL`
 
 /** What wakes an idle owner's inbox-wait: an incident edge, or an ordinary actionable type.
  * getLatestInboxWaitMessage also applies edge OR noOpenIncidentAttentionPredicateSql, so this type-or-edge
@@ -2397,6 +2444,53 @@ export function createStatements(db: Database) {
 		UNION
 		SELECT sender, reply FROM messages_archive
 		WHERE kind = 'direct' AND reply IS NOT NULL
+		ORDER BY reply, sender
+	`),
+
+    /** 33650: the owed view's outcome facts — every generation, both tiers, of
+     *  the obligations whose payload request_id is in `$request_ids` (a JSON
+     *  array). Same rows `selectPendingOutcomeFactsByType` returns for those
+     *  ids; the caller narrows to its (request_id, recipient) identities. */
+    selectPendingOutcomeFactsForRequestIds: db.prepare(
+      assertSingleStatement(`
+		WITH ids(request_id) AS (SELECT DISTINCT value FROM json_each($request_ids))
+		SELECT m.id AS id, m.type AS type, m.content AS content, m.ts AS ts FROM ids
+		CROSS JOIN messages m INDEXED BY idx_messages_ball_fact_request
+		WHERE ${BALL_FACT_REQUEST_ID_SQL} = ids.request_id AND ${BALL_FACT_PREDICATE_SQL}
+		UNION
+		SELECT m.id AS id, m.type AS type, m.content AS content, m.ts AS ts FROM ids
+		CROSS JOIN messages_archive m INDEXED BY idx_messages_archive_ball_fact_request
+		WHERE ${BALL_FACT_REQUEST_ID_SQL} = ids.request_id AND ${BALL_FACT_PREDICATE_SQL}
+		ORDER BY ts, id
+	`),
+    ),
+
+    /** 33650: one ball outcome fact from the unassignable bucket (no usable
+     *  payload request_id), either tier, or none. Every such fact fails the
+     *  shared parser, so one row is enough to keep a scoped read loud; it is a
+     *  seek on the NULL key of the identity index, never a history scan. */
+    selectUnassignableBallOutcomeFact: db.prepare(
+      assertSingleStatement(`
+		SELECT id, type, content, ts FROM messages INDEXED BY idx_messages_ball_fact_request
+		WHERE ${BALL_FACT_REQUEST_ID_SQL} IS NULL AND ${BALL_FACT_PREDICATE_SQL}
+		UNION ALL
+		SELECT id, type, content, ts FROM messages_archive INDEXED BY idx_messages_archive_ball_fact_request
+		WHERE ${BALL_FACT_REQUEST_ID_SQL} IS NULL AND ${BALL_FACT_PREDICATE_SQL}
+		LIMIT 1
+	`),
+    ),
+
+    /** 33650: replies to the ids in `$reply_ids` (a JSON array: request ids and
+     *  every generation's message id), both tiers. */
+    selectPendingReplyFactsForIds: db.prepare(`
+		WITH ids(reply) AS (SELECT DISTINCT value FROM json_each($reply_ids))
+		SELECT m.sender AS sender, m.reply AS reply FROM ids
+		CROSS JOIN messages m INDEXED BY idx_messages_direct_reply
+		WHERE m.reply = ids.reply AND m.kind = 'direct' AND m.reply IS NOT NULL
+		UNION
+		SELECT m.sender AS sender, m.reply AS reply FROM ids
+		CROSS JOIN messages_archive m INDEXED BY idx_messages_archive_direct_reply
+		WHERE m.reply = ids.reply AND m.kind = 'direct' AND m.reply IS NOT NULL
 		ORDER BY reply, sender
 	`),
 

@@ -29,8 +29,10 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
+import { assertSingleStatement } from "@bearly/sqlite"
+
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { pendingExpiredRead, type HandlerOpts } from "./handlers.ts"
+import { handleToolCall, pendingExpiredRead, type HandlerOpts } from "./handlers.ts"
 import { logEvent } from "./messaging.ts"
 
 const HOUR = 3_600_000
@@ -189,13 +191,28 @@ describe("33650: the owed expired view folds only its obligations' history", () 
     settled("live-b", "@dev/2", "live-b-m1", NOW - 40 * HOUR, "answered", NOW - 38 * HOUR, "all")
     deadline("live-b", "@dev/3", "live-b-m1", NOW - 40 * HOUR, "live-b", "all")
     reply("@dev/2", "live-b", NOW - 39 * HOUR)
-    // live-e: a replayed journal generation opened AFTER the live row replaces
-    // it in the collapse, so the owed view must not list live-e at all.
+    // live-e: a replayed journal generation opened AFTER the live row. The
+    // live row stays the owner; the replay is disclosed history.
     deadline("live-e", "@chief", "live-e-m9", NOW - 1 * HOUR)
+    // live-g: three older generations, all unanswered.
+    for (const [gen, hoursAgo] of [
+      ["m1", 20],
+      ["m2", 15],
+      ["m3", 10],
+    ] as const) {
+      deadline("live-g", "@chief", `live-g-${gen}`, NOW - hoursAgo * HOUR)
+    }
     for (let i = 0; i < unrelated; i++) {
       const at = NOW - (60 + (i % 400)) * HOUR
       deadline(`old-${i}`, `@dev/${i % 7}`, `old-${i}-m1`, at)
-      settled(`old-${i}`, `@dev/${i % 7}`, `old-${i}-m2`, at + HOUR, i % 3 === 0 ? "answered" : "gc-expired", at + 2 * HOUR)
+      settled(
+        `old-${i}`,
+        `@dev/${i % 7}`,
+        `old-${i}-m2`,
+        at + HOUR,
+        i % 3 === 0 ? "answered" : "gc-expired",
+        at + 2 * HOUR,
+      )
       reply(`@dev/${i % 7}`, `old-${i}-m1`, at + 1000)
     }
     // Move everything older than 45 h to the archive by the daemon's own mover.
@@ -212,6 +229,7 @@ describe("33650: the owed expired view folds only its obligations' history", () 
     openLive("live-b", "@dev/2", "live-b-m2", NOW - 2 * HOUR, "all")
     openLive("live-b", "@dev/3", "live-b-m2", NOW - 2 * HOUR, "all")
     openLive("live-e", "@chief", "live-e-m3", NOW - 3 * HOUR)
+    openLive("live-g", "@chief", "live-g-m4", NOW - 2 * HOUR)
     stmts.openPendingRequest.run({
       $request_id: "not-expired",
       $recipient: "@chief",
@@ -247,7 +265,13 @@ describe("33650: the owed expired view folds only its obligations' history", () 
   it("the fixture exercises every scope edge through the full fold", () => {
     seed(50)
     const byKey = new Map(fullFoldLive().map((row) => [`${row.request_id} ${row.recipient}`, row]))
-    expect([...byKey.keys()].toSorted()).toEqual(["live-a @chief", "live-b @dev/2", "live-b @dev/3"])
+    expect([...byKey.keys()].toSorted()).toEqual([
+      "live-a @chief",
+      "live-b @dev/2",
+      "live-b @dev/3",
+      "live-e @chief",
+      "live-g @chief",
+    ])
     // m1 (third-id ref, archived and duplicated hot) counts; m2 was answered by message id.
     expect(byKey.get("live-a @chief")!.superseded_count).toBe(1)
     expect(byKey.get("live-a @chief")!.opened_at).toBe(new Date(NOW - 50 * HOUR).toISOString())
@@ -268,5 +292,114 @@ describe("33650: the owed expired view folds only its obligations' history", () 
     seed(200)
     const expected = fullFoldLive(owner)
     expect(JSON.stringify(owedWithoutFold(owner))).toBe(JSON.stringify(expected))
+  })
+
+  /** @cto b3839df7: the collapse kept the live row only against the first
+   * older generation. It overwrote the kept row's opened_at with the earliest
+   * opening and then compared the next generation against that, so a live
+   * ball with two or more older generations lost to one of them and the owed
+   * view dropped it. Live ownership stays; the latest generation is chosen on
+   * each row's own opening, separate from the disclosed earliest opening. */
+  it("a live ball keeps ownership through three older generations and a later replay", () => {
+    seed(5)
+    const view = json(
+      handleToolCall(
+        ctx,
+        "tribe.pending",
+        { owner: "@chief", expired: true, owed: true, now: NOW },
+        makeOpts(),
+      ) as never,
+    )
+    const byId = new Map((view.pending ?? []).map((row) => [row.request_id, row]))
+    expect(byId.get("live-g")).toMatchObject({
+      message_id: "live-g-m4",
+      backing: "live",
+      superseded_count: 3,
+      opened_at: new Date(NOW - 20 * HOUR).toISOString(),
+    })
+    expect(byId.get("live-e")).toMatchObject({ message_id: "live-e-m3", backing: "live", superseded_count: 1 })
+  })
+
+  it("without a live row, the latest generation by its own opening represents the obligation", () => {
+    for (const [gen, hoursAgo] of [
+      ["m1", 30],
+      ["m3", 10],
+      ["m2", 20],
+    ] as const) {
+      deadline("gone", "@chief", `gone-${gen}`, NOW - hoursAgo * HOUR)
+    }
+    const rows = (json(pendingExpiredRead(ctx, makeOpts(), { owner: "@chief", now: NOW })).pending ?? []).filter(
+      (row) => row.request_id === "gone",
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      message_id: "gone-m3",
+      backing: "journal",
+      superseded_count: 2,
+      opened_at: new Date(NOW - 30 * HOUR).toISOString(),
+    })
+  })
+
+  /** A fact with no usable payload request_id cannot be assigned to any
+   * obligation, so it is never "unrelated": the owed read stays as loud as the
+   * whole fold (@cto 2c7f2ee1). */
+  const unassignable: Array<[string, (now: number) => void]> = [
+    [
+      "content that is not JSON",
+      (now) =>
+        db.run(
+          `INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, ref)
+           VALUES ('bad-json', 'event.ball.expired', 'daemon', '*', 'event', '{not json', ?, 'push', 'live-a')`,
+          [now],
+        ),
+    ],
+    [
+      "a missing request_id",
+      () => logEvent(ctx, "ball.expired", undefined, { schema_version: 2, recipient: "@chief" }),
+    ],
+    ["a numeric request_id", () => logEvent(ctx, "ball.settled", undefined, { schema_version: 1, request_id: 7 })],
+    ["an empty request_id", () => logEvent(ctx, "ball.expired", undefined, { schema_version: 2, request_id: "" })],
+  ]
+
+  it.each(unassignable)("an unassignable fact (%s) fails the owed read as the whole fold does", (_label, write) => {
+    seed(5)
+    write(NOW - 70 * HOUR)
+    expect(() => pendingExpiredRead(ctx, makeOpts(), { all: true, now: NOW })).toThrow(/invalid ball/)
+    expect(() => pendingExpiredRead(ctx, makeOpts(), { all: true, owed: true, now: NOW })).toThrow(/invalid ball/)
+    // Archived, it is still found.
+    stmts.archiveExpiredMessages.run({ $cutoff: NOW - 60 * HOUR, $archived_at: NOW } as never)
+    stmts.deleteExpiredMessages.run({ $cutoff: NOW - 60 * HOUR } as never)
+    expect(() => pendingExpiredRead(ctx, makeOpts(), { owner: "@chief", owed: true, now: NOW })).toThrow(/invalid ball/)
+  })
+
+  it("a selected generation with a malformed recipient fails loud before any recipient filter", () => {
+    seed(5)
+    logEvent(
+      ctx,
+      "ball.expired",
+      undefined,
+      { schema_version: 2, request_id: "live-a", recipient: 42, sender: "@yrd", message_id: "live-a-mx" },
+      { sender: "daemon", ref: "live-a", ts: NOW - 10 * HOUR },
+    )
+    expect(() => pendingExpiredRead(ctx, makeOpts(), { owner: "@chief", owed: true, now: NOW })).toThrow(
+      /invalid ball expiry fact live-a/,
+    )
+  })
+
+  it("every owed-read statement seeks an index, never scans a table", () => {
+    const plans = [
+      [stmts.selectPendingOutcomeFactsForRequestIds, { $request_ids: '["a","b"]' }],
+      [stmts.selectPendingReplyFactsForIds, { $reply_ids: '["a","b"]' }],
+      [stmts.selectUnassignableBallOutcomeFact, {}],
+    ] as const
+    for (const [statement, params] of plans) {
+      const detail = (
+        db.prepare(assertSingleStatement(`EXPLAIN QUERY PLAN ${statement.toString()}`)).all(params as never) as Array<{
+          detail: string
+        }>
+      ).map((row) => row.detail)
+      expect(detail.join("\n")).not.toMatch(/SCAN (m|messages|messages_archive)\b/)
+      expect(detail.filter((line) => /^SEARCH m(essages(_archive)?)? USING/.test(line))).toHaveLength(2)
+    }
   })
 })
