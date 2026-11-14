@@ -242,7 +242,7 @@ describe("25654 one ball with two settlement facts", () => {
       ])
       db.run("DELETE FROM pending_request WHERE request_id = ?", ["live-history"])
       openExpired(stmts, "other-owner-live", "@dev/2", now)
-      const outcomes = vi.spyOn(stmts.selectPendingOutcomeFacts, "all")
+      const outcomes = vi.spyOn(stmts.selectPendingOutcomeFactsByType, "all")
       const replies = vi.spyOn(stmts.selectPendingReplyFacts, "all")
       try {
         const empty = parseToolJson(

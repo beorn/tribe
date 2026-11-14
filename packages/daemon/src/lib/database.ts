@@ -2321,22 +2321,14 @@ export function createStatements(db: Database) {
     /** Historical unanswered outcomes derive from the journal rather than a
      *  second tracker table. Deadline observations and terminal non-reply
      *  settlements are separate facts; the read fold preserves that distinction.
-     *  UNION spans both retention tiers and deduplicates an interrupted archive. */
-    selectPendingOutcomeFacts: db.prepare(`
-		SELECT id, type, content, ts FROM messages
-		WHERE kind = 'event' AND type IN ('event.ball.expired', 'event.ball.settled')
-		UNION
-		SELECT id, type, content, ts FROM messages_archive
-		WHERE kind = 'event' AND type IN ('event.ball.expired', 'event.ball.settled')
-		ORDER BY ts, id
-	`),
-
-    /** 34154 - the SAME outcome facts, read per type through the indexes that
-     *  already exist instead of through `kind`. The statement above plans as
-     *  `SEARCH messages USING INDEX idx_messages_kind_ts (kind=?)`, which
-     *  scans every event row: 6.59 s for 156,408 facts on a 1.81 GB store.
-     *  Per type it is 0.59 s for the identical rows, so a later edit that
-     *  reshapes this query must keep the type leading or it falls back. */
+     *  UNION spans both retention tiers and deduplicates an interrupted archive.
+     *
+     *  34154 - read per type through the indexes that already exist instead of
+     *  through `kind`. The kind-led form plans as
+     *  `SEARCH messages USING INDEX idx_messages_kind_ts (kind=?)`, which scans
+     *  every event row: 6.59 s for 156,408 facts on a 1.81 GB store. Per type it
+     *  is 0.59 s for the identical rows, so a later edit that reshapes this
+     *  query must keep the type leading or it falls back. */
     selectPendingOutcomeFactsByType: db.prepare(`
 		SELECT id, type, content, ts FROM messages INDEXED BY idx_messages_type_ts
 		WHERE type = 'event.ball.expired' AND kind = 'event'
@@ -2352,30 +2344,7 @@ export function createStatements(db: Database) {
 		ORDER BY ts, id
 	`),
 
-    /** 34154 - the owed form of the expired view needs the facts of the live
-     *  requests only, so it reads them by `ref` through the same index its
-     *  single-request sibling uses: 0.002 s for 1,942 facts against 37 live
-     *  rows, where folding all history costs 6.59 s.
-     *
-     *  `$refs` carries BOTH the live request ids and their message ids: a
-     *  tracker-built ball (`dark-work:Owner4h:@dev/1`) files its facts under
-     *  the message id, so a request-id-only scope silently drops it — measured
-     *  as 5 owed rows becoming 4 on the live store. */
-    selectPendingOutcomeFactsForRequests: db.prepare(
-      assertSingleStatement(`
-      WITH asked(ref) AS (SELECT value FROM json_each($refs))
-      SELECT m.id AS id, m.type AS type, m.content AS content, m.ts AS ts
-      FROM asked r CROSS JOIN messages m INDEXED BY idx_messages_event_type_ref_ts
-      WHERE m.ref = r.ref AND m.kind = 'event' AND m.type IN ('event.ball.expired', 'event.ball.settled')
-      UNION
-      SELECT m.id, m.type, m.content, m.ts
-      FROM asked r CROSS JOIN messages_archive m INDEXED BY idx_messages_archive_event_type_ref_ts
-      WHERE m.ref = r.ref AND m.kind = 'event' AND m.type IN ('event.ball.expired', 'event.ball.settled')
-      ORDER BY ts, id
-    `),
-    ),
-
-    /** Same two outcome-fact types as `selectPendingOutcomeFacts` above, but
+    /** Same two outcome-fact types as `selectPendingOutcomeFactsByType` above, but
      *  scoped to one request by `ref`, resolving retained message aliases —
      *  the read behind a `closed: 0` ball
      *  result's cause (@ag/tribe/an-advertised-ball-owner-disappears-before-
