@@ -268,6 +268,13 @@ describe("selectAvailableCheapModels", () => {
 })
 
 describe("loadLlm shared provider-health surface", () => {
+  // A JS caller's malformed flag must never become truthy billing consent.
+  test.each(["true", 1, null])("rejects invalid metered consent %s", async (allowMetered) => {
+    const backend = selectionBackend({ candidates: [], available: [] })
+    await expect(loadLlm({ backend, allowMetered: allowMetered as unknown as boolean })).rejects.toThrow("allowMetered must be a boolean")
+    expect(backend.queryModel).not.toHaveBeenCalled()
+  })
+
   // 33909: a process-cached backend must not cache a caller's billing consent.
   // The host records every dispatch; it deliberately does NOT enforce consent,
   // so the assertion observes Recall's actual boundary rather than a fake guard.

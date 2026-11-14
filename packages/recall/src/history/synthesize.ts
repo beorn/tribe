@@ -89,9 +89,10 @@ export async function raceLlmModels(
   models: LlmModel[],
   timeoutMs: number,
   llmOverride?: LlmBackend,
+  options: { allowMetered?: boolean } = {},
 ): Promise<LlmRaceResult> {
   // Models in hand imply the backend already loaded — this resolves from cache.
-  const llm = llmOverride ?? (await requireLlm("raceLlmModels"))
+  const llm = await requireLlm("raceLlmModels", { backend: llmOverride, allowMetered: options.allowMetered })
   const raceStart = Date.now()
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -231,10 +232,11 @@ export async function synthesizeResults(
   results: RecallSearchResult[],
   timeoutMs: number,
   llmOverride?: LlmBackend,
+  options: { allowMetered?: boolean } = {},
 ): Promise<SynthesisResult> {
   let llm: LlmBackend
   try {
-    llm = llmOverride ?? (await requireLlm("Recall synthesis"))
+    llm = await requireLlm("Recall synthesis", { backend: llmOverride, allowMetered: options.allowMetered })
   } catch (error) {
     log(`no LLM backend (TRIBE_LLM_DIR) — synthesis skipped`)
     const summary = `${error instanceof Error ? error.message : String(error)} ${resultCountPhrase(results.length)}; rerun with --raw to see them without an LLM.`
@@ -309,7 +311,7 @@ export async function synthesizeResults(
       `LLM synthesis: racing [${modelNames}] context=${context.length} chars timeout=${batchTimeoutMs}ms ` +
         `(${remainingMs}ms budget / ${batchesRemaining} batch${batchesRemaining === 1 ? "" : "es"} left)`,
     )
-    const race = await raceLlmModels(context, SYNTHESIS_PROMPT, batch, batchTimeoutMs, llm)
+    const race = await raceLlmModels(context, SYNTHESIS_PROMPT, batch, batchTimeoutMs, llm, options)
     calls.push(...race.calls)
 
     batches.push({

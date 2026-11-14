@@ -179,6 +179,13 @@ function unpaidRouteRefusal(llm: LlmBackend, model: LlmModel, allowMetered: bool
   return route && route.kind !== "metered" ? undefined : `no unpaid route for ${model.modelId}`
 }
 
+function readMeteredConsent(value: unknown): boolean | undefined {
+  if (value !== undefined && typeof value !== "boolean") {
+    throw new Error(`allowMetered must be a boolean; received ${value === null ? "null" : typeof value}`)
+  }
+  return value
+}
+
 export type RejectedCheapModel = LlmModel & {
   reason: string
   status?: "refusing" | "excluded"
@@ -484,7 +491,8 @@ export function buildFormatProviderError(
  * it no longer falsifies the source-compatible credential-presence boolean.
  */
 export async function loadLlm(options: { allowMetered?: boolean; backend?: LlmBackend } = {}): Promise<LlmBackend | null> {
-  if (options.backend) return invocationBackend(options.backend, options.allowMetered ?? false)
+  const allowMetered = readMeteredConsent(options.allowMetered) ?? false
+  if (options.backend) return invocationBackend(options.backend, allowMetered)
   probe ??= (async () => {
     const dir = process.env.TRIBE_LLM_DIR
     if (!dir) {
@@ -545,7 +553,7 @@ export async function loadLlm(options: { allowMetered?: boolean; backend?: LlmBa
     }
   })()
   const host = await probe
-  return host ? invocationBackend(host, options.allowMetered ?? false) : null
+  return host ? invocationBackend(host, allowMetered) : null
 }
 
 /** Read route-specific observations once into this invocation, keeping consent out of the host cache. */
@@ -576,7 +584,7 @@ async function invocationBackend(host: LlmHost, allowMetered: boolean): Promise<
     allowMetered,
     ...(host.providerFacts ? { providerFacts } : {}),
     queryModel: async (options) => {
-      const permit = options.allowMetered ?? allowMetered
+      const permit = readMeteredConsent(options.allowMetered) ?? allowMetered
       const reason = unpaidRouteRefusal(host, options.model, permit)
       if (reason) return { response: { model: options.model, content: "", error: reason } }
       const result = await host.queryModel({ ...options, allowMetered: permit })

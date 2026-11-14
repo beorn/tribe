@@ -614,6 +614,7 @@ describe("synthesizeResults", () => {
       getCheapModel: () => models[0],
       getCheapModels: () => models,
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       // Compatibility meaning stays credential-presence only. The shared
       // selector is the authority for explicit policy exclusions.
       isProviderAvailable: () => true,
@@ -674,6 +675,7 @@ describe("synthesizeResults", () => {
         return models.slice(0, max)
       },
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: (provider) => provider === "xai" || provider === "openrouter",
     }
 
@@ -719,6 +721,7 @@ describe("synthesizeResults", () => {
       getCheapModel: () => gemini,
       getCheapModels: () => [gemini, deepseek],
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
     }
 
@@ -757,6 +760,7 @@ describe("synthesizeResults", () => {
       getCheapModel: () => deepseek,
       getCheapModels: () => [deepseek, gemini],
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
     }
 
@@ -796,6 +800,7 @@ describe("synthesizeResults", () => {
       getCheapModel: () => models[0],
       getCheapModels: () => models,
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
     }
 
@@ -851,6 +856,7 @@ describe("synthesizeResults", () => {
       getCheapModel: () => models[0],
       getCheapModels: () => models,
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
     }
 
@@ -909,6 +915,7 @@ describe("synthesizeResults", () => {
       getCheapModel: () => models[0],
       getCheapModels: () => models,
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
     }
 

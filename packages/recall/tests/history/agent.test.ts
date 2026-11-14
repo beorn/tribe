@@ -31,6 +31,7 @@ const llm = {
   getCheapModel: () => fakeModel("mock-cheap"),
   getCheapModels: (max = 2) => [fakeModel("mock-cheap"), fakeModel("mock-cheap-2")].slice(0, Math.max(0, max)),
   ...unavailableCostMethods,
+  resolveQueryRoute: () => ({ kind: "local" }),
   isProviderAvailable: alwaysAvailable,
 } satisfies LlmBackend
 
