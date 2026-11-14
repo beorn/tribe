@@ -63,6 +63,14 @@ export function cpuGapMsForCadence(pollIntervalSec: number): number {
   return Math.round(pollIntervalSec * 1000 * CPU_WINDOW_GAP_POLLS)
 }
 const CPU_OFFENDER_MIN_PERCENT = 3
+
+/**
+ * #34311: until a CPU pressure floor gates this page, every CPU message must say what it is and is
+ * not — a busy-host notice, not evidence that anything is being starved. Without this sentence the
+ * page sends the reader hunting for a hog that a pressure reading would rule out.
+ */
+const CPU_BUSY_HOST_NOTICE =
+  " Busy-host notice, not evidence of starvation: this rule reads load and runnable depth only, and no CPU pressure reading gates it yet."
 const HEALTH_ALERT_ARGV_MAX_CHARS = 160
 type CanonicalDiskCapacity = Extract<
   Extract<CanonicalHostScalarObservation, { kind: "available" }>["values"]["disk"],
@@ -1986,7 +1994,7 @@ export function evaluateAlerts(
       alerts.push({
         type: "cpu",
         severity: "critical",
-        message: `CPU critical: load ${load} exceeds ${cpuCriticalThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuCriticalMultiplier}) for ${thresholds.sustainedSamples * 10}s`,
+        message: `CPU critical: load ${load} exceeds ${cpuCriticalThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuCriticalMultiplier}) for ${thresholds.sustainedSamples * 10}s${CPU_BUSY_HOST_NOTICE}`,
         metrics: { cpu: metrics.cpu },
         topOffenders: metrics.cpu.topProcesses.slice(0, 5),
       })
@@ -2001,7 +2009,7 @@ export function evaluateAlerts(
       alerts.push({
         type: "cpu",
         severity: "warning",
-        message: `CPU warning: load ${load} exceeds ${cpuWarningThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuWarningMultiplier}) for ${thresholds.sustainedSamples * 10}s`,
+        message: `CPU warning: load ${load} exceeds ${cpuWarningThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuWarningMultiplier}) for ${thresholds.sustainedSamples * 10}s${CPU_BUSY_HOST_NOTICE}`,
         metrics: { cpu: metrics.cpu },
         topOffenders: metrics.cpu.topProcesses.slice(0, 5),
       })
@@ -2058,7 +2066,7 @@ export function evaluateAlerts(
         severity: "critical",
         message:
           `CPU critical: load ${load} exceeds ${cpuCriticalThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuCriticalMultiplier}) ` +
-          `${where} for ${seconds(measured.criticalMs)} ${window}`,
+          `${where} for ${seconds(measured.criticalMs)} ${window}${CPU_BUSY_HOST_NOTICE}`,
         metrics: { cpu: metrics.cpu },
         topOffenders: metrics.cpu.topProcesses.slice(0, 5),
       })
@@ -2076,7 +2084,7 @@ export function evaluateAlerts(
         severity: "warning",
         message:
           `CPU warning: load ${load} exceeds ${cpuWarningThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuWarningMultiplier}) ` +
-          `${where} for ${seconds(measured.warningMs)} ${window}`,
+          `${where} for ${seconds(measured.warningMs)} ${window}${CPU_BUSY_HOST_NOTICE}`,
         metrics: { cpu: metrics.cpu },
         topOffenders: metrics.cpu.topProcesses.slice(0, 5),
       })

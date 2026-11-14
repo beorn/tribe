@@ -226,7 +226,9 @@ describe("health alert delivery", () => {
     expect(kinds(warning)).toEqual(["cpu:warning"])
     expect(warning[0]!.message).toBe(
       "CPU warning: load 5 exceeds 3.2 (4 cores x 0.8) with 7 runnable tasks over 4 cores for 50s of the last 180s " +
-        "observed (6 observations covering 50s)",
+        "observed (6 observations covering 50s)" +
+        " Busy-host notice, not evidence of starvation: this rule reads load and runnable depth only, " +
+        "and no CPU pressure reading gates it yet.",
     )
     // Critical line (6): critical time starts accruing only once BOTH ends of an interval are critical.
     for (let sample = 0; sample < 5; sample += 1) expect(step(9, 7)).toEqual([])
@@ -234,7 +236,9 @@ describe("health alert delivery", () => {
     expect(kinds(critical)).toEqual(["cpu:critical"])
     expect(critical[0]!.message).toBe(
       "CPU critical: load 9 exceeds 6.0 (4 cores x 1.5) with 7 runnable tasks over 4 cores for 50s of the last 180s " +
-        "observed (12 observations covering 110s)",
+        "observed (12 observations covering 110s)" +
+        " Busy-host notice, not evidence of starvation: this rule reads load and runnable depth only, " +
+        "and no CPU pressure reading gates it yet.",
     )
   })
 
@@ -491,6 +495,8 @@ describe("health alert delivery", () => {
     const fired = evaluateAlerts(metrics(9, BASE_TIME_MS + 20_000), thresholds, state)
     expect(kinds(fired)).toEqual(["cpu:critical"])
     expect(fired[0]!.message).toContain("for 30s")
+    // #34311: the load-only rule must not read as starvation evidence on a host that cannot read pressure.
+    expect(fired[0]!.message).toContain("Busy-host notice, not evidence of starvation")
     expect(state.cpuWindow).toHaveLength(0)
   })
 
