@@ -120,6 +120,7 @@ describe("registerReadCommands", () => {
       const { exitCode, document } = evaluateWireHealthDocument({
         daemon: { pid: 12345, uptime: 3600, clients: 12 },
         sessions: [{ name: "@chief" }, { name: "@dev/1" }],
+        authority_issues: [],
       })
       expect(exitCode).toBe(0)
       expect(document).toEqual({
