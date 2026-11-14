@@ -277,15 +277,20 @@ describe("Tribe command descriptors", () => {
 
     const pending = commandDescriptorByMcpName("pending")!
     expect(pending.mcp.inputSchema.properties?.all).toMatchObject({ type: "boolean" })
+    // 34169: expired is bounded by owed, and the unbounded form is refused by name before its fold.
     expect(pending.mcp.inputSchema.properties?.expired).toMatchObject({
       type: "boolean",
-      description: expect.stringMatching(/deadline-passed.*historical unanswered/i),
+      description: expect.stringMatching(/requires owed.*deadline-passed/i),
     })
     const expiredDescription = (
       pending.mcp.inputSchema.properties?.expired as { readonly description?: string } | undefined
     )?.description
-    expect(expiredDescription).toMatch(/default.*deadline-passed.*remain.*visible/i)
+    expect(expiredDescription).toMatch(/unbounded form \(expired without owed\) is refused by name/i)
     expect(expiredDescription).not.toMatch(/default view omits|lapsed request is invisible/i)
+    expect(pending.mcp.inputSchema.properties?.owed).toMatchObject({
+      type: "boolean",
+      description: expect.stringMatching(/with expired.*live pending request/i),
+    })
     expect(pending.mcp.inputSchema.properties?.prune).toMatchObject({
       type: "boolean",
       description: expect.stringMatching(/stale_ms/i),
