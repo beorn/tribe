@@ -5,6 +5,7 @@
  */
 
 import { describe, test, expect, vi } from "vitest"
+import { pickSummaryModel } from "../../../../plugins/claude/recall/lib/summarizer.ts"
 import { spawnSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -77,6 +78,24 @@ function selectionBackend(opts: {
 }
 
 describe("selectAvailableCheapModels", () => {
+  // Haiku mode promises a Haiku attempt before its preferred-model fallback,
+  // even when the shared host selector would rank the fallback first.
+  test("preserves Haiku preference before the preferred-model fallback", () => {
+    const haiku = { provider: "anthropic", modelId: "claude-haiku" }
+    const preferred = { provider: "openai", modelId: "preferred" }
+    const llm: LlmBackend = {
+      ...selectionBackend({ preferred, candidates: [haiku, preferred], available: ["anthropic", "openai"] }),
+      providerFacts: [],
+      selectModels: ({ candidates }) => ({
+        candidates,
+        selected: [preferred, haiku].filter((model) => candidates.includes(model)).slice(0, 1),
+        excluded: [],
+        evidence: [],
+      }),
+    }
+    expect(pickSummaryModel("haiku", llm)).toEqual(haiku)
+  })
+
   test("uses shared provider facts and selector output instead of the legacy boolean when both are available", async () => {
     const openai = { modelId: "gpt-cheap", provider: "openai" }
     const openrouter = { modelId: "deepseek-cheap", provider: "openrouter" }
@@ -280,7 +299,7 @@ describe("loadLlm shared provider-health surface", () => {
   // 33909: a process-cached backend must not cache a caller's billing consent.
   // The host records every dispatch; it deliberately does NOT enforce consent,
   // so the assertion observes Recall's actual boundary rather than a fake guard.
-  test("isolates concurrent metered opt-in from default selection and dispatch", () => {
+  test("isolates metered consent and preserves enabled daemon-tail outcomes", () => {
     const fixture = mkdtempSync(join(tmpdir(), "recall-llm-consent-"))
     const backendModule = pathToFileURL(resolve(import.meta.dirname, "../../src/lib/llm-backend.ts")).href
     writeFileSync(
@@ -289,16 +308,18 @@ describe("loadLlm shared provider-health surface", () => {
       const paid = { provider: "openai", modelId: "paid-only" }
       const subscription = { provider: "openai", modelId: "subscription" }
       export const calls = []
+      export let summaryModel
+      export const setSummaryModel = (model) => { summaryModel = model }
       export const queryModel = async (options) => {
         await Promise.resolve()
         calls.push({ model: options.model.modelId, consent: options.allowMetered })
-        return { response: { content: "answer" } }
+        return { response: { content: options.question.startsWith("TAIL:") ? JSON.stringify({ focus: "fixture summary", loose_ends: [] }) : "answer" } }
       }
-      export const resolveQueryRoute = (model) => model.modelId === "subscription"
+      export const resolveQueryRoute = (model) => model.provider === "ollama" ? { kind: "local" } : model.modelId.includes("subscription")
         ? { kind: "subscription", cli: "codex" } : { kind: "metered" }
       export const getModel = (id) => [paid, subscription].find(model => model.modelId === id)
-      export const getCheapModel = () => paid
-      export const getCheapModels = () => [paid, subscription]
+      export const getCheapModel = () => summaryModel ?? paid
+      export const getCheapModels = () => summaryModel ? [summaryModel] : [paid, subscription]
       export const isProviderAvailable = () => true
       export const createProviderObservationStore = () => ({})
       export const readProviderAvailability = async (provider, options) => ({
@@ -329,11 +350,23 @@ describe("loadLlm shared provider-health surface", () => {
         ordinary.queryModel({ model: paid, question: "default" }),
       ])
       const host = await import(process.env.TRIBE_LLM_DIR + "/index.ts")
+      const consentCalls = [...host.calls]
+      host.calls.length = 0
+      const { summarizeTail } = await import(process.env.TAIL_SUMMARIZER_MODULE)
+      host.setSummaryModel({ provider: "anthropic", modelId: "claude-haiku-paid" })
+      const refused = await summarizeTail("fixture session tail", { mode: "haiku" })
+      const off = await summarizeTail("fixture session tail", { mode: "off" })
+      const refusedCalls = [...host.calls]
+      host.setSummaryModel({ provider: "ollama", modelId: "local-qwen" })
+      const local = await summarizeTail("fixture session tail", { mode: "local" })
+      host.setSummaryModel({ provider: "openai", modelId: "haiku-subscription" })
+      const subscriptionSummary = await summarizeTail("fixture session tail", { mode: "haiku" })
       console.log(JSON.stringify({
+        tail: { refused, off, refusedCalls, local, subscription: subscriptionSummary, calls: host.calls },
         selected: selected.models.map(model => model.modelId),
         allowedSelected: opted.models.map(model => model.modelId),
         rejected: selected.rejected,
-        calls: host.calls,
+        calls: consentCalls,
         allowed: yes.response,
         ordinary: no.response,
       }))
@@ -344,12 +377,23 @@ describe("loadLlm shared provider-health surface", () => {
         env: {
           ...process.env,
           LLM_BACKEND_MODULE: backendModule,
+          TAIL_SUMMARIZER_MODULE: pathToFileURL(
+            resolve(import.meta.dirname, "../../../../plugins/claude/recall/lib/summarizer.ts"),
+          ).href,
           TRIBE_LLM_DIR: fixture,
           RECALL_LLM_DENY_PROVIDERS: "",
         },
       })
       expect(child.status, child.stderr).toBe(0)
       const result = JSON.parse(child.stdout) as {
+        tail: {
+          refused: { error?: string; calls: unknown[] } | null
+          off: unknown
+          refusedCalls: unknown[]
+          local: { focus: string } | null
+          subscription: { focus: string } | null
+          calls: Array<{ model: string; consent: boolean }>
+        }
         selected: string[]
         allowedSelected: string[]
         rejected: Array<{ modelId: string; reason: string }>
@@ -365,6 +409,16 @@ describe("loadLlm shared provider-health surface", () => {
       expect(result.calls).toEqual([{ model: "paid-only", consent: true }])
       expect(result.allowed.content).toBe("answer")
       expect(result.ordinary).toMatchObject({ content: "", error: "no unpaid route for paid-only" })
+      // Enabled daemon-tail summarization must retain a route refusal without dispatch.
+      expect(result.tail.refused).toMatchObject({ error: expect.stringContaining("no unpaid route"), calls: [] })
+      expect(result.tail.refusedCalls).toEqual([])
+      expect(result.tail.off).toBeNull()
+      expect(result.tail.local?.focus).toBe("fixture summary")
+      expect(result.tail.subscription?.focus).toBe("fixture summary")
+      expect(result.tail.calls).toEqual([
+        { model: "local-qwen", consent: false },
+        { model: "haiku-subscription", consent: false },
+      ])
     } finally {
       rmSync(fixture, { recursive: true, force: true })
     }
