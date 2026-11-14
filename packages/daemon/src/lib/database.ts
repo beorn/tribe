@@ -1996,7 +1996,7 @@ function takingStatusForOpenRequestMatchSql(
 ): string {
   return `${takingStatusSubjectMatchSql(receipt, { owner: `${pending}.recipient`, requester: `${pending}.sender` })}
     AND ${receipt}.ref IS NOT NULL
-    AND (${receipt}.ref = ${pending}.request_id OR ${receipt}.ref = ${pending}.message_id)
+    AND ${receipt}.ref IN (${pending}.request_id, ${pending}.message_id)
     AND ${receipt}.${receiptSequence} > ${originalSequence}`
 }
 
@@ -2014,13 +2014,13 @@ function takingReceiptsForOpenBallsSql(
       FROM pending_request p
       LEFT JOIN messages pending_message ON pending_message.id = p.message_id
       LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
-      CROSS JOIN messages r ON ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", originalSequence)}
+      CROSS JOIN messages r INDEXED BY idx_messages_status_ref_retire ON ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", originalSequence)}
       UNION ALL
       SELECT p.request_id AS request_id, p.recipient, p.message_id, r.ts AS taking_receipt_at_ms
       FROM pending_request p
       LEFT JOIN messages pending_message ON pending_message.id = p.message_id
       LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
-      CROSS JOIN messages_archive r ON ${takingStatusForOpenRequestMatchSql("r", "seq", "p", originalSequence)}
+      CROSS JOIN messages_archive r INDEXED BY idx_messages_archive_status_ref_retire ON ${takingStatusForOpenRequestMatchSql("r", "seq", "p", originalSequence)}
     )
     GROUP BY request_id, recipient, message_id
   `
@@ -2635,10 +2635,10 @@ export function createStatements(db: Database) {
         WHERE p.request_kind != 'incident' AND (p.sender = $name OR p.recipient = $name)
       ), receipts AS (
         SELECT r.id, r.rowid AS seq FROM caller_pending p
-        JOIN messages r ON ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", "p.original_seq")}
+        JOIN messages r INDEXED BY idx_messages_status_ref_retire ON ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", "p.original_seq")}
         UNION
         SELECT r.id, r.seq FROM caller_pending p
-        JOIN messages_archive r ON ${takingStatusForOpenRequestMatchSql("r", "seq", "p", "p.original_seq")}
+        JOIN messages_archive r INDEXED BY idx_messages_archive_status_ref_retire ON ${takingStatusForOpenRequestMatchSql("r", "seq", "p", "p.original_seq")}
       ), availability AS (
         SELECT EXISTS(SELECT 1 FROM sessions WHERE name = $name)
           AND NOT EXISTS(SELECT 1 FROM caller_pending WHERE original_seq IS NULL) AS available
@@ -2665,12 +2665,12 @@ export function createStatements(db: Database) {
       )
       SELECT r.id, r.type, r.sender, r.recipient, r.kind, r.content, r.bead_id, r.ref,
         r.ts AS ts, r.delivery, r.topic, r.room_id, r.request, r.reply, r.summary
-      FROM matched_pending p CROSS JOIN messages r
+      FROM matched_pending p CROSS JOIN messages r INDEXED BY idx_messages_status_ref_retire
       WHERE ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", "p.original_seq")}
       UNION
       SELECT r.id, r.type, r.sender, r.recipient, r.kind, r.content, r.bead_id, r.ref,
         r.ts AS ts, r.delivery, r.topic, r.room_id, r.request, r.reply, r.summary
-      FROM matched_pending p CROSS JOIN messages_archive r
+      FROM matched_pending p CROSS JOIN messages_archive r INDEXED BY idx_messages_archive_status_ref_retire
       WHERE ${takingStatusForOpenRequestMatchSql("r", "seq", "p", "p.original_seq")}
       ORDER BY ts DESC LIMIT $limit
     `),

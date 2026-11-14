@@ -29,7 +29,7 @@
  */
 
 import { assertSingleStatement } from "@bearly/sqlite"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -383,14 +383,23 @@ describe("health projection reads the archive through an index", () => {
   })
 
   it("seeks taking receipts for open balls in both retention tiers without scanning receipts", () => {
-    const { db } = fixture()
+    const { db, dir } = fixture()
     const stmts = createStatements(db)
+    db.exec(
+      assertSingleStatement(`
+      INSERT INTO sessions (id, name, role, domains, pid, cwd, started_at, updated_at) VALUES
+        ('sess-caller', 'caller', 'chief', '[]', 1, '/hh', 100, 100),
+        ('sess-owner', 'owner', 'dev', '[]', 2, '/hh', 100, 100)
+    `),
+    )
     db.exec(
       assertSingleStatement(`
       INSERT INTO messages (rowid, id, type, sender, recipient, content, ts, kind, ref) VALUES
         (101, 'original', 'request', 'caller', 'owner', 'body', 100, 'direct', NULL),
         (102, 'hot-taking', 'status', 'owner', 'caller', 'body', 200, 'direct', 'ball'),
-        (103, 'wrong-owner', 'status', 'other', 'caller', 'body', 900, 'direct', 'ball')
+        (103, 'wrong-owner', 'status', 'other', 'caller', 'body', 900, 'direct', 'ball'),
+        (105, 'reverse-direction', 'status', 'caller', 'owner', 'body', 950, 'direct', 'ball'),
+        (106, 'missing-orig-taking', 'status', 'owner', 'other-caller', 'body', 250, 'direct', 'ball-missing-orig')
     `),
     )
     db.exec(
@@ -402,17 +411,194 @@ describe("health projection reads the archive through an index", () => {
     )
     db.exec(
       assertSingleStatement(`
-      INSERT INTO pending_request (request_id, recipient, sender, opened_at, expires_at, message_id, fanout) VALUES
-        ('ball', 'owner', 'caller', 100, 10000, 'original', 'first')
+      INSERT INTO pending_request (request_id, recipient, sender, opened_at, expires_at, message_id, fanout, request_kind) VALUES
+        ('ball', 'owner', 'caller', 100, 10000, 'original', 'first', 'request')
     `),
     )
-    // Both approved original-sequence expressions keep the existing index seeks.
-    for (const statement of [stmts.selectTakingReceiptsForOpenBalls, stmts.selectTakingReceiptsForPendingBalls]) {
-      expect(statement.all()).toEqual([
-        { request_id: "ball", recipient: "owner", message_id: "original", taking_receipt_at_ms: 300 },
-      ])
-      const queryPlan = plan(db, statement.toString())
+
+    // 1. All four prepared receipt statements must use idx_messages_status_ref_retire and
+    // idx_messages_archive_status_ref_retire, and never fall back to idx_messages_recipient_kind.
+    for (const [statement, params] of [
+      [stmts.selectTakingReceiptsForOpenBalls, {}],
+      [stmts.selectTakingReceiptsForPendingBalls, {}],
+      [stmts.getOpenRequestStatus, { $name: "caller" }],
+      [stmts.getOpenRequestStatusesForRefPrefix, { $prefix: "ball", $limit: 10 }],
+    ] as const) {
+      const queryPlan = plan(db, statement.toString(), params)
+      expect(queryPlan).toContain("idx_messages_status_ref_retire")
+      expect(queryPlan).toContain("idx_messages_archive_status_ref_retire")
+      expect(queryPlan).not.toContain("idx_messages_recipient_kind")
       expect(queryPlan).not.toMatch(/\bSCAN\s+(?:r|messages|messages_archive)\b/i)
+    }
+
+    // 2. The 5th consumer (takingStatusProtectsOpenBallPredicateSql in archive-delete eligibility)
+    // keeps its bounded idx_pending_sender seek and protects archive-taking while allowing too-early.
+    for (const [sql, params] of [
+      [stmts.selectArchiveDeleteBatch.toString(), { $cutoff: 10_000, $cursor_floor: 10_000, $limit: 50 }],
+      [stmts.selectArchiveRowsForExport.toString(), { $cutoff: 10_000, $cursor_floor: 10_000, $limit: 50 }],
+      [stmts.selectArchiveDeleteDiagnostics.toString(), { $cutoff: 10_000, $cursor_floor: 10_000 }],
+    ] as const) {
+      const queryPlan = plan(db, sql, params)
+      expect(queryPlan).toContain("idx_pending_sender")
+      expect(queryPlan).not.toContain("idx_messages_recipient_kind")
+    }
+    expect(plan(db, stmts.selectArchiveRowsByIdsSql("'archive-taking','too-early'"))).toContain("idx_pending_sender")
+    const reVerifiedIds = (
+      db
+        .prepare(assertSingleStatement(stmts.selectArchiveRowsByIdsSql("?, ?")))
+        .all("archive-taking", "too-early", 10_000, 10_000) as Array<{ id: string }>
+    ).map((r) => r.id)
+    expect(reVerifiedIds).toEqual(["too-early"])
+
+    // 3. Exact result equality on the active ball (request_id + message_id equivalence, chronology, MAX/dedup).
+    expect(stmts.selectTakingReceiptsForOpenBalls.all()).toEqual([
+      { request_id: "ball", recipient: "owner", message_id: "original", taking_receipt_at_ms: 300 },
+    ])
+    expect(stmts.selectTakingReceiptsForPendingBalls.all()).toEqual([
+      { request_id: "ball", recipient: "owner", message_id: "original", taking_receipt_at_ms: 300 },
+    ])
+    expect(stmts.getOpenRequestStatus.get({ $name: "caller" })).toEqual({
+      open_request_status_count: 2,
+      latest_open_request_status_seq: 104,
+    })
+    expect(stmts.getOpenRequestStatus.get({ $name: "owner" })).toEqual({
+      open_request_status_count: 2,
+      latest_open_request_status_seq: 104,
+    })
+    expect(
+      (stmts.getOpenRequestStatusesForRefPrefix.all({ $prefix: "ball", $limit: 10 }) as Array<{ id: string }>).map(
+        (r) => r.id,
+      ),
+    ).toEqual(["archive-taking", "hot-taking"])
+    expect(
+      (stmts.getOpenRequestStatusesForRefPrefix.all({ $prefix: "orig", $limit: 10 }) as Array<{ id: string }>).map(
+        (r) => r.id,
+      ),
+    ).toEqual(["archive-taking", "hot-taking"])
+
+    // 4. Strict missing-original vs explicit-zero fallback:
+    // A pending ball whose original message is absent from both tiers has NULL originalSequence in
+    // selectTakingReceiptsForOpenBalls (excluded) and getOpenRequestStatus (available=0 -> null counts),
+    // but falls back to 0 in selectTakingReceiptsForPendingBalls (included).
+    db.exec(
+      assertSingleStatement(`
+      INSERT INTO pending_request (request_id, recipient, sender, opened_at, expires_at, message_id, fanout, request_kind) VALUES
+        ('ball-missing-orig', 'owner', 'other-caller', 120, 10000, 'missing-original-msg', 'first', 'request')
+    `),
+    )
+    expect(stmts.selectTakingReceiptsForOpenBalls.all()).toEqual([
+      { request_id: "ball", recipient: "owner", message_id: "original", taking_receipt_at_ms: 300 },
+    ])
+    expect(stmts.selectTakingReceiptsForPendingBalls.all()).toEqual([
+      { request_id: "ball", recipient: "owner", message_id: "original", taking_receipt_at_ms: 300 },
+      {
+        request_id: "ball-missing-orig",
+        recipient: "owner",
+        message_id: "missing-original-msg",
+        taking_receipt_at_ms: 250,
+      },
+    ])
+    expect(stmts.getOpenRequestStatus.get({ $name: "owner" })).toEqual({
+      open_request_status_count: null,
+      latest_open_request_status_seq: null,
+    })
+    db.exec("DELETE FROM pending_request WHERE request_id = 'ball-missing-orig'")
+
+    // 5. Meaningful seek / logical-read bound under unrelated-recipient traffic:
+    // Flood `messages` with 2,000 unrelated direct status rows addressed to `caller` after rowid 101.
+    // The old unforced plan (`idx_messages_recipient_kind`) scans every direct message to `caller`
+    // after `originalSequence`, whereas the pinned `idx_messages_status_ref_retire` plan seeks only
+    // matching `(sender, recipient, ref)` keys.
+    db.exec("BEGIN")
+    const insertUnrelated = db.prepare(
+      assertSingleStatement(`
+      INSERT INTO messages (rowid, id, type, sender, recipient, content, ts, kind, ref)
+      VALUES ($rowid, $id, 'status', $sender, 'caller', $content, $ts, 'direct', $ref)
+    `),
+    )
+    const payload = "x".repeat(500)
+    for (let i = 0; i < 2000; i++) {
+      insertUnrelated.run({
+        $rowid: 1000 + i,
+        $id: `unrelated-${i}`,
+        $sender: `peer-${i % 10}`,
+        $content: payload,
+        $ts: 1000 + i,
+        $ref: `unrelated-ref-${i}`,
+      })
+    }
+    db.exec("COMMIT")
+    db.exec("PRAGMA cache_size = 16")
+
+    const readRchar = (): number => {
+      const m = readFileSync("/proc/self/io", "utf8").match(/^rchar:\s+(\d+)/m)
+      return m ? Number(m[1]) : 0
+    }
+    const measureRchar = <T>(fn: () => T): { result: T; rcharBytes: number } => {
+      const before = readRchar()
+      const result = fn()
+      return { result, rcharBytes: readRchar() - before }
+    }
+
+    const legacyUnforcedOpenBallsSql = `
+      SELECT request_id, recipient, message_id, MAX(taking_receipt_at_ms) AS taking_receipt_at_ms
+      FROM (
+        SELECT p.request_id AS request_id, p.recipient, p.message_id, r.ts AS taking_receipt_at_ms
+        FROM pending_request p
+        LEFT JOIN messages pending_message ON pending_message.id = p.message_id
+        LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
+        CROSS JOIN messages r ON r.kind = 'direct' AND r.type = 'status'
+          AND r.sender = p.recipient AND r.recipient = p.sender
+          AND r.ref IS NOT NULL AND (r.ref = p.request_id OR r.ref = p.message_id)
+          AND r.rowid > COALESCE(pending_message.rowid, pending_archive.seq)
+        UNION ALL
+        SELECT p.request_id AS request_id, p.recipient, p.message_id, r.ts AS taking_receipt_at_ms
+        FROM pending_request p
+        LEFT JOIN messages pending_message ON pending_message.id = p.message_id
+        LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
+        CROSS JOIN messages_archive r ON r.kind = 'direct' AND r.type = 'status'
+          AND r.sender = p.recipient AND r.recipient = p.sender
+          AND r.ref IS NOT NULL AND (r.ref = p.request_id OR r.ref = p.message_id)
+          AND r.seq > COALESCE(pending_message.rowid, pending_archive.seq)
+      )
+      GROUP BY request_id, recipient, message_id
+    `
+    expect(plan(db, legacyUnforcedOpenBallsSql)).toContain("idx_messages_recipient_kind")
+    const legacyStmt = db.prepare(assertSingleStatement(legacyUnforcedOpenBallsSql))
+    const legacyRun = measureRchar(() => legacyStmt.all())
+    const boundedOpenRun = measureRchar(() => stmts.selectTakingReceiptsForOpenBalls.all())
+    const boundedPendingRun = measureRchar(() => stmts.selectTakingReceiptsForPendingBalls.all())
+    const boundedStatusRun = measureRchar(() => stmts.getOpenRequestStatus.get({ $name: "caller" }))
+    const boundedPrefixRun = measureRchar(() =>
+      stmts.getOpenRequestStatusesForRefPrefix.all({ $prefix: "ball", $limit: 10 }),
+    )
+
+    expect(boundedOpenRun.result).toEqual(legacyRun.result)
+    expect(boundedPendingRun.result).toEqual(legacyRun.result)
+    expect(boundedStatusRun.result).toEqual({
+      open_request_status_count: 2,
+      latest_open_request_status_seq: 104,
+    })
+    expect((boundedPrefixRun.result as Array<{ id: string }>).map((r) => r.id)).toEqual([
+      "archive-taking",
+      "hot-taking",
+    ])
+    // The unforced recipient_kind plan reads >500 KiB of unrelated table pages for 1 ball,
+    // while each pinned status_ref_retire statement stays bounded (<64 KiB).
+    expect(legacyRun.rcharBytes).toBeGreaterThan(500 * 1024)
+    expect(boundedOpenRun.rcharBytes).toBeLessThan(64 * 1024)
+    expect(boundedPendingRun.rcharBytes).toBeLessThan(64 * 1024)
+    expect(boundedStatusRun.rcharBytes).toBeLessThan(64 * 1024)
+    expect(boundedPrefixRun.rcharBytes).toBeLessThan(64 * 1024)
+
+    // 6. Fresh and upgraded DB preparation proof: reopening an existing DB and opening a fresh DB
+    // both prepare and run all four statements cleanly.
+    const reopened = openDatabase(join(dir, "tribe.db"))
+    try {
+      const reopenedStmts = createStatements(reopened)
+      expect(reopenedStmts.selectTakingReceiptsForOpenBalls.all()).toEqual(legacyRun.result)
+    } finally {
+      reopened.close()
     }
   })
 
