@@ -770,12 +770,13 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           limit: { type: "number", description: "Max event rows to return (default 50, max 500)." },
           advance: {
             type: "boolean",
-            description: "Advance the session cursor after a since/default scan. Default: true only for default drain.",
+            description:
+              "Advance the session cursor after a since/default scan. Default: true only for default drain; pass false (with receipt:false) to peek without consuming.",
           },
           receipt: {
             type: "boolean",
             description:
-              "Default true: the read acknowledges the mailbox as the seat's attention read. false only from a relay that cannot know the model saw the rows.",
+              "Default true: acknowledges the mailbox as the seat's attention read. Pass false (with advance:false) from a helper subagent or relay so the parent seat still sees read-once attention.",
           },
         },
       },

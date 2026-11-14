@@ -319,5 +319,7 @@ describe("Tribe command descriptors", () => {
     const fetch = commandDescriptorByMcpName("fetch")!
     expect(fetch.mcp.outputSchema.properties).not.toHaveProperty("delivery_ack")
     expect(fetch.mcp.outputSchema.properties).not.toHaveProperty("ack_id")
+    expect(JSON.stringify(fetch.mcp.inputSchema.properties?.advance)).toContain("receipt:false")
+    expect(JSON.stringify(fetch.mcp.inputSchema.properties?.receipt)).toContain("advance:false")
   })
 })

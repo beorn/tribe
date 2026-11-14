@@ -2105,6 +2105,28 @@ describe("dispatcher bounded mailbox drain", () => {
     expect((await read(true)).attention.actionable_unread).toEqual([])
   })
 
+  it("01M3E1QX: a subagent transport that peeks with advance:false, receipt:false preserves read-once attention for the parent's default fetch", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-parent")
+    await harness.register("conn-parent", { name: "@dev/11", pid: liveHolderPid, project: "/tmp/wt11" })
+    harness.addTransport("conn-subagent", "conn-parent", liveHolderPid)
+    const body = "an answered ruling the parent must see"
+    harness.sendAttentionResponse("@dev/11", body)
+    const fetch = async (connId: string, params: Record<string, unknown> = { limit: 50 }) =>
+      parseResult<{ structuredContent: { attention: { actionable_unread: Array<{ content: string }> } } }>(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: `fetch-${connId}`, method: "tribe.fetch", params },
+          connId,
+        ),
+      ).structuredContent
+    const bySubagentPeek = await fetch("conn-subagent", { limit: 50, advance: false, receipt: false })
+    const byParent = await fetch("conn-parent")
+    expect(bySubagentPeek.attention.actionable_unread.map((row) => row.content)).toContain(body)
+    expect(byParent.attention.actionable_unread.map((row) => row.content)).toContain(body)
+    expect((await fetch("conn-parent")).attention.actionable_unread).toEqual([])
+  })
+
   it("counts attention-required responses through the canonical inbox projection", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose

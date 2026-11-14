@@ -2178,7 +2178,7 @@ async function cmdInboxDrain(opts: {
         `${result.unread_count} remaining.`,
     )
     console.log(
-      `\n(Note: this drain consumed the messages and advanced the cursor. Use --peek to read without consuming.)`,
+      `\n(Note: this drain consumed the messages and advanced the cursor. Use --peek to read without consuming; recover consumed rows with: ${JSON_TO_FILE_RECOVERY})`,
     )
   }
 }
@@ -2402,13 +2402,15 @@ function projectInboxDrainFailure(error: unknown): InboxDrainFailureProjection {
   }
 }
 
-function renderInboxDrainFailure(error: unknown, json: boolean): void {
+export function renderInboxDrainFailure(error: unknown, json: boolean): void {
   const failure = projectInboxDrainFailure(error)
   if (json) {
     console.error(JSON.stringify({ error: failure }))
     return
   }
-  console.error(`tribe inbox-drain: ${failure.kind} — ${failure.message} (reason=${failure.reason})`)
+  console.error(
+    `tribe inbox-drain: ${failure.kind} — ${failure.message} (reason=${failure.reason}); recover already-consumed rows with: ${JSON_TO_FILE_RECOVERY}`,
+  )
 }
 
 /** Machine-readable failure for `tribe inbox --json`. Stdout must not be empty: an empty document reads as an empty inbox (#27089). */
