@@ -12,8 +12,7 @@
 import { describe, expect, it } from "vitest"
 import { cpuPressureReading } from "./cpu-pressure"
 
-const measured = (cpuSomeAvg60Percent: number) =>
-  ({ kind: "supported", value: { cpuSomeAvg60Percent } }) as const
+const measured = (cpuSomeAvg60Percent: number) => ({ kind: "supported", value: { cpuSomeAvg60Percent } }) as const
 
 describe("cpuPressureReading", () => {
   it("passes through the percentage the host:scalars fact reported", () => {
@@ -36,7 +35,8 @@ describe("cpuPressureReading", () => {
   it("calls an absent metric a platform limit and keeps the producer's reason", () => {
     expect(cpuPressureReading(undefined)).toEqual({
       kind: "absent",
-      detail: "the host:scalars fact carries no pressure metric (a producer that predates the field, or one that declined it)",
+      detail:
+        "the host:scalars fact carries no pressure metric (a producer that predates the field, or one that declined it)",
     })
     expect(
       cpuPressureReading({
@@ -54,7 +54,12 @@ describe("cpuPressureReading", () => {
 
   it("calls a failed read unreadable, naming the producer's reason", () => {
     for (const reason of ["access-denied", "provider-error", "source-protocol-invalid"]) {
-      const reading = cpuPressureReading({ kind: "unavailable", metric: "pressure", reason, detail: "/proc/pressure/cpu" })
+      const reading = cpuPressureReading({
+        kind: "unavailable",
+        metric: "pressure",
+        reason,
+        detail: "/proc/pressure/cpu",
+      })
       expect(reading.kind).toBe("unreadable")
       expect(reading.kind === "unreadable" && reading.detail).toContain(`${reason}: /proc/pressure/cpu`)
     }

@@ -338,9 +338,7 @@ describe("health monitor managed process source", () => {
     const withPressure = (pressure: unknown) =>
       managed(observation(), { ...base, values: { ...base.values, pressure } } as typeof base)
 
-    const measured = await collectFullMetrics(
-      withPressure({ kind: "supported", value: { cpuSomeAvg60Percent: 2.55 } }),
-    )
+    const measured = await collectFullMetrics(withPressure({ kind: "supported", value: { cpuSomeAvg60Percent: 2.55 } }))
     expect(measured.metrics.cpu.cpuPressure).toEqual({ kind: "measured", someAvg60Percent: 2.55 })
 
     const absent = await collectFullMetrics(
@@ -369,7 +367,8 @@ describe("health monitor managed process source", () => {
     const omitted = await collectFullMetrics(managed(observation(), base))
     expect(omitted.metrics.cpu.cpuPressure).toEqual({
       kind: "absent",
-      detail: "the host:scalars fact carries no pressure metric (a producer that predates the field, or one that declined it)",
+      detail:
+        "the host:scalars fact carries no pressure metric (a producer that predates the field, or one that declined it)",
     })
     spawn.mockRestore()
   })

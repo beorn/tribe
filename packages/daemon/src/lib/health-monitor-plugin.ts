@@ -74,9 +74,11 @@ const CPU_OFFENDER_MIN_PERCENT = 3
 function cpuPressureClause(cpu: HealthMetrics["cpu"]): string {
   // A standalone metric never read `procs_running` (30382: only a canonical fact carries it), so the sentence
   // must not claim a runnable reading that was never taken (@cto, 34311-psi-source-ruling).
-  const rule = cpu.runnableTasks === undefined && cpu.runnableUnavailable === undefined ? "load" : "load and runnable depth"
+  const rule =
+    cpu.runnableTasks === undefined && cpu.runnableUnavailable === undefined ? "load" : "load and runnable depth"
   const pressure = cpu.cpuPressure
-  if (pressure === undefined) return ` Busy-host notice, not evidence of starvation: this rule reads ${rule} only, and no CPU pressure reading gates it yet.`
+  if (pressure === undefined)
+    return ` Busy-host notice, not evidence of starvation: this rule reads ${rule} only, and no CPU pressure reading gates it yet.`
   switch (pressure.kind) {
     case "measured":
       return ` CPU pressure some avg60 ${pressure.someAvg60Percent.toFixed(2)}% from the same host:scalars fact; no pressure floor gates this page yet.`

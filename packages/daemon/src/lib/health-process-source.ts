@@ -241,16 +241,7 @@ export type CanonicalProcessObservation =
 type ScalarUnavailableMetric = {
   readonly detail?: string
   readonly kind: "unavailable"
-  readonly metric:
-    | "cpu"
-    | "disk"
-    | "disk.inodes"
-    | "diskIo"
-    | "memory"
-    | "oomKill"
-    | "pressure"
-    | "runnable"
-    | "swap"
+  readonly metric: "cpu" | "disk" | "disk.inodes" | "diskIo" | "memory" | "oomKill" | "pressure" | "runnable" | "swap"
   readonly platform: string
   readonly reason: string
 }

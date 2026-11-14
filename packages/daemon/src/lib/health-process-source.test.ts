@@ -579,10 +579,7 @@ describe("neutral health process source", () => {
     ],
     ["oomKill without a value", (payload: any) => (payload.values.oomKill = { kind: "supported" })],
     // 34311: a PRESENT but malformed pressure metric is a protocol violation, never read as "no stall".
-    [
-      "pressure without a percentage",
-      (payload: any) => (payload.values.pressure = { kind: "supported", value: {} }),
-    ],
+    ["pressure without a percentage", (payload: any) => (payload.values.pressure = { kind: "supported", value: {} })],
     [
       "pressure whose percentage is text",
       (payload: any) => (payload.values.pressure = { kind: "supported", value: { cpuSomeAvg60Percent: "2.5" } }),
