@@ -119,7 +119,10 @@ export type LlmQueryOpts = {
 export type LlmBackend = {
   /** Set only on an invocation view, never on the cached host backend. */
   readonly allowMetered?: boolean
-  resolveQueryRoute?: (model: LlmModel, context?: { hasImage?: boolean }) => { kind: "local" | "subscription" | "metered" }
+  resolveQueryRoute?: (
+    model: LlmModel,
+    context?: { hasImage?: boolean },
+  ) => { kind: "local" | "subscription" | "metered" }
   queryModel: (opts: LlmQueryOpts) => Promise<LlmQueryResult>
   getModel: (idOrName: string) => LlmModel | undefined
   getCheapModel: () => LlmModel | undefined
@@ -275,13 +278,16 @@ export function selectAvailableCheapModels(
       limit,
     })
     const models = shared.selected
-    const rejected: RejectedCheapModel[] = [...routeRejected, ...shared.excluded.map((entry) => ({
-      ...entry.model,
-      reason: entry.reason,
-      status: entry.status,
-      ...(entry.kind !== undefined ? { kind: entry.kind } : {}),
-      ...(entry.ageMs !== undefined ? { ageMs: entry.ageMs } : {}),
-    }))]
+    const rejected: RejectedCheapModel[] = [
+      ...routeRejected,
+      ...shared.excluded.map((entry) => ({
+        ...entry.model,
+        reason: entry.reason,
+        status: entry.status,
+        ...(entry.kind !== undefined ? { kind: entry.kind } : {}),
+        ...(entry.ageMs !== undefined ? { ageMs: entry.ageMs } : {}),
+      })),
+    ]
     const sharedOrder = `${order}; shared facts rank available before unknown, then typicalLatencyMs`
     const failure =
       models.length > 0
@@ -409,7 +415,12 @@ type LlmBarrelModule = Pick<
   createProviderObservationStore: () => unknown
   readProviderAvailability: (
     provider: string,
-    options: { store: unknown; now: number; env?: Readonly<Record<string, string | undefined>>; requireApiKey?: boolean },
+    options: {
+      store: unknown
+      now: number
+      env?: Readonly<Record<string, string | undefined>>
+      requireApiKey?: boolean
+    },
   ) => Promise<LlmProviderAvailabilityFact>
   selectModels: NonNullable<LlmBackend["selectModels"]>
   describeDispatchFailure: (
@@ -490,7 +501,9 @@ export function buildFormatProviderError(
  * policy input, but is passed to the selector as an explicit exclusion set;
  * it no longer falsifies the source-compatible credential-presence boolean.
  */
-export async function loadLlm(options: { allowMetered?: boolean; backend?: LlmBackend } = {}): Promise<LlmBackend | null> {
+export async function loadLlm(
+  options: { allowMetered?: boolean; backend?: LlmBackend } = {},
+): Promise<LlmBackend | null> {
   const allowMetered = readMeteredConsent(options.allowMetered) ?? false
   if (options.backend) return invocationBackend(options.backend, allowMetered)
   probe ??= (async () => {
@@ -510,11 +523,12 @@ export async function loadLlm(options: { allowMetered?: boolean; backend?: LlmBa
       return {
         queryModel: bearly.queryModel,
         resolveQueryRoute: bearly.resolveQueryRoute,
-        readProviderFact: (provider, requireApiKey) => bearly.readProviderAvailability(provider, {
-          store: observationStore,
-          now: Date.now(),
-          requireApiKey,
-        }),
+        readProviderFact: (provider, requireApiKey) =>
+          bearly.readProviderAvailability(provider, {
+            store: observationStore,
+            now: Date.now(),
+            requireApiKey,
+          }),
         getModel: bearly.getModel,
         getCheapModel: bearly.getCheapModel,
         getCheapModels: bearly.getCheapModels,
@@ -558,10 +572,15 @@ export async function loadLlm(options: { allowMetered?: boolean; backend?: LlmBa
 
 /** Read route-specific observations once into this invocation, keeping consent out of the host cache. */
 async function invocationBackend(host: LlmHost, allowMetered: boolean): Promise<LlmBackend> {
-  const candidates = host.readProviderFact ? [
-    ...host.getCheapModels(Number.MAX_SAFE_INTEGER),
-    ...Object.values(BUDGETED_MODEL_IDS).flat().map((id) => host.getModel(id)).filter((model): model is LlmModel => !!model),
-  ] : []
+  const candidates = host.readProviderFact
+    ? [
+        ...host.getCheapModels(Number.MAX_SAFE_INTEGER),
+        ...Object.values(BUDGETED_MODEL_IDS)
+          .flat()
+          .map((id) => host.getModel(id))
+          .filter((model): model is LlmModel => !!model),
+      ]
+    : []
   const factsByModel = new Map<string, LlmProviderAvailabilityFact>()
   const key = (model: LlmModel): string => `${model.provider}/${model.modelId}`
   const readFact = async (model: LlmModel): Promise<void> => {
@@ -573,10 +592,12 @@ async function invocationBackend(host: LlmHost, allowMetered: boolean): Promise<
   // The shared selector accepts one real observation per provider, even when
   // several route-eligible models belong to that provider.
   const factsForModels = (models: readonly LlmModel[]): LlmProviderAvailabilityFact[] => [
-    ...new Map(models.flatMap((model) => {
-      const fact = factsByModel.get(key(model))
-      return fact ? [[fact.provider, fact] as const] : []
-    })).values(),
+    ...new Map(
+      models.flatMap((model) => {
+        const fact = factsByModel.get(key(model))
+        return fact ? [[fact.provider, fact] as const] : []
+      }),
+    ).values(),
   ]
   const providerFacts = host.readProviderFact ? factsForModels(candidates) : [...(host.providerFacts ?? [])]
   const view: LlmBackend = {
@@ -592,17 +613,29 @@ async function invocationBackend(host: LlmHost, allowMetered: boolean): Promise<
       return result
     },
   }
-  if (host.selectModels) {
+  const selectModels = host.selectModels
+  if (selectModels) {
     view.selectModels = (options) => {
       const refused: LlmModelSelectionResult["excluded"] = []
       const eligible = (options.candidates ?? candidates).filter((model) => {
         const fact = factsByModel.get(key(model))
         if (fact?.status !== "refusing" || fact.kind !== "credential-missing") return true
-        refused.push({ model, provider: model.provider, status: "refusing", source: fact.source, reason: fact.reason, kind: fact.kind })
+        refused.push({
+          model,
+          provider: model.provider,
+          status: "refusing",
+          source: fact.source,
+          reason: fact.reason,
+          kind: fact.kind,
+        })
         return false
       })
       const facts = factsForModels(eligible)
-      const selected = host.selectModels!({ ...options, candidates: eligible, facts: host.readProviderFact ? facts : options.facts })
+      const selected = selectModels({
+        ...options,
+        candidates: eligible,
+        facts: host.readProviderFact ? facts : options.facts,
+      })
       return { ...selected, excluded: [...refused, ...selected.excluded] }
     }
   }
@@ -614,7 +647,10 @@ async function invocationBackend(host: LlmHost, allowMetered: boolean): Promise<
  * (planner, synthesis explicitly requested) — never for opportunistic
  * enrichment.
  */
-export async function requireLlm(feature: string, options: { allowMetered?: boolean; backend?: LlmBackend } = {}): Promise<LlmBackend> {
+export async function requireLlm(
+  feature: string,
+  options: { allowMetered?: boolean; backend?: LlmBackend } = {},
+): Promise<LlmBackend> {
   const llm = await loadLlm(options)
   if (!llm) {
     throw new Error(

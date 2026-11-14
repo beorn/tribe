@@ -469,9 +469,11 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
       // Recall quality recommendations
       if (!recallTest.synthesisOk) {
         const exclusions = result.synthesisFailure?.excludedProviders ?? []
-        const reason = exclusions.length > 0
-          ? exclusions.map((entry) => `${entry.modelId} (${entry.provider}): ${entry.reason}`).join("; ")
-          : result.synthesisFailure?.summary ?? `no synthesized answer for "${testQuery}" from ${result.results.length} lexical results`
+        const reason =
+          exclusions.length > 0
+            ? exclusions.map((entry) => `${entry.modelId} (${entry.provider}): ${entry.reason}`).join("; ")
+            : (result.synthesisFailure?.summary ??
+              `no synthesized answer for "${testQuery}" from ${result.results.length} lexical results`)
         recommendations.push(`LLM synthesis failed — ${reason}`)
       } else {
         if (recallTest.synthesisLength < 50) {
@@ -569,7 +571,9 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
           `review: racing "${q}" context=${context.length} chars across [${raceModels.map((m) => m.modelId).join(", ")}]`,
         )
 
-        const race = await raceLlmModels(context, SYNTHESIS_PROMPT, raceModels, raceTimeoutMs, reviewLlm ?? undefined, { allowMetered: opts.allowMetered })
+        const race = await raceLlmModels(context, SYNTHESIS_PROMPT, raceModels, raceTimeoutMs, reviewLlm ?? undefined, {
+          allowMetered: opts.allowMetered,
+        })
 
         raceResults.push({
           query: q,

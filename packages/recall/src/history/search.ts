@@ -959,7 +959,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const llm = await loadLlm({ backend: options.deps?.llm, allowMetered: options.allowMetered })
     let synthesis
     try {
-      synthesis = await synthesizeResults(query, deduped, timeout, llm ?? undefined, { allowMetered: options.allowMetered })
+      synthesis = await synthesizeResults(query, deduped, timeout, llm ?? undefined, {
+        allowMetered: options.allowMetered,
+      })
     } catch (err) {
       const failure = synthesisDiagnosticsFromError(err, timeout)
       const llmMs = Date.now() - llmStart

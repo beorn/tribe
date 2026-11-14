@@ -313,7 +313,10 @@ async function handlePlanOnly(args: Record<string, unknown>): Promise<string> {
   const daemon = await getDaemon()
   if (daemon) {
     try {
-      const result = (await daemon.call(TRIBE_METHODS.planOnly, { query, allowMetered: args.allowMetered === true })) as PlanOnlyResult
+      const result = (await daemon.call(TRIBE_METHODS.planOnly, {
+        query,
+        allowMetered: args.allowMetered === true,
+      })) as PlanOnlyResult
       return JSON.stringify({ ...result, mode: "daemon" }, null, 2)
     } catch (err) {
       if (process.env.TRIBE_LOG === "1") {

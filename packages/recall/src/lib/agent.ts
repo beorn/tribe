@@ -192,7 +192,12 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   const requiredResolution: RequiredIdResolution = resolveRequiredIssueIds(query, options.vaultDb ?? getVaultDbPath())
   const requiredIds = requiredResolution.required
 
-  const planR1 = await planQuery(query, context, { round: 1, timeoutMs: planTimeoutMs, llm, allowMetered: options.allowMetered })
+  const planR1 = await planQuery(query, context, {
+    round: 1,
+    timeoutMs: planTimeoutMs,
+    llm,
+    allowMetered: options.allowMetered,
+  })
   planElapsed.push(planR1.elapsedMs)
   plannerCalls.push(...planR1.calls)
 
@@ -634,7 +639,8 @@ async function fallthrough(
   priorCalls: LlmCostCall[] = [],
   llm?: LlmBackend,
 ): Promise<AgentRecallResult> {
-  const backend = (await loadLlm({ backend: llm ?? options.deps?.llm, allowMetered: options.allowMetered })) ?? undefined
+  const backend =
+    (await loadLlm({ backend: llm ?? options.deps?.llm, allowMetered: options.allowMetered })) ?? undefined
   const baseline = await recall(query, { ...options, deps: { ...options.deps, llm: backend } })
   const calls = [...priorCalls, ...(baseline.calls ?? [])]
   const baselineResult = { ...baseline }

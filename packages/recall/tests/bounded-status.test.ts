@@ -20,7 +20,10 @@ const CLI = join(import.meta.dirname, "..", "src", "cli.ts")
 
 let home: string
 
-function runStatus(args: string[], extraEnv: NodeJS.ProcessEnv = {}): { status: number | null; stdout: string; stderr: string; elapsedMs: number } {
+function runStatus(
+  args: string[],
+  extraEnv: NodeJS.ProcessEnv = {},
+): { status: number | null; stdout: string; stderr: string; elapsedMs: number } {
   const start = Date.now()
   const res = spawnSync(process.execPath, [CLI, "status", ...args], {
     encoding: "utf8",
@@ -47,8 +50,15 @@ describe("recall status (bounded by default)", () => {
     const fixture = join(home, "llm-host")
     const callsPath = join(home, "dispatches.jsonl")
     mkdirSync(fixture)
-    const fixtureEnv = { RECALL_DB_PATH: dbPath, TRIBE_LLM_DIR: fixture, RECALL_LLM_DENY_PROVIDERS: "", CONSENT_CALLS: callsPath }
-    writeFileSync(join(fixture, "index.ts"), `
+    const fixtureEnv = {
+      RECALL_DB_PATH: dbPath,
+      TRIBE_LLM_DIR: fixture,
+      RECALL_LLM_DENY_PROVIDERS: "",
+      CONSENT_CALLS: callsPath,
+    }
+    writeFileSync(
+      join(fixture, "index.ts"),
+      `
       import { appendFileSync } from "node:fs"
       const models = [
         { provider: "openrouter", modelId: "deepseek/deepseek-chat" },
@@ -74,25 +84,39 @@ describe("recall status (bounded by default)", () => {
       export const serializeCost = () => ({ cost_usd: 0, list_equivalent_usd: 0, list_equivalent_basis: [] })
       export const deserializeCost = () => cost
       export const describeDispatchFailure = (error) => ({ message: String(error) })
-    `)
+    `,
+    )
     expect(runStatus(["--json"], fixtureEnv).status).toBe(0)
     const db = new Database(dbPath)
     try {
       const now = Date.now()
-      db.prepare("INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, cwd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run("consent-session", "/fixture", "/fixture/transcript.jsonl", now, now, 1, "inline edit", "/fixture")
-      db.prepare("INSERT INTO messages (uuid, session_id, type, content, timestamp) VALUES (?, ?, ?, ?, ?)").run("consent-message", "consent-session", "user", "inline edit bug fix test project knowledge", now)
+      db.prepare(
+        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, cwd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("consent-session", "/fixture", "/fixture/transcript.jsonl", now, now, 1, "inline edit", "/fixture")
+      db.prepare("INSERT INTO messages (uuid, session_id, type, content, timestamp) VALUES (?, ?, ?, ?, ?)").run(
+        "consent-message",
+        "consent-session",
+        "user",
+        "inline edit bug fix test project knowledge",
+        now,
+      )
     } finally {
       db.close()
     }
     const ordinary = runStatus(["--json", "--bench"], fixtureEnv)
     expect(ordinary.status, ordinary.stderr).toBe(0)
     expect(existsSync(callsPath)).toBe(false)
-    expect(JSON.parse(ordinary.stdout).recommendations.join(" ")).toContain("no unpaid route for deepseek/deepseek-chat")
+    expect(JSON.parse(ordinary.stdout).recommendations.join(" ")).toContain(
+      "no unpaid route for deepseek/deepseek-chat",
+    )
     const optedIn = runStatus(["--json", "--bench", "--allow-metered"], fixtureEnv)
     expect(optedIn.status, optedIn.stderr).toBe(0)
-    const calls = readFileSync(callsPath, "utf8").trim().split("\n").map(line => JSON.parse(line))
+    const calls = readFileSync(callsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
     expect(calls.length).toBeGreaterThan(0)
-    expect(calls.every(call => call.consent === true)).toBe(true)
+    expect(calls.every((call) => call.consent === true)).toBe(true)
   })
 
   test("default JSON omits both LLM stages and flags bounded mode", () => {

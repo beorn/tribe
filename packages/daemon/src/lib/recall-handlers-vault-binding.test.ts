@@ -135,7 +135,10 @@ describe("the daemon's ask names its --vault-db on the agent call", () => {
         vaultDbPath,
       })
       try {
-        await handlers.dispatch({ sessionId: `s-${name}`, claudePid: null }, TRIBE_METHODS.ask, { query: "q", allowMetered })
+        await handlers.dispatch({ sessionId: `s-${name}`, claudePid: null }, TRIBE_METHODS.ask, {
+          query: "q",
+          allowMetered,
+        })
       } finally {
         await handlers.close()
       }
@@ -145,6 +148,8 @@ describe("the daemon's ask names its --vault-db on the agent call", () => {
       null,
       null,
     ])
-    expect(recallAgentMock.mock.calls.map(([, options]) => (options as { allowMetered?: boolean }).allowMetered)).toEqual([true, false, undefined])
+    expect(
+      recallAgentMock.mock.calls.map(([, options]) => (options as { allowMetered?: boolean }).allowMetered),
+    ).toEqual([true, false, undefined])
   })
 })

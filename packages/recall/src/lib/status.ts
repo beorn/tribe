@@ -86,7 +86,12 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean; allowMe
         closeDb()
       }
     }
-    const review = await reviewMemorySystem(projectRoot, { skipLlm, skipSearchBenchmarks, vaultDb, allowMetered: opts.allowMetered })
+    const review = await reviewMemorySystem(projectRoot, {
+      skipLlm,
+      skipSearchBenchmarks,
+      vaultDb,
+      allowMetered: opts.allowMetered,
+    })
     console.log(JSON.stringify({ ...review, sessionDiscovery, ...(vaultSemantic ? { vaultSemantic } : {}) }, null, 2))
     return
   }
@@ -324,7 +329,12 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean; allowMe
   }
 
   // ── Hook Configuration ──────────────────────────────────────────────
-  const review = await reviewMemorySystem(projectRoot, { skipLlm, skipSearchBenchmarks, vaultDb, allowMetered: opts.allowMetered })
+  const review = await reviewMemorySystem(projectRoot, {
+    skipLlm,
+    skipSearchBenchmarks,
+    vaultDb,
+    allowMetered: opts.allowMetered,
+  })
   const hk = review.hookConfig
 
   console.log(`${BOLD}Hook Configuration${RESET}`)

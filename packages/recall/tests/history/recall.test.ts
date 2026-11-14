@@ -564,32 +564,50 @@ describe("recall integration", () => {
 describe("synthesizeResults", () => {
   // 33909: an injected host is not caller consent. The backend test cannot
   // catch a synthesis entry point bypassing the invocation view entirely.
-  test.each([undefined, false, true])("requires metered opt-in for an injected synthesis backend: %s", async (allowMetered) => {
-    const model: LlmModel = { provider: "openrouter", modelId: "metered-fixture" }
-    const queried: string[] = []
-    const llm: LlmBackend = {
-      queryModel: async ({ model }) => {
-        queried.push(model.modelId)
-        return { response: { content: "explicitly authorized answer" } }
-      },
-      resolveQueryRoute: () => ({ kind: "metered" }),
-      getModel: () => model,
-      budgetedModelIds: [model.modelId],
-      getCheapModel: () => model,
-      getCheapModels: () => [model],
-      isProviderAvailable: () => true,
-      ...unavailableCostMethods,
-    }
-    const results = [{ type: "message" as const, sessionId: "consent-fixture", sessionTitle: "Consent", timestamp: 1, snippet: "retained lexical evidence", rank: 1 }]
-    const call = synthesizeResults("consent", results, 1000, llm, { allowMetered })
-    if (allowMetered) {
-      expect((await call).text).toBe("explicitly authorized answer")
-      expect(queried).toEqual([model.modelId])
-    } else {
-      await expect(call).rejects.toMatchObject({ diagnostics: { excludedProviders: [expect.objectContaining({ modelId: model.modelId, reason: "no unpaid route for metered-fixture" })] } })
-      expect(queried).toEqual([])
-    }
-  })
+  test.each([undefined, false, true])(
+    "requires metered opt-in for an injected synthesis backend: %s",
+    async (allowMetered) => {
+      const model: LlmModel = { provider: "openrouter", modelId: "metered-fixture" }
+      const queried: string[] = []
+      const llm: LlmBackend = {
+        queryModel: async ({ model }) => {
+          queried.push(model.modelId)
+          return { response: { content: "explicitly authorized answer" } }
+        },
+        resolveQueryRoute: () => ({ kind: "metered" }),
+        getModel: () => model,
+        budgetedModelIds: [model.modelId],
+        getCheapModel: () => model,
+        getCheapModels: () => [model],
+        isProviderAvailable: () => true,
+        ...unavailableCostMethods,
+      }
+      const results = [
+        {
+          type: "message" as const,
+          sessionId: "consent-fixture",
+          sessionTitle: "Consent",
+          timestamp: 1,
+          snippet: "retained lexical evidence",
+          rank: 1,
+        },
+      ]
+      const call = synthesizeResults("consent", results, 1000, llm, { allowMetered })
+      if (allowMetered) {
+        expect((await call).text).toBe("explicitly authorized answer")
+        expect(queried).toEqual([model.modelId])
+      } else {
+        await expect(call).rejects.toMatchObject({
+          diagnostics: {
+            excludedProviders: [
+              expect.objectContaining({ modelId: model.modelId, reason: "no unpaid route for metered-fixture" }),
+            ],
+          },
+        })
+        expect(queried).toEqual([])
+      }
+    },
+  )
 
   test("uses the shared provider selector so explicit exclusions never reach the synthesis race", async () => {
     const models: LlmModel[] = [

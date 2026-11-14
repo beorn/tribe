@@ -271,7 +271,9 @@ describe("loadLlm shared provider-health surface", () => {
   // A JS caller's malformed flag must never become truthy billing consent.
   test.each(["true", 1, null])("rejects invalid metered consent %s", async (allowMetered) => {
     const backend = selectionBackend({ candidates: [], available: [] })
-    await expect(loadLlm({ backend, allowMetered: allowMetered as unknown as boolean })).rejects.toThrow("allowMetered must be a boolean")
+    await expect(loadLlm({ backend, allowMetered: allowMetered as unknown as boolean })).rejects.toThrow(
+      "allowMetered must be a boolean",
+    )
     expect(backend.queryModel).not.toHaveBeenCalled()
   })
 
@@ -281,7 +283,9 @@ describe("loadLlm shared provider-health surface", () => {
   test("isolates concurrent metered opt-in from default selection and dispatch", () => {
     const fixture = mkdtempSync(join(tmpdir(), "recall-llm-consent-"))
     const backendModule = pathToFileURL(resolve(import.meta.dirname, "../../src/lib/llm-backend.ts")).href
-    writeFileSync(join(fixture, "index.ts"), `
+    writeFileSync(
+      join(fixture, "index.ts"),
+      `
       const paid = { provider: "openai", modelId: "paid-only" }
       const subscription = { provider: "openai", modelId: "subscription" }
       export const calls = []
@@ -311,7 +315,8 @@ describe("loadLlm shared provider-health surface", () => {
       export const serializeCost = () => ({})
       export const deserializeCost = () => ({})
       export const describeDispatchFailure = (error) => ({ message: String(error) })
-    `)
+    `,
+    )
     const childScript = `
       const { loadLlm, selectAvailableCheapModels } = await import(process.env.LLM_BACKEND_MODULE)
       const [allowed, ordinary] = await Promise.all([loadLlm({ allowMetered: true }), loadLlm()])
@@ -336,13 +341,20 @@ describe("loadLlm shared provider-health surface", () => {
     try {
       const child = spawnSync("bun", ["-e", childScript], {
         encoding: "utf8",
-        env: { ...process.env, LLM_BACKEND_MODULE: backendModule, TRIBE_LLM_DIR: fixture, RECALL_LLM_DENY_PROVIDERS: "" },
+        env: {
+          ...process.env,
+          LLM_BACKEND_MODULE: backendModule,
+          TRIBE_LLM_DIR: fixture,
+          RECALL_LLM_DENY_PROVIDERS: "",
+        },
       })
       expect(child.status, child.stderr).toBe(0)
       const result = JSON.parse(child.stdout)
       expect(result.selected).toEqual(["subscription"])
       expect(result.allowedSelected).toContain("paid-only")
-      expect(result.rejected).toContainEqual(expect.objectContaining({ modelId: "paid-only", reason: "no unpaid route for paid-only" }))
+      expect(result.rejected).toContainEqual(
+        expect.objectContaining({ modelId: "paid-only", reason: "no unpaid route for paid-only" }),
+      )
       expect(result.calls).toEqual([{ model: "paid-only", consent: true }])
       expect(result.allowed.content).toBe("answer")
       expect(result.ordinary).toMatchObject({ content: "", error: "no unpaid route for paid-only" })
