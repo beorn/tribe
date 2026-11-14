@@ -11,7 +11,7 @@ import { assertSingleStatement } from "@bearly/sqlite"
  */
 import { describe, test, expect, beforeEach, afterEach } from "vitest"
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs"
 import { Database } from "bun:sqlite"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -20,12 +20,15 @@ const CLI = join(import.meta.dirname, "..", "src", "cli.ts")
 
 let home: string
 
-function runStatus(args: string[]): { status: number | null; stdout: string; stderr: string; elapsedMs: number } {
+function runStatus(
+  args: string[],
+  extraEnv: NodeJS.ProcessEnv = {},
+): { status: number | null; stdout: string; stderr: string; elapsedMs: number } {
   const start = Date.now()
   const res = spawnSync(process.execPath, [CLI, "status", ...args], {
     encoding: "utf8",
     timeout: 60_000,
-    env: { ...process.env, HOME: home, TRIBE_LLM_DIR: "" },
+    env: { ...process.env, HOME: home, TRIBE_LLM_DIR: "", ...extraEnv },
   })
   return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "", elapsedMs: Date.now() - start }
 }
@@ -39,6 +42,82 @@ afterEach(() => {
 })
 
 describe("recall status (bounded by default)", () => {
+  // 33909 / CTO d7ecb647: exercise the real CLI and benchmark paths against
+  // a host that records EVERY dispatch and deliberately has no consent guard.
+  // The opted-in control proves the same corpus actually reaches model calls.
+  test("--bench needs explicit metered consent before dispatching", () => {
+    const dbPath = join(home, "session-index.db")
+    const fixture = join(home, "llm-host")
+    const callsPath = join(home, "dispatches.jsonl")
+    mkdirSync(fixture)
+    const fixtureEnv = {
+      RECALL_DB_PATH: dbPath,
+      TRIBE_LLM_DIR: fixture,
+      RECALL_LLM_DENY_PROVIDERS: "",
+      CONSENT_CALLS: callsPath,
+    }
+    writeFileSync(
+      join(fixture, "index.ts"),
+      `
+      import { appendFileSync } from "node:fs"
+      const models = [
+        { provider: "openrouter", modelId: "deepseek/deepseek-chat" },
+        { provider: "google", modelId: "gemini-2.5-flash" },
+      ]
+      export const queryModel = async (options) => {
+        appendFileSync(process.env.CONSENT_CALLS, JSON.stringify({ model: options.model.modelId, consent: options.allowMetered }) + "\\n")
+        return { response: { model: options.model, content: "Fixture synthesis retains the indexed inline edit evidence without any provider request." } }
+      }
+      export const resolveQueryRoute = () => ({ kind: "metered" })
+      export const getModel = (id) => models.find(model => model.modelId === id)
+      export const getCheapModel = () => models[0]
+      export const getCheapModels = () => models
+      export const isProviderAvailable = () => true
+      export const createProviderObservationStore = () => ({})
+      export const readProviderAvailability = async (provider) => ({ provider, status: "unknown", source: "fixture", reason: "no stored observation" })
+      export const selectModels = ({ candidates, limit }) => ({ candidates, selected: candidates.slice(0, limit), excluded: [], evidence: [] })
+      const cost = { charged: { usd: 0 }, listEquivalent: { usd: 0 }, listEquivalentBasis: [] }
+      export const resolveResponseCost = () => cost
+      export const aggregateCosts = () => cost
+      export const averageCost = () => cost
+      export const formatCostColumns = () => "fixture cost"
+      export const serializeCost = () => ({ cost_usd: 0, list_equivalent_usd: 0, list_equivalent_basis: [] })
+      export const deserializeCost = () => cost
+      export const describeDispatchFailure = (error) => ({ message: String(error) })
+    `,
+    )
+    expect(runStatus(["--json"], fixtureEnv).status).toBe(0)
+    const db = new Database(dbPath)
+    try {
+      const now = Date.now()
+      db.prepare(
+        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, cwd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("consent-session", "/fixture", "/fixture/transcript.jsonl", now, now, 1, "inline edit", "/fixture")
+      db.prepare("INSERT INTO messages (uuid, session_id, type, content, timestamp) VALUES (?, ?, ?, ?, ?)").run(
+        "consent-message",
+        "consent-session",
+        "user",
+        "inline edit bug fix test project knowledge",
+        now,
+      )
+    } finally {
+      db.close()
+    }
+    const ordinary = runStatus(["--json", "--bench"], fixtureEnv)
+    expect(ordinary.status, ordinary.stderr).toBe(0)
+    expect(existsSync(callsPath)).toBe(false)
+    const ordinaryReview = JSON.parse(ordinary.stdout) as { recommendations: string[] }
+    expect(ordinaryReview.recommendations.join(" ")).toContain("no unpaid route for deepseek/deepseek-chat")
+    const optedIn = runStatus(["--json", "--bench", "--allow-metered"], fixtureEnv)
+    expect(optedIn.status, optedIn.stderr).toBe(0)
+    const calls = readFileSync(callsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { model: string; consent: boolean })
+    expect(calls.length).toBeGreaterThan(0)
+    expect(calls.every((call) => call.consent === true)).toBe(true)
+  })
+
   test("default JSON omits both LLM stages and flags bounded mode", () => {
     const { status, stdout } = runStatus(["--json"])
     expect(status).toBe(0)

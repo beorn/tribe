@@ -224,6 +224,7 @@ describe("planQuery provider fallback", () => {
         getCheapModel: () => model,
         getCheapModels: () => [model],
         ...unavailableCostMethods,
+        resolveQueryRoute: () => ({ kind: "local" }),
         isProviderAvailable: () => true,
       } satisfies LlmBackend
       const options = mode === "round1" ? { round: 1 as const } : { round: 2 as const, mode }
@@ -270,6 +271,7 @@ describe("planQuery provider fallback", () => {
       getCheapModel: () => denied,
       getCheapModels: () => [denied, selected],
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
       providerFacts,
       selectModels: ({ candidates = [denied, selected] }) => ({
@@ -325,6 +327,7 @@ describe("planQuery provider fallback", () => {
       getCheapModel: () => anotherGemini,
       getCheapModels: () => [anotherGemini, fallback],
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -353,6 +356,7 @@ describe("planQuery provider fallback", () => {
       getCheapModel: () => fallback,
       getCheapModels: () => [fallback],
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -391,6 +395,7 @@ describe("planQuery provider fallback", () => {
       getCheapModel: () => fallback,
       getCheapModels: () => [fallback],
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -434,6 +439,7 @@ describe("planQuery provider fallback", () => {
       getCheapModel: () => models[0],
       getCheapModels: () => models,
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -475,6 +481,7 @@ describe("planQuery provider fallback", () => {
       getCheapModel: () => models[0],
       getCheapModels: () => models,
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -516,6 +523,7 @@ describe("planQuery provider fallback", () => {
       getCheapModel: () => deepseek,
       getCheapModels: () => [deepseek],
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -559,6 +567,7 @@ describe("planQuery provider fallback", () => {
       getCheapModel: () => gemini,
       getCheapModels: () => [gemini, deepseek],
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 
@@ -581,6 +590,7 @@ describe("planQuery provider fallback", () => {
       getCheapModel: () => fallback,
       getCheapModels: () => [fallback],
       ...unavailableCostMethods,
+      resolveQueryRoute: () => ({ kind: "local" }),
       isProviderAvailable: () => true,
     } satisfies LlmBackend
 

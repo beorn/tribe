@@ -956,10 +956,12 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // "nothing found" defect. Catch, keep the lexical results, and attach a
     // full diagnostic report so the formatter can say so loudly.
     const llmStart = Date.now()
-    const llm = options.deps?.llm ?? (await loadLlm())
+    const llm = await loadLlm({ backend: options.deps?.llm, allowMetered: options.allowMetered })
     let synthesis
     try {
-      synthesis = await synthesizeResults(query, deduped, timeout, llm ?? undefined)
+      synthesis = await synthesizeResults(query, deduped, timeout, llm ?? undefined, {
+        allowMetered: options.allowMetered,
+      })
     } catch (err) {
       const failure = synthesisDiagnosticsFromError(err, timeout)
       const llmMs = Date.now() - llmStart

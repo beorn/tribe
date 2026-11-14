@@ -14,6 +14,7 @@ import {
   loadLlm,
   llmCostCall,
   selectBudgetedModels,
+  selectAvailableCheapModels,
   type LlmBackend,
   type LlmModel,
   type LlmCostCall,
@@ -128,6 +129,7 @@ Budget: up to 15 variants. Output ONLY the JSON object.`
 // ============================================================================
 
 export interface PlanOptions {
+  allowMetered?: boolean
   round: 1 | 2
   mode?: "wider" | "deeper"
   priorPlan?: QueryPlan
@@ -154,7 +156,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
   const { round, mode, priorPlan, priorResults = [], priorVariants = [], timeoutMs = DEFAULT_PLAN_TIMEOUT_MS } = options
   const startedAt = Date.now()
 
-  const llm = options.llm ?? (await loadLlm())
+  const llm = await loadLlm({ backend: options.llm, allowMetered: options.allowMetered })
   if (!llm) {
     return {
       plan: null,
@@ -163,13 +165,16 @@ export async function planQuery(query: string, context: QueryContext, options: P
       error: "no-llm-backend-available",
     }
   }
-  const models = options.model ? [options.model] : plannerModels(llm)
+  const selection = options.model
+    ? selectAvailableCheapModels(llm, { candidates: [options.model], includeRegistryFallback: false })
+    : selectBudgetedModels(llm, "planner")
+  const models = selection.models
   if (models.length === 0) {
     return {
       plan: null,
       calls: [],
       elapsedMs: Date.now() - startedAt,
-      error: "no-planner-model-available",
+      error: selection.failure ?? "no-planner-model-available",
     }
   }
 
@@ -287,12 +292,6 @@ export function planVariants(plan: QueryPlan): string[] {
 // ============================================================================
 // Internals
 // ============================================================================
-
-// The planner runs only the planner models BUDGETED_MODEL_IDS declares (@cto 967ea2db, ba46468c): a slow first model
-// shares the one deadline with every later one, so a Google call through the agy one-shot starved the fallback.
-function plannerModels(llm: LlmBackend): LlmModel[] {
-  return selectBudgetedModels(llm, "planner").models
-}
 
 /**
  * One failed attempt's cause. When the planner's own deadline aborted it, that is the cause, whatever words the

@@ -59,38 +59,39 @@ export function resolveSummarizerMode(raw?: string): SummarizerMode {
  * the mode is "off" or no available provider matches.
  */
 export function pickSummaryModel(mode: SummarizerMode, llm: LlmBackend): Model | null {
-  if (mode === "off") return null
-  if (mode === "haiku") {
-    const haikuCandidates = llm.getCheapModels(Number.MAX_SAFE_INTEGER).filter((model) => /haiku/i.test(model.modelId))
-    const haiku = selectAvailableCheapModels(llm, {
-      candidates: haikuCandidates,
-      includeRegistryFallback: false,
-      limit: 1,
-      order: "registry",
-    }).models[0]
-    if (haiku) return haiku
-    const preferred = llm.getCheapModel()
-    if (!preferred) return null
-    return (
-      selectAvailableCheapModels(llm, {
-        candidates: [preferred],
-        includeRegistryFallback: false,
-        limit: 1,
-        order: "registry",
-      }).models[0] ?? null
-    )
+  return mode === "off" ? null : (selectSummaryModels(mode, llm).models[0] ?? null)
+}
+
+function selectSummaryModels(mode: Exclude<SummarizerMode, "off">, llm: LlmBackend) {
+  const candidates = llm
+    .getCheapModels(Number.MAX_SAFE_INTEGER)
+    .filter((model) => (mode === "haiku" ? /haiku/i.test(model.modelId) : model.provider === "ollama"))
+  const selection = selectAvailableCheapModels(llm, {
+    candidates,
+    includeRegistryFallback: false,
+    limit: 1,
+    order: "registry",
+  })
+  if (mode === "local" || selection.models.length > 0) return selection
+  const preferred = llm.getCheapModel()
+  if (
+    !preferred ||
+    candidates.some((model) => model.provider === preferred.provider && model.modelId === preferred.modelId)
+  ) {
+    return selection
   }
-  // mode === "local" — prefer any ollama-backed model; extend when we add
-  // lmstudio to the provider enum.
-  const localCandidates = llm.getCheapModels(Number.MAX_SAFE_INTEGER).filter((model) => model.provider === "ollama")
-  return (
-    selectAvailableCheapModels(llm, {
-      candidates: localCandidates,
-      includeRegistryFallback: false,
-      limit: 1,
-      order: "registry",
-    }).models[0] ?? null
-  )
+  const fallback = selectAvailableCheapModels(llm, {
+    candidates: [preferred],
+    includeRegistryFallback: false,
+    limit: 1,
+    order: "registry",
+  })
+  if (fallback.models.length > 0) return fallback
+  return {
+    ...fallback,
+    rejected: [...selection.rejected, ...fallback.rejected],
+    failure: [selection.failure, fallback.failure].filter(Boolean).join("; "),
+  }
 }
 
 const SYSTEM_PROMPT = `You are a terse session summarizer. Given the recent tail of a Claude Code
@@ -110,8 +111,8 @@ Rules:
 `.trim()
 
 /**
- * Summarize a flattened session tail. Returns null on model unavailable,
- * or empty tail. An invoked failure returns its original receipt and error.
+ * Summarize a flattened session tail. Off, empty tails and missing backends
+ * return null. Enabled selection/dispatch failures retain an error receipt.
  */
 export async function summarizeTail(
   tail: string,
@@ -127,7 +128,17 @@ export async function summarizeTail(
     return null
   }
   const model = pickSummaryModel(mode, llm)
-  if (!model) return null
+  if (!model) {
+    const selection = selectSummaryModels(mode, llm)
+    return {
+      ...llm.serializeCost(llm.aggregateCosts([])),
+      focus: null,
+      looseEnds: [],
+      model: selection.rejected[0]?.modelId ?? mode,
+      calls: [],
+      error: selection.failure ?? `No eligible model for summarizer mode "${mode}"`,
+    }
+  }
 
   const startedAt = Date.now()
   let response: LlmQueryResult["response"]

@@ -121,9 +121,12 @@ describe("the daemon's ask names its --vault-db on the agent call", () => {
       trace: { rounds: [], decision: { round2Mode: "off", reason: "test" }, contextChars: 0 },
       fellThrough: false,
     })
-    for (const [name, vaultDbPath] of [
-      ["ask-bound", vaultDb],
-      ["ask-unbound", null],
+    // 33909: transport must carry caller consent, including omission. The
+    // library's dispatch test cannot see a daemon dropping this field.
+    for (const [name, vaultDbPath, allowMetered] of [
+      ["ask-bound", vaultDb, true],
+      ["ask-unbound", null, false],
+      ["ask-default", null, undefined],
     ] as const) {
       const handlers = createRecallHandlers({
         dbPath: join(base, `lore-${name}.db`),
@@ -132,7 +135,10 @@ describe("the daemon's ask names its --vault-db on the agent call", () => {
         vaultDbPath,
       })
       try {
-        await handlers.dispatch({ sessionId: `s-${name}`, claudePid: null }, TRIBE_METHODS.ask, { query: "q" })
+        await handlers.dispatch({ sessionId: `s-${name}`, claudePid: null }, TRIBE_METHODS.ask, {
+          query: "q",
+          allowMetered,
+        })
       } finally {
         await handlers.close()
       }
@@ -140,6 +146,10 @@ describe("the daemon's ask names its --vault-db on the agent call", () => {
     expect(recallAgentMock.mock.calls.map(([, options]) => (options as { vaultDb?: unknown }).vaultDb)).toEqual([
       vaultDb,
       null,
+      null,
     ])
+    expect(
+      recallAgentMock.mock.calls.map(([, options]) => (options as { allowMetered?: boolean }).allowMetered),
+    ).toEqual([true, false, undefined])
   })
 })

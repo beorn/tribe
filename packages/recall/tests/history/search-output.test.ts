@@ -1349,17 +1349,19 @@ describe("recall search output", () => {
     expect(output).toContain('0 results — UNPROVEN (unknown index) for "nohits"')
   })
 
-  test("gives synthesis a 20 second default budget while preserving an explicit timeout", async () => {
+  test("carries the default budget and each invocation's explicit consent to the agent", async () => {
     // Accepted requirement: the default covers the measured live-provider
     // latency. Existing synthesis tests pass explicit budgets, so they cannot
     // detect the CLI continuing to inject its old 10 second value.
     mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
 
     await cmdSearch("defaultbudget", { agent: true, project: "*", refresh: false })
-    expect(mockAgent.options).toMatchObject({ timeout: 20_000 })
+    expect(mockAgent.options).toMatchObject({ timeout: 20_000, allowMetered: undefined })
 
-    await cmdSearch("explicitbudget", { agent: true, project: "*", refresh: false, timeout: "45000" })
-    expect(mockAgent.options).toMatchObject({ timeout: 45_000 })
+    for (const allowMetered of [true, false]) {
+      await cmdSearch("explicitbudget", { agent: true, project: "*", refresh: false, timeout: "45000", allowMetered })
+      expect(mockAgent.options).toMatchObject({ timeout: 45_000, allowMetered })
+    }
   })
 
   test("default raw search uses global project scope finding transcripts across project origins", async () => {

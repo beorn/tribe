@@ -261,6 +261,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
     const engine = await engineReady
     if (!engine) throw new Error(ENGINE_UNAVAILABLE)
     const result = await engine.recallAgent(params.query, {
+      allowMetered: params.allowMetered,
       limit: params.limit,
       since: params.since,
       projectFilter: params.projectFilter,
@@ -331,7 +332,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
     }
     const context = engine.buildQueryContext()
     try {
-      const call = await engine.planQuery(params.query, context, { round: 1 })
+      const call = await engine.planQuery(params.query, context, { round: 1, allowMetered: params.allowMetered })
       return toPlanOnlyResult(call, call.plan ? engine.planVariants(call.plan) : undefined)
     } catch (err) {
       return toPlanOnlyResult({

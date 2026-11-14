@@ -5,12 +5,14 @@
  */
 
 import { describe, test, expect, vi } from "vitest"
+import { pickSummaryModel } from "../../../../plugins/claude/recall/lib/summarizer.ts"
 import { spawnSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import {
+  loadLlm,
   parseDeniedProviders,
   resolveAvailableCheapModel,
   selectAvailableCheapModels,
@@ -76,7 +78,28 @@ function selectionBackend(opts: {
 }
 
 describe("selectAvailableCheapModels", () => {
-  test("uses shared provider facts and selector output instead of the legacy boolean when both are available", () => {
+  // Haiku mode promises a Haiku attempt before its preferred-model fallback,
+  // even when the shared host selector would rank the fallback first.
+  test("preserves Haiku preference before the preferred-model fallback", () => {
+    const haiku = { provider: "anthropic", modelId: "claude-haiku" }
+    const preferred = { provider: "openai", modelId: "preferred" }
+    const llm: LlmBackend = {
+      ...selectionBackend({ preferred, candidates: [haiku, preferred], available: ["anthropic", "openai"] }),
+      providerFacts: [],
+      selectModels: ({ candidates }) => {
+        if (!candidates) throw new Error("summary selector must supply its candidate pool")
+        return {
+          candidates: [...candidates],
+          selected: [preferred, haiku].filter((model) => candidates.includes(model)).slice(0, 1),
+          excluded: [],
+          evidence: [],
+        }
+      },
+    }
+    expect(pickSummaryModel("haiku", llm)).toEqual(haiku)
+  })
+
+  test("uses shared provider facts and selector output instead of the legacy boolean when both are available", async () => {
     const openai = { modelId: "gpt-cheap", provider: "openai" }
     const openrouter = { modelId: "deepseek-cheap", provider: "openrouter" }
     const providerFacts: LlmProviderAvailabilityFact[] = [
@@ -121,9 +144,12 @@ describe("selectAvailableCheapModels", () => {
       }),
       providerFacts,
       selectModels,
+      resolveQueryRoute: () => ({ kind: "local" }),
     }
 
-    const selection = selectAvailableCheapModels(llm, { limit: 2, order: "registry" })
+    const scoped = await loadLlm({ backend: llm })
+    expect(scoped).not.toBeNull()
+    const selection = selectAvailableCheapModels(scoped!, { limit: 2, order: "registry" })
 
     expect(selection.models).toEqual([openrouter])
     expect(selection.rejected).toEqual([
@@ -264,6 +290,165 @@ describe("selectAvailableCheapModels", () => {
 })
 
 describe("loadLlm shared provider-health surface", () => {
+  // A JS caller's malformed flag must never become truthy billing consent.
+  test.each(["true", 1, null])("rejects invalid metered consent %s", async (allowMetered) => {
+    const backend = selectionBackend({ candidates: [], available: [] })
+    await expect(loadLlm({ backend, allowMetered: allowMetered as unknown as boolean })).rejects.toThrow(
+      "allowMetered must be a boolean",
+    )
+    expect(backend.queryModel).not.toHaveBeenCalled()
+  })
+
+  // 33909: a process-cached backend must not cache a caller's billing consent.
+  // The host records every dispatch; it deliberately does NOT enforce consent,
+  // so the assertion observes Recall's actual boundary rather than a fake guard.
+  test("isolates metered consent and preserves enabled daemon-tail outcomes", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "recall-llm-consent-"))
+    const backendModule = pathToFileURL(resolve(import.meta.dirname, "../../src/lib/llm-backend.ts")).href
+    writeFileSync(
+      join(fixture, "index.ts"),
+      `
+      const paid = { provider: "openai", modelId: "paid-only" }
+      const subscription = { provider: "openai", modelId: "subscription" }
+      export const calls = []
+      export let summaryModel
+      export let providerRefusal
+      export const setProviderRefusal = (reason) => { providerRefusal = reason }
+      export const setSummaryModel = (model) => { summaryModel = model }
+      export const queryModel = async (options) => {
+        await Promise.resolve()
+        calls.push({ model: options.model.modelId, consent: options.allowMetered })
+        return { response: { content: options.question.startsWith("TAIL:") ? JSON.stringify({ focus: "fixture summary", loose_ends: [] }) : "answer" } }
+      }
+      export const resolveQueryRoute = (model) => model.provider === "ollama" ? { kind: "local" } : model.modelId.includes("subscription")
+        ? { kind: "subscription", cli: "codex" } : { kind: "metered" }
+      export const getModel = (id) => [paid, subscription].find(model => model.modelId === id)
+      export const getCheapModel = () => summaryModel ?? paid
+      export const getCheapModels = () => summaryModel ? [summaryModel] : [paid, subscription]
+      export const isProviderAvailable = () => true
+      export const createProviderObservationStore = () => ({})
+      export const readProviderAvailability = async (provider, options) => ({
+        provider, status: providerRefusal ? "refusing" : "unknown", source: "fixture",
+        reason: providerRefusal ?? "no stored observation", ...(providerRefusal ? { kind: "quota" } : {}),
+      })
+      export const selectModels = ({ candidates, facts }) => {
+        if (new Set(facts.map(fact => fact.provider)).size !== facts.length) throw new Error("duplicate provider facts")
+        return { candidates, selected: candidates, excluded: [], evidence: [] }
+      }
+      export const resolveResponseCost = () => ({})
+      export const aggregateCosts = () => ({})
+      export const averageCost = () => ({})
+      export const formatCostColumns = () => ""
+      export const serializeCost = () => ({})
+      export const deserializeCost = () => ({})
+      export const describeDispatchFailure = (error) => ({ message: String(error) })
+    `,
+    )
+    const childScript = `
+      const { loadLlm, selectAvailableCheapModels } = await import(process.env.LLM_BACKEND_MODULE)
+      const [allowed, ordinary] = await Promise.all([loadLlm({ allowMetered: true }), loadLlm()])
+      if (!allowed || !ordinary) throw new Error("fixture backend failed to load")
+      const selected = selectAvailableCheapModels(ordinary, { limit: 2 })
+      const opted = selectAvailableCheapModels(allowed, { limit: 2 })
+      const paid = ordinary.getModel("paid-only")
+      const [yes, no] = await Promise.all([
+        allowed.queryModel({ model: paid, question: "allowed" }),
+        ordinary.queryModel({ model: paid, question: "default" }),
+      ])
+      const changed = await loadLlm({ backend: ordinary, allowMetered: true })
+      if (!changed) throw new Error("changed-consent view failed to load")
+      const changedResponse = await changed.queryModel({ model: paid, question: "changed consent" })
+      const ordinaryAfter = await ordinary.queryModel({ model: paid, question: "still default" })
+      const host = await import(process.env.TRIBE_LLM_DIR + "/index.ts")
+      const consentCalls = [...host.calls]
+      host.calls.length = 0
+      const { summarizeTail } = await import(process.env.TAIL_SUMMARIZER_MODULE)
+      host.setSummaryModel({ provider: "anthropic", modelId: "claude-haiku-paid" })
+      const refused = await summarizeTail("fixture session tail", { mode: "haiku" })
+      const off = await summarizeTail("fixture session tail", { mode: "off" })
+      const refusedCalls = [...host.calls]
+      host.setSummaryModel({ provider: "ollama", modelId: "local-qwen" })
+      const local = await summarizeTail("fixture session tail", { mode: "local" })
+      host.setSummaryModel({ provider: "openai", modelId: "haiku-subscription" })
+      const subscriptionSummary = await summarizeTail("fixture session tail", { mode: "haiku" })
+      host.setProviderRefusal("stored quota refusal")
+      const refusedView = await loadLlm()
+      const explanation = refusedView.explainUnavailable("openai")
+      console.log(JSON.stringify({
+        tail: { refused, off, refusedCalls, local, subscription: subscriptionSummary, calls: host.calls },
+        explanation,
+        selected: selected.models.map(model => model.modelId),
+        allowedSelected: opted.models.map(model => model.modelId),
+        rejected: selected.rejected,
+        calls: consentCalls,
+        allowed: yes.response,
+        ordinary: no.response,
+        changed: changedResponse.response,
+        ordinaryAfter: ordinaryAfter.response,
+      }))
+    `
+    try {
+      const child = spawnSync("bun", ["-e", childScript], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          LLM_BACKEND_MODULE: backendModule,
+          TAIL_SUMMARIZER_MODULE: pathToFileURL(
+            resolve(import.meta.dirname, "../../../../plugins/claude/recall/lib/summarizer.ts"),
+          ).href,
+          TRIBE_LLM_DIR: fixture,
+          RECALL_LLM_DENY_PROVIDERS: "",
+        },
+      })
+      expect(child.status, child.stderr).toBe(0)
+      const result = JSON.parse(child.stdout) as {
+        explanation: string
+        tail: {
+          refused: { error?: string; calls: unknown[] } | null
+          off: unknown
+          refusedCalls: unknown[]
+          local: { focus: string } | null
+          subscription: { focus: string } | null
+          calls: Array<{ model: string; consent: boolean }>
+        }
+        selected: string[]
+        allowedSelected: string[]
+        rejected: Array<{ modelId: string; reason: string }>
+        calls: Array<{ model: string; consent: boolean }>
+        allowed: { content: string }
+        ordinary: { content: string; error: string }
+        changed: { content: string }
+        ordinaryAfter: { error: string }
+      }
+      expect(result.selected).toEqual(["subscription"])
+      expect(result.allowedSelected).toContain("paid-only")
+      expect(result.rejected).toContainEqual(
+        expect.objectContaining({ modelId: "paid-only", reason: "no unpaid route for paid-only" }),
+      )
+      expect(result.calls).toEqual([
+        { model: "paid-only", consent: true },
+        { model: "paid-only", consent: true },
+      ])
+      expect(result.allowed.content).toBe("answer")
+      expect(result.changed.content).toBe("answer")
+      expect(result.ordinaryAfter.error).toBe("no unpaid route for paid-only")
+      expect(result.ordinary).toMatchObject({ content: "", error: "no unpaid route for paid-only" })
+      // Enabled daemon-tail summarization must retain a route refusal without dispatch.
+      expect(result.tail.refused).toMatchObject({ error: expect.stringContaining("no unpaid route"), calls: [] })
+      expect(result.tail.refusedCalls).toEqual([])
+      expect(result.explanation).toBe("stored quota refusal")
+      expect(result.tail.off).toBeNull()
+      expect(result.tail.local?.focus).toBe("fixture summary")
+      expect(result.tail.subscription?.focus).toBe("fixture summary")
+      expect(result.tail.calls).toEqual([
+        { model: "local-qwen", consent: false },
+        { model: "haiku-subscription", consent: false },
+      ])
+    } finally {
+      rmSync(fixture, { recursive: true, force: true })
+    }
+  })
+
   test("rejects an incomplete public barrel with every missing capability named", () => {
     // #30820 AC3: stderr alone cannot prove the user-facing synthesis summary
     // distinguishes a configured but failed barrel from an unset variable.
@@ -326,6 +511,7 @@ describe("loadLlm shared provider-health surface", () => {
         export const getModel = (id) => id === model.modelId ? model : undefined
         export const getCheapModel = () => model
         export const getCheapModels = () => [model]
+        export const resolveQueryRoute = () => ({ kind: "subscription", cli: "codex" })
         const cost = { charged: { usd: 0.125 }, listEquivalent: { reason: "fixture rate unavailable" }, listEquivalentBasis: [] }
         export const resolveResponseCost = (response) => {
           if (response.cost_usd !== 0.125 || response.usage.raw.invoice !== "fixture") throw new Error("billing facts lost")

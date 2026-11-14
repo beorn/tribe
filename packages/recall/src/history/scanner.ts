@@ -245,6 +245,8 @@ export interface ReviewResult {
  * @param projectRoot - Absolute path to the project root (for finding settings.json)
  */
 export interface ReviewOptions {
+  /** Explicit consent for metered model routes in the optional LLM benchmarks. */
+  allowMetered?: boolean
   /**
    * Skip every LLM-bound stage (the recall synthesis test + the multi-model
    * race benchmark). Used by the default `recall status` so chief recovery
@@ -435,7 +437,7 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
 
   // ── Recall Quality Test ───────────────────────────────────────────────
   let recallTest: ReviewResult["recallTest"] = null
-  const reviewLlm = skipLlm ? null : await loadLlm()
+  const reviewLlm = skipLlm ? null : await loadLlm({ allowMetered: opts.allowMetered })
   if (skipLlm) {
     log(`review: skipping live LLM synthesis test (bounded mode)`)
   } else {
@@ -448,6 +450,7 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
         timeout: 8000,
         vaultDb: opts.vaultDb,
         deps: { llm: reviewLlm ?? undefined },
+        allowMetered: opts.allowMetered,
       })
       const durationMs = Date.now() - startTime
       const uniqueSessions = new Set(result.results.map((r) => r.sessionId)).size
@@ -465,7 +468,13 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
 
       // Recall quality recommendations
       if (!recallTest.synthesisOk) {
-        recommendations.push("LLM synthesis failed — check API keys (OPENAI_API_KEY, etc.)")
+        const exclusions = result.synthesisFailure?.excludedProviders ?? []
+        const reason =
+          exclusions.length > 0
+            ? exclusions.map((entry) => `${entry.modelId} (${entry.provider}): ${entry.reason}`).join("; ")
+            : (result.synthesisFailure?.summary ??
+              `no synthesized answer for "${testQuery}" from ${result.results.length} lexical results`)
+        recommendations.push(`LLM synthesis failed — ${reason}`)
       } else {
         if (recallTest.synthesisLength < 50) {
           recommendations.push(`Synthesis too short (${recallTest.synthesisLength} chars) — may not be useful`)
@@ -489,8 +498,8 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
           )
         }
       }
-    } catch {
-      recommendations.push("Recall test threw an error — check DB and LLM setup")
+    } catch (error) {
+      recommendations.push(`Recall test failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -562,7 +571,9 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
           `review: racing "${q}" context=${context.length} chars across [${raceModels.map((m) => m.modelId).join(", ")}]`,
         )
 
-        const race = await raceLlmModels(context, SYNTHESIS_PROMPT, raceModels, raceTimeoutMs, reviewLlm ?? undefined)
+        const race = await raceLlmModels(context, SYNTHESIS_PROMPT, raceModels, raceTimeoutMs, reviewLlm ?? undefined, {
+          allowMetered: opts.allowMetered,
+        })
 
         raceResults.push({
           query: q,

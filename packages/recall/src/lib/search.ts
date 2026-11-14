@@ -51,6 +51,7 @@ import {
 // ============================================================================
 
 export interface SearchOptions {
+  allowMetered?: boolean
   raw?: boolean
   json?: boolean
   since?: string
@@ -306,6 +307,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
 
   // Default: LLM synthesis mode via recall()
   const recallOpts: RecallOptions = {
+    allowMetered: options.allowMetered,
     raw: false,
     json: json,
     since,

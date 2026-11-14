@@ -56,7 +56,7 @@ export function getPersistedFailedSessions(db: Database): PersistedFailedSession
     .all() as PersistedFailedSession[]
 }
 
-export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Promise<void> {
+export async function cmdStatus(opts: { json?: boolean; bench?: boolean; allowMetered?: boolean }): Promise<void> {
   // Resolve the project root from the CALLER's cwd, not this file's location.
   // recall is a vendored submodule, so a code-relative walk lands on
   // vendor/tribe and makes hook config always read "unknown" (19990); cwd-based
@@ -86,7 +86,12 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
         closeDb()
       }
     }
-    const review = await reviewMemorySystem(projectRoot, { skipLlm, skipSearchBenchmarks, vaultDb })
+    const review = await reviewMemorySystem(projectRoot, {
+      skipLlm,
+      skipSearchBenchmarks,
+      vaultDb,
+      allowMetered: opts.allowMetered,
+    })
     console.log(JSON.stringify({ ...review, sessionDiscovery, ...(vaultSemantic ? { vaultSemantic } : {}) }, null, 2))
     return
   }
@@ -324,7 +329,12 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   }
 
   // ── Hook Configuration ──────────────────────────────────────────────
-  const review = await reviewMemorySystem(projectRoot, { skipLlm, skipSearchBenchmarks, vaultDb })
+  const review = await reviewMemorySystem(projectRoot, {
+    skipLlm,
+    skipSearchBenchmarks,
+    vaultDb,
+    allowMetered: opts.allowMetered,
+  })
   const hk = review.hookConfig
 
   console.log(`${BOLD}Hook Configuration${RESET}`)

@@ -136,10 +136,10 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   // Speculative synth defaults on — env var or explicit option can disable.
   const speculativeSynth =
     options.speculativeSynth !== undefined ? options.speculativeSynth : process.env.RECALL_SPECULATIVE_SYNTH !== "0"
-  const llm = options.deps?.llm ?? (await loadLlm()) ?? undefined
+  const llm = (await loadLlm({ backend: options.deps?.llm, allowMetered: options.allowMetered })) ?? undefined
   const runSynthesis = async (results: RecallSearchResult[]): Promise<SynthesisResult> => {
     try {
-      const result = await synthesizeResults(query, results, timeout, llm)
+      const result = await synthesizeResults(query, results, timeout, llm, { allowMetered: options.allowMetered })
       synthesisCalls.push(...result.calls)
       return result
     } catch (error) {
@@ -192,7 +192,12 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   const requiredResolution: RequiredIdResolution = resolveRequiredIssueIds(query, options.vaultDb ?? getVaultDbPath())
   const requiredIds = requiredResolution.required
 
-  const planR1 = await planQuery(query, context, { round: 1, timeoutMs: planTimeoutMs, llm })
+  const planR1 = await planQuery(query, context, {
+    round: 1,
+    timeoutMs: planTimeoutMs,
+    llm,
+    allowMetered: options.allowMetered,
+  })
   planElapsed.push(planR1.elapsedMs)
   plannerCalls.push(...planR1.calls)
 
@@ -284,6 +289,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
         priorVariants: fanoutR1.variants,
         timeoutMs: planTimeoutMs,
         llm,
+        allowMetered: options.allowMetered,
       })
       planElapsed.push(planR2.elapsedMs)
       plannerCalls.push(...planR2.calls)
@@ -633,7 +639,8 @@ async function fallthrough(
   priorCalls: LlmCostCall[] = [],
   llm?: LlmBackend,
 ): Promise<AgentRecallResult> {
-  const backend = llm ?? options.deps?.llm ?? (await loadLlm()) ?? undefined
+  const backend =
+    (await loadLlm({ backend: llm ?? options.deps?.llm, allowMetered: options.allowMetered })) ?? undefined
   const baseline = await recall(query, { ...options, deps: { ...options.deps, llm: backend } })
   const calls = [...priorCalls, ...(baseline.calls ?? [])]
   const baselineResult = { ...baseline }

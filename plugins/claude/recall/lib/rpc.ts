@@ -71,6 +71,7 @@ export type HelloResult = {
 
 export type AskParams = {
   query: string
+  allowMetered?: boolean
   limit?: number
   since?: string
   projectFilter?: string
@@ -154,6 +155,7 @@ export type CurrentBriefResult = {
 
 export type PlanOnlyParams = {
   query: string
+  allowMetered?: boolean
 }
 
 export type PlanOnlyResult = Partial<LlmCostFields> & {
