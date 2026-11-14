@@ -3292,7 +3292,7 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     .option(inboxWaitWakeOnCorrelatedReply.flags, inboxWaitWakeOnCorrelatedReply.description)
     .option(
       "--no-wake-on-correlated-reply",
-      "Do not wake on a validated reply settlement to one of this seat's tracked requests, or a direct status or response whose ref names an open ball this seat requested",
+      "Do not wake on a direct non-incident response to this seat, a validated reply settlement to one of this seat's tracked requests, or a direct status whose ref names an open ball this seat requested",
     )
     .option(inboxWaitJson.flags, inboxWaitJson.description)
     .action(

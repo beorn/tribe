@@ -3131,7 +3131,7 @@ export function createStatements(db: Database) {
             AND type IN (${CORRELATED_REPLY_TYPES_SQL})
             AND (
               (
-                correlated_reply_requester = $name
+                ((m.type = 'response' AND m.is_incident = 0) OR correlated_reply_requester = $name)
                 AND (
                   $unacknowledged_only = 0
                   OR m.request IS NOT NULL

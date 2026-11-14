@@ -528,7 +528,8 @@ describe("29535 a ref-bound status wakes only its requester, and only under the 
     expect(settlesRequestOpenedBy(refOnlyInfo as MessageInsertedInfo, REQUESTER)).toBe(true)
 
     // C2(ii): a direct response whose ref names a request the recipient (@requester) did NOT open
-    // stays correlatedReply = null and does not wake focus-mode push or opt-in inbox-wait.
+    // stays correlatedReply = null and does not wake focus-mode push or default inbox-wait; under #21547
+    // it wakes opt-in inbox-wait as a direct response with settles_request_id = null.
     const foreignRefResponse = sendMessage(
       f.peer,
       REQUESTER,
@@ -540,7 +541,13 @@ describe("29535 a ref-bound status wakes only its requester, and only under the 
     const foreignInfo = f.inserted.find((i) => i.id === foreignRefResponse.id)
     expect(foreignInfo?.correlatedReply).toBeNull()
     expect(settlesRequestOpenedBy(foreignInfo as MessageInsertedInfo, REQUESTER)).toBe(false)
-    expect(tailSeq(f.stmts, REQUESTER, true)).not.toBe(rowidOf(f, foreignRefResponse.id))
+    expect(tailSeq(f.stmts, REQUESTER, false)).not.toBe(rowidOf(f, foreignRefResponse.id))
+    expect(tailSeq(f.stmts, REQUESTER, true)).toBe(rowidOf(f, foreignRefResponse.id))
+    expect(readInboxWaitWokenBy(f.stmts, REQUESTER, rowidOf(f, foreignRefResponse.id), true)).toMatchObject({
+      kind: "message",
+      type: "response",
+      settles_request_id: null,
+    })
 
     // C3: readInboxWaitWokenBy never sets settles_request_id on a status row, even when its ref names BALL.
     const statusRow = sendMessage(f.peer, REQUESTER, "status on open ball", "status", undefined, BALL)

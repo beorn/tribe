@@ -438,7 +438,7 @@ describe("createInboxWaitManager", () => {
           result = value
         })
 
-        sendReply("response", `missing-${requestId}`)
+        sendReply("status", `missing-${requestId}`)
         await Promise.resolve()
         expect(result).toBeUndefined()
 
@@ -472,6 +472,15 @@ describe("createInboxWaitManager", () => {
       sendMessage(
         responder,
         "@requester",
+        "status referencing another requester's ball",
+        "status",
+        undefined,
+        "req-other",
+        "direct",
+      )
+      sendMessage(
+        responder,
+        "@other",
         "valid reply for another requester",
         "response",
         undefined,
@@ -491,7 +500,7 @@ describe("createInboxWaitManager", () => {
   })
 
   it.each(["response", "historical status"] as const)(
-    "fresh opt-in wait wakes for a pre-existing validated %s only",
+    "fresh opt-in wait wakes for a pre-existing %s while unvalidated status stays quiet",
     async (kind) => {
       const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-current-reply-"))
       const db = openDatabase(join(tmpDir, "tribe.db"))
@@ -506,17 +515,7 @@ describe("createInboxWaitManager", () => {
       const responder = makeContext(db, stmts, "responder", "@responder", manager.onMessageInserted)
 
       try {
-        sendMessage(
-          responder,
-          "@requester",
-          "unvalidated response",
-          "response",
-          undefined,
-          undefined,
-          "direct",
-          {},
-          { reply: "missing-request" },
-        )
+        sendMessage(responder, "@requester", "unvalidated status", "status", undefined, "missing-request", "direct")
         await expect(
           manager.wait("@requester", "conn-unvalidated-current", 0, { wakeOnCorrelatedReply: true }),
         ).resolves.toMatchObject({ status: "timeout", timed_out: true })
@@ -856,8 +855,10 @@ describe("createInboxWaitManager", () => {
         unread_count: 0,
       })
 
-      // 3. Sibling quiet case (b): a direct response whose ref names a closed ball NOT opened by @requester
-      //    does not live-wake, and settles woken at the deadline on retained attention (30414).
+      // 3. Sibling case (b): a direct response whose ref names a closed ball NOT opened by @requester
+      //    does not live-wake a default wait (settling woken at the deadline on retained attention, 30414),
+      //    and under #21547 DOES live-wake an opt-in wait (`wakeOnCorrelatedReply: true`) while keeping
+      //    `settles_request_id: null` (never manufacturing correlation or a settled request ID).
       sendMessage(
         other,
         "@responder",
@@ -886,10 +887,19 @@ describe("createInboxWaitManager", () => {
       )
       expect(db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get("req-foreign-settled")).toBeNull()
 
-      const foreignWait = manager.wait("@requester", "conn-foreign-closed-ref", 40, { wakeOnCorrelatedReply: true })
-      let foreignResult: Awaited<typeof foreignWait> | undefined
-      void foreignWait.then((value) => {
-        foreignResult = value
+      const foreignDefaultWait = manager.wait("@requester", "conn-foreign-closed-ref-default", 40, {
+        wakeOnCorrelatedReply: false,
+      })
+      const foreignOptInWait = manager.wait("@requester", "conn-foreign-closed-ref-optin", 400, {
+        wakeOnCorrelatedReply: true,
+      })
+      let foreignDefaultResult: Awaited<typeof foreignDefaultWait> | undefined
+      let foreignOptInResult: Awaited<typeof foreignOptInWait> | undefined
+      void foreignDefaultWait.then((value) => {
+        foreignDefaultResult = value
+      })
+      void foreignOptInWait.then((value) => {
+        foreignOptInResult = value
       })
       const foreignFollowUp = sendMessage(
         responder,
@@ -901,8 +911,9 @@ describe("createInboxWaitManager", () => {
         "direct",
       )
       await Promise.resolve()
-      expect(foreignResult).toBeUndefined()
-      await expect(foreignWait).resolves.toMatchObject({
+      expect(foreignDefaultResult).toBeUndefined()
+      expect(foreignOptInResult).toBeDefined()
+      await expect(foreignOptInWait).resolves.toMatchObject({
         status: "woken",
         timed_out: false,
         aborted: false,
@@ -911,6 +922,312 @@ describe("createInboxWaitManager", () => {
           kind: "message",
           seq: foreignFollowUp.rowid,
           message_id: foreignFollowUp.id,
+          type: "response",
+          sender: "@responder",
+          settles_request_id: null,
+          replay: false,
+        },
+      })
+      await expect(foreignDefaultWait).resolves.toMatchObject({
+        status: "woken",
+        timed_out: false,
+        aborted: false,
+        unread_count: 1,
+        woken_by: {
+          kind: "message",
+          seq: foreignFollowUp.rowid,
+          message_id: foreignFollowUp.id,
+          type: "response",
+          sender: "@responder",
+          settles_request_id: null,
+          replay: false,
+        },
+      })
+    } finally {
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("21547: post-TAKING final direct response wakes opt-in inbox-wait (already-unread and armed mid-wait, no-ref and closed-ref) while preserving cursor, reconnect, and negative controls", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-21547-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const manager = createInboxWaitManager(
+      (session) => status(session, 0),
+      realAttentionReader(db, stmts),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply, true),
+      (session, seq, wakeOnCorrelatedReply) => readInboxWaitWokenBy(stmts, session, seq, wakeOnCorrelatedReply),
+    )
+    const requester = makeContext(db, stmts, "requester", "@requester", manager.onMessageInserted)
+    const responder = makeContext(db, stmts, "responder", "@responder", manager.onMessageInserted)
+    const other = makeContext(db, stmts, "other", "@other", manager.onMessageInserted)
+
+    try {
+      // --- 1. Request -> TAKING settlement -> final no-ref response ALREADY UNREAD before fresh wait ---
+      sendMessage(
+        requester,
+        "@responder",
+        "review deploy selector",
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { request: "req-21547-pre" },
+      )
+      const takingPre = sendMessage(
+        responder,
+        "@requester",
+        "TAKING req-21547-pre · ETA 5m",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { reply: "req-21547-pre" },
+      )
+      expect(db.prepare("SELECT * FROM pending_request WHERE request_id = ?").get("req-21547-pre")).toBeNull()
+      stmts.advanceMailboxCursor.run({ $recipient: "@requester", $seq: takingPre.rowid, $now: Date.now() })
+
+      // Final response arrives with NO ref and NO reply before fresh wait is armed (specimen 8c30ca50).
+      const finalPreNoRef = sendMessage(
+        responder,
+        "@requester",
+        "SOURCE GO on cf855ae4",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+      )
+
+      // Negative control: default wait (`wakeOnCorrelatedReply: false`) does NOT wake on already-unread direct response.
+      await expect(
+        manager.wait("@requester", "conn-21547-pre-default", 0, { wakeOnCorrelatedReply: false }),
+      ).resolves.toMatchObject({
+        status: "timeout",
+        timed_out: true,
+        unread_count: 1,
+      })
+
+      // Positive: fresh opt-in wait (`wakeOnCorrelatedReply: true`) wakes immediately on already-unread no-ref final response
+      // without manufacturing `settles_request_id`.
+      const preWoken = await manager.wait("@requester", "conn-21547-pre-optin", 400, {
+        wakeOnCorrelatedReply: true,
+      })
+      expect(preWoken).toMatchObject({
+        status: "woken",
+        timed_out: false,
+        aborted: false,
+        waited_ms: immediateWakeMs,
+        unread_count: 1,
+        woken_by: {
+          kind: "message",
+          seq: finalPreNoRef.rowid,
+          message_id: finalPreNoRef.id,
+          type: "response",
+          sender: "@responder",
+          settles_request_id: null,
+          replay: false,
+        },
+      })
+      expect(preWoken.baseline_seq).toBeGreaterThanOrEqual(finalPreNoRef.rowid)
+
+      // Reconnect control: resumed chunk from delivered `baseline_seq` does not duplicate-wake.
+      await expect(
+        manager.wait("@requester", "conn-21547-pre-reconnect", 25, {
+          wakeOnCorrelatedReply: true,
+          afterSeq: preWoken.baseline_seq,
+        }),
+      ).resolves.toMatchObject({
+        status: "timeout",
+        timed_out: true,
+      })
+
+      // Consumption control: advancing mailbox cursor prevents replay on a fresh wait.
+      stmts.advanceMailboxCursor.run({ $recipient: "@requester", $seq: finalPreNoRef.rowid, $now: Date.now() })
+      await expect(
+        manager.wait("@requester", "conn-21547-pre-consumed", 25, {
+          wakeOnCorrelatedReply: true,
+        }),
+      ).resolves.toMatchObject({
+        status: "timeout",
+        timed_out: true,
+        unread_count: 0,
+      })
+
+      // Already-unread closed-ref forms (own closed request vs foreign closed request):
+      sendMessage(
+        other,
+        "@responder",
+        "other seat request",
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { request: "req-21547-foreign" },
+      )
+      sendMessage(
+        responder,
+        "@other",
+        "TAKING foreign",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { reply: "req-21547-foreign" },
+      )
+      const finalPreForeignRef = sendMessage(
+        responder,
+        "@requester",
+        "deploy complete (referencing foreign ball)",
+        "response",
+        undefined,
+        "req-21547-foreign",
+        "direct",
+      )
+      const preForeignWoken = await manager.wait("@requester", "conn-21547-pre-foreign-ref", 400, {
+        wakeOnCorrelatedReply: true,
+      })
+      expect(preForeignWoken).toMatchObject({
+        status: "woken",
+        timed_out: false,
+        waited_ms: immediateWakeMs,
+        woken_by: {
+          kind: "message",
+          seq: finalPreForeignRef.rowid,
+          message_id: finalPreForeignRef.id,
+          type: "response",
+          settles_request_id: null,
+        },
+      })
+      // Retirement control (#31132): sending a later direct message from @requester to @responder retires the unconsumed response.
+      const followUpReq = sendMessage(
+        requester,
+        "@responder",
+        "follow-up request",
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { request: "req-21547-live" },
+      )
+      stmts.advanceMailboxCursor.run({ $recipient: "@requester", $seq: followUpReq.rowid, $now: Date.now() })
+
+      // --- 2. Request -> TAKING settlement -> armed mid-wait arrival + negative controls ---
+      const takingLive = sendMessage(
+        responder,
+        "@requester",
+        "TAKING req-21547-live · ETA 5m",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { reply: "req-21547-live" },
+      )
+      stmts.advanceMailboxCursor.run({ $recipient: "@requester", $seq: takingLive.rowid, $now: Date.now() })
+
+      // Open an incident before arming so a repeat during the armed wait has `isIncident: true, wakesOwner: false`:
+      const incOpen = sendMessage(
+        responder,
+        "@requester",
+        "incident open",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        { summary: "same condition" },
+        {
+          incident: {
+            emitter: "health-monitor",
+            subject: "@requester",
+            condition: "check",
+            active: true,
+          },
+        },
+      )
+      stmts.advanceMailboxCursor.run({ $recipient: "@requester", $seq: incOpen.rowid, $now: Date.now() })
+
+      const armedWait = manager.wait("@requester", "conn-21547-armed", 1_000, {
+        wakeOnCorrelatedReply: true,
+      })
+      let armedSettled: Awaited<typeof armedWait> | undefined
+      void armedWait.then((value) => {
+        armedSettled = value
+      })
+
+      // Negative control A: self-send direct response does not wake.
+      sendMessage(requester, "@requester", "self response", "response", undefined, undefined, "direct")
+      // Negative control B: direct response to another recipient does not wake @requester.
+      sendMessage(responder, "@other", "response for @other", "response", undefined, undefined, "direct")
+      // Negative control C: broadcast/event response or tracked broadcast that is not a direct response does not wake via direct-response arm.
+      manager.onMessageInserted(
+        message({
+          id: "evt-resp-21547",
+          rowid: incOpen.rowid + 100,
+          type: "response",
+          kind: "event",
+          sender: "@responder",
+          recipient: "@requester",
+        }),
+      )
+      manager.onMessageInserted(
+        message({
+          id: "bcast-resp-21547",
+          rowid: incOpen.rowid + 101,
+          type: "response",
+          kind: "broadcast",
+          sender: "@responder",
+          recipient: "*",
+        }),
+      )
+      // Negative control D: quiet incident repeat (`wakes_owner = 0, is_incident = 1, type = 'response'`) does not wake.
+      sendMessage(
+        responder,
+        "@requester",
+        "incident repeat",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        { summary: "same condition" },
+        {
+          incident: {
+            emitter: "health-monitor",
+            subject: "@requester",
+            condition: "check",
+            active: true,
+          },
+        },
+      )
+      await Promise.resolve()
+      expect(armedSettled).toBeUndefined()
+
+      // Positive armed arrival: post-TAKING final direct response with `ref: null, reply: null` wakes immediately!
+      const finalLiveNoRef = sendMessage(
+        responder,
+        "@requester",
+        "final post-TAKING response with no ref",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+      )
+      await Promise.resolve()
+      expect(armedSettled).toBeDefined()
+      await expect(armedWait).resolves.toMatchObject({
+        status: "woken",
+        timed_out: false,
+        aborted: false,
+        woken_by: {
+          kind: "message",
+          seq: finalLiveNoRef.rowid,
+          message_id: finalLiveNoRef.id,
           type: "response",
           sender: "@responder",
           settles_request_id: null,

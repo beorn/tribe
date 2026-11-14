@@ -611,8 +611,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           wake_on_correlated_reply: {
             type: "boolean",
             description:
-              "Also wake on a validated reply settlement to one of this seat's tracked requests, or a direct status " +
-              "or response whose ref names an open ball this seat requested (default false).",
+              "Also wake on a direct non-incident response to this seat, a validated reply settlement to one of " +
+              "this seat's tracked requests, or a direct status whose ref names an open ball this seat requested (default false).",
           },
         },
       },
@@ -696,7 +696,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "inbox-wait",
       description:
-        "Long-poll until unanswered actionable attention exists or the timeout elapses. This is the steady-state bounded-wait rail. Direct request/query/verdict/assign rows, an incident opened or changed (its summary), and owned tracked actionable broadcasts wake it; notify/status/response rows do not wake by default. Callers may opt into a validated reply settlement to one of their own tracked requests, or a direct status or response whose ref names an open ball they requested. Defaults to the daemon-resolved launch identity.",
+        "Long-poll until unanswered actionable attention exists or the timeout elapses. This is the steady-state bounded-wait rail. Direct request/query/verdict/assign rows, an incident opened or changed (its summary), and owned tracked actionable broadcasts wake it; notify/status/response rows do not wake by default. Callers may opt into a direct non-incident response to this session, a validated reply settlement to one of their own tracked requests, or a direct status whose ref names an open ball they requested. Defaults to the daemon-resolved launch identity.",
       lifetime: "one-shot",
       mapsToMcp: "inbox.wait",
       options: [
@@ -725,8 +725,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           name: "wake-on-correlated-reply",
           flags: "--wake-on-correlated-reply",
           description:
-            "Also wake on a validated reply settlement to one of this session's tracked requests, or on a direct " +
-            "status or response whose ref names an open ball this session requested",
+            "Also wake on a direct non-incident response to this session, a validated reply settlement to one of " +
+            "this session's tracked requests, or on a direct status whose ref names an open ball this session requested",
           mapsTo: "wake_on_correlated_reply",
         },
         { name: "json", flags: "--json", description: "Emit machine-readable JSON (for hooks)" },
