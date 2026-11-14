@@ -20,15 +20,29 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { setLogLevel, setSuppressConsole, type LogLevel } from "loggily"
 import { emitInjectionDebugEvent, flushInjectionFileWriters, installInjectionFileWriter } from "../src/debug.ts"
 
-/** The file statSync refuses to measure: needed inside the hoisted mock factory, so declared with vi.hoisted. */
-const { UNMEASURABLE } = vi.hoisted(() => ({ UNMEASURABLE: "unmeasurable.jsonl" }))
+/** The files statSync refuses to measure: needed inside the hoisted mock factory, so declared with vi.hoisted.
+ * UNMEASURABLE is one SEGMENT's refusal (the oversized one written below): once rotated aside, the fresh segment at
+ * the same path measures. PERMANENT is the path's: every stat there fails, the fresh segment included, so loggily's
+ * open-time measurement (34294) refuses it too and the install must fail loud. */
+const { UNMEASURABLE, UNMEASURABLE_AT_LEAST, PERMANENT } = vi.hoisted(() => ({
+  UNMEASURABLE: "unmeasurable.jsonl",
+  UNMEASURABLE_AT_LEAST: 1024 * 1024,
+  PERMANENT: "stat-always-refused.jsonl",
+}))
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>()
   return {
     ...actual,
     statSync: (target: Parameters<typeof statSync>[0], ...rest: unknown[]): ReturnType<typeof statSync> => {
-      if (typeof target === "string" && target.endsWith(UNMEASURABLE)) {
+      const segment =
+        typeof target === "string" && target.endsWith(UNMEASURABLE)
+          ? actual.statSync(target, { throwIfNoEntry: false })
+          : undefined
+      const refused =
+        (typeof target === "string" && target.endsWith(PERMANENT)) ||
+        (segment !== undefined && segment.size >= UNMEASURABLE_AT_LEAST)
+      if (refused) {
         const denied = new Error("EACCES: permission denied, stat") as NodeJS.ErrnoException
         denied.code = "EACCES"
         throw denied
@@ -90,6 +104,18 @@ describe("injection record — a segment whose size cannot be read", () => {
     expect(named).toContain("EACCES")
     expect(existsSync(`${path}.1`), "the segment nobody can measure is rotated aside, not appended to").toBe(true)
     expect(readFileSync(path, "utf8")).toContain("row-after-an-unmeasurable-segment")
+  })
+
+  test("a path where every stat fails: install throws loud, keeps the old segment, and registers nothing", () => {
+    const path = join(dir, PERMANENT)
+    writeFileSync(path, "old-segment-row\n")
+
+    expect(() => installInjectionFileWriter(path)).toThrow(/stat failed for .*stat-always-refused\.jsonl \(EACCES\)/)
+    expect(errors.join("\n")).toContain(path)
+    // The segment nobody can measure was rotated aside under the lock, never deleted or appended to.
+    expect(readFileSync(`${path}${".1"}`, "utf8")).toBe("old-segment-row\n")
+    // A failed install claims nothing: the next call tries again and fails loud again, never a silent no-op.
+    expect(() => installInjectionFileWriter(path)).toThrow()
   })
 
   test("a record that does not exist yet is the empty-file case: installing and appending it says nothing on stderr", () => {
