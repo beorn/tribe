@@ -550,10 +550,10 @@ export async function loadLlm(options: { allowMetered?: boolean; backend?: LlmBa
 
 /** Read route-specific observations once into this invocation, keeping consent out of the host cache. */
 async function invocationBackend(host: LlmHost, allowMetered: boolean): Promise<LlmBackend> {
-  const candidates = [
+  const candidates = host.readProviderFact ? [
     ...host.getCheapModels(Number.MAX_SAFE_INTEGER),
     ...Object.values(BUDGETED_MODEL_IDS).flat().map((id) => host.getModel(id)).filter((model): model is LlmModel => !!model),
-  ]
+  ] : []
   const factsByModel = new Map<string, LlmProviderAvailabilityFact>()
   const key = (model: LlmModel): string => `${model.provider}/${model.modelId}`
   const readFact = async (model: LlmModel): Promise<void> => {
@@ -606,8 +606,8 @@ async function invocationBackend(host: LlmHost, allowMetered: boolean): Promise<
  * (planner, synthesis explicitly requested) — never for opportunistic
  * enrichment.
  */
-export async function requireLlm(feature: string): Promise<LlmBackend> {
-  const llm = await loadLlm()
+export async function requireLlm(feature: string, options: { allowMetered?: boolean; backend?: LlmBackend } = {}): Promise<LlmBackend> {
+  const llm = await loadLlm(options)
   if (!llm) {
     throw new Error(
       `${feature} requires an LLM backend, but none is available: ${unavailableReason ?? "backend supplied no load-failure diagnostic"}. ` +

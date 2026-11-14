@@ -73,6 +73,8 @@ export type IndexProvenanceDetail =
     }
 
 export interface RecallOptions {
+  /** Permit metered LLM routes for this invocation; omitted defaults to unpaid routes. */
+  allowMetered?: boolean
   /** Existing host backend, also forwarded by the agent's fallback path. */
   deps?: {
     llm?: LlmBackend

@@ -118,6 +118,7 @@ program
   .option("--session <id>", "Specific session (implies --raw)")
   .option("-i, --include <types>", "Content types: m,b,e,d,c or long names (implies --raw)")
   .option("--agent", "LLM query-planner mode: plan → fan out → rerank → synthesize")
+  .option("--allow-metered", "Allow metered LLM routes for this invocation (default: subscription or local only)")
   .option("--round2 <mode>", "Round 2 mode: auto|wider|deeper|off (default auto)")
   .option("--max-rounds <n>", "Cap agent rounds (1 or 2, default 2)", int)
   .option("--debug-plan", "Print full planner output each round (implies --agent)")

@@ -107,6 +107,7 @@ const TOOLS = [
       type: "object" as const,
       properties: {
         query: { type: "string", description: "The natural-language query to recall" },
+        allowMetered: { type: "boolean", description: "Allow metered LLM routes for this call (default false)" },
         limit: { type: "number", description: "Max results (default 5)" },
         since: { type: "string", description: "Time filter: 1h, 1d, 1w, 30d, today, yesterday" },
         projectFilter: { type: "string", description: "Project path glob (e.g. *km*)" },
@@ -148,6 +149,7 @@ const TOOLS = [
       type: "object" as const,
       properties: {
         query: { type: "string", description: "The natural-language query" },
+        allowMetered: { type: "boolean", description: "Allow metered LLM routes for this call (default false)" },
       },
       required: ["query"],
     },
@@ -199,11 +201,15 @@ const TOOLS = [
 // ============================================================================
 
 async function handleAsk(args: Record<string, unknown>): Promise<string> {
+  if (args.allowMetered !== undefined && typeof args.allowMetered !== "boolean") {
+    throw new Error("lore.ask: allowMetered must be a boolean")
+  }
   const query = String(args.query ?? "")
   if (!query) throw new Error("lore.ask: `query` is required")
 
   const askParams = {
     query,
+    allowMetered: args.allowMetered === true,
     limit: typeof args.limit === "number" ? args.limit : 5,
     since: typeof args.since === "string" ? args.since : undefined,
     projectFilter: typeof args.projectFilter === "string" ? args.projectFilter : undefined,
@@ -241,6 +247,7 @@ async function handleAsk(args: Record<string, unknown>): Promise<string> {
     round2: askParams.round2,
     maxRounds: askParams.maxRounds,
     speculativeSynth: askParams.speculativeSynth,
+    allowMetered: askParams.allowMetered,
     provenance: readIndexProvenance({}),
   })
   const payload: Record<string, unknown> = {
@@ -297,13 +304,16 @@ async function handleCurrentBrief(args: Record<string, unknown>): Promise<string
 }
 
 async function handlePlanOnly(args: Record<string, unknown>): Promise<string> {
+  if (args.allowMetered !== undefined && typeof args.allowMetered !== "boolean") {
+    throw new Error("lore.plan: allowMetered must be a boolean")
+  }
   const query = String(args.query ?? "")
   if (!query) throw new Error("lore.plan: `query` is required")
 
   const daemon = await getDaemon()
   if (daemon) {
     try {
-      const result = (await daemon.call(TRIBE_METHODS.planOnly, { query })) as PlanOnlyResult
+      const result = (await daemon.call(TRIBE_METHODS.planOnly, { query, allowMetered: args.allowMetered === true })) as PlanOnlyResult
       return JSON.stringify({ ...result, mode: "daemon" }, null, 2)
     } catch (err) {
       if (process.env.TRIBE_LOG === "1") {
@@ -315,7 +325,7 @@ async function handlePlanOnly(args: Record<string, unknown>): Promise<string> {
   }
 
   const context = buildQueryContext()
-  const call = await planQuery(query, context, { round: 1 })
+  const call = await planQuery(query, context, { round: 1, allowMetered: args.allowMetered === true })
 
   return JSON.stringify(
     {
