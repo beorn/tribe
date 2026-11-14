@@ -13,21 +13,19 @@
  * treated as full, so the next row opens a fresh segment rather than growing a record nobody can measure.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { setLogLevel, setSuppressConsole, type LogLevel } from "loggily"
 import { emitInjectionDebugEvent, flushInjectionFileWriters, installInjectionFileWriter } from "../src/debug.ts"
 
-/** The files statSync refuses to measure: needed inside the hoisted mock factory, so declared with vi.hoisted.
- * UNMEASURABLE is one SEGMENT's refusal (the oversized one written below): once rotated aside, the fresh segment at
- * the same path measures. PERMANENT is the path's: every stat there fails, the fresh segment included, so loggily's
- * open-time measurement (34294) refuses it too and the install must fail loud. */
-const { UNMEASURABLE, UNMEASURABLE_AT_LEAST, PERMANENT } = vi.hoisted(() => ({
+/** The file statSync refuses to measure: needed inside the hoisted mock factory, so declared with vi.hoisted. The
+ * refusal is one SEGMENT's (the oversized one written below): once it is rotated aside, the fresh segment at the
+ * same path measures, as loggily's own open-time measurement (34294) requires. */
+const { UNMEASURABLE, UNMEASURABLE_AT_LEAST } = vi.hoisted(() => ({
   UNMEASURABLE: "unmeasurable.jsonl",
   UNMEASURABLE_AT_LEAST: 1024 * 1024,
-  PERMANENT: "stat-always-refused.jsonl",
 }))
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -39,10 +37,7 @@ vi.mock("node:fs", async (importOriginal) => {
         typeof target === "string" && target.endsWith(UNMEASURABLE)
           ? actual.statSync(target, { throwIfNoEntry: false })
           : undefined
-      const refused =
-        (typeof target === "string" && target.endsWith(PERMANENT)) ||
-        (segment !== undefined && segment.size >= UNMEASURABLE_AT_LEAST)
-      if (refused) {
+      if (segment !== undefined && segment.size >= UNMEASURABLE_AT_LEAST) {
         const denied = new Error("EACCES: permission denied, stat") as NodeJS.ErrnoException
         denied.code = "EACCES"
         throw denied
@@ -106,16 +101,26 @@ describe("injection record — a segment whose size cannot be read", () => {
     expect(readFileSync(path, "utf8")).toContain("row-after-an-unmeasurable-segment")
   })
 
+  /** A real permission denial, not the mock: the root vitest config does not transform loggily, so a mocked
+   * statSync would never reach loggily's own open-time measurement there. A directory without search permission
+   * refuses every stat, open and rename under it, in every config. */
   test("a path where every stat fails: install throws loud, keeps the old segment, and registers nothing", () => {
-    const path = join(dir, PERMANENT)
+    const locked = join(dir, "no-search")
+    mkdirSync(locked)
+    const path = join(locked, "record.jsonl")
     writeFileSync(path, "old-segment-row\n")
-
-    expect(() => installInjectionFileWriter(path)).toThrow(/stat failed for .*stat-always-refused\.jsonl \(EACCES\)/)
-    expect(errors.join("\n")).toContain(path)
-    // The segment nobody can measure was rotated aside under the lock, never deleted or appended to.
-    expect(readFileSync(`${path}${".1"}`, "utf8")).toBe("old-segment-row\n")
-    // A failed install claims nothing: the next call tries again and fails loud again, never a silent no-op.
-    expect(() => installInjectionFileWriter(path)).toThrow()
+    chmodSync(locked, 0o600)
+    try {
+      expect(() => track(installInjectionFileWriter(path))).toThrow(/EACCES/)
+      expect(errors.join("\n"), "the refusal is named with the record's path").toContain(path)
+      // A failed install claims nothing: the next call tries again and fails loud again, never a silent no-op.
+      expect(() => track(installInjectionFileWriter(path))).toThrow(/EACCES/)
+    } finally {
+      chmodSync(locked, 0o700)
+    }
+    // Nothing was appended, rotated or lost.
+    expect(readFileSync(path, "utf8")).toBe("old-segment-row\n")
+    expect(existsSync(`${path}.1`)).toBe(false)
   })
 
   test("a record that does not exist yet is the empty-file case: installing and appending it says nothing on stderr", () => {
