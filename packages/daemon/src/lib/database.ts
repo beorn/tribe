@@ -1663,8 +1663,10 @@ const MIGRATIONS: readonly Migration[] = [
      * 33650: `pending --expired --owed` folded every ball outcome fact and every reply in the store on the daemon's
      * one thread (13 s on the live store, past the 10 s client limit, and every other caller waited behind it). The
      * owed view only needs its live obligations' generations: these indexes seek outcome facts by payload request_id
-     * and replies by the id they answer. Building them reads each table once at upgrade; rollback is DROP INDEX, and
-     * an older daemon ignores them. Idempotent and guarded on each table's own columns, as v44 is.
+     * and replies by the id they answer. Building them reads each table once at upgrade. Rollback is the old consumer
+     * code first, with these indexes left in place (an older daemon ignores them); the new statements name them with
+     * INDEXED BY, so dropping them before that fails every owed read at prepare. Remove them only through this
+     * migration procedure, never by hand. Idempotent and guarded on each table's own columns, as v44 is.
      */
     up(db) {
       for (const table of ["messages", "messages_archive"] as const) {
