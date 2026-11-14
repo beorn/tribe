@@ -6,62 +6,73 @@
  * `some` avg60. `full` is not usable here because at the root of a cgroup hierarchy it is zero by
  * definition, which is the mistake that made earlier readings look like "nobody is starved".
  *
+ * NO /proc/pressure READER LIVES HERE. The canonical `host:scalars` fact already carries
+ * `pressure.cpuSomeAvg60Percent` — read live on 2026-11-14 as 2.55 percent, measured with
+ * `hab sysmon snapshot --kind scalars --json` — and longproc-reading is its other consumer (34310).
+ * A parser in the daemon would be the second implementation that row forbids, and it would also
+ * throw away the producer's typed reasons for having no reading. So this module reads nothing: it
+ * interprets the one fact the daemon already asks its canonical source for, beside `runnable`.
+ *
  * Three outcomes, never a fabricated zero:
- * - `measured`   — the percentage the kernel reported.
- * - `absent`     — this host has no /proc/pressure/cpu (macOS, standalone-os). A platform limit, not
- *                  an outage: the caller keeps its own rule and says which rule it used.
- * - `unreadable` — the file exists and could not be read or parsed. Loud and typed, in the
- *                  `source-protocol-invalid` shape #30382 established for a malformed source.
+ * - `measured`   — the percentage the host:scalars fact reported.
+ * - `absent`     — this host publishes no CPU pressure (Linux without /proc/pressure/cpu, macOS,
+ *                  standalone-os, or a producer that omitted the metric). A platform limit, not an
+ *                  outage: the caller keeps its own rule and says which rule it used.
+ * - `unreadable` — the fact carries the metric and it could not be read or parsed. Loud and typed,
+ *                  in the `source-protocol-invalid` shape #30382 established for a malformed source.
  */
-import { readFileSync } from "node:fs"
-
-/** Where Linux publishes per-resource pressure stall information. */
-export const CPU_PRESSURE_PATH = "/proc/pressure/cpu"
 
 export type CpuPressureReading =
   | { readonly kind: "measured"; readonly someAvg60Percent: number }
   | { readonly kind: "absent"; readonly detail: string }
   | { readonly kind: "unreadable"; readonly detail: string }
 
-const SOME_AVG60 = /(?:^|\s)avg60=(\d+(?:\.\d+)?)(?=\s|$)/u
-
 /**
- * Parse one `/proc/pressure/cpu` body. The kernel writes two lines — `some` and `full` — and only
- * `some` answers "is anything waiting on a CPU". A body without it is malformed, not zero.
+ * The part of the canonical `pressure` scalar this module interprets. The real fact carries the
+ * memory averages and their totals beside the CPU one; only the CPU number is consumed here, and a
+ * structural subset keeps this module independent of the producer's full shape.
  */
-export function parseCpuPressure(text: string, path: string = CPU_PRESSURE_PATH): CpuPressureReading {
-  const lines = text.split("\n")
-  const someLine = lines.find((line) => line.startsWith("some "))
-  if (someLine === undefined) {
-    const first = lines.find((line) => line.trim() !== "")
-    return { kind: "unreadable", detail: `${path}: no "some" line in the reading (${first ?? "empty"})` }
-  }
-  const match = SOME_AVG60.exec(someLine)
-  if (match === null) {
-    return { kind: "unreadable", detail: `${path}: no avg60 field on the some line (${someLine.trim()})` }
-  }
-  const value = Number(match[1])
-  if (!Number.isFinite(value) || value < 0 || value > 100) {
-    return { kind: "unreadable", detail: `${path}: avg60 ${match[1]} is not a percentage` }
-  }
-  return { kind: "measured", someAvg60Percent: value }
+export type CpuPressureFact =
+  | { readonly kind: "supported"; readonly value: { readonly cpuSomeAvg60Percent: number } }
+  | {
+      readonly kind: "unavailable"
+      readonly metric: string
+      readonly reason: string
+      readonly detail?: string
+    }
+  | undefined
+
+/** Reasons that mean "this host cannot report CPU pressure", as against "the reading failed". */
+const ABSENT_REASONS = new Set(["not-reported", "unsupported-on-platform"])
+
+function describe(detail: string | undefined, reason: string): string {
+  return detail === undefined || detail === "" ? reason : `${reason}: ${detail}`
 }
 
 /**
- * Read and parse the host's CPU pressure. `path` is injectable so a test can prove each of the three
- * outcomes without a host that has to be broken on purpose.
+ * Interpret the canonical pressure scalar. An undefined or unavailable metric is disclosed with the
+ * producer's own reason; a number outside 0..100 is a malformed fact, never clamped to a value the
+ * kernel did not report.
  */
-export function readCpuPressure(path: string = CPU_PRESSURE_PATH): CpuPressureReading {
-  let text: string
-  try {
-    text = readFileSync(path, "utf8")
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code
-    if (code === "ENOENT") {
-      return { kind: "absent", detail: `${path} does not exist on this host; no pressure reading is available` }
+export function cpuPressureReading(pressure: CpuPressureFact): CpuPressureReading {
+  if (pressure === undefined) {
+    return {
+      kind: "absent",
+      detail: "the host:scalars fact carries no pressure metric, so this host reports no CPU pressure",
     }
-    const reason = code ?? (error instanceof Error ? error.message : String(error))
-    return { kind: "unreadable", detail: `${path}: ${reason}` }
   }
-  return parseCpuPressure(text, path)
+  if (pressure.kind === "unavailable") {
+    if (ABSENT_REASONS.has(pressure.reason)) {
+      return { kind: "absent", detail: describe(pressure.detail, pressure.reason) }
+    }
+    return { kind: "unreadable", detail: `host:scalars pressure is unavailable (${describe(pressure.detail, pressure.reason)})` }
+  }
+  const value = pressure.value.cpuSomeAvg60Percent
+  if (!Number.isFinite(value) || value < 0 || value > 100) {
+    return {
+      kind: "unreadable",
+      detail: `host:scalars pressure.cpuSomeAvg60Percent is not a percentage (${String(value)})`,
+    }
+  }
+  return { kind: "measured", someAvg60Percent: value }
 }

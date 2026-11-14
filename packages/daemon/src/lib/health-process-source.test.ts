@@ -660,6 +660,32 @@ describe("neutral health process source", () => {
     await expect(source.readScalars()).resolves.toMatchObject({ kind: "available", values: { oomKill } })
   })
 
+  // 34311: `pressure` (CPU PSI some avg60) rides the same fact as the load, so the daemon never opens
+  // /proc/pressure/cpu itself and longproc-reading stays the only reader of that file.
+  it.each([
+    ["a supported CPU pressure reading", { kind: "supported", value: { cpuSomeAvg60Percent: 2.55 } }],
+    [
+      "a pressure metric the host cannot report",
+      {
+        detail: "/proc/pressure/cpu: ENOENT",
+        kind: "unavailable",
+        metric: "pressure",
+        platform: "linux",
+        reason: "not-reported",
+      },
+    ],
+  ])("preserves %s in host-scalar-observation/1", async (_name, pressure) => {
+    const payload = structuredClone(scalarPayload) as any
+    payload.values.pressure = pressure
+    const source = createHealthProcessSource({
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
+      runCommand: async () => ({ exitCode: 0, stderr: "", stdout: `${JSON.stringify(payload)}\n` }),
+    })
+    if (source.kind !== "managed") throw new Error("expected managed source")
+
+    await expect(source.readScalars()).resolves.toMatchObject({ kind: "available", values: { pressure } })
+  })
+
   it("admits a host-scalar-observation/1 without `oomKill` as an older emitter, with no boot proof invented", async () => {
     const payload = structuredClone(scalarPayload) as any
     expect(payload.values.oomKill).toBeUndefined()

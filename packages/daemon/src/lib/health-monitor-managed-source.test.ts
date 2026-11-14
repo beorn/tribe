@@ -332,6 +332,48 @@ describe("health monitor managed process source", () => {
     spawn.mockRestore()
   })
 
+  it("carries CPU pressure from the same host:scalars fact, disclosed when the host has none (34311)", async () => {
+    const spawn = stubPeripheralCommands()
+    const base = scalarObservation()
+    const withPressure = (pressure: unknown) =>
+      managed(observation(), { ...base, values: { ...base.values, pressure } } as typeof base)
+
+    const measured = await collectFullMetrics(
+      withPressure({ kind: "supported", value: { cpuSomeAvg60Percent: 2.55 } }),
+    )
+    expect(measured.metrics.cpu.cpuPressure).toEqual({ kind: "measured", someAvg60Percent: 2.55 })
+
+    const absent = await collectFullMetrics(
+      withPressure({
+        detail: "/proc/pressure/cpu: ENOENT",
+        kind: "unavailable",
+        metric: "pressure",
+        platform: "linux",
+        reason: "not-reported",
+      }),
+    )
+    expect(absent.metrics.cpu.cpuPressure).toEqual({
+      kind: "absent",
+      detail: "not-reported: /proc/pressure/cpu: ENOENT",
+    })
+
+    const unreadable = await collectFullMetrics(
+      withPressure({ kind: "unavailable", metric: "pressure", platform: "linux", reason: "access-denied" }),
+    )
+    expect(unreadable.metrics.cpu.cpuPressure).toEqual({
+      kind: "unreadable",
+      detail: "host:scalars pressure is unavailable (access-denied)",
+    })
+
+    // An older producer that omits the metric is a host with no reading, never a zero and never silence.
+    const omitted = await collectFullMetrics(managed(observation(), base))
+    expect(omitted.metrics.cpu.cpuPressure).toEqual({
+      kind: "absent",
+      detail: "the host:scalars fact carries no pressure metric, so this host reports no CPU pressure",
+    })
+    spawn.mockRestore()
+  })
+
   it("maps canonical host scalars and never invokes standalone OS acquisition", async () => {
     const spawn = stubPeripheralCommands()
     const osSampler = vi.fn(() => {

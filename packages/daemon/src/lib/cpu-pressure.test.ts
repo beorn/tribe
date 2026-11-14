@@ -4,75 +4,59 @@
  *          pages as if the host were starving. Read as "CPU PSI full is 0.00", which at the root
  *          of a cgroup hierarchy is zero by definition — the reading that cannot support the
  *          conclusion drawn from it. `@i/4-supervision/27335/34311`.
- * @level   l1 — the exported parser and reader, with the path injected. The contract under test is
- *          that a malformed or absent reading is named, never turned into a zero.
+ * @level   l1 — the pure interpreter of the canonical host:scalars pressure metric, driven from
+ *          fixed lists. The contract under test is that every absence and every malformed value is
+ *          named, never turned into a zero, and that no host is read here.
  * @consumer @chief, who reads health:cpu alerts for runtime health.
  */
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import { afterAll, describe, expect, it } from "vitest"
-import { parseCpuPressure, readCpuPressure } from "./cpu-pressure"
+import { describe, expect, it } from "vitest"
+import { cpuPressureReading } from "./cpu-pressure"
 
-const REAL_BODY = "some avg10=6.54 avg60=4.93 avg300=7.67 total=1234\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
-const scratch = mkdtempSync(join(tmpdir(), "cpu-pressure-test-"))
-afterAll(() => rmSync(scratch, { recursive: true, force: true }))
+const measured = (cpuSomeAvg60Percent: number) =>
+  ({ kind: "supported", value: { cpuSomeAvg60Percent } }) as const
 
-describe("parseCpuPressure", () => {
-  it("reads some avg60 as the percentage the kernel reported", () => {
-    expect(parseCpuPressure(REAL_BODY)).toEqual({ kind: "measured", someAvg60Percent: 4.93 })
+describe("cpuPressureReading", () => {
+  it("passes through the percentage the host:scalars fact reported", () => {
+    expect(cpuPressureReading(measured(2.55))).toEqual({ kind: "measured", someAvg60Percent: 2.55 })
   })
 
-  it("accepts a whole-number average", () => {
-    expect(parseCpuPressure("some avg10=0.00 avg60=61 avg300=0.00 total=0\n")).toEqual({
-      kind: "measured",
-      someAvg60Percent: 61,
+  it("accepts the boundary values 0 and 100", () => {
+    expect(cpuPressureReading(measured(0))).toEqual({ kind: "measured", someAvg60Percent: 0 })
+    expect(cpuPressureReading(measured(100))).toEqual({ kind: "measured", someAvg60Percent: 100 })
+  })
+
+  it("refuses a number outside 0..100 instead of clamping it", () => {
+    for (const value of [-1, 100.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const reading = cpuPressureReading(measured(value))
+      expect(reading.kind).toBe("unreadable")
+      expect(reading.kind === "unreadable" && reading.detail).toContain("is not a percentage")
+    }
+  })
+
+  it("calls an absent metric a platform limit and keeps the producer's reason", () => {
+    expect(cpuPressureReading(undefined)).toEqual({
+      kind: "absent",
+      detail: "the host:scalars fact carries no pressure metric, so this host reports no CPU pressure",
+    })
+    expect(
+      cpuPressureReading({
+        kind: "unavailable",
+        metric: "pressure",
+        reason: "not-reported",
+        detail: "/proc/pressure/cpu: ENOENT",
+      }),
+    ).toEqual({ kind: "absent", detail: "not-reported: /proc/pressure/cpu: ENOENT" })
+    expect(cpuPressureReading({ kind: "unavailable", metric: "pressure", reason: "unsupported-on-platform" })).toEqual({
+      kind: "absent",
+      detail: "unsupported-on-platform",
     })
   })
 
-  it("names a body with no some line instead of reading zero", () => {
-    const reading = parseCpuPressure("full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n", "/proc/pressure/cpu")
-    expect(reading.kind).toBe("unreadable")
-    expect(reading.kind === "unreadable" && reading.detail).toContain('no "some" line')
-  })
-
-  it("names an empty body instead of reading zero", () => {
-    const reading = parseCpuPressure("")
-    expect(reading.kind).toBe("unreadable")
-    expect(reading.kind === "unreadable" && reading.detail).toContain("empty")
-  })
-
-  it("names a some line with no avg60 field", () => {
-    const reading = parseCpuPressure("some avg10=0.00 avg300=0.00 total=0\n")
-    expect(reading.kind).toBe("unreadable")
-    expect(reading.kind === "unreadable" && reading.detail).toContain("no avg60 field")
-  })
-
-  it("refuses an average outside 0..100 instead of clamping it", () => {
-    const reading = parseCpuPressure("some avg10=0.00 avg60=150.00 avg300=0.00 total=0\n")
-    expect(reading.kind).toBe("unreadable")
-    expect(reading.kind === "unreadable" && reading.detail).toContain("is not a percentage")
-  })
-})
-
-describe("readCpuPressure", () => {
-  it("reads a real file through the same parse", () => {
-    const path = join(scratch, "cpu")
-    writeFileSync(path, REAL_BODY)
-    expect(readCpuPressure(path)).toEqual({ kind: "measured", someAvg60Percent: 4.93 })
-  })
-
-  it("calls a missing file absent — a platform limit, not an outage", () => {
-    const reading = readCpuPressure(join(scratch, "does-not-exist"))
-    expect(reading.kind).toBe("absent")
-    expect(reading.kind === "absent" && reading.detail).toContain("does not exist")
-  })
-
-  it("calls an unreadable path unreadable, naming the errno", () => {
-    const path = join(scratch, "a-directory")
-    mkdirSync(path, { recursive: true })
-    const reading = readCpuPressure(path)
-    expect(reading.kind).toBe("unreadable")
-    expect(reading.kind === "unreadable" && reading.detail).toContain("EISDIR")
+  it("calls a failed read unreadable, naming the producer's reason", () => {
+    for (const reason of ["access-denied", "provider-error", "source-protocol-invalid"]) {
+      const reading = cpuPressureReading({ kind: "unavailable", metric: "pressure", reason, detail: "/proc/pressure/cpu" })
+      expect(reading.kind).toBe("unreadable")
+      expect(reading.kind === "unreadable" && reading.detail).toContain(`${reason}: /proc/pressure/cpu`)
+    }
   })
 })

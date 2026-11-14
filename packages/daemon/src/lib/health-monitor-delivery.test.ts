@@ -242,6 +242,34 @@ describe("health alert delivery", () => {
     )
   })
 
+  test("34311: a CPU page carries the pressure it read from the same fact, and names the rule it kept", () => {
+    const thresholds = { ...defaultThresholds(), cpuCriticalMultiplier: 2, cpuQualifyingMs: 20_000 }
+    const fire = (pressure: HealthMetrics["cpu"]["cpuPressure"]): string => {
+      const state = createAlertState()
+      let message = ""
+      for (let sample = 0; sample < 3; sample += 1) {
+        const observation = canonical(sample + 1, BASE_TIME_MS + sample * 10_000, 9, 9)
+        observation.cpu.cpuPressure = pressure
+        const alerts = evaluateAlerts(observation, thresholds, state)
+        if (alerts.length > 0) message = alerts[0]!.message
+      }
+      return message
+    }
+
+    expect(fire({ kind: "measured", someAvg60Percent: 2.55 })).toContain(
+      "CPU pressure some avg60 2.55% from the same host:scalars fact; no pressure floor gates this page yet.",
+    )
+    // A host that cannot report pressure says so, with the producer's own reason, and names the rule it kept.
+    expect(fire({ kind: "absent", detail: "not-reported: /proc/pressure/cpu: ENOENT" })).toContain(
+      "No CPU pressure reading on this host (not-reported: /proc/pressure/cpu: ENOENT); " +
+        "this page keeps the load-and-runnable rule.",
+    )
+    expect(fire({ kind: "unreadable", detail: "host:scalars pressure is unavailable (access-denied)" })).toContain(
+      "CPU pressure is unreadable (host:scalars pressure is unavailable (access-denied)); " +
+        "this page keeps the load-and-runnable rule.",
+    )
+  })
+
   test("30382: the current observation must itself qualify — retained history alone never pages", () => {
     const thresholds = { ...defaultThresholds(), cpuQualifyingMs: 45_000 }
     const state = createAlertState()
