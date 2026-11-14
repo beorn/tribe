@@ -58,7 +58,7 @@ export function cpuPressureReading(pressure: CpuPressureFact): CpuPressureReadin
   if (pressure === undefined) {
     return {
       kind: "absent",
-      detail: "the host:scalars fact carries no pressure metric, so this host reports no CPU pressure",
+      detail: "the host:scalars fact carries no pressure metric (a producer that predates the field, or one that declined it)",
     }
   }
   if (pressure.kind === "unavailable") {

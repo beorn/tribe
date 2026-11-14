@@ -36,7 +36,7 @@ describe("cpuPressureReading", () => {
   it("calls an absent metric a platform limit and keeps the producer's reason", () => {
     expect(cpuPressureReading(undefined)).toEqual({
       kind: "absent",
-      detail: "the host:scalars fact carries no pressure metric, so this host reports no CPU pressure",
+      detail: "the host:scalars fact carries no pressure metric (a producer that predates the field, or one that declined it)",
     })
     expect(
       cpuPressureReading({
