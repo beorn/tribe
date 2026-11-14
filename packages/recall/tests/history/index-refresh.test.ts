@@ -37,7 +37,7 @@ vi.mock("../../src/history/db", async (original) => ({
   findTodoFiles: () => corpus.todos,
 }))
 
-// The command owns the whole-index clock and reporting; refresh behavior stays in its own fixture suites.
+// The command owns the vault embed-phase clock and reporting; refresh behavior stays in its own fixture suites.
 vi.mock("../../src/history/vault-fts.ts", async (original) => ({
   ...(await original<typeof import("../../src/history/vault-fts.ts")>()),
   getVaultDbPath: () => corpus.vaultDb,
@@ -82,40 +82,39 @@ afterEach(() => {
 })
 
 describe("Recall refresh completion", () => {
-  /** @failure The CPU trial restarted the 60-second window after transcripts or hid a pass that embedded nothing. */
-  test.each([15_000, 65_000])("transcripts use %i ms of the whole-index embedding window", async (transcriptMs) => {
-    corpus.vaultDb = dbPath
-    vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(transcriptMs)
-    vi.mocked(runVaultEmbedPass).mockImplementation(async ({ timeLeftMs }) => {
-      expect(timeLeftMs()).toBe(60_000 - transcriptMs)
-      return {
-        generation: 1,
-        published: true,
-        documents: 280,
-        coveredDocuments: 5,
-        embeddedDocuments: 0,
-        embeddedChunks: 0,
-        reusedChunks: 0,
-        uncovered: { "refresh budget spent before this document": 275 },
-        stoppedEarly: true,
-        tooLarge: { documents: 0, largestChunks: 0 },
-        msPerChunk: { first: null, steadyMedian: null },
-      }
-    })
-    await cmdIndex({ incremental: true })
-    expect(runVaultEmbedPass).toHaveBeenCalledOnce()
-    const output = vi.mocked(console.log).mock.calls.flat().join("\n")
-    expect(output).toContain(
-      `transcript phase ${transcriptMs} ms; embed window remaining ${Math.max(0, 60_000 - transcriptMs)} ms`,
-    )
-    expect(output).toContain("0 chunks embedded")
-    expect(output).toContain("275 uncovered")
-    if (transcriptMs >= 60_000) {
-      expect(output).toContain("embed window spent before embedding started; 0 embedded, 275 uncovered")
-    } else {
+  /** @failure A transcript longer than the old shared window left the vault embed pass with no time, so the hourly index embedded nothing. */
+  test.each([15_000, 45_002, 65_487])(
+    "vault embed pass gets a fresh 60s budget after %i ms of transcripts",
+    async (transcriptMs) => {
+      corpus.vaultDb = dbPath
+      vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(transcriptMs)
+      vi.mocked(runVaultEmbedPass).mockImplementation(async ({ timeLeftMs }) => {
+        expect(timeLeftMs()).toBe(60_000)
+        vi.spyOn(Date, "now").mockReturnValue(transcriptMs + 1_000)
+        expect(timeLeftMs()).toBe(59_000)
+        return {
+          generation: 1,
+          published: true,
+          documents: 280,
+          coveredDocuments: 5,
+          embeddedDocuments: 0,
+          embeddedChunks: 0,
+          reusedChunks: 0,
+          uncovered: { "refresh budget spent before this document": 275 },
+          stoppedEarly: true,
+          tooLarge: { documents: 0, largestChunks: 0 },
+          msPerChunk: { first: null, steadyMedian: null },
+        }
+      })
+      await cmdIndex({ incremental: true })
+      expect(runVaultEmbedPass).toHaveBeenCalledOnce()
+      const output = vi.mocked(console.log).mock.calls.flat().join("\n")
+      expect(output).toContain(`transcript phase ${transcriptMs} ms; embed window remaining 60000 ms`)
+      expect(output).toContain("0 chunks embedded")
+      expect(output).toContain("275 uncovered")
       expect(output).not.toContain("embed window spent before embedding started")
-    }
-  })
+    },
+  )
 
   /** @failure Diagnostic metadata failed after publishing a fresh success marker. */
   test.each(["last_codex_failures", "last_codex_reason_counts"])(

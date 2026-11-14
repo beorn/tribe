@@ -23,7 +23,7 @@ import { getVaultDbPath } from "../history/vault-fts.ts"
 export const RECALL_INDEX_BUSY_EXIT = 4
 /** The incremental share-cap prune was refused: report the incomplete provenance (25462). */
 export const RECALL_INDEX_PRUNE_REFUSED_EXIT = 5
-/** CPU trial: cooperative embedding budget measured from the whole index start, including transcripts. */
+/** Vault embed phase: cooperative budget measured from embed-pass entry, not from index start. */
 export const RECALL_VAULT_EMBED_STOP_MS = 60_000
 
 export async function cmdIndex(opts: {
@@ -137,7 +137,7 @@ export async function cmdIndex(opts: {
     }
 
     // @ag/recall/three-dark-search-paths: vault embeddings refresh only for a bound --vault-db, inside the same
-    // writer lock. The cooperative budget includes transcripts; native setup/calls may overrun it.
+    // writer lock. The embed phase has its own budget from pass entry; native setup and calls may overrun it.
     const vaultDbPath = getVaultDbPath()
     if (vaultDbPath !== null) {
       // Loaded only here: qmd and node-llama-cpp never load on an unbound index or any other command.
@@ -153,12 +153,13 @@ export async function cmdIndex(opts: {
             (skipped ? `; not seeded: ${skipped}` : ""),
         )
       }
-      const embedWindowMs = startedAt + RECALL_VAULT_EMBED_STOP_MS - Date.now()
+      const embedStartedAt = Date.now()
+      const embedWindowMs = embedStartedAt + RECALL_VAULT_EMBED_STOP_MS - Date.now()
       console.log(`  transcript phase ${transcriptMs} ms; embed window remaining ${Math.max(0, embedWindowMs)} ms`)
       const vault = await runVaultEmbedPass({
         db,
         vaultDbPath,
-        timeLeftMs: () => startedAt + RECALL_VAULT_EMBED_STOP_MS - Date.now(),
+        timeLeftMs: () => embedStartedAt + RECALL_VAULT_EMBED_STOP_MS - Date.now(),
       })
       const uncoveredCount = Object.values(vault.uncovered).reduce((sum, count) => sum + count, 0)
       const uncovered = Object.entries(vault.uncovered)
