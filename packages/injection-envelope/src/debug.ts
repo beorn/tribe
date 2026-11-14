@@ -243,9 +243,19 @@ export function installInjectionFileWriter(path: string): () => void {
     )
   }
   try {
+    // An existing segment this process cannot measure is the full segment (readLiveSegment has named it on stderr),
+    // and loggily's open would throw measuring it (34294): rotate it aside first, under the lock, then open once.
+    // Without the lock there is no rename; the open stays loud. Every other failure propagates.
+    if (installLock !== undefined && readLiveSegment(path) === "unmeasurable") {
+      renameSync(path, path + RECORD_PREVIOUS_SEGMENT_SUFFIX)
+    }
     writer = createFileWriter(path)
     _installedWriters.set(writer, path)
     if (installLock !== undefined) openedIno = liveIno()
+  } catch (error) {
+    // A failed install registers nothing, so the next call tries again instead of returning a silent no-op.
+    _installedPaths.delete(path)
+    throw error
   } finally {
     installLock?.release()
   }
