@@ -112,6 +112,7 @@ describe("33650: the owed expired view folds only its obligations' history", () 
     openedAt: number,
     ref = request,
     fanout: "first" | "all" = "first",
+    journaledAt?: number,
   ) {
     const expiresAt = openedAt + 1_200_000
     logEvent(
@@ -131,7 +132,7 @@ describe("33650: the owed expired view folds only its obligations' history", () 
         observation: "deadline-passed",
         observed_at: expiresAt + 1,
       },
-      { sender: "daemon", ref, ts: expiresAt + 1 },
+      { sender: "daemon", ref, ts: journaledAt ?? expiresAt + 1 },
     )
   }
 
@@ -291,7 +292,17 @@ describe("33650: the owed expired view folds only its obligations' history", () 
   ])("owed read (%s) equals the full fold's live rows without reading the whole journal", (_label, owner) => {
     seed(200)
     const expected = fullFoldLive(owner)
-    expect(JSON.stringify(owedWithoutFold(owner))).toBe(JSON.stringify(expected))
+    const owed = owedWithoutFold(owner)
+    expect(JSON.stringify(owed)).toBe(JSON.stringify(expected))
+    // Agreeing is not enough (both once agreed on zero): name what is owed.
+    const owedIdentities: Record<string, string[]> = {
+      all: ["live-a @chief", "live-b @dev/2", "live-b @dev/3", "live-e @chief", "live-g @chief"],
+      "@chief": ["live-a @chief", "live-e @chief", "live-g @chief"],
+      "@dev/2": ["live-b @dev/2"],
+      "@dev/3": ["live-b @dev/3"],
+      "@dev/9": [],
+    }
+    expect(owed.map((row) => `${row.request_id} ${row.recipient}`).toSorted()).toEqual(owedIdentities[owner ?? "all"])
   })
 
   /** @cto b3839df7: the collapse kept the live row only against the first
@@ -320,25 +331,67 @@ describe("33650: the owed expired view folds only its obligations' history", () 
     expect(byId.get("live-e")).toMatchObject({ message_id: "live-e-m3", backing: "live", superseded_count: 1 })
   })
 
-  it("without a live row, the latest generation by its own opening represents the obligation", () => {
-    for (const [gen, hoursAgo] of [
-      ["m1", 30],
-      ["m3", 10],
-      ["m2", 20],
-    ] as const) {
-      deadline("gone", "@chief", `gone-${gen}`, NOW - hoursAgo * HOUR)
-    }
-    const rows = (json(pendingExpiredRead(ctx, makeOpts(), { owner: "@chief", now: NOW })).pending ?? []).filter(
-      (row) => row.request_id === "gone",
+  /** Journal row order (by ts) is independent of each generation's opening:
+   * a replayed or archived fact can land late. Generations openings m1 30 h,
+   * m2 20 h, m3 10 h ago, journaled in each order below. */
+  const journalOrders: Array<[string, Array<"m1" | "m2" | "m3">]> = [
+    ["oldest first", ["m1", "m2", "m3"]],
+    ["newest first", ["m3", "m2", "m1"]],
+    ["newest, oldest, middle", ["m3", "m1", "m2"]],
+  ]
+  const openedHoursAgo = { m1: 30, m2: 20, m3: 10 } as const
+  function journalGenerations(request: string, order: Array<"m1" | "m2" | "m3">) {
+    order.forEach((gen, position) => {
+      deadline(
+        request,
+        "@chief",
+        `${request}-${gen}`,
+        NOW - openedHoursAgo[gen] * HOUR,
+        request,
+        "first",
+        NOW - (5 - position) * HOUR,
+      )
+    })
+  }
+
+  it.each(journalOrders)("a live ball with three older generations stays live and owed (%s)", (_label, order) => {
+    seed(5)
+    journalGenerations("live-h", order)
+    openLive("live-h", "@chief", "live-h-m4", NOW - 2 * HOUR)
+    const view = json(
+      handleToolCall(
+        ctx,
+        "tribe.pending",
+        { owner: "@chief", expired: true, owed: true, now: NOW },
+        makeOpts(),
+      ) as never,
     )
+    const rows = (view.pending ?? []).filter((row) => row.request_id === "live-h")
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({
-      message_id: "gone-m3",
-      backing: "journal",
-      superseded_count: 2,
+      message_id: "live-h-m4",
+      backing: "live",
+      superseded_count: 3,
       opened_at: new Date(NOW - 30 * HOUR).toISOString(),
     })
   })
+
+  it.each(journalOrders)(
+    "without a live row, the latest generation by its own opening represents it (%s)",
+    (_label, order) => {
+      journalGenerations("gone", order)
+      const rows = (json(pendingExpiredRead(ctx, makeOpts(), { owner: "@chief", now: NOW })).pending ?? []).filter(
+        (row) => row.request_id === "gone",
+      )
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({
+        message_id: "gone-m3",
+        backing: "journal",
+        superseded_count: 2,
+        opened_at: new Date(NOW - 30 * HOUR).toISOString(),
+      })
+    },
+  )
 
   /** A fact with no usable payload request_id cannot be assigned to any
    * obligation, so it is never "unrelated": the owed read stays as loud as the
