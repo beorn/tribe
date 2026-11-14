@@ -384,9 +384,13 @@ export async function resolveRequestSender(requestId: string, callerName?: strin
     // silent-fallback-allow: active pending lookup failure falls through to expired request search
   }
 
-  // 3. Check fleet-wide expired pending requests
+  // 3. Check fleet-wide expired pending requests. Bounded by `owed` (34169): the
+  //    unbounded history view is refused because its fold holds the whole daemon;
+  //    a request settled out of band is found by the history fetch below instead.
   try {
-    const res = mcpJsonContent(await callDaemon("tribe.pending", { all: true, expired: true })) as PendingListResult
+    const res = mcpJsonContent(
+      await callDaemon("tribe.pending", { all: true, expired: true, owed: true }),
+    ) as PendingListResult
     const match = (res.pending ?? []).find((p) => p.request_id === normalizedId || p.message_id === normalizedId)
     if (match?.sender && match.sender.trim().length > 0) return match.sender.trim()
     if (res.owners) {

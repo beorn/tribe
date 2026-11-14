@@ -28,7 +28,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { handleToolCall, pendingExpiredRead, type HandlerOpts } from "./handlers.ts"
 import { logEvent } from "./messaging.ts"
 
 type ToolJson = Record<string, unknown>
@@ -118,7 +118,7 @@ describe("expired view collapses generations of one obligation", () => {
     journalExpiry(ctx, REQ, "gen-m2", 61000)
     journalExpiry(ctx, REQ, "gen-m3", 121000)
 
-    const res = parseToolJson(handleToolCall(ctx, "tribe.pending", { owner: "@chief", expired: true }, makeOpts()))
+    const res = parseToolJson(pendingExpiredRead(ctx, makeOpts(), { owner: "@chief" }))
     const rows = ((res.pending ?? []) as Row[]).filter((r) => r.request_id === REQ)
 
     expect(rows).toHaveLength(1)
@@ -135,7 +135,7 @@ describe("expired view collapses generations of one obligation", () => {
     journalExpiry(ctx, "wait-watch:seat @dev/1:demand-unconsumed", "a-m1", 1000)
     journalExpiry(ctx, "wait-watch:seat @dev/2:demand-unconsumed", "b-m1", 2000)
 
-    const res = parseToolJson(handleToolCall(ctx, "tribe.pending", { owner: "@chief", expired: true }, makeOpts()))
+    const res = parseToolJson(pendingExpiredRead(ctx, makeOpts(), { owner: "@chief" }))
     const rows = (res.pending ?? []) as Row[]
 
     expect(rows).toHaveLength(2)
@@ -185,7 +185,7 @@ describe("expired view collapses generations of one obligation", () => {
     expect(owedRows[0]!.superseded_count).toBe(1)
     expect(owedView.owed).toBe(true)
 
-    const fullView = parseToolJson(handleToolCall(ctx, "tribe.pending", { owner: "@chief", expired: true }, makeOpts()))
+    const fullView = parseToolJson(pendingExpiredRead(ctx, makeOpts(), { owner: "@chief" }))
     const fullRows = (fullView.pending ?? []) as Row[]
     expect(fullRows).toHaveLength(3)
     const byId = new Map(fullRows.map((r) => [r.request_id, r]))

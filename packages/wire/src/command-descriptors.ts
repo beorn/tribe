@@ -470,12 +470,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           expired: {
             type: "boolean",
             description:
-              "Read deadline-passed and historical unanswered outcomes. In the default view, live deadline-passed requests remain visible; this view adds journal-backed history. Answered rows are omitted.",
+              "Requires owed: derive deadline-passed outcomes from live rows, journal facts, and replies. The unbounded form (expired without owed) is refused by name: its fold reads every settled fact on the live store and holds the shared daemon for about 13 s. Answered rows are omitted.",
           },
           owed: {
             type: "boolean",
             description:
-              "With expired: only rows a live pending request still backs (deadline passed, still open, needs the owner's decision).",
+              "With expired: only rows a live pending request still backs (deadline passed, still open, needs the owner's decision). This is the bound that keeps the expired read off the full history fold.",
           },
           owner: { type: "string", description: "Owner seat name (default: the caller)." },
           emitter: {
@@ -510,7 +510,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           pending: {
             type: "array",
             description:
-              "Open requests, or derived expired outcomes (backing live|journal, superseded_count). Ordinary live owner/all rows include taking_receipt_at_ms (number|null), the latest matching reciprocal status/ref timestamp; zero is valid, null is observed absence, and owed (boolean): untaken, past its deadline, or taken without an end, the same predicate as inbox-status owed_count. Includes incidents and overdue rows, independent of deadlines. Missing originals use sequence zero; health keeps its stricter original requirement. Emitter and expired/history shapes are unchanged. Each row carries the owner's transport snapshot; vocabulary: /tribe.",
+              "Open requests, or derived expired outcomes (owed view: backing live, plus journal-disclosed superseded_count). Ordinary live owner/all rows include taking_receipt_at_ms (number|null), the latest matching reciprocal status/ref timestamp; zero is valid, null is observed absence, and owed (boolean): untaken, past its deadline, or taken without an end, the same predicate as inbox-status owed_count. Includes incidents and overdue rows, independent of deadlines. Missing originals use sequence zero; health keeps its stricter original requirement. Emitter and expired/history shapes are unchanged. Each row carries the owner's transport snapshot; vocabulary: /tribe.",
             items: { type: "object", additionalProperties: true },
           },
           owners: {
@@ -552,7 +552,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "expired",
           flags: "--expired",
-          description: "Show live deadline-passed and historical unanswered outcomes",
+          description: "Requires --owed. Deadline-passed outcomes still backed by a live request; alone it is refused",
         },
         {
           name: "owed",

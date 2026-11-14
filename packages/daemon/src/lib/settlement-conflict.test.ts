@@ -29,7 +29,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase } from "./database.ts"
-import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { handleToolCall, pendingExpiredRead, type HandlerOpts } from "./handlers.ts"
 import { logEvent } from "./messaging.ts"
 
 type ConflictEntry = { settlement: string; settled_at: string; settled_by: string }
@@ -154,7 +154,7 @@ describe("25654 one ball with two settlement facts", () => {
     openExpired(stmts, "other-owner-req", "@dev/2", now)
     closedThenAnswered(ctx, stmts, now)
 
-    const view = parseToolJson(handleToolCall(ctx, "tribe.pending", { owner: "@chief", expired: true }, makeOpts()))
+    const view = parseToolJson(pendingExpiredRead(ctx, makeOpts(), { owner: "@chief" }))
     expect(view.error).toBeUndefined()
     const byId = new Map((view.pending ?? []).map((row) => [row.request_id, row]))
     expect([...byId.keys()].toSorted()).toEqual(["live-req", "twice-req"])
@@ -170,13 +170,13 @@ describe("25654 one ball with two settlement facts", () => {
     expect(view.warning).toMatch(/answered/)
 
     // The owner who never held the ball reads a clean answer, no warning.
-    const other = parseToolJson(handleToolCall(ctx, "tribe.pending", { owner: "@dev/2", expired: true }, makeOpts()))
+    const other = parseToolJson(pendingExpiredRead(ctx, makeOpts(), { owner: "@dev/2" }))
     expect(other.error).toBeUndefined()
     expect((other.pending ?? []).map((row) => row.request_id)).toEqual(["other-owner-req"])
     expect(other.warning).toBeUndefined()
 
     // The fleet-wide view answers with every owner and names the conflict.
-    const all = parseToolJson(handleToolCall(ctx, "tribe.pending", { all: true, expired: true }, makeOpts()))
+    const all = parseToolJson(pendingExpiredRead(ctx, makeOpts(), { all: true }))
     expect(all.error).toBeUndefined()
     expect(all.count).toBe(3)
     expect((all.owners ?? []).map((group) => group.owner)).toEqual(["@chief", "@dev/2"])
@@ -288,7 +288,7 @@ describe("25654 one ball with two settlement facts", () => {
     journalSettlement(ctx, "late-close-req", "@chief", "answered", now - 2_000, now - 3_600_000)
     journalSettlement(ctx, "late-close-req", "@chief", "manual-close", now - 1_000, now - 3_600_000)
 
-    const view = parseToolJson(handleToolCall(ctx, "tribe.pending", { owner: "@chief", expired: true }, makeOpts()))
+    const view = parseToolJson(pendingExpiredRead(ctx, makeOpts(), { owner: "@chief" }))
     expect(view.error).toBeUndefined()
     expect(view.pending).toHaveLength(1)
     const row = view.pending![0]!

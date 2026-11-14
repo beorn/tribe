@@ -21,7 +21,13 @@ import { incidentKey } from "tribe-wire"
 
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { handleToolCall, readAttentionProjection, type ActiveSessionInfo, type HandlerOpts } from "./handlers.ts"
+import {
+  handleToolCall,
+  pendingExpiredRead,
+  readAttentionProjection,
+  type ActiveSessionInfo,
+  type HandlerOpts,
+} from "./handlers.ts"
 import { logEvent, sendMessage } from "./messaging.ts"
 import { cleanupOldData, registerSession } from "./session.ts"
 
@@ -189,7 +195,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       expect(all).toMatchObject({ count: 1, owner_count: 1, pending: [{ taking_receipt_at_ms: now }] })
       expect(own).toMatchObject({ count: 1, pending: [{ taking_receipt_at_ms: now }] })
       expect((all.owners as Array<{ pending: unknown }>)[0]?.pending).toEqual(all.pending)
-      const history = parseToolJson(handleToolCall(ctx, "tribe.pending", { expired: true }, makeOpts()))
+      const history = parseToolJson(pendingExpiredRead(ctx, makeOpts()))
       expect((history.pending as Array<Record<string, unknown>>)[0]).not.toHaveProperty("taking_receipt_at_ms")
       const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as {
         pending_balls: { requests: { owners: Array<{ pending: Array<{ taking_receipt_at_ms: number | null }> }> } }
@@ -1288,7 +1294,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       const pending = parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts())) as {
         pending: Array<{ request_id: string; status: string }>
       }
-      const expired = parseToolJson(handleToolCall(ctx, "tribe.pending", { expired: true }, makeOpts())) as {
+      const expired = parseToolJson(pendingExpiredRead(ctx, makeOpts())) as {
         expired: boolean
         pending: Array<{ request_id: string; settlement: string; settled_at: string }>
       }
@@ -1318,9 +1324,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       const archiveCutoff = Date.now() + 1_000
       stmts.archiveExpiredMessages.run({ $cutoff: archiveCutoff, $archived_at: archiveCutoff })
       stmts.deleteExpiredMessages.run({ $cutoff: archiveCutoff })
-      const archived = parseToolJson(
-        handleToolCall(ctx, "tribe.pending", { all: true, expired: true }, makeOpts()),
-      ) as {
+      const archived = parseToolJson(pendingExpiredRead(ctx, makeOpts(), { all: true })) as {
         pending: Array<{ request_id: string; settlement: string }>
         owners: Array<{ owner: string; pending: Array<{ request_id: string; settlement: string }> }>
       }
@@ -1395,7 +1399,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
 
       track("late-answer", "answered after deadline")
       db.prepare("UPDATE pending_request SET expires_at = ? WHERE request_id = 'late-answer'").run(Date.now() - 1)
-      handleToolCall(chief, "tribe.pending", { expired: true }, makeOpts())
+      pendingExpiredRead(chief, makeOpts())
       sendMessage(
         chief,
         "@agent/2",
@@ -1419,9 +1423,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         count: 0,
         pending: [],
       })
-      const outcomes = parseToolJson(
-        handleToolCall(chief, "tribe.pending", { all: true, expired: true }, makeOpts()),
-      ) as {
+      const outcomes = parseToolJson(pendingExpiredRead(chief, makeOpts(), { all: true })) as {
         pending: Array<{ request_id: string; settlement: string | null; status: string }>
       }
 
@@ -1563,7 +1565,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         { sender: "daemon", ref: "older-opening-later-settlement", ts: now },
       )
 
-      const expired = parseToolJson(handleToolCall(ctx, "tribe.pending", { all: true, expired: true }, makeOpts())) as {
+      const expired = parseToolJson(pendingExpiredRead(ctx, makeOpts(), { all: true })) as {
         count: number
         pending: Array<{ request_id: string; status: string; settlement: string | null }>
         owners: Array<{ owner: string; oldest_age_ms: number }>
@@ -1606,9 +1608,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       })
       logEvent(ctx, "ball.expired", undefined, { request_id: "missing-evidence" }, { sender: "daemon" })
 
-      expect(() => handleToolCall(ctx, "tribe.pending", { expired: true }, makeOpts())).toThrow(
-        /invalid ball expiry fact.*missing-evidence/i,
-      )
+      expect(() => pendingExpiredRead(ctx, makeOpts())).toThrow(/invalid ball expiry fact.*missing-evidence/i)
     } finally {
       db.close()
     }

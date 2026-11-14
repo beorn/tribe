@@ -25,7 +25,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { handleToolCall, pendingExpiredRead, type HandlerOpts } from "./handlers.ts"
 import { registerSession } from "./session.ts"
 
 const PROJECT_ID = "ball-close-cause"
@@ -580,9 +580,7 @@ describe("a closed: 0 ball result names its exact cause from the journal", () =>
     expect(closedByChief.closed).toBe(1)
 
     // Before @dev/3 replies, pending --expired lists the ball as unanswered with settlement=offline-owner-close and settled_by=@chief
-    const expiredBefore = parseToolJson(
-      handleToolCall(dev3, "tribe.pending", { owner: "@dev/3", expired: true }, makeOpts(ALL_ACTIVE)),
-    ) as {
+    const expiredBefore = parseToolJson(pendingExpiredRead(dev3, makeOpts(ALL_ACTIVE), { owner: "@dev/3" })) as {
       pending: Array<{ request_id: string; settlement: string; settled_by?: string; by_another_owner?: boolean }>
     }
     expect(expiredBefore.pending).toEqual([
@@ -623,9 +621,9 @@ describe("a closed: 0 ball result names its exact cause from the journal", () =>
       reply: fullId,
       correlated_reply_requester: "@ci",
     })
-    const expiredAfter = parseToolJson(
-      handleToolCall(dev3, "tribe.pending", { owner: "@dev/3", expired: true }, makeOpts(ALL_ACTIVE)),
-    ) as { pending: Array<{ request_id: string }> }
+    const expiredAfter = parseToolJson(pendingExpiredRead(dev3, makeOpts(ALL_ACTIVE), { owner: "@dev/3" })) as {
+      pending: Array<{ request_id: string }>
+    }
     expect(expiredAfter.pending).toEqual([])
   })
 })

@@ -20,7 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { handleToolCall, pendingExpiredRead, type HandlerOpts } from "./handlers.ts"
 import { sendMessage } from "./messaging.ts"
 
 type ToolJson = Record<string, unknown>
@@ -223,9 +223,7 @@ describe("a ball never outlives its question (22844)", () => {
 
     // After the deadline passes the ball leaves the default view; the
     // expired diagnostic view must still deliver the question.
-    const expired = parseToolJson(
-      handleToolCall(chief, "tribe.pending", { owner: "@chief", expired: true }, makeOpts()),
-    )
+    const expired = parseToolJson(pendingExpiredRead(chief, makeOpts(), { owner: "@chief" }))
     const expiredRows = (expired.pending ?? []) as PendingRow[]
     const row = expiredRows.find((r) => r.request_id === "ttl-req-1")
     if (row !== undefined) expect(row.content).toBe(body)

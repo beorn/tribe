@@ -333,12 +333,17 @@ Deadline passage changes presentation, never membership: the ball becomes
 `expired`, sorts first, and remains in the owner's pile. Reads compare the live
 deadline directly, so they stay authoritative even if the durable
 `ball.expired` observation echo waits for the next recorder sweep or daemon
-boundary. `tribe.pending({ expired: true })` folds active rows, hot or archived
-journal facts, and durable replies into one expired/unanswered view. A live
-deadline-passed row has no settlement; terminal non-reply rows preserve
-`manual-close`, `incident-cleared`, `gc-expired`, or `sender-withdrawn`; a later
+boundary. `tribe.pending({ expired: true, owed: true })` derives the
+deadline-passed outcomes a live request still backs from active rows, journal
+facts, and durable replies; generations of one obligation collapse into one row
+with `superseded_count`. A live deadline-passed row has no settlement; a later
 answer is derived from the reply message and omitted. There is no second status
-store. Paging, reminders, transfer, and escalation remain consumer policy.
+store. **The unbounded form — `expired` without `owed` — is refused by name**,
+because that fold reads every settled fact in the store on the daemon's one
+serving thread and held the whole wire for its full duration (13 s measured) even
+after the caller gave up at its 10 s limit. Settled history, if it is ever needed,
+is a separate read bounded by an owner and a time window. Paging, reminders,
+transfer, and escalation remain consumer policy.
 
 **Health cadence.** The daemon projects a health snapshot — response-latency
 percentiles by role and message type, open-ball counts and oldest age, per-

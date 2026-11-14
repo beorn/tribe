@@ -2162,6 +2162,77 @@ function withQuestionBodies<T extends { message_id: string }>(
   })
 }
 
+/** The transport observation a pending row carries, built once per read. */
+function ownerTransportProjection(ctx: TribeContext, opts: HandlerOpts, now: number) {
+  return (rows: readonly PendingBall[]): PendingBallWithOwnerTransport[] => {
+    if (rows.length === 0) return []
+    const transport = ownerTransportObservationProjector(ctx, opts, now, false)
+    return rows.map((row) => ({ ...row, ...transport.observe(row.recipient) }))
+  }
+}
+
+/**
+ * 34169 (@cto 4203a1ab): the expired-history fold. Its only wired shape is the
+ * bounded `owed` one — the unbounded read is refused at the handler because the
+ * fold holds the shared daemon for its full duration. The journal semantics this
+ * returns (generation collapse, settlement conflicts, non-reply reasons) are
+ * still live for every owed row, so the tests that pin them call this directly
+ * rather than the refused RPC shape. A bounded history read (one owner plus a
+ * time window) would be a new ask; nothing here is cached or counted.
+ */
+export function pendingExpiredRead(
+  ctx: TribeContext,
+  opts: HandlerOpts,
+  query: { all?: boolean; owner?: string; owed?: boolean; staleMs?: number | null; now?: number } = {},
+): ReturnType<typeof jsonResult> {
+  const all = query.all === true
+  const owed = query.owed === true
+  const owner = query.owner ?? ctx.getName()
+  const staleMs = query.staleMs ?? null
+  const now = query.now ?? Date.now()
+  const withOwnerTransport = ownerTransportProjection(ctx, opts, now)
+  if (all) {
+    const rows = withQuestionBodies(
+      ctx,
+      expiredPendingBalls(ctx, now, owed).filter(
+        (row) => (!owed || row.backing === "live") && (staleMs === null || row.age_ms >= staleMs),
+      ),
+    )
+    const pending: PendingBallWithOwnerTransport[] = withOwnerTransport(rows)
+    const owners = pendingOwnerGroups(pending)
+    const warning = settlementConflictWarning(rows as PendingOutcomeBall[])
+    return jsonResult({
+      all: true,
+      expired: true,
+      ...(owed ? { owed: true } : {}),
+      scope: "all",
+      pending,
+      owners,
+      owner_count: owners.length,
+      oldest_age_ms: pending.reduce((oldest, row) => Math.max(oldest, row.age_ms), 0),
+      count: pending.length,
+      ...(warning ? { warning } : {}),
+    })
+  }
+  const rows = withQuestionBodies(
+    ctx,
+    expiredPendingBalls(ctx, now, owed, owner).filter(
+      (row) =>
+        row.recipient === owner && (!owed || row.backing === "live") && (staleMs === null || row.age_ms >= staleMs),
+    ),
+  )
+  const pending: PendingBallWithOwnerTransport[] = withOwnerTransport(rows)
+  const warning = settlementConflictWarning(rows as PendingOutcomeBall[])
+  return jsonResult({
+    owner,
+    expired: true,
+    ...(owed ? { owed: true } : {}),
+    pending,
+    count: pending.length,
+    ...(warning ? { warning } : {}),
+  })
+}
+
 const pendingFactKey = ballFactKey
 
 function indexPendingReplies(replies: readonly PendingReplyFactRow[]): Map<string, Set<string>> {
@@ -2932,11 +3003,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
         "tribe.pending: --evidence is only accepted for an incident --close; ordinary request closes do not accept evidence.",
     })
   }
-  const withOwnerTransport = <T extends PendingBall>(rows: readonly T[]): Array<T & OwnerTransportObservation> => {
-    if (rows.length === 0) return []
-    const transport = ownerTransportObservationProjector(ctx, opts, now, false)
-    return rows.map((row) => ({ ...row, ...transport.observe(row.recipient) }))
-  }
+  const withOwnerTransport = ownerTransportProjection(ctx, opts, now)
 
   if (all && typeof a.owner === "string") {
     return jsonResult({ error: "tribe.pending: all and owner are mutually exclusive." })
@@ -2950,12 +3017,31 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
   if (owed && !expired) {
     return jsonResult({ owner, error: "tribe.pending: owed filters the expired view; pass expired: true." })
   }
+  // 34169 (@cto 4203a1ab): the unbounded expired view is a refusal, not a slow answer.
+  // `expiredPendingBalls` reads every settlement fact and every reply fact in the
+  // store, and the daemon runs it on the one thread that serves every seat with
+  // synchronous SQLite: a caller that gives up at its 10 s limit does not stop the
+  // query, so the shape holds the whole wire for the fold's full duration
+  // (measured 13.0 s on the live store, 17.4 s under load). `owed` bounds it by
+  // early return when the owner has no live deadline-passed ball; journal-only
+  // history is a new ask with an owner and a time window, never this flag back.
+  if (expired && !owed) {
+    return jsonResult({
+      owner,
+      error:
+        "tribe.pending: refusing the unbounded expired history read before any fold — it reads every settled fact on the live store and holds the shared daemon for the whole fold (13 s measured, past the 10 s client limit), so every other seat waits too. Pass owed: true to bound it to live requests: expired + owed, optionally with all: true or one owner. There is no unbounded history view (34169).",
+    })
+  }
+
+  // The expired view is read-only and never settles, so it answers before the
+  // declared-roster sweep below. Its unbounded form is refused above (34169).
+  if (expired) return pendingExpiredRead(ctx, opts, { all, owner, owed, staleMs, now })
 
   // 24588 row 4: dual expected:false balls cannot be answered, so they must
-  // not accrue on the live view. The expired diagnostic stays a snapshot.
+  // not accrue on the live view.
   // settled_by is declared-roster, not the caller — this is not a third-party
   // owner close (24563). Incident balls stay emitter-owned.
-  const declaredRoster = expired ? undefined : opts.getExpectedMembers?.()
+  const declaredRoster = opts.getExpectedMembers?.()
   if (declaredRoster !== undefined) {
     // Eligibility first, transaction second: a read that finds nothing to settle
     // must not open one (34154).
@@ -3096,17 +3182,9 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
     })()
 
   if (all) {
-    const rows = expired
-      ? withQuestionBodies(
-          ctx,
-          expiredPendingBalls(ctx, now, owed).filter(
-            (row) => (!owed || row.backing === "live") && (staleMs === null || row.age_ms >= staleMs),
-          ),
-        )
-      : liveRows().filter((row) => staleMs === null || row.age_ms >= staleMs)
-    const pending: PendingBallWithOwnerTransport[] = withOwnerTransport<PendingBall>(rows)
+    const rows = liveRows().filter((row) => staleMs === null || row.age_ms >= staleMs)
+    const pending: PendingBallWithOwnerTransport[] = withOwnerTransport(rows)
     const owners = pendingOwnerGroups(pending)
-    const warning = expired ? settlementConflictWarning(rows as PendingOutcomeBall[]) : undefined
     return jsonResult({
       all: true,
       expired,
@@ -3117,28 +3195,17 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
       owner_count: owners.length,
       oldest_age_ms: pending.reduce((oldest, row) => Math.max(oldest, row.age_ms), 0),
       count: pending.length,
-      ...(warning ? { warning } : {}),
     })
   }
 
-  const rows = expired
-    ? withQuestionBodies(
-        ctx,
-        expiredPendingBalls(ctx, now, owed, owner).filter(
-          (row) =>
-            row.recipient === owner && (!owed || row.backing === "live") && (staleMs === null || row.age_ms >= staleMs),
-        ),
-      )
-    : liveRows().filter((row) => staleMs === null || row.age_ms >= staleMs)
-  const pending: PendingBallWithOwnerTransport[] = withOwnerTransport<PendingBall>(rows)
-  const warning = expired ? settlementConflictWarning(rows as PendingOutcomeBall[]) : undefined
+  const rows = liveRows().filter((row) => staleMs === null || row.age_ms >= staleMs)
+  const pending: PendingBallWithOwnerTransport[] = withOwnerTransport(rows)
   return jsonResult({
     owner,
     expired,
     ...(owed ? { owed: true } : {}),
     pending,
     count: pending.length,
-    ...(warning ? { warning } : {}),
   })
 }
 
