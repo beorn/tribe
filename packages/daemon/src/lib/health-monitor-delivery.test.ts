@@ -262,12 +262,26 @@ describe("health alert delivery", () => {
     // A host that cannot report pressure says so, with the producer's own reason, and names the rule it kept.
     expect(fire({ kind: "absent", detail: "not-reported: /proc/pressure/cpu: ENOENT" })).toContain(
       "No CPU pressure reading on this host (not-reported: /proc/pressure/cpu: ENOENT); " +
-        "this page keeps the load-and-runnable rule.",
+        "this page keeps its load and runnable depth rule.",
     )
     expect(fire({ kind: "unreadable", detail: "host:scalars pressure is unavailable (access-denied)" })).toContain(
       "CPU pressure is unreadable (host:scalars pressure is unavailable (access-denied)); " +
-        "this page keeps the load-and-runnable rule.",
+        "this page keeps its load and runnable depth rule.",
     )
+  })
+
+  test("34311: a standalone metric never claims a runnable reading it did not take", () => {
+    const thresholds = { ...defaultThresholds(), cpuCriticalMultiplier: 2, cpuQualifyingMs: 20_000 }
+    const state = createAlertState()
+    let message = ""
+    for (let sample = 0; sample < 3; sample += 1) {
+      const observation = metrics(9, BASE_TIME_MS + sample * 10_000)
+      const alerts = evaluateAlerts(observation, thresholds, state)
+      if (alerts.length > 0) message = alerts[0]!.message
+    }
+    // Standalone metrics carry no procs_running (30382), so the sentence names load as the whole rule.
+    expect(message).toContain("this rule reads load only, and no CPU pressure reading gates it yet.")
+    expect(message).not.toContain("load and runnable depth")
   })
 
   test("30382: the current observation must itself qualify — retained history alone never pages", () => {

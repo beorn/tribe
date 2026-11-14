@@ -66,29 +66,24 @@ export function cpuGapMsForCadence(pollIntervalSec: number): number {
 const CPU_OFFENDER_MIN_PERCENT = 3
 
 /**
- * #34311: until a CPU pressure floor gates this page, every CPU message must say what it is and is
- * not — a busy-host notice, not evidence that anything is being starved. Without this sentence the
- * page sends the reader hunting for a hog that a pressure reading would rule out.
- */
-const CPU_BUSY_HOST_NOTICE =
-  " Busy-host notice, not evidence of starvation: this rule reads load and runnable depth only, and no CPU pressure reading gates it yet."
-
-/**
  * #34311: what the CPU page says about pressure beside its load. A measured reading is reported with the
  * fact it came from; a host that cannot report pressure says so and names the rule it kept; an unreadable
  * one is loud with the reason. The fallback sentence is only for metrics built outside the canonical lane,
  * because those never consulted a fact and must not claim one.
  */
 function cpuPressureClause(cpu: HealthMetrics["cpu"]): string {
+  // A standalone metric never read `procs_running` (30382: only a canonical fact carries it), so the sentence
+  // must not claim a runnable reading that was never taken (@cto, 34311-psi-source-ruling).
+  const rule = cpu.runnableTasks === undefined && cpu.runnableUnavailable === undefined ? "load" : "load and runnable depth"
   const pressure = cpu.cpuPressure
-  if (pressure === undefined) return CPU_BUSY_HOST_NOTICE
+  if (pressure === undefined) return ` Busy-host notice, not evidence of starvation: this rule reads ${rule} only, and no CPU pressure reading gates it yet.`
   switch (pressure.kind) {
     case "measured":
       return ` CPU pressure some avg60 ${pressure.someAvg60Percent.toFixed(2)}% from the same host:scalars fact; no pressure floor gates this page yet.`
     case "absent":
-      return ` No CPU pressure reading on this host (${pressure.detail}); this page keeps the load-and-runnable rule.`
+      return ` No CPU pressure reading on this host (${pressure.detail}); this page keeps its ${rule} rule.`
     case "unreadable":
-      return ` CPU pressure is unreadable (${pressure.detail}); this page keeps the load-and-runnable rule.`
+      return ` CPU pressure is unreadable (${pressure.detail}); this page keeps its ${rule} rule.`
   }
 }
 const HEALTH_ALERT_ARGV_MAX_CHARS = 160
