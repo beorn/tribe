@@ -338,16 +338,20 @@ export function createInboxWaitManager(
       if (!directForWaiter && !trackedBroadcastForWaiter) continue
       if (info.rowid <= waiter.baselineSeq) continue
       // SQL excludes quiet incidents even from opt-in correlated replies; match that durable qualification.
-      // 29541: under the opt-in this is the same union the SQL tail arm computes under
-      // $include_correlated_replies — a structured reply that settled the waiter's request, OR a
-      // progress status whose ref names the still-open ball the waiter REQUESTED. Requester side
-      // only, so an owner-side precision stays quiet. Focus-mode push keeps the settlement-only
-      // question (settlesRequestOpenedBy); this arm is the opt-in alone, and widens no default.
+      // 29541 + 21547: under the opt-in this is the same union the SQL tail arm computes under
+      // $include_correlated_replies — a direct non-incident response from another sender to this exact
+      // recipient, a structured reply that settled the waiter's request, OR a progress status whose ref
+      // names the still-open ball the waiter REQUESTED. A tracked broadcast is not a direct response.
+      // Focus-mode push keeps the settlement-only question (settlesRequestOpenedBy); this arm is the
+      // opt-in alone, and widens no default.
+      const directResponseForWaiter =
+        directForWaiter && info.type === "response" && info.isIncident !== true && info.sender !== waiter.session
       if (
-        (info.isIncident !== true || info.wakesOwner === true) &&
         waiter.wakeOnCorrelatedReply &&
-        CORRELATED_REPLY_TYPES_SET.has(info.type) &&
-        (settlesRequestOpenedBy(info, waiter.session) || info.refBoundOpenRequest?.requester === waiter.session)
+        (directResponseForWaiter ||
+          ((info.isIncident !== true || info.wakesOwner === true) &&
+            CORRELATED_REPLY_TYPES_SET.has(info.type) &&
+            (settlesRequestOpenedBy(info, waiter.session) || info.refBoundOpenRequest?.requester === waiter.session)))
       ) {
         settle(waiter, { timedOut: false, aborted: false }, info.rowid)
         continue
