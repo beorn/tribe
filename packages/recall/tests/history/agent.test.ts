@@ -13,7 +13,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { buildMockQueryModel, buildPlanJson, alwaysAvailable, unavailableCostMethods } from "../helpers/llm-mock.ts"
 import { makeKmVault } from "../helpers/km-vault.ts"
-import type { LlmBackend } from "../../src/lib/llm-backend.ts"
+import type { LlmBackend, LlmProviderAvailabilityFact } from "../../src/lib/llm-backend.ts"
 
 process.env.RECALL_DB_PATH = ":memory:"
 
@@ -124,6 +124,49 @@ afterEach(() => {
 // ──────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────
+
+describe("recallAgent — invocation observations", () => {
+  test("loads one fact snapshot across nested planner and synthesis calls", async () => {
+    mockHolder.fn = buildMockQueryModel([
+      { match: /query planner/i, content: buildPlanJson({ keywords: ["alpha"] }) },
+      { content: "synthesized" },
+    ])
+    seedCorpus({ sessions: [{ id: "fact-session", title: "A", messages: ["alpha content"] }] })
+    const primary = fakeModel("fact-primary")
+    const readProviderFact = vi.fn(async (provider: string): Promise<LlmProviderAvailabilityFact> => ({
+      provider,
+      status: "unknown",
+      source: "fixture",
+      reason: "no stored refusal",
+    }))
+    const readsBeforeDispatch: number[] = []
+    const queryModel = vi.fn((options: Parameters<LlmBackend["queryModel"]>[0]) => {
+      readsBeforeDispatch.push(readProviderFact.mock.calls.length)
+      return llm.queryModel(options)
+    })
+    const backend = {
+      ...llm,
+      queryModel,
+      readProviderFact,
+      budgetedModelIds: [primary.modelId],
+      getModel: (id: string) => (id === primary.modelId ? primary : undefined),
+      getCheapModel: () => primary,
+      getCheapModels: () => [primary],
+    }
+    const result = await recallAgentImpl("alpha", {
+      deps: { llm: backend },
+      maxRounds: 2,
+      round2: "wider",
+      speculativeSynth: false,
+    })
+    expect(result.synthesis).toBe("synthesized")
+    expect(result.trace.rounds).toHaveLength(2)
+    expect(queryModel.mock.calls.length).toBeGreaterThanOrEqual(3)
+    expect(readsBeforeDispatch[0]).toBe(1)
+    // Initial snapshot once; dispatch still refreshes its actual outcome facts.
+    expect(readProviderFact.mock.calls.length).toBe(1 + queryModel.mock.calls.length)
+  })
+})
 
 describe("recallAgent — short-circuit", () => {
   test("skips round 2 when top-coverage absolute threshold hit (low fraction)", async () => {

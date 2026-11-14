@@ -312,6 +312,8 @@ describe("loadLlm shared provider-health surface", () => {
       const subscription = { provider: "openai", modelId: "subscription" }
       export const calls = []
       export let summaryModel
+      export let providerRefusal
+      export const setProviderRefusal = (reason) => { providerRefusal = reason }
       export const setSummaryModel = (model) => { summaryModel = model }
       export const queryModel = async (options) => {
         await Promise.resolve()
@@ -326,7 +328,8 @@ describe("loadLlm shared provider-health surface", () => {
       export const isProviderAvailable = () => true
       export const createProviderObservationStore = () => ({})
       export const readProviderAvailability = async (provider, options) => ({
-        provider, status: "unknown", source: "fixture", reason: "no stored observation",
+        provider, status: providerRefusal ? "refusing" : "unknown", source: "fixture",
+        reason: providerRefusal ?? "no stored observation", ...(providerRefusal ? { kind: "quota" } : {}),
       })
       export const selectModels = ({ candidates, facts }) => {
         if (new Set(facts.map(fact => fact.provider)).size !== facts.length) throw new Error("duplicate provider facts")
@@ -352,6 +355,10 @@ describe("loadLlm shared provider-health surface", () => {
         allowed.queryModel({ model: paid, question: "allowed" }),
         ordinary.queryModel({ model: paid, question: "default" }),
       ])
+      const changed = await loadLlm({ backend: ordinary, allowMetered: true })
+      if (!changed) throw new Error("changed-consent view failed to load")
+      const changedResponse = await changed.queryModel({ model: paid, question: "changed consent" })
+      const ordinaryAfter = await ordinary.queryModel({ model: paid, question: "still default" })
       const host = await import(process.env.TRIBE_LLM_DIR + "/index.ts")
       const consentCalls = [...host.calls]
       host.calls.length = 0
@@ -364,14 +371,20 @@ describe("loadLlm shared provider-health surface", () => {
       const local = await summarizeTail("fixture session tail", { mode: "local" })
       host.setSummaryModel({ provider: "openai", modelId: "haiku-subscription" })
       const subscriptionSummary = await summarizeTail("fixture session tail", { mode: "haiku" })
+      host.setProviderRefusal("stored quota refusal")
+      const refusedView = await loadLlm()
+      const explanation = refusedView.explainUnavailable("openai")
       console.log(JSON.stringify({
         tail: { refused, off, refusedCalls, local, subscription: subscriptionSummary, calls: host.calls },
+        explanation,
         selected: selected.models.map(model => model.modelId),
         allowedSelected: opted.models.map(model => model.modelId),
         rejected: selected.rejected,
         calls: consentCalls,
         allowed: yes.response,
         ordinary: no.response,
+        changed: changedResponse.response,
+        ordinaryAfter: ordinaryAfter.response,
       }))
     `
     try {
@@ -389,6 +402,7 @@ describe("loadLlm shared provider-health surface", () => {
       })
       expect(child.status, child.stderr).toBe(0)
       const result = JSON.parse(child.stdout) as {
+        explanation: string
         tail: {
           refused: { error?: string; calls: unknown[] } | null
           off: unknown
@@ -403,18 +417,26 @@ describe("loadLlm shared provider-health surface", () => {
         calls: Array<{ model: string; consent: boolean }>
         allowed: { content: string }
         ordinary: { content: string; error: string }
+        changed: { content: string }
+        ordinaryAfter: { error: string }
       }
       expect(result.selected).toEqual(["subscription"])
       expect(result.allowedSelected).toContain("paid-only")
       expect(result.rejected).toContainEqual(
         expect.objectContaining({ modelId: "paid-only", reason: "no unpaid route for paid-only" }),
       )
-      expect(result.calls).toEqual([{ model: "paid-only", consent: true }])
+      expect(result.calls).toEqual([
+        { model: "paid-only", consent: true },
+        { model: "paid-only", consent: true },
+      ])
       expect(result.allowed.content).toBe("answer")
+      expect(result.changed.content).toBe("answer")
+      expect(result.ordinaryAfter.error).toBe("no unpaid route for paid-only")
       expect(result.ordinary).toMatchObject({ content: "", error: "no unpaid route for paid-only" })
       // Enabled daemon-tail summarization must retain a route refusal without dispatch.
       expect(result.tail.refused).toMatchObject({ error: expect.stringContaining("no unpaid route"), calls: [] })
       expect(result.tail.refusedCalls).toEqual([])
+      expect(result.explanation).toBe("stored quota refusal")
       expect(result.tail.off).toBeNull()
       expect(result.tail.local?.focus).toBe("fixture summary")
       expect(result.tail.subscription?.focus).toBe("fixture summary")

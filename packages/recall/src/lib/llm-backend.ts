@@ -388,8 +388,11 @@ export function resolveAvailableCheapModel(llm: LlmBackend | null): CheapModelRe
 }
 
 type LlmHost = LlmBackend & {
+  deniedProviders?: ReadonlySet<string>
   readProviderFact?: (provider: string, requireApiKey: boolean) => Promise<LlmProviderAvailabilityFact>
 }
+
+const invocationViews = new WeakMap<LlmBackend, { host: LlmHost; allowMetered: boolean }>()
 
 let probe: Promise<LlmHost | null> | undefined
 let warned = false
@@ -505,7 +508,11 @@ export async function loadLlm(
   options: { allowMetered?: boolean; backend?: LlmBackend } = {},
 ): Promise<LlmBackend | null> {
   const allowMetered = readMeteredConsent(options.allowMetered) ?? false
-  if (options.backend) return invocationBackend(options.backend, allowMetered)
+  if (options.backend) {
+    const existing = invocationViews.get(options.backend)
+    if (existing?.allowMetered === allowMetered) return options.backend
+    return invocationBackend(existing?.host ?? options.backend, allowMetered)
+  }
   probe ??= (async () => {
     const dir = process.env.TRIBE_LLM_DIR
     if (!dir) {
@@ -522,6 +529,7 @@ export async function loadLlm(
       const observationStore = bearly.createProviderObservationStore()
       return {
         queryModel: bearly.queryModel,
+        deniedProviders: denied,
         resolveQueryRoute: bearly.resolveQueryRoute,
         readProviderFact: (provider, requireApiKey) =>
           bearly.readProviderAvailability(provider, {
@@ -604,6 +612,15 @@ async function invocationBackend(host: LlmHost, allowMetered: boolean): Promise<
     ...host,
     allowMetered,
     ...(host.providerFacts ? { providerFacts } : {}),
+    explainUnavailable: (provider) => {
+      const normalized = provider.toLowerCase()
+      const hostReason = host.explainUnavailable?.(provider)
+      if (host.deniedProviders?.has(normalized) && hostReason) return hostReason
+      const facts = host.readProviderFact ? [...factsByModel.values()] : (host.providerFacts ?? [])
+      const matches = facts.filter((fact) => fact.provider.toLowerCase() === normalized)
+      const fact = matches.find((candidate) => candidate.status === "refusing") ?? matches[0]
+      return fact?.reason ?? hostReason ?? `no provider fact available for "${provider}"`
+    },
     queryModel: async (options) => {
       const permit = readMeteredConsent(options.allowMetered) ?? allowMetered
       const reason = unpaidRouteRefusal(host, options.model, permit)
@@ -639,6 +656,7 @@ async function invocationBackend(host: LlmHost, allowMetered: boolean): Promise<
       return { ...selected, excluded: [...refused, ...selected.excluded] }
     }
   }
+  invocationViews.set(view, { host, allowMetered })
   return view
 }
 
