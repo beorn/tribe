@@ -241,7 +241,7 @@ export type CanonicalProcessObservation =
 type ScalarUnavailableMetric = {
   readonly detail?: string
   readonly kind: "unavailable"
-  readonly metric: "cpu" | "disk" | "disk.inodes" | "diskIo" | "memory" | "oomKill" | "runnable" | "swap"
+  readonly metric: "cpu" | "disk" | "disk.inodes" | "diskIo" | "memory" | "oomKill" | "pressure" | "runnable" | "swap"
   readonly platform: string
   readonly reason: string
 }
@@ -273,6 +273,13 @@ export type CanonicalHostScalarObservation =
          * absent field is legal, a malformed one rejects the whole observation like every other scalar.
          */
         readonly runnable?: ScalarMetric<"runnable", { readonly logicalCores: number; readonly tasks: number }>
+        /**
+         * CPU pressure stall information, from the same fact (34311). Only `some` avg60 is consumed by the health
+         * monitor; the producer writes the memory averages and both totals beside it. Optional for the same reasons
+         * as `runnable`: retained facts predate the field, a host without /proc/pressure/cpu declines it by name
+         * (`not-reported`), and a present-but-malformed metric rejects the whole observation.
+         */
+        readonly pressure?: ScalarMetric<"pressure", { readonly cpuSomeAvg60Percent: number }>
         /**
          * The kernel boot id the producer read beside its OOM-kill counter, from the same fact (30427): the optional
          * boot-continuity proof the CPU window consults at a sampler replacement. Absent on retained facts and
@@ -547,6 +554,16 @@ function isScalarMetric(value: unknown, metric: ScalarUnavailableMetric["metric"
       (item) => isNonNegativeInteger(item.tasks) && isPositiveInteger(item.logicalCores),
     )
   }
+  if (metric === "pressure") {
+    // Before the unconditional swap validator, like runnable and oomKill: that one would reject every pressure row.
+    // A finite number is all the fact has to carry to be readable. Range is interpreted in cpu-pressure.ts, so an
+    // out-of-range value stays a NAMED unreadable reading instead of blinding the whole observation and with it
+    // every load, memory and disk page that rides the same fact.
+    return isSupportedScalarMetric(
+      value,
+      (item) => typeof item.cpuSomeAvg60Percent === "number" && Number.isFinite(item.cpuSomeAvg60Percent),
+    )
+  }
   if (metric === "oomKill") {
     // Also before the unconditional swap validator (30427): placed after it, every supported boot proof would read
     // malformed, every boot would be unproved, and the continuity rule would silently never carry a window.
@@ -636,6 +653,7 @@ function parseScalarObservation(value: unknown): CanonicalHostScalarObservation 
     !isScalarMetric(value.values.memory, "memory") ||
     // Absent stays legal (older retained facts); present-but-malformed rejects the observation, never reads as zero.
     (value.values.runnable !== undefined && !isScalarMetric(value.values.runnable, "runnable")) ||
+    (value.values.pressure !== undefined && !isScalarMetric(value.values.pressure, "pressure")) ||
     (value.values.oomKill !== undefined && !isScalarMetric(value.values.oomKill, "oomKill")) ||
     !isScalarMetric(value.values.swap, "swap")
   ) {

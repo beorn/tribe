@@ -29,6 +29,7 @@ import {
   reloadDeadlineMs as deriveReloadDeadlineMs,
   reloadMaxDeclaredForDeadlineMs,
 } from "tribe-wire/lib/reload-pacing"
+import { cpuPressureReading, type CpuPressureReading } from "./cpu-pressure.ts"
 import { createTimers } from "./timers.ts"
 import { startSingleFlightTicker, type SingleFlightRunner, type SingleFlightStats } from "./single-flight-ticker.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
@@ -63,6 +64,30 @@ export function cpuGapMsForCadence(pollIntervalSec: number): number {
   return Math.round(pollIntervalSec * 1000 * CPU_WINDOW_GAP_POLLS)
 }
 const CPU_OFFENDER_MIN_PERCENT = 3
+
+/**
+ * #34311: what the CPU page says about pressure beside its load. A measured reading is reported with the
+ * fact it came from; a host that cannot report pressure says so and names the rule it kept; an unreadable
+ * one is loud with the reason. The fallback sentence is only for metrics built outside the canonical lane,
+ * because those never consulted a fact and must not claim one.
+ */
+function cpuPressureClause(cpu: HealthMetrics["cpu"]): string {
+  // A standalone metric never read `procs_running` (30382: only a canonical fact carries it), so the sentence
+  // must not claim a runnable reading that was never taken (@cto, 34311-psi-source-ruling).
+  const rule =
+    cpu.runnableTasks === undefined && cpu.runnableUnavailable === undefined ? "load" : "load and runnable depth"
+  const pressure = cpu.cpuPressure
+  if (pressure === undefined)
+    return ` Busy-host notice, not evidence of starvation: this rule reads ${rule} only, and no CPU pressure reading gates it yet.`
+  switch (pressure.kind) {
+    case "measured":
+      return ` CPU pressure some avg60 ${pressure.someAvg60Percent.toFixed(2)}% from the same host:scalars fact; no pressure floor gates this page yet.`
+    case "absent":
+      return ` No CPU pressure reading on this host (${pressure.detail}); this page keeps its ${rule} rule.`
+    case "unreadable":
+      return ` CPU pressure is unreadable (${pressure.detail}); this page keeps its ${rule} rule.`
+  }
+}
 const HEALTH_ALERT_ARGV_MAX_CHARS = 160
 type CanonicalDiskCapacity = Extract<
   Extract<CanonicalHostScalarObservation, { kind: "available" }>["values"]["disk"],
@@ -82,6 +107,13 @@ export interface HealthMetrics {
     runnableTasks?: number
     /** Why a canonical observation carries no `runnableTasks`: the producer omitted (`not-reported`) or declined it. */
     runnableUnavailable?: { readonly reason: string; readonly detail?: string }
+    /**
+     * CPU pressure stall information from the same `host:scalars` fact (34311), interpreted into three
+     * outcomes. Absent means a host that reports no CPU pressure (macOS, standalone, a kernel without
+     * /proc/pressure/cpu); unreadable means the fact carried it and it was malformed. Undefined only for
+     * metrics built outside the canonical lane, where no fact was consulted at all.
+     */
+    cpuPressure?: CpuPressureReading
     topProcesses: Array<{ pid: number; cpu: number; mem?: number; command: string }>
   }
   memory?: {
@@ -1986,7 +2018,7 @@ export function evaluateAlerts(
       alerts.push({
         type: "cpu",
         severity: "critical",
-        message: `CPU critical: load ${load} exceeds ${cpuCriticalThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuCriticalMultiplier}) for ${thresholds.sustainedSamples * 10}s`,
+        message: `CPU critical: load ${load} exceeds ${cpuCriticalThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuCriticalMultiplier}) for ${thresholds.sustainedSamples * 10}s${cpuPressureClause(metrics.cpu)}`,
         metrics: { cpu: metrics.cpu },
         topOffenders: metrics.cpu.topProcesses.slice(0, 5),
       })
@@ -2001,7 +2033,7 @@ export function evaluateAlerts(
       alerts.push({
         type: "cpu",
         severity: "warning",
-        message: `CPU warning: load ${load} exceeds ${cpuWarningThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuWarningMultiplier}) for ${thresholds.sustainedSamples * 10}s`,
+        message: `CPU warning: load ${load} exceeds ${cpuWarningThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuWarningMultiplier}) for ${thresholds.sustainedSamples * 10}s${cpuPressureClause(metrics.cpu)}`,
         metrics: { cpu: metrics.cpu },
         topOffenders: metrics.cpu.topProcesses.slice(0, 5),
       })
@@ -2058,7 +2090,7 @@ export function evaluateAlerts(
         severity: "critical",
         message:
           `CPU critical: load ${load} exceeds ${cpuCriticalThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuCriticalMultiplier}) ` +
-          `${where} for ${seconds(measured.criticalMs)} ${window}`,
+          `${where} for ${seconds(measured.criticalMs)} ${window}${cpuPressureClause(metrics.cpu)}`,
         metrics: { cpu: metrics.cpu },
         topOffenders: metrics.cpu.topProcesses.slice(0, 5),
       })
@@ -2076,7 +2108,7 @@ export function evaluateAlerts(
         severity: "warning",
         message:
           `CPU warning: load ${load} exceeds ${cpuWarningThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuWarningMultiplier}) ` +
-          `${where} for ${seconds(measured.warningMs)} ${window}`,
+          `${where} for ${seconds(measured.warningMs)} ${window}${cpuPressureClause(metrics.cpu)}`,
         metrics: { cpu: metrics.cpu },
         topOffenders: metrics.cpu.topProcesses.slice(0, 5),
       })
@@ -2770,6 +2802,7 @@ function canonicalScalarMetrics(
                         ...(values.runnable.detail === undefined ? {} : { detail: values.runnable.detail }),
                       },
               }),
+          cpuPressure: cpuPressureReading(values.pressure),
           topProcesses: [],
         }
       : { topProcesses: [] }
