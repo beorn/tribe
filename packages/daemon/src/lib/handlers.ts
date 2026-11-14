@@ -2265,20 +2265,45 @@ function expiredPendingBalls(ctx: TribeContext, now: number, owed = false, owner
   )
   // History can enrich a live generation's age and conflicts, but cannot
   // create a live obligation. Apply only owner scope here, never stale age.
-  if (owed && !live.some((ball) => owner === undefined || ball.recipient === owner)) return []
-  // 34154: both forms read the outcome facts per TYPE through the indexes that
-  // already exist (0.59 s for the same 156,408 rows the old single statement
-  // took 6.59 s to scan through `kind`). The owed form was measured at 0.002 s
-  // when scoped to the live request ids by `ref`, and that scope is WRONG: the
-  // generations of one obligation each file their fact under a different
-  // message id (`dark-work:Owner4h:@dev/1`), so a ref scope hides the extra
-  // generations the owed view discloses as superseded_count, and lets a journal
-  // row replace a live one. The view's contract needs the whole fold, so the
-  // cure is the index plan, not a narrower key set.
-  const rows = ctx.stmts.selectPendingOutcomeFactsByType.all() as BallOutcomeFactRow[]
-  const replies = ctx.stmts.selectPendingReplyFacts.all() as PendingReplyFactRow[]
+  const scope = owed ? live.filter((ball) => owner === undefined || ball.recipient === owner) : undefined
+  if (scope?.length === 0) return []
+  // 33650 (@cto 5c8dd3b9): the owed view shows only live rows, and a live
+  // row's collapse reads only facts with its own (request_id, recipient)
+  // identity: settlement conflicts key on (request_id, recipient, message_id),
+  // the generation collapse on (request_id, recipient), and answered-ness on
+  // replies to the fact's request id or message id. So the owed read seeks
+  // every generation, both tiers, by PAYLOAD request_id — never `ref`, which
+  // a legacy fact can set to a third id (34154 measured why a ref scope is
+  // wrong) — then replies to those request ids and every generation's message
+  // id. A fact with no usable request_id is unassignable, not unrelated: the
+  // probe replays one through the shared parser, which throws as the whole
+  // fold would. The non-owed form keeps the whole-journal fold.
+  if (scope !== undefined) {
+    const unassignable = ctx.stmts.selectUnassignableBallOutcomeFact.get() as BallOutcomeFactRow | null
+    if (unassignable) {
+      parseBallOutcomeFact(unassignable)
+      throw new Error(`ball outcome fact ${unassignable.id} has no usable request_id yet passed the replay parser`)
+    }
+  }
+  const rows = (
+    scope === undefined
+      ? ctx.stmts.selectPendingOutcomeFactsByType.all()
+      : ctx.stmts.selectPendingOutcomeFactsForRequestIds.all({
+          $request_ids: JSON.stringify([...new Set(scope.map((ball) => ball.request_id))]),
+        })
+  ) as BallOutcomeFactRow[]
+  const scopeIdentities = scope === undefined ? undefined : new Set(scope.map(obligationIdentity))
+  const facts = rows
+    .map(parseBallOutcomeFact)
+    .filter((fact) => scopeIdentities === undefined || scopeIdentities.has(obligationIdentity(fact)))
+  const replies = (
+    scope === undefined
+      ? ctx.stmts.selectPendingReplyFacts.all()
+      : ctx.stmts.selectPendingReplyFactsForIds.all({
+          $reply_ids: JSON.stringify([...new Set(facts.flatMap((fact) => [fact.request_id, fact.message_id]))]),
+        })
+  ) as PendingReplyFactRow[]
   const respondersByRef = indexPendingReplies(replies)
-  const facts = rows.map(parseBallOutcomeFact)
   // Two facts that disagree on one key are REPORTED on that ball (25654),
   // never thrown: a throw here answered exit 2 to every owner's expired view.
   // A conflicted ball is always listed, even when its latest fact is
@@ -2331,6 +2356,10 @@ function expiredPendingBalls(ctx: TribeContext, now: number, owed = false, owner
   return sortPendingBalls(collapseOutcomeGenerations(outcomes))
 }
 
+function obligationIdentity(row: { request_id: string; recipient: string }): string {
+  return JSON.stringify([row.request_id, row.recipient])
+}
+
 /**
  * One obligation per (request_id, recipient). The fact fold above is keyed
  * per MESSAGE — correct for journal identity, wrong for display: a standing
@@ -2338,28 +2367,35 @@ function expiredPendingBalls(ctx: TribeContext, now: number, owed = false, owner
  * message id, and the live pile rendered 255 rows for 198 identities (one
  * wait-watch condition alone rendered 15 unanswered ghosts no close could
  * reach). Keep the latest generation; disclose the rest as superseded_count.
+ *
+ * A live row is the ownership authority and always represents its obligation
+ * (@cto b3839df7). Between journal generations the latest is chosen on each
+ * row's OWN opening, held apart from the disclosed earliest opening: comparing
+ * against the disclosed value let a live ball with two older generations lose
+ * to one of them, and the owed view dropped it.
  */
 function collapseOutcomeGenerations(outcomes: PendingOutcomeBall[]): PendingOutcomeBall[] {
-  const byIdentity = new Map<string, PendingOutcomeBall>()
+  const byIdentity = new Map<string, { row: PendingOutcomeBall; ownOpenedAt: PendingOutcomeBall["opened_at"] }>()
   for (const row of outcomes) {
-    const key = JSON.stringify([row.request_id, row.recipient])
+    const key = obligationIdentity(row)
     const prior = byIdentity.get(key)
     if (prior === undefined) {
-      byIdentity.set(key, { ...row, superseded_count: 0 })
+      byIdentity.set(key, { row: { ...row, superseded_count: 0 }, ownOpenedAt: row.opened_at })
       continue
     }
-    const latest = prior.opened_at >= row.opened_at ? prior : { ...row, superseded_count: 0 }
-    latest.superseded_count = (prior.superseded_count ?? 0) + 1
+    const priorStays = prior.row.backing === "live" || (row.backing !== "live" && prior.ownOpenedAt >= row.opened_at)
+    const latest = priorStays ? prior.row : { ...row, superseded_count: 0 }
+    latest.superseded_count = (prior.row.superseded_count ?? 0) + 1
     // Content (message id, summary, settlement) is the LATEST generation's;
     // the obligation's AGE is the condition's whole standing life — it has
     // been owed since the first opening, not since the newest re-send.
-    latest.opened_at = prior.opened_at <= row.opened_at ? prior.opened_at : row.opened_at
-    latest.age_ms = Math.max(prior.age_ms, row.age_ms)
+    latest.opened_at = prior.row.opened_at <= row.opened_at ? prior.row.opened_at : row.opened_at
+    latest.age_ms = Math.max(prior.row.age_ms, row.age_ms)
     // A conflict on an older generation is still this obligation's history.
-    latest.settlement_conflict ??= prior.settlement_conflict ?? row.settlement_conflict
-    byIdentity.set(key, latest)
+    latest.settlement_conflict ??= prior.row.settlement_conflict ?? row.settlement_conflict
+    byIdentity.set(key, { row: latest, ownOpenedAt: priorStays ? prior.ownOpenedAt : row.opened_at })
   }
-  return [...byIdentity.values()]
+  return [...byIdentity.values()].map((entry) => entry.row)
 }
 
 function pendingCloseMissWarning(
