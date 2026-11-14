@@ -349,7 +349,14 @@ describe("loadLlm shared provider-health surface", () => {
         },
       })
       expect(child.status, child.stderr).toBe(0)
-      const result = JSON.parse(child.stdout)
+      const result = JSON.parse(child.stdout) as {
+        selected: string[]
+        allowedSelected: string[]
+        rejected: Array<{ modelId: string; reason: string }>
+        calls: Array<{ model: string; consent: boolean }>
+        allowed: { content: string }
+        ordinary: { content: string; error: string }
+      }
       expect(result.selected).toEqual(["subscription"])
       expect(result.allowedSelected).toContain("paid-only")
       expect(result.rejected).toContainEqual(

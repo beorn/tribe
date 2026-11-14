@@ -106,15 +106,14 @@ describe("recall status (bounded by default)", () => {
     const ordinary = runStatus(["--json", "--bench"], fixtureEnv)
     expect(ordinary.status, ordinary.stderr).toBe(0)
     expect(existsSync(callsPath)).toBe(false)
-    expect(JSON.parse(ordinary.stdout).recommendations.join(" ")).toContain(
-      "no unpaid route for deepseek/deepseek-chat",
-    )
+    const ordinaryReview = JSON.parse(ordinary.stdout) as { recommendations: string[] }
+    expect(ordinaryReview.recommendations.join(" ")).toContain("no unpaid route for deepseek/deepseek-chat")
     const optedIn = runStatus(["--json", "--bench", "--allow-metered"], fixtureEnv)
     expect(optedIn.status, optedIn.stderr).toBe(0)
     const calls = readFileSync(callsPath, "utf8")
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line))
+      .map((line) => JSON.parse(line) as { model: string; consent: boolean })
     expect(calls.length).toBeGreaterThan(0)
     expect(calls.every((call) => call.consent === true)).toBe(true)
   })
