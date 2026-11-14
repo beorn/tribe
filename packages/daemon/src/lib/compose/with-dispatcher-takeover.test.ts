@@ -2804,6 +2804,144 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     expect(ids[1]).toBe(ids[0])
     expect(harness.registry.clients.get("fan-in-0")?.role).toBe(firstRole)
     expect(harness.registry.clients.get("fan-in-1")?.role).toBe(secondRole)
+    expect(harness.db.prepare("SELECT role FROM sessions WHERE id = ?").get(ids[0]!)).toEqual({ role: "member" })
+    expect(harness.registry.getActiveSessionIds().has(ids[0]!)).toBe(true)
+    expect(harness.registry.getActiveSessionInfo()).toEqual([
+      expect.objectContaining({ id: ids[0], name: "@dev/7", role: "member" }),
+    ])
+  })
+
+  // @failure After a daemon restart or adapter re-exec gap where attachWatch registers first as watch,
+  // an untyped participant registration or subsequent role-omitted tribe.join inherits watch and drops
+  // the live seat from getActiveSessionIds / getActiveSessionInfo / cli_inbox_status_by_launch_v1.
+  // @level l2 @consumer #33946 / #26665 managed seat participant projection after attachWatch-first reconnect
+  it("preserves member participant role and active snapshot when attachWatch registers first or same-pid untyped participant replaces watch (#33946)", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+
+    // 1. Daemon-gap / attachWatch-first: watch transport connects first for the launch.
+    harness.addPendingClient("watch-conn")
+    const watchReg = parseResult<RegisterResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "reg-watch-first",
+          method: "register",
+          params: {
+            name: "@dev/7",
+            role: "watch",
+            pid: process.pid,
+            project: "/tmp/p",
+            launchParentPid: process.pid,
+            idToken: fixtureToken("token-g3"),
+            delivery: "push",
+            protocolVersion: TRIBE_PROTOCOL_VERSION,
+          },
+        },
+        "watch-conn",
+      ),
+    )
+    expect(watchReg.role).toBe("watch")
+    expect(harness.registry.clients.get("watch-conn")?.role).toBe("watch")
+    // Explicit watch alone is not a participant member.
+    expect(harness.registry.getActiveSessionIds().has(watchReg.sessionId)).toBe(false)
+
+    // 2. Untyped participant adapter fans in on the same launch after re-exec/reconnect jitter.
+    harness.addPendingClient("member-conn")
+    const memberReg = parseResult<RegisterResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "reg-member-second",
+          method: "register",
+          params: {
+            name: "@dev/7",
+            pid: process.pid + 1,
+            project: "/tmp/p",
+            launchParentPid: process.pid,
+            idToken: fixtureToken("token-g3"),
+            delivery: "push",
+            protocolVersion: TRIBE_PROTOCOL_VERSION,
+          },
+        },
+        "member-conn",
+      ),
+    )
+    expect(memberReg.sessionId).toBe(watchReg.sessionId)
+    expect(memberReg.role).toBe("member")
+    expect(harness.registry.clients.get("watch-conn")?.role).toBe("watch")
+    expect(harness.registry.clients.get("member-conn")?.role).toBe("member")
+
+    // 3. Ordinary role-omitted tribe.join on the participant adapter must keep member, never downgrade to watch.
+    const joined = parseResult<{ content: Array<{ text: string }> }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "join-member-conn",
+          method: "tribe.join",
+          params: {
+            name: "@dev/7",
+            delivery: "push",
+          },
+        },
+        "member-conn",
+      ),
+    )
+    expect(JSON.parse(joined.content[0]!.text)).toMatchObject({ joined: true, name: "@dev/7", role: "member" })
+    expect(harness.registry.clients.get("watch-conn")?.role).toBe("watch")
+    expect(harness.registry.clients.get("member-conn")?.role).toBe("member")
+    expect(harness.db.prepare("SELECT role FROM sessions WHERE id = ?").get(watchReg.sessionId)).toEqual({
+      role: "member",
+    })
+    expect(harness.registry.getActiveSessionIds().has(watchReg.sessionId)).toBe(true)
+    expect(harness.registry.getActiveSessionInfo()).toEqual([
+      expect.objectContaining({ id: watchReg.sessionId, name: "@dev/7", role: "member" }),
+    ])
+
+    // 4. Same-pid untyped participant replacement after a legacy watch holder must resolve to member, never watch.
+    harness.addPendingClient("same-pid-watch")
+    const samePidWatch = parseResult<RegisterResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "reg-same-pid-watch",
+          method: "register",
+          params: {
+            name: "legacy-same-pid",
+            role: "watch",
+            pid: process.pid,
+            project: "/tmp/legacy",
+            delivery: "push",
+            protocolVersion: TRIBE_PROTOCOL_VERSION,
+          },
+        },
+        "same-pid-watch",
+      ),
+    )
+    expect(samePidWatch.role).toBe("watch")
+
+    harness.addPendingClient("same-pid-untyped")
+    const samePidMember = parseResult<RegisterResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "reg-same-pid-untyped",
+          method: "register",
+          params: {
+            name: "legacy-same-pid",
+            pid: process.pid,
+            project: "/tmp/legacy",
+            delivery: "pull",
+            protocolVersion: TRIBE_PROTOCOL_VERSION,
+          },
+        },
+        "same-pid-untyped",
+      ),
+    )
+    expect(samePidMember.sessionId).toBe(samePidWatch.sessionId)
+    expect(samePidMember.role).toBe("member")
+    expect(harness.registry.clients.get("same-pid-untyped")?.role).toBe("member")
+    expect(harness.registry.getActiveSessionIds().has(samePidMember.sessionId)).toBe(true)
   })
 
   // @failure A verified successor closes the incumbent before its exact process incarnation is proved, or a

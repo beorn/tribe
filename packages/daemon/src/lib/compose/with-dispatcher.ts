@@ -2346,6 +2346,10 @@ export function withDispatcher<
               // later member must not inherit the watch's role.
               const holderTransportRole = holder.role
               const attachingTransportRole = role
+              if (attachingTransportRole === "member" && holder.ctx.getRole() !== "member") {
+                holder.ctx.setRole("member")
+                db.prepare("UPDATE sessions SET role = 'member' WHERE id = ?").run(holder.ctx.sessionId)
+              }
               // Backfill the durable one-shot fence when multiple transports
               // from a launch fan in before any cross-launch contention.
               if (p.takeover === true && typeof p.name === "string") {
@@ -2552,7 +2556,7 @@ export function withDispatcher<
             const samePidHolder = findSamePidNameHolder(resolvedName, clientPid, connId)
             if (samePidHolder) {
               adopted = { id: samePidHolder.ctx.sessionId, name: samePidHolder.name, role: samePidHolder.role }
-              if (!p.role && (samePidHolder.role === "member" || samePidHolder.role === "watch")) {
+              if (!p.role && samePidHolder.role === "member") {
                 role = samePidHolder.role
               }
               log.info?.(`Replacing live self-registration for ${resolvedName} pid=${clientPid}`)

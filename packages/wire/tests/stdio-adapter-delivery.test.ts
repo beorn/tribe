@@ -847,10 +847,11 @@ setTimeout(() => process.exit(0), 35000);\n`,
     await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
 
     const register = daemon.requests.find((msg) => msg.method === "register") as
-      | { params?: { name?: string; delivery?: string } }
+      | { params?: { name?: string; delivery?: string; role?: string } }
       | undefined
     expect(register?.params?.name).toBe("@chief")
     expect(register?.params?.delivery).toBe("pull")
+    expect(register?.params?.role).toBe("member")
   })
 
   /**

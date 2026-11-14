@@ -611,7 +611,7 @@ const launchIdentityToken = REGISTER_WITH_LAUNCH_NAME ? readIdentityTokenFromEnv
 
 const baseRegisterParams = {
   ...(REGISTER_WITH_LAUNCH_NAME ? { name: LAUNCH_NAME } : {}),
-  ...(args.role ? { role: args.role } : {}),
+  role: args.role ?? "member",
   domains: SESSION_DOMAINS,
   project: process.cwd(),
   projectName: PROJECT_NAME,
