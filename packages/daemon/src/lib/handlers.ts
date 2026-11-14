@@ -2195,7 +2195,16 @@ function expiredPendingBalls(ctx: TribeContext, now: number, owed = false, owner
   // History can enrich a live generation's age and conflicts, but cannot
   // create a live obligation. Apply only owner scope here, never stale age.
   if (owed && !live.some((ball) => owner === undefined || ball.recipient === owner)) return []
-  const rows = ctx.stmts.selectPendingOutcomeFacts.all() as BallOutcomeFactRow[]
+  // 34154: both forms read the outcome facts per TYPE through the indexes that
+  // already exist (0.59 s for the same 156,408 rows the old single statement
+  // took 6.59 s to scan through `kind`). The owed form was measured at 0.002 s
+  // when scoped to the live request ids by `ref`, and that scope is WRONG: the
+  // generations of one obligation each file their fact under a different
+  // message id (`dark-work:Owner4h:@dev/1`), so a ref scope hides the extra
+  // generations the owed view discloses as superseded_count, and lets a journal
+  // row replace a live one. The view's contract needs the whole fold, so the
+  // cure is the index plan, not a narrower key set.
+  const rows = ctx.stmts.selectPendingOutcomeFactsByType.all() as BallOutcomeFactRow[]
   const replies = ctx.stmts.selectPendingReplyFacts.all() as PendingReplyFactRow[]
   const respondersByRef = indexPendingReplies(replies)
   const facts = rows.map(parseBallOutcomeFact)
