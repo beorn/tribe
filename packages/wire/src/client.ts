@@ -359,13 +359,19 @@ function connectToDaemonOnce(
         call(method, params, callOpts) {
           // Closure retires the managed timers, so a later call cannot arm its deadline (28504).
           if (ac.signal.aborted || socket.destroyed) return Promise.reject(new Error("Connection closed"))
+          const explicitTimeoutMs = callOpts?.timeoutMs
+          // A zero explicit budget is the caller's deadline already spent. Arming it builds
+          // DaemonCallTimeoutError("timed out after 0ms"), which the inbox-wait classifier reads as a
+          // transport-close (30593). Refuse before any write or timer.
+          if (explicitTimeoutMs !== undefined && (!Number.isFinite(explicitTimeoutMs) || explicitTimeoutMs <= 0)) {
+            return Promise.reject(
+              new Error(`refusing non-positive explicit request budget (${explicitTimeoutMs}ms) for ${method}`),
+            )
+          }
           return new Promise((res, rej) => {
             let id = nextId++
-            const explicitTimeoutMs = callOpts?.timeoutMs
             const requestTimeoutMs =
-              explicitTimeoutMs !== undefined && Number.isFinite(explicitTimeoutMs)
-                ? Math.max(0, explicitTimeoutMs)
-                : callTimeoutMs
+              explicitTimeoutMs !== undefined && Number.isFinite(explicitTimeoutMs) ? explicitTimeoutMs : callTimeoutMs
             const requestDeadlineAt = Date.now() + requestTimeoutMs
             // Freeze JSON semantics before inserting pending state: caller mutation
             // and custom toJSON must not change a retry's payload/message_id.

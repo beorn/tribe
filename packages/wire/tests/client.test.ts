@@ -254,6 +254,29 @@ describe("connectToDaemon", () => {
     },
   )
 
+  it("refuses a non-positive explicit request budget before any daemon write (30593)", async () => {
+    const sock = join(tmpDir, "d.sock")
+    let requests = 0
+    const { server } = await spawnFakeDaemon(sock, () => {
+      requests += 1
+    })
+    try {
+      const client = await connectToDaemon(sock)
+      const error = await client.call("cli_inbox_wait", { timeout_ms: 0 }, { timeoutMs: 0 }).then(
+        () => undefined,
+        (caught: unknown) => caught,
+      )
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toBe("refusing non-positive explicit request budget (0ms) for cli_inbox_wait")
+      expect((error as Error).message).not.toMatch(/timed out/)
+      expect((error as { name?: string }).name).not.toBe("DaemonCallTimeoutError")
+      expect(requests).toBe(0)
+      client.close()
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  })
+
   it("connects, sends a request, and resolves with the response result", async () => {
     const sock = join(tmpDir, "d.sock")
     const { server } = await spawnFakeDaemon(sock)
