@@ -2395,7 +2395,6 @@ function declaredUnrunRows(
   return rows
 }
 
-
 /** M1 (25057): what an offline-owner close owes its original sender — one
  * direct notice, dispatched after the close transaction commits. */
 interface OfflineOwnerCloseNotice {
