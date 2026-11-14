@@ -691,10 +691,29 @@ process.exit(await child.exited)
     const dbPath = join(tmpDir, "tribe.db")
     const daemonLog = join(tmpDir, "daemon.log")
     const adapterLog = join(tmpDir, "adapter.log")
+    // C8: the existing clean restart journey did not start the real owner with
+    // power-cut diagnostic tails. These are owned files; custody remains SQLite.
+    const activityLog = join(tmpDir, "activity.jsonl")
+    const stderrLog = join(tmpDir, "daemon-stderr.log")
+    const damaged = `${JSON.stringify({ ts: 1, source: "tribe", kind: "event", session: "fixture-A" })}\n${"\u0000".repeat(32)}${JSON.stringify({ ts: 2, source: "tribe", kind: "event", session: "fixture-B" })}\n${"\u0000".repeat(32)}`
+    writeFileSync(activityLog, damaged)
+    writeFileSync(stderrLog, damaged)
     // 25074 3d-3: a push seat reads its own mailbox (so a tracked request reaches it) only when its token verified.
     const verifierPath = join(tmpDir, "verifier.ts")
     writeClaimsVerifier(verifierPath, { gen: false })
-    spawnTestDaemon(dbPath, daemonLog, {}, { identityVerifier: verifierPath })
+    spawnTestDaemon(
+      dbPath,
+      daemonLog,
+      {
+        HOME: tmpDir,
+        XDG_CONFIG_HOME: tmpDir,
+        XDG_DATA_HOME: tmpDir,
+        XDG_STATE_HOME: tmpDir,
+        TRIBE_ACTIVITY_LOG: activityLog,
+        TRIBE_DAEMON_STDERR_LOG: stderrLog,
+      },
+      { identityVerifier: verifierPath },
+    )
     await waitFor(() => existsSync(socketPath), "initial daemon socket")
     const firstDaemon = await connectToGeneration(socketPath)
     daemonPids.add(firstDaemon.pid)
@@ -877,6 +896,17 @@ process.exit(await child.exited)
         ),
       "post-restart push channel delivery",
     )
+    const retained = parseToolJson(await secondSuccessor.client.call("tribe.fetch", { with: PERSONA, limit: 20 }))
+    expect(retained).toMatchObject({
+      events: expect.arrayContaining([
+        expect.objectContaining({ content: "22322 channel before restart" }),
+        expect.objectContaining({ content: "22322 channel after two restarts" }),
+      ]),
+    })
+    // Activity/focus statistics are separately excluded under 34008. Do not
+    // mistake preserved raw diagnostic bytes for parser or appender repair.
+    expect(readFileSync(activityLog, "utf8").startsWith(damaged)).toBe(true)
+    expect(readFileSync(stderrLog, "utf8").startsWith(damaged)).toBe(true)
     secondSuccessor.client.close()
   }, 45_000)
 
