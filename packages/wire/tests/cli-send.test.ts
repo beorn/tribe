@@ -2415,7 +2415,7 @@ describe("reply and taking convenience commands (25028)", () => {
     const full = "c15eb0f9-6972-415e-a693-8b4593b70727"
     const res = await runMockDaemon(
       ["send", "dark-work", "short ref probe", "--type", "status", "--ref", "c15eb0f9", "--json"],
-      { pendingRows: [], fetchEvents: [{ id: full, from: "dark-work", settlement: "open" }] },
+      { pendingRows: [], fetchEvents: [{ id: full, from: "@dev/8", settlement: "open" }] },
     )
     expect(res.code).toBe(0)
     expect(res.sent).toEqual([expect.objectContaining({ to: "dark-work", ref: full })])
@@ -2429,7 +2429,7 @@ describe("reply and taking convenience commands (25028)", () => {
       ["send", "dark-work", "short ref probe", "--type", "status", "--ref", "c15eb0f9", "--json"],
       {
         pendingRows: [],
-        fetchEvents: [{ id: "c15eb0f9-6972-415e-a693-8b4593b70727", from: "dark-work", settlement: "open" }],
+        fetchEvents: [{ id: "c15eb0f9-6972-415e-a693-8b4593b70727", from: "@dev/8", settlement: "open" }],
         fetchLookup: { status: "partial", detail: "budget exhausted" },
       },
     )
