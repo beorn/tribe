@@ -2214,7 +2214,15 @@ describe("reply and taking convenience commands (25028)", () => {
       status?: string
       summary?: string
     }>
-    fetchEvents?: Array<{ id?: string; from?: string; sender?: string; recipient?: string; content?: string }>
+    fetchEvents?: Array<{
+      id?: string
+      from?: string
+      sender?: string
+      recipient?: string
+      content?: string
+      settlement?: string
+      owners?: string[]
+    }>
   }
 
   async function runMockDaemon(
