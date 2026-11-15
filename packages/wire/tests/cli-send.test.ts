@@ -2409,6 +2409,35 @@ describe("reply and taking convenience commands (25028)", () => {
     }
   })
 
+  // @failure A correct short reference is stored as typed, so the row never correlates (31209).
+  // @level l2 @consumer tribe-wire send CLI
+  test("a unique short reference is stored as the daemon's full id without the advisory warning", async () => {
+    const full = "c15eb0f9-6972-415e-a693-8b4593b70727"
+    const res = await runMockDaemon(
+      ["send", "dark-work", "short ref probe", "--type", "status", "--ref", "c15eb0f9", "--json"],
+      { pendingRows: [], fetchEvents: [{ id: full, from: "dark-work", settlement: "open" }] },
+    )
+    expect(res.code).toBe(0)
+    expect(res.sent).toEqual([expect.objectContaining({ to: "dark-work", ref: full })])
+    expect(res.stderr).not.toContain("unresolved-ref")
+  })
+
+  // @failure A partial settlement lookup is read as a resolved identity and rewrites the stored ref (31209).
+  // @level l2 @consumer tribe-wire send CLI
+  test("a partial lookup keeps the typed reference and still sends with its warning", async () => {
+    const res = await runMockDaemon(
+      ["send", "dark-work", "short ref probe", "--type", "status", "--ref", "c15eb0f9", "--json"],
+      {
+        pendingRows: [],
+        fetchEvents: [{ id: "c15eb0f9-6972-415e-a693-8b4593b70727", from: "dark-work", settlement: "open" }],
+        fetchLookup: { status: "partial", detail: "budget exhausted" },
+      },
+    )
+    expect(res.code).toBe(0)
+    expect(res.sent).toEqual([expect.objectContaining({ to: "dark-work", ref: "c15eb0f9" })])
+    expect(res.stderr).toContain("unresolved-ref")
+  })
+
   // 29601: these commands share cmdSend with the ordinary send verb. Its argv encoding must not
   // leave JSON punctuation in the recipient passed to the daemon's existing normalizer.
   // @failure JSON list sends reach bogus bracket/quote-named seats while reporting success

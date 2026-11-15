@@ -756,8 +756,33 @@ export function refNamesOwnedOpenBall(
   return event.settlement === "open" && (event.from === sender || event.owners?.includes(sender) === true)
 }
 
-/** A correlation is advisory: neither lookup failure nor a stale id refuses delivery. */
-async function warnUnresolvedRef(sender: SendCaller, ref: string, ownedPending?: PendingListResult): Promise<void> {
+/**
+ * The daemon's ids reader already resolves a unique prefix to the authoritative
+ * full message id (28909/29327, handlers.ts resolveMessageIdPrefix). Read that
+ * answer and never search here: this returns the supplied ref unless ONE stored
+ * identity came back, the lookup decided cleanly, and the identity is a genuine
+ * extension of the typed ref. An exact persisted id (including a caller-minted
+ * non-UUID id) is returned untouched, and ambiguous, too-short, partial or
+ * failed lookups keep the supplied ref — partial settlement knowledge is not
+ * absence, and only a full id can be stored as a correlation (31209).
+ */
+export function resolvedStoredRef(ref: string, snapshot: RefSettlementSnapshot): string {
+  if (snapshot.error || snapshot.settlement_lookup !== undefined) return ref
+  if (snapshot.settlement_unknown_ids?.includes(ref)) return ref
+  const rows = snapshot.events ?? []
+  if (rows.length !== 1) return ref
+  const id = rows[0]?.id
+  if (typeof id !== "string" || id === ref || !id.startsWith(ref)) return ref
+  return id
+}
+
+/**
+ * A correlation is advisory: neither lookup failure nor a stale id refuses delivery.
+ * The one ids read that decides the advisory also carries the identity to store,
+ * so the send stores the daemon's full id instead of a typed prefix.
+ * Returns the ref the caller must store on the outgoing message.
+ */
+async function warnUnresolvedRef(sender: SendCaller, ref: string, ownedPending?: PendingListResult): Promise<string> {
   // The complete owner read can verify a held ball even when bounded history is
   // partial. Keep the snapshot fallback for requester-owned and unknown refs.
   if (
@@ -766,24 +791,29 @@ async function warnUnresolvedRef(sender: SendCaller, ref: string, ownedPending?:
       (row) => row.recipient === sender.name && (row.request_id === ref || row.message_id === ref),
     )
   ) {
-    return
+    return ref
   }
   let detail: string
   try {
     // ids is a snapshot read: it never acknowledges the caller's mailbox.
     const snapshot = mcpJsonContent(await callDaemon("tribe.fetch", { ids: [ref] }, sender)) as RefSettlementSnapshot
-    const ownsOpenBall = refNamesOwnedOpenBall(ref, sender.name, snapshot)
-    if (ownsOpenBall === true) return
+    const stored = resolvedStoredRef(ref, snapshot)
+    const ownsOpenBall = refNamesOwnedOpenBall(stored, sender.name, snapshot)
+    if (ownsOpenBall === true) return stored
     detail =
       ownsOpenBall === false
         ? "names no open ball you sent"
         : `could not be verified by tribe.fetch ids (${snapshot.error ?? snapshot.settlement_lookup?.detail ?? "no settlement fact returned"})`
+    console.error(
+      `tribe-wire send: unresolved-ref — --ref ${ref} ${detail}; check the reference with tribe fetch --ids ${ref}. Sending anyway; --ref does not settle a ball.`,
+    )
+    return stored
   } catch (error) {
-    detail = `could not be verified by tribe.fetch ids (${error instanceof Error ? error.message : String(error)})`
+    console.error(
+      `tribe-wire send: unresolved-ref — --ref ${ref} could not be verified by tribe.fetch ids (${error instanceof Error ? error.message : String(error)}); check the reference with tribe fetch --ids ${ref}. Sending anyway; --ref does not settle a ball.`,
+    )
+    return ref
   }
-  console.error(
-    `tribe-wire send: unresolved-ref — --ref ${ref} ${detail}; check the reference with tribe fetch --ids ${ref}. Sending anyway; --ref does not settle a ball.`,
-  )
 }
 
 /**
@@ -902,7 +932,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     )
   }
   if (input.ref && !input.reply && caller && !input.anonymous && !createsRequest) {
-    await warnUnresolvedRef(caller, input.ref, ownedPending)
+    input.ref = await warnUnresolvedRef(caller, input.ref, ownedPending)
   }
 
   const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller, !input.anonymous)) as {
