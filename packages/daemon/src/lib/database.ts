@@ -2771,7 +2771,7 @@ export function createStatements(db: Database) {
 		SELECT rowid, id FROM messages AS m
 		WHERE m.ts < $cutoff
 			AND NOT (${protectedUnreadAttentionPredicateSql("m")})
-		ORDER BY m.rowid ASC LIMIT $limit
+		ORDER BY m.ts ASC, m.rowid ASC LIMIT $limit
 	`),
     ),
 

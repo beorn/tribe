@@ -189,74 +189,128 @@ describe("journal retention sweep", () => {
 
   // @failure Startup retention archives the journal before the socket binds,
   // the initial sweep replaces/duplicates the existing six-hour cadence,
-  // or a failed bind escapes run() before the daemon's own handler disposes it.
+  // startup ignores min(configured batchSize, 500), or a failed bind escapes
+  // run() before the daemon's own handler disposes it.
   // @level l2
   // @consumer The daemon's real socket/runtime lifecycle and journal history.
-  it.each(["listening", "failed"] as const)("33749: %s startup preserves retention lifecycle", async (binding) => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
-    const { db, stmts } = setup()
-    const scope = createScope("retention-after-listen")
-    const ctx = makeContext(db, stmts)
-    const seed = () => {
-      const sent = sendMessage(ctx, "@chief", "retained startup history", "notify")
-      setMessageTs(db, sent.id, Date.now() - 20 * DAY)
-      return sent.id
-    }
-    const initial = seed()
-    let runSettled: Promise<"resolved" | "rejected"> | undefined
-    try {
-      const registryShape = withClientRegistry()(createBaseTribe({ scope }))
-      const socketShape = withSocketServer()({
-        ...registryShape,
-        config: {
-          socketPath: binding === "failed" ? join(tmpDir, "missing", "runtime.sock") : join(tmpDir, "runtime.sock"),
-          inheritFd: null,
-        },
-        broadcast: { log: () => {} },
-      } as never)
-      const subject = withRuntime({
-        plugins: [],
-        buildPluginApi: () => ({}) as never,
-        publishActivePluginNames: () => {},
-        publishStopPlugins: () => {},
-        publishShutdown: () => {},
-      })({ ...socketShape, db, stmts, daemonCtx: ctx, recall: null } as never)
-      runSettled = subject.run().then(
-        () => "resolved" as const,
-        () => "rejected" as const,
-      )
-
-      if (binding === "failed") {
-        // The real socket fails with ENOENT; daemon-run owns its diagnostic,
-        // root-scope disposal and exit. Runtime must not race that handler.
-        await expect(socketShape.socket.binding).rejects.toMatchObject({ code: "ENOENT" })
-        expect(await runSettled).toBe("resolved")
-        expect(liveIds(db)).toContain(initial)
-        expect(archivedIds(db)).not.toContain(initial)
-        return
+  it.each([
+    ["listening", 2],
+    ["listening", 600],
+    ["failed", 600],
+  ] as const)(
+    "33749: %s startup preserves retention lifecycle and caps startup batch at min(%i, 500)",
+    async (binding, configuredBatchSize) => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+      const prevArchiveWindow = process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS
+      const prevBatchSize = process.env.TRIBE_RETENTION_BATCH_SIZE
+      process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS = String(3 * DAY)
+      process.env.TRIBE_RETENTION_BATCH_SIZE = String(configuredBatchSize)
+      const { db, stmts } = setup()
+      const scope = createScope("retention-after-listen")
+      const ctx = makeContext(db, stmts)
+      const seed = () => {
+        const sent = sendMessage(ctx, "@chief", "retained startup history", "notify")
+        setMessageTs(db, sent.id, Date.now() - 20 * DAY)
+        return sent.id
       }
+      const initial = seed()
+      // Seed 1,120 rows aged 5d: younger than cleanupOldData's 7d window (so
+      // cleanupOldData leaves them in messages) and older than retention's 3d
+      // archiveWindowMs (so only runRetentionSweep's batchSize moves them).
+      const retentionOnlyTotal = 1_120
+      const retentionOnlyTs = Date.now() - 5 * DAY
+      db.transaction(() => {
+        const insert = db.prepare(
+          `INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery)
+           VALUES (?, 'notify', '@fable/1', '@chief', 'direct', 'retention-batch-row', ?, 'push')`,
+        )
+        for (let i = 0; i < retentionOnlyTotal; i += 1) {
+          insert.run(`retention-only-${i}`, retentionOnlyTs + i)
+        }
+      })()
+      const countRetentionOnlyLive = (): number =>
+        (
+          db.prepare("SELECT COUNT(*) AS n FROM messages WHERE id LIKE 'retention-only-%'").get() as {
+            n: number
+          }
+        ).n
+      const countRetentionOnlyArchived = (): number =>
+        (
+          db.prepare("SELECT COUNT(*) AS n FROM messages_archive WHERE id LIKE 'retention-only-%'").get() as {
+            n: number
+          }
+        ).n
 
-      // The real listen callback has not run in this synchronous turn.
-      expect(liveIds(db)).toContain(initial)
-      await expect(socketShape.socket.binding).resolves.toBe("listening")
-      await new Promise<void>((resolve) => setImmediate(resolve))
-      expect(liveIds(db)).not.toContain(initial)
-      expect(archivedIds(db)).toContain(initial)
-      expect(vi.getTimerCount()).toBe(1)
+      let runSettled: Promise<"resolved" | "rejected"> | undefined
+      try {
+        const registryShape = withClientRegistry()(createBaseTribe({ scope }))
+        const socketShape = withSocketServer()({
+          ...registryShape,
+          config: {
+            socketPath: binding === "failed" ? join(tmpDir, "missing", "runtime.sock") : join(tmpDir, "runtime.sock"),
+            inheritFd: null,
+          },
+          broadcast: { log: () => {} },
+        } as never)
+        const subject = withRuntime({
+          plugins: [],
+          buildPluginApi: () => ({}) as never,
+          publishActivePluginNames: () => {},
+          publishStopPlugins: () => {},
+          publishShutdown: () => {},
+        })({ ...socketShape, db, stmts, daemonCtx: ctx, recall: null } as never)
+        runSettled = subject.run().then(
+          () => "resolved" as const,
+          () => "rejected" as const,
+        )
 
-      const later = seed()
-      vi.advanceTimersByTime(6 * 60 * 60 * 1000 - 1)
-      expect(liveIds(db)).toContain(later)
-      vi.advanceTimersByTime(1)
-      expect(liveIds(db)).not.toContain(later)
-      expect(archivedIds(db)).toEqual([initial, later])
-    } finally {
-      await scope[Symbol.asyncDispose]()
-      await runSettled
-      db.close()
-      vi.useRealTimers()
-    }
-  })
+        if (binding === "failed") {
+          // The real socket fails with ENOENT; daemon-run owns its diagnostic,
+          // root-scope disposal and exit. Runtime must not race that handler.
+          await expect(socketShape.socket.binding).rejects.toMatchObject({ code: "ENOENT" })
+          expect(await runSettled).toBe("resolved")
+          expect(liveIds(db)).toContain(initial)
+          expect(archivedIds(db)).not.toContain(initial)
+          expect(countRetentionOnlyLive()).toBe(retentionOnlyTotal)
+          expect(countRetentionOnlyArchived()).toBe(0)
+          return
+        }
+
+        // The real listen callback has not run in this synchronous turn.
+        expect(liveIds(db)).toContain(initial)
+        await expect(socketShape.socket.binding).resolves.toBe("listening")
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(liveIds(db)).not.toContain(initial)
+        expect(archivedIds(db)).toContain(initial)
+        expect(vi.getTimerCount()).toBe(1)
+
+        // Startup caps batchSize at min(configuredBatchSize, 500).
+        const expectedStartupBatch = Math.min(configuredBatchSize, 500)
+        expect(countRetentionOnlyArchived()).toBe(expectedStartupBatch)
+        expect(countRetentionOnlyLive()).toBe(retentionOnlyTotal - expectedStartupBatch)
+
+        const later = seed()
+        vi.advanceTimersByTime(6 * 60 * 60 * 1000 - 1)
+        expect(liveIds(db)).toContain(later)
+        vi.advanceTimersByTime(1)
+        expect(liveIds(db)).not.toContain(later)
+        expect(archivedIds(db)).toContain(later)
+        // The periodic tick uses the full declared configuredBatchSize.
+        const expectedAfterTick = expectedStartupBatch + configuredBatchSize
+        expect(countRetentionOnlyArchived()).toBe(expectedAfterTick)
+        expect(countRetentionOnlyLive()).toBe(retentionOnlyTotal - expectedAfterTick)
+      } finally {
+        if (prevArchiveWindow === undefined) delete process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS
+        else process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS = prevArchiveWindow
+        if (prevBatchSize === undefined) delete process.env.TRIBE_RETENTION_BATCH_SIZE
+        else process.env.TRIBE_RETENTION_BATCH_SIZE = prevBatchSize
+        await scope[Symbol.asyncDispose]()
+        await runSettled
+        db.close()
+        vi.useRealTimers()
+      }
+    },
+  )
 
   // -------------------------------------------------------------------
   // Archive-move phase
@@ -459,31 +513,63 @@ describe("journal retention sweep", () => {
     it("bounds one sweep tick to batchSize and drains the rest on the next tick", () => {
       const { db, stmts } = setup()
       try {
+        const now = Date.now()
         const ctx = makeContext(db, stmts)
-        const ids: string[] = []
-        for (let i = 0; i < 12; i += 1) {
-          const sent = sendMessage(ctx, "@chief", `msg-${i}`, "notify")
-          setMessageTs(db, sent.id, Date.now() - 20 * DAY)
-          ids.push(sent.id)
-        }
+        const officer = makeContext(db, stmts, "@officer")
+        // Seed a live recipient's protected unread actionable at the oldest timestamp
+        // so it sits at the head of idx_messages_ts (ts < cutoff) and must be skipped
+        // on every tick while eligible rows behind it drain.
+        db.prepare(
+          `INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at, last_attention_read_at)
+           VALUES ('@live', 0, ?, ?)`,
+        ).run(now - 1 * DAY, now - 1 * DAY)
+        const protectedVerdict = sendMessage(officer, "@live", "protected unread verdict", "verdict")
+        setMessageTs(db, protectedVerdict.id, now - 40 * DAY)
 
-        const config = enabledConfig({ archiveWindowMs: 14 * DAY, batchSize: 5 })
-        const first = runRetentionSweep(db, stmts, config)
+        // 12 eligible rows with out-of-order timestamps relative to insertion (rowid)
+        // order and equal-time ties: higher rowids have older timestamps (30d) than
+        // lower rowids (20d), and four rows tie at 25d (tie-broken by rowid ASC).
+        const relativeAgesDays = [20, 22, 25, 25, 18, 30, 25, 16, 28, 25, 32, 19]
+        const seeded: Array<{ id: string; rowid: number; ts: number }> = []
+        for (let i = 0; i < relativeAgesDays.length; i += 1) {
+          const sent = sendMessage(ctx, "@chief", `msg-${i}`, "notify")
+          const ts = now - (relativeAgesDays[i] ?? 20) * DAY
+          setMessageTs(db, sent.id, ts)
+          const row = db.prepare("SELECT rowid FROM messages WHERE id = ?").get(sent.id) as { rowid: number }
+          seeded.push({ id: sent.id, rowid: row.rowid, ts })
+        }
+        const expectedAgeOrderIds = [...seeded].sort((a, b) => a.ts - b.ts || a.rowid - b.rowid).map((r) => r.id)
+
+        const config = enabledConfig({ archiveWindowMs: 14 * DAY, batchSize: 5, deleteEnabled: false })
+        const first = runRetentionSweep(db, stmts, config, now)
         expect(first.archiveMove.candidates).toBe(5)
         expect(first.archiveMove.moved).toBe(5)
-        expect(liveIds(db)).toHaveLength(7)
-        expect(archivedIds(db)).toHaveLength(5)
+        expect(liveIds(db)).toHaveLength(1 + 7)
+        expect(liveIds(db)).toContain(protectedVerdict.id)
+        expect(archivedIds(db).sort()).toEqual(expectedAgeOrderIds.slice(0, 5).sort())
 
-        const second = runRetentionSweep(db, stmts, config)
+        const second = runRetentionSweep(db, stmts, config, now)
         expect(second.archiveMove.moved).toBe(5)
-        expect(liveIds(db)).toHaveLength(2)
-        expect(archivedIds(db)).toHaveLength(10)
+        expect(liveIds(db)).toHaveLength(1 + 2)
+        expect(liveIds(db)).toContain(protectedVerdict.id)
+        expect(archivedIds(db).sort()).toEqual(expectedAgeOrderIds.slice(0, 10).sort())
 
-        const third = runRetentionSweep(db, stmts, config)
+        const third = runRetentionSweep(db, stmts, config, now)
         expect(third.archiveMove.moved).toBe(2)
-        expect(liveIds(db)).toHaveLength(0)
+        expect(liveIds(db)).toEqual([protectedVerdict.id])
         expect(archivedIds(db)).toHaveLength(12)
-        expect(archivedIds(db).sort()).toEqual([...ids].sort())
+        expect(archivedIds(db).sort()).toEqual(expectedAgeOrderIds.sort())
+        // Selecting by (ts ASC, rowid ASC) must not alter stored seq in messages_archive:
+        // archiveMoveBatch preserves each message's original rowid as messages_archive.seq.
+        const archivedSeqById = new Map(
+          (db.prepare("SELECT id, seq FROM messages_archive").all() as Array<{ id: string; seq: number }>).map((r) => [
+            r.id,
+            r.seq,
+          ]),
+        )
+        for (const row of seeded) {
+          expect(archivedSeqById.get(row.id)).toBe(row.rowid)
+        }
       } finally {
         db.close()
       }

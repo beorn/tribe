@@ -591,6 +591,28 @@ describe("health projection reads the archive through an index", () => {
     expect(boundedStatusRun.rcharBytes).toBeLessThan(64 * 1024)
     expect(boundedPrefixRun.rcharBytes).toBeLessThan(64 * 1024)
 
+    // 5b. Archive-move candidate query (#33937 / #33650): when the old population before
+    // $cutoff is empty (normal post-cleanupOldData state at startup and every 6h tick),
+    // selectMessagesToArchiveBatch must seek idx_messages_ts (ts < ?) and return 0 rows
+    // immediately rather than walking messages in rowid order.
+    const archiveMoveParams = { $cutoff: 50, $live_cutoff: 0, $limit: 12_000 }
+    const indexedArchiveMoveRun = measureRchar(() => stmts.selectMessagesToArchiveBatch.all(archiveMoveParams))
+    const archiveMoveSql = stmts.selectMessagesToArchiveBatch.toString()
+    const archiveMovePlan = plan(db, archiveMoveSql)
+    expect(archiveMovePlan).toContain("SEARCH m USING INDEX idx_messages_ts (ts<?)")
+    expect(archiveMovePlan).not.toMatch(/\bSCAN\s+(?:m|messages)\b/i)
+    expect(archiveMovePlan).not.toContain("USE TEMP B-TREE")
+
+    const legacyArchiveMoveSql = archiveMoveSql.replace("ORDER BY m.ts ASC, m.rowid ASC", "ORDER BY m.rowid ASC")
+    expect(legacyArchiveMoveSql).not.toBe(archiveMoveSql)
+    expect(plan(db, legacyArchiveMoveSql)).toMatch(/\bSCAN\s+m\b/)
+    const legacyArchiveMoveStmt = db.prepare(assertSingleStatement(legacyArchiveMoveSql))
+    const legacyArchiveMoveRun = measureRchar(() => legacyArchiveMoveStmt.all())
+    expect(legacyArchiveMoveRun.result).toEqual([])
+    expect(indexedArchiveMoveRun.result).toEqual([])
+    expect(legacyArchiveMoveRun.rcharBytes).toBeGreaterThan(500 * 1024)
+    expect(indexedArchiveMoveRun.rcharBytes).toBeLessThan(64 * 1024)
+
     // 6. Fresh and upgraded DB preparation proof: reopening an existing DB and opening a fresh DB
     // both prepare and run all four statements cleanly.
     const reopened = openDatabase(join(dir, "tribe.db"))

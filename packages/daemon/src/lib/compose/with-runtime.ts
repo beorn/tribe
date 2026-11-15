@@ -288,11 +288,15 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     // archive-then-prune mechanism, its config surface (env-var only, no
     // TribeConfig changes), and why the delete half ships default-off.
     const retentionConfig = resolveRetentionConfig()
+    const startupRetentionConfig = {
+      ...retentionConfig,
+      batchSize: Math.min(retentionConfig.batchSize, resolveRetentionConfig({}).batchSize),
+    }
     // 27889 — the sweep's cold export is a safety gate, not a detail: when it
     // fails the batch is kept, and the tick says so at error level here rather
     // than letting a silently-not-deleted backlog look like a no-op.
-    const runRetention = (): void => {
-      const sweep = runRetentionSweep(t.db, t.stmts, retentionConfig)
+    const runRetention = (config = retentionConfig): void => {
+      const sweep = runRetentionSweep(t.db, t.stmts, config)
       if (sweep.export.status === "failed") {
         log.error?.(
           `journal retention: cold export FAILED; this tick deleted ${sweep.archiveDelete.deleted} row(s) and kept the refused batch — every row stays readable in messages_archive. reason: ${sweep.export.error ?? "unnamed"}`,
@@ -375,7 +379,7 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
       if (!startupRetentionRan) {
         startupRetentionRan = true
         cleanupOldData(t.daemonCtx, { liveWindowMs: retentionConfig.liveWindowMs })
-        runRetention()
+        runRetention(startupRetentionConfig)
       }
       return new Promise((resolve) => {
         if (t.scope.signal.aborted) {
