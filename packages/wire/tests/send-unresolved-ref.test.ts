@@ -56,15 +56,20 @@ describe("stored reference identity", () => {
     expect(resolvedStoredRef(ref.slice(0, 8), { events: [{ id: full, from: caller, settlement: "open" }] })).toBe(full)
   })
 
-  it.each([
-    "5a253b24-0000-0000-0000-000000000000",
-    "dark-work:Owner4h:@dev/8",
-  ])("leaves an exact persisted id untouched, UUID or caller-minted: %s", (exact) => {
-    expect(resolvedStoredRef(exact, { events: [{ id: exact, from: caller, settlement: "open" }] })).toBe(exact)
-  })
+  it.each(["5a253b24-0000-0000-0000-000000000000", "dark-work:Owner4h:@dev/8"])(
+    "leaves an exact persisted id untouched, UUID or caller-minted: %s",
+    (exact) => {
+      expect(resolvedStoredRef(exact, { events: [{ id: exact, from: caller, settlement: "open" }] })).toBe(exact)
+    },
+  )
 
   it.each([
-    { events: [{ id: full, from: caller }, { id: `${ref.slice(0, 8)}-1111`, from: caller }] },
+    {
+      events: [
+        { id: full, from: caller },
+        { id: `${ref.slice(0, 8)}-1111`, from: caller },
+      ],
+    },
     { events: [{ id: full, from: caller }], settlement_lookup: { status: "partial", detail: "budget exhausted" } },
     { events: [{ id: full, from: caller }], settlement_unknown_ids: [ref.slice(0, 8)] },
     { events: [{ id: full, from: caller }], error: "tracker unavailable" },
