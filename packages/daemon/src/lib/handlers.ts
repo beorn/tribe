@@ -872,7 +872,8 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const msgType = (a.type as string) ?? "notify"
   // A caller that mistypes the body field sends no `message` at all, and the
   // validator then throws on undefined - indistinguishable from a broken tool.
-  // Every neighbouring argument refuses by name; so does this one (@km/@i/21-wire/34396).
+  // Every neighbouring argument refuses by name; so does this one
+  // (@i/21-wire/34396-missing-message-throws-typeerror).
   if (typeof a.message !== "string") {
     return jsonResult({ error: "tribe.send: invalid message - must be a string" })
   }
