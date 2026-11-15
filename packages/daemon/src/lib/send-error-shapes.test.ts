@@ -102,6 +102,15 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
+  it("refuses an absent message by name instead of throwing", () => {
+    const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
+    const sent = parseToolJson(
+      handleToolCall(sender, "tribe.send", { to: "@dev/2" }, makeOpts([liveInfo("sess-dev2", "@dev/2")])),
+    )
+
+    expect(sent.error).toBe("tribe.send: invalid message - must be a string")
+  })
+
   it("pins self-mailbox-authority-missing refusal to one line with last seen time and preserves detail", () => {
     const fiveMinsAgo = Date.now() - 5 * 60_000
     addSession(db, stmts, "sess-adhoc", "@adhoc/1", fiveMinsAgo)
