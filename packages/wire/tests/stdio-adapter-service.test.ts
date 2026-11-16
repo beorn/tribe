@@ -1,3 +1,14 @@
+/**
+ * @failure  a Hab service actor registers through the stdio adapter without the certified service shape — no
+ *           principalClass, a foreign launch key, or a keyed pid that is not its own — so the daemon's service
+ *           lifetime, reconnect latch, and ball ownership attach to an identity nobody certified.
+ * @level    l1
+ * @consumer @i/6-dev/30968 (@cto delta GO: repair the existing stdio adapter's service registration)
+ *
+ * Fake-daemon wire contract for the adapter's service registration: the register carries principalClass
+ * service, the exact token actor, this process as pid and launchParentPid, and pull delivery; hostile ACKs
+ * (downgraded class, foreign pid, foreign or generation-shifted launch key) never yield a usable adapter.
+ */
 import { existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
