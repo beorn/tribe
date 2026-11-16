@@ -55,7 +55,8 @@ import { fileURLToPath } from "node:url"
 import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
 import { launchSender, type LaunchSender } from "./service-send.ts"
 import { keyedLaunchId } from "./launch-registration.ts"
-import { deriveTribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
+import { deriveTribePersonaLaunchIdentity, formatInstanceId } from "./lib/persona-launch-identity.ts"
+import { readUnverifiedTokenClaims } from "./lib/identity-token.ts"
 import { isIdentityTokenMissingRefusal } from "./lib/identity-token-missing-refusal.ts"
 import { TRIBE_NAME_ENV, TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE_ENV } from "./lib/session-identity-env.ts"
 import { AG_HOST_LAUNCH_GENERATION_ENV } from "./lib/ag-host-env.ts"
@@ -784,9 +785,14 @@ function certifyServiceRegistration(reg: {
   }
   if (key === certifiedServiceLaunchKey) return
   if (certifiedServiceLaunchKey === derived) {
-    // The one promotion: claimed derived key -> exact verified instance.
-    certifiedServiceLaunchKey = key
-    return
+    // The one promotion: claimed derived key -> the token's exact verified
+    // instance (`<sid>@<gen>` from the token's own claims, as
+    // connectTribeLaunch's latch computes it), never any other generation.
+    const claims = readUnverifiedTokenClaims(SERVICE_SENDER.idToken, { generation: true })
+    if (claims.gen !== undefined && key === formatInstanceId(claims.sid, claims.gen)) {
+      certifiedServiceLaunchKey = key
+      return
+    }
   }
   throw new Error(
     `Tribe re-registered ${SERVICE_SENDER.name} as launch ${key}, not its own ${certifiedServiceLaunchKey}`,

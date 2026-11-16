@@ -27,13 +27,16 @@ function fakeDaemon(
 ): Promise<Server> {
   return new Promise((resolveServer) => {
     const server = createServer((socket: Socket) => {
+      const reply = (payload: string) => {
+        if (!socket.destroyed && !socket.writableEnded) socket.write(payload)
+      }
       const parse = createLineParser((msg) => {
         if (!isRequest(msg)) return
         const params = (msg.params ?? {}) as RegisterParams
         if (msg.method === "register") {
           registers.push(params)
           const sequenceKey = opts.launchIdSequence?.[registers.length - 1]
-          socket.write(
+          reply(
             makeResponse(msg.id, {
               sessionId: "daemon-svc-1",
               name: params.name,
@@ -51,10 +54,10 @@ function fakeDaemon(
           return
         }
         if (msg.method === "tribe.members") {
-          socket.write(makeResponse(msg.id, { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }))
+          reply(makeResponse(msg.id, { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }))
           return
         }
-        socket.write(makeResponse(msg.id, { ok: true }))
+        reply(makeResponse(msg.id, { ok: true }))
       })
       socket.on("data", (chunk: Buffer) => parse(chunk))
     })
@@ -178,11 +181,11 @@ describe("stdio adapter service registration (30968)", () => {
     dir = mkdtempSync(join(tmpdir(), "tribe-svc-adapter-"))
     const socketPath = join(dir, "daemon.sock")
     const registers: RegisterParams[] = []
-    // Register 1 certifies the claimed derived key, register 2 takes the one
-    // canonical promotion to the verified instance, register 3 shifts the
-    // generation and must never certify.
+    // Register 1 certifies the claimed derived key; register 2 presents a
+    // shifted generation (`@2`, while the token's gen is 1) instead of the
+    // token's exact verified instance and must never certify.
     server = await fakeDaemon(socketPath, registers, {
-      launchIdSequence: ["svc-launch-1::grok-30968", "svc-launch-1@1", "svc-launch-1@2"],
+      launchIdSequence: ["svc-launch-1::grok-30968", "svc-launch-1@2"],
     })
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "grok-30968"], {
       cwd: dir,
@@ -211,8 +214,8 @@ describe("stdio adapter service registration (30968)", () => {
     )
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`)
     const deadline = Date.now() + 25_000
-    while (registers.length < 3 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50))
-    expect(registers.length).toBeGreaterThanOrEqual(3)
+    while (registers.length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50))
+    expect(registers.length).toBeGreaterThanOrEqual(2)
     child.stdin.write(
       `${JSON.stringify({
         jsonrpc: "2.0",
