@@ -53,6 +53,7 @@ import { constants as osConstants } from "node:os"
 import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
+import { launchSender, type LaunchSender } from "./service-send.ts"
 import { isIdentityTokenMissingRefusal } from "./lib/identity-token-missing-refusal.ts"
 import { TRIBE_NAME_ENV, TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE_ENV } from "./lib/session-identity-env.ts"
 import { AG_HOST_LAUNCH_GENERATION_ENV } from "./lib/ag-host-env.ts"
@@ -421,6 +422,26 @@ if (LAUNCH_READ.malformedToken !== null) {
 }
 const LAUNCH_IDENTITY = LAUNCH_READ.identity
 
+// 30968 (@cto delta GO): a supervisor-minted Hab service actor registers as a
+// certified service principal through the same parameters connectTribeLaunch
+// sends — principalClass service, this process's own pid as both pid and
+// launchParentPid, pull delivery — and the register response is certified
+// below. Agent actors keep the existing agent registration untouched. The
+// sender resolution reuses service-send's launchSender; a missing or
+// malformed token leaves the ordinary agent path in charge (the daemon's
+// verifier still judges any token that is present).
+const SERVICE_SENDER: Extract<LaunchSender, { kind: "service" }> | null = (() => {
+  try {
+    const sender = launchSender("tribe stdio adapter", process.env)
+    return sender.kind === "service" ? sender : null
+  } catch {
+    // silent-fallback-allow: no usable service token here means the ordinary
+    // agent registration path owns this adapter; a present-but-malformed token
+    // is still forwarded in the register params and judged by the daemon.
+    return null
+  }
+})()
+
 // Worktree-isolation guardrail (km-bearly.tribe-codex-cwd-worktree-guardrail):
 // standalone codex / non-launcher MCP clients inherit the user's invocation
 // cwd. If that cwd is the main repo while a `<basename>-wtN` pool exists,
@@ -692,12 +713,53 @@ function requiredMcpTransportFailureResult(): {
 function registerParamsForConnection(): typeof baseRegisterParams & {
   delivery: "push" | "pull"
   takeover?: true
+  name?: string
+  principalClass?: "service"
+  launchParentPid?: number
 } {
+  if (SERVICE_SENDER !== null) {
+    // Certified service registration (connectTribeLaunch's wire shape): the
+    // exact token actor as the name, this process as its own launch parent,
+    // pull delivery, and never a takeover of another principal.
+    return {
+      ...baseRegisterParams,
+      ...protocolVersionAdvertisement(selectedProtocolVersion),
+      name: SERVICE_SENDER.name,
+      principalClass: "service",
+      pid: process.pid,
+      launchParentPid: process.pid,
+      delivery: "pull",
+    }
+  }
   return {
     ...baseRegisterParams,
     ...protocolVersionAdvertisement(selectedProtocolVersion),
     delivery: joined ? DELIVERY_CAPABILITY.delivery : UNJOINED_DELIVERY_CAPABILITY.delivery,
     ...(TAKEOVER && !hasRegistered ? { takeover: true as const } : {}),
+  }
+}
+
+/**
+ * Certify a service registration the way connectTribeLaunch does: the daemon
+ * must have registered the exact token actor, as a service principal, keyed
+ * under this process. Anything else is refused loudly here rather than
+ * silently degrading the service to an uncertified registration.
+ */
+function certifyServiceRegistration(reg: { name: string; principalClass?: unknown; launchParentPid?: unknown }): void {
+  if (SERVICE_SENDER === null) return
+  if (reg.name !== SERVICE_SENDER.name) {
+    throw new Error(`Tribe registered ${JSON.stringify(reg.name)} instead of ${JSON.stringify(SERVICE_SENDER.name)}`)
+  }
+  if (reg.principalClass !== "service") {
+    throw new Error(
+      `Tribe did not certify service lifetime for ${SERVICE_SENDER.name}; the daemon must support service principals`,
+    )
+  }
+  if (reg.launchParentPid !== undefined && reg.launchParentPid !== null && reg.launchParentPid !== process.pid) {
+    throw new Error(
+      `Tribe register refused by this client: the daemon keyed launch parent pid ${String(reg.launchParentPid)}, ` +
+        `not this process's ${process.pid}`,
+    )
   }
 }
 
@@ -1005,6 +1067,8 @@ function startDaemonConnection(): Promise<DaemonClient> {
         protocolVersion?: number
         transportDelivery?: unknown
         delivery?: unknown
+        principalClass?: unknown
+        launchParentPid?: unknown
         daemon?: { pid?: number }
       }
       client.onNotification(handleDaemonNotification)
@@ -1014,6 +1078,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
         registrationInFlight = registerPromise
         try {
           reg = (await registerPromise) as typeof reg
+          if (SERVICE_SENDER !== null) certifyServiceRegistration(reg)
           acceptDeliveryAcknowledgement(reg, registration.delivery)
         } finally {
           registrationInFlight = null
