@@ -17,7 +17,13 @@ type RegisterParams = Record<string, unknown>
 function fakeDaemon(
   socketPath: string,
   registers: RegisterParams[],
-  opts: { principalClass?: string; launchId?: string; launchParentPid?: number } = {},
+  opts: {
+    principalClass?: string
+    launchId?: string
+    launchParentPid?: number
+    /** Per-register launch keys (index by register count); closes the socket after each register reply. */
+    launchIdSequence?: string[]
+  } = {},
 ): Promise<Server> {
   return new Promise((resolveServer) => {
     const server = createServer((socket: Socket) => {
@@ -26,6 +32,7 @@ function fakeDaemon(
         const params = (msg.params ?? {}) as RegisterParams
         if (msg.method === "register") {
           registers.push(params)
+          const sequenceKey = opts.launchIdSequence?.[registers.length - 1]
           socket.write(
             makeResponse(msg.id, {
               sessionId: "daemon-svc-1",
@@ -34,12 +41,13 @@ function fakeDaemon(
               chief: "",
               protocolVersion: 11,
               principalClass: opts.principalClass ?? params.principalClass,
-              launchId: opts.launchId ?? params.launchId,
+              launchId: sequenceKey ?? opts.launchId ?? params.launchId,
               launchParentPid: opts.launchParentPid ?? params.launchParentPid,
               transportDelivery: params.delivery,
               delivery: params.delivery,
             }),
           )
+          if (opts.launchIdSequence !== undefined) socket.end()
           return
         }
         if (msg.method === "tribe.members") {
@@ -165,4 +173,62 @@ describe("stdio adapter service registration (30968)", () => {
     },
     20_000,
   )
+
+  it("latches the certified launch key across reconnects: a shifted generation is refused", async () => {
+    dir = mkdtempSync(join(tmpdir(), "tribe-svc-adapter-"))
+    const socketPath = join(dir, "daemon.sock")
+    const registers: RegisterParams[] = []
+    // Register 1 certifies the claimed derived key, register 2 takes the one
+    // canonical promotion to the verified instance, register 3 shifts the
+    // generation and must never certify.
+    server = await fakeDaemon(socketPath, registers, {
+      launchIdSequence: ["svc-launch-1::grok-30968", "svc-launch-1@1", "svc-launch-1@2"],
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "grok-30968"], {
+      cwd: dir,
+      env: {
+        ...process.env,
+        HAB_ID_TOKEN: launchToken("svc-launch-1", "grok-30968", "service"),
+        TRIBE_REQUIRE_JOIN: "0",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    let stdoutText = ""
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutText += chunk.toString()
+    })
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "svc-test", version: "0" },
+        },
+      })}\n`,
+    )
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`)
+    const deadline = Date.now() + 25_000
+    while (registers.length < 3 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50))
+    expect(registers.length).toBeGreaterThanOrEqual(3)
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "members", arguments: {} },
+      })}\n`,
+    )
+    await new Promise((r) => setTimeout(r, 3_000))
+    // No successful members answer: the shifted generation never certifies,
+    // so the call answers as an error (or not at all), never with sessions.
+    const responseLine = stdoutText.split("\n").find((line) => line.includes('"id":2'))
+    if (responseLine !== undefined) {
+      const response = JSON.parse(responseLine) as { result?: { isError?: boolean; content?: unknown } }
+      expect(response.result?.isError).toBe(true)
+      expect(JSON.stringify(response.result?.content ?? "")).not.toContain("sessions")
+    }
+  }, 30_000)
 })

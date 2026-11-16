@@ -741,13 +741,20 @@ function registerParamsForConnection(): typeof baseRegisterParams & {
   }
 }
 
+/** The first launch key this service certified; retained across reconnects. */
+let certifiedServiceLaunchKey: string | null = null
+
 /**
  * Certify a service registration through the canonical certifier
  * (launch-registration's keyedLaunchId, the same check connectTribeLaunch
  * runs): the daemon must have registered the exact token actor, as a service
  * principal, keyed under the derived launch key (or this token's
- * `<sid>@<gen>`) and this process. Anything else is refused loudly here
- * rather than silently degrading the service to an uncertified registration.
+ * `<sid>@<gen>`) and this process. The certified key is latched: a reconnect
+ * must present the same key, with the one canonical promotion from the
+ * claimed derived key to the exact verified `<sid>@<gen>` instance
+ * (connectTribeLaunch's reregister latch). Anything else is refused loudly
+ * here rather than silently degrading the service to an uncertified
+ * registration.
  */
 function certifyServiceRegistration(reg: {
   name: string
@@ -770,7 +777,20 @@ function certifyServiceRegistration(reg: {
   const derived = REGISTER_WITH_LAUNCH_NAME
     ? LAUNCH_IDENTITY.id
     : deriveTribePersonaLaunchIdentity(SERVICE_SENDER.name, LAUNCH_IDENTITY.id).providerLaunchKey
-  keyedLaunchId(reg, derived, true, process.pid)
+  const key = keyedLaunchId(reg, derived, true, process.pid)
+  if (certifiedServiceLaunchKey === null) {
+    certifiedServiceLaunchKey = key
+    return
+  }
+  if (key === certifiedServiceLaunchKey) return
+  if (certifiedServiceLaunchKey === derived) {
+    // The one promotion: claimed derived key -> exact verified instance.
+    certifiedServiceLaunchKey = key
+    return
+  }
+  throw new Error(
+    `Tribe re-registered ${SERVICE_SENDER.name} as launch ${key}, not its own ${certifiedServiceLaunchKey}`,
+  )
 }
 
 function errorMessage(err: unknown): string {
