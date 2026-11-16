@@ -460,7 +460,7 @@ function tokenSidClaim(token: string): string | undefined {
  * equal the derived one. A daemon that returns none keyed the launch id it was sent, so the derived id certifies: an old
  * daemon plus this client keeps joining (@cto 57e5f42a). A returned parent pid that is not this harness's refuses.
  */
-function keyedLaunchId(
+export function keyedLaunchId(
   registration: { readonly launchId?: unknown; readonly launchParentPid?: unknown },
   derived: string,
   byToken: boolean,

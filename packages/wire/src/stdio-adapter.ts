@@ -54,6 +54,8 @@ import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
 import { launchSender, type LaunchSender } from "./service-send.ts"
+import { keyedLaunchId } from "./launch-registration.ts"
+import { deriveTribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
 import { isIdentityTokenMissingRefusal } from "./lib/identity-token-missing-refusal.ts"
 import { TRIBE_NAME_ENV, TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE_ENV } from "./lib/session-identity-env.ts"
 import { AG_HOST_LAUNCH_GENERATION_ENV } from "./lib/ag-host-env.ts"
@@ -740,12 +742,19 @@ function registerParamsForConnection(): typeof baseRegisterParams & {
 }
 
 /**
- * Certify a service registration the way connectTribeLaunch does: the daemon
- * must have registered the exact token actor, as a service principal, keyed
- * under this process. Anything else is refused loudly here rather than
- * silently degrading the service to an uncertified registration.
+ * Certify a service registration through the canonical certifier
+ * (launch-registration's keyedLaunchId, the same check connectTribeLaunch
+ * runs): the daemon must have registered the exact token actor, as a service
+ * principal, keyed under the derived launch key (or this token's
+ * `<sid>@<gen>`) and this process. Anything else is refused loudly here
+ * rather than silently degrading the service to an uncertified registration.
  */
-function certifyServiceRegistration(reg: { name: string; principalClass?: unknown; launchParentPid?: unknown }): void {
+function certifyServiceRegistration(reg: {
+  name: string
+  principalClass?: unknown
+  launchId?: unknown
+  launchParentPid?: unknown
+}): void {
   if (SERVICE_SENDER === null) return
   if (reg.name !== SERVICE_SENDER.name) {
     throw new Error(`Tribe registered ${JSON.stringify(reg.name)} instead of ${JSON.stringify(SERVICE_SENDER.name)}`)
@@ -755,12 +764,13 @@ function certifyServiceRegistration(reg: { name: string; principalClass?: unknow
       `Tribe did not certify service lifetime for ${SERVICE_SENDER.name}; the daemon must support service principals`,
     )
   }
-  if (reg.launchParentPid !== undefined && reg.launchParentPid !== null && reg.launchParentPid !== process.pid) {
-    throw new Error(
-      `Tribe register refused by this client: the daemon keyed launch parent pid ${String(reg.launchParentPid)}, ` +
-        `not this process's ${process.pid}`,
-    )
+  if (LAUNCH_IDENTITY === null) {
+    throw new Error(`Tribe register refused by this client: ${SERVICE_SENDER.name} has no launch identity to certify`)
   }
+  const derived = REGISTER_WITH_LAUNCH_NAME
+    ? LAUNCH_IDENTITY.id
+    : deriveTribePersonaLaunchIdentity(SERVICE_SENDER.name, LAUNCH_IDENTITY.id).providerLaunchKey
+  keyedLaunchId(reg, derived, true, process.pid)
 }
 
 function errorMessage(err: unknown): string {
@@ -1068,6 +1078,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
         transportDelivery?: unknown
         delivery?: unknown
         principalClass?: unknown
+        launchId?: unknown
         launchParentPid?: unknown
         daemon?: { pid?: number }
       }
