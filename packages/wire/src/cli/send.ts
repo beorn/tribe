@@ -782,7 +782,12 @@ export function resolvedStoredRef(ref: string, snapshot: RefSettlementSnapshot):
  * so the send stores the daemon's full id instead of a typed prefix.
  * Returns the ref the caller must store on the outgoing message.
  */
-async function warnUnresolvedRef(sender: SendCaller, ref: string, ownedPending?: PendingListResult): Promise<string> {
+async function warnUnresolvedRef(
+  sender: SendCaller,
+  ref: string,
+  ownedPending: PendingListResult | undefined,
+  recipient: string,
+): Promise<string> {
   // The complete owner read can verify a held ball even when bounded history is
   // partial. Keep the snapshot fallback for requester-owned and unknown refs.
   if (
@@ -800,10 +805,37 @@ async function warnUnresolvedRef(sender: SendCaller, ref: string, ownedPending?:
     const stored = resolvedStoredRef(ref, snapshot)
     const ownsOpenBall = refNamesOwnedOpenBall(stored, sender.name, snapshot)
     if (ownsOpenBall === true) return stored
+    let recipientLookupError: string | undefined
+    // A bounded member snapshot can omit a request the caller sent. One named
+    // recipient's pending facts can prove that exact request without a fleet scan.
+    if (snapshot.settlement_lookup?.status === "partial" && recipient !== "*" && !recipient.includes(",")) {
+      try {
+        const recipientPending = mcpJsonContent(
+          await callDaemon("tribe.pending", { owner: recipient }, sender),
+        ) as PendingListResult
+        recipientLookupError = recipientPending.error
+        if (
+          !recipientPending.error &&
+          recipientPending.pending?.some(
+            (row) =>
+              row.sender === sender.name &&
+              row.recipient === recipient &&
+              (row.request_id === ref || row.message_id === ref),
+          )
+        ) {
+          return ref
+        }
+      } catch (error) {
+        // An unavailable recipient read is no proof; retain the existing
+        // incomplete-snapshot diagnostic and continue the send below.
+        recipientLookupError = error instanceof Error ? error.message : String(error)
+      }
+    }
     detail =
       ownsOpenBall === false
         ? "names no open ball you sent"
         : `could not be verified by tribe.fetch ids (${snapshot.error ?? snapshot.settlement_lookup?.detail ?? "no settlement fact returned"})`
+    if (recipientLookupError) detail += `; recipient pending lookup unavailable (${recipientLookupError})`
     console.error(
       `tribe-wire send: unresolved-ref — --ref ${ref} ${detail}; check the reference with tribe fetch --ids ${ref}. Sending anyway; --ref does not settle a ball.`,
     )
@@ -932,7 +964,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     )
   }
   if (input.ref && !input.reply && caller && !input.anonymous && !createsRequest) {
-    input.ref = await warnUnresolvedRef(caller, input.ref, ownedPending)
+    input.ref = await warnUnresolvedRef(caller, input.ref, ownedPending, input.to)
   }
 
   const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller, !input.anonymous)) as {

@@ -2195,6 +2195,7 @@ describe("reply and taking convenience commands (25028)", () => {
     }>
     sendAppliedDue?: { request_id: string; previous_expires_at: number | null; expires_at: number }
     sendError?: string
+    pendingByOwner?: Record<string, { rows: NonNullable<MockDaemonOptions["pendingRows"]>; error?: string }>
     pendingError?: string
     pendingRpcError?: string
     fetchLookup?: { status: string; detail: string }
@@ -2283,14 +2284,17 @@ describe("reply and taking convenience commands (25028)", () => {
                 ],
               }
             } else {
+              const scoped = opts.pendingByOwner?.[(p.owner as string) ?? "@dev/8"]
+              const rows = scoped?.rows ?? opts.pendingRows ?? []
+              const error = scoped?.error ?? opts.pendingError
               result = {
                 content: [
                   {
                     text: JSON.stringify({
                       owner: (p.owner as string) ?? "@dev/8",
-                      count: (opts.pendingRows ?? []).length,
-                      pending: opts.pendingRows ?? [],
-                      ...(opts.pendingError === undefined ? {} : { error: opts.pendingError }),
+                      count: rows.length,
+                      pending: rows,
+                      ...(error === undefined ? {} : { error }),
                     }),
                   },
                 ],
@@ -2414,6 +2418,36 @@ describe("reply and taking convenience commands (25028)", () => {
       ])
       expect(res.stderr.includes("unresolved-ref"), scenario.name).toBe(scenario.warns)
       if (scenario.to === "*") expect(res.stderr).not.toContain("open ball(s) from")
+    }
+  })
+
+  // @failure Requester-created refs falsely warn when bounded history omits their recipient-owned ball (31937).
+  // @level l2 @consumer tribe-wire send CLI
+  test("requester references use recipient facts when 59 of 109 members are omitted", async () => {
+    const ref = "worker-starved:@dev/7:no-startable-item"
+    const request = { request_id: ref, message_id: "member-108", sender: "@dev/8", recipient: "@chief" }
+    for (const scenario of [
+      { name: "requester", rows: [request], warns: false },
+      { name: "unknown", rows: [], warns: true },
+      { name: "foreign sender", rows: [{ ...request, sender: "@dev/9" }], warns: true },
+      { name: "foreign recipient", rows: [{ ...request, recipient: "@dev/9" }], warns: true },
+      { name: "unavailable", rows: [request], error: "tracker unavailable", warns: true },
+    ]) {
+      const res = await runMockDaemon(
+        ["send", "@chief", scenario.name, "--type", "status", "--ref", ref, "--json"],
+        {
+          pendingRows: [],
+          pendingByOwner: { "@chief": { rows: scenario.rows, error: scenario.error } },
+          fetchEvents: Array.from({ length: 50 }, (_, i) => ({ id: `member-${i}`, from: "@dev/8" })),
+          fetchLookup: { status: "partial", detail: `request ${ref}: 59 of 109 member(s) not returned at limit 50` },
+        },
+      )
+      expect(res.code, scenario.name).toBe(0)
+      expect(JSON.parse(res.stdout), scenario.name).toMatchObject({ sent: true })
+      expect(res.sent, scenario.name).toHaveLength(1)
+      expect(res.sent[0], scenario.name).toMatchObject({ to: "@chief", type: "status", ref })
+      expect(res.sent[0], scenario.name).not.toHaveProperty("reply")
+      expect(res.stderr.includes("unresolved-ref"), scenario.name).toBe(scenario.warns)
     }
   })
 
