@@ -135,22 +135,24 @@ export async function connectTribeLaunch(
         continue
       }
       // The same original token may be promoted once from its claimed key to its exact verified instance.
-      // A verified key never changes again, including back to a claimed key.
-      let sameLaunch = next.launchId === current.launchId
-      if (
-        !sameLaunch &&
-        next.processId === first.processId &&
-        current.launchId === deriveTribePersonaLaunchIdentity(request.name, providerLaunchId).providerLaunchKey &&
-        request.idToken !== undefined
-      ) {
+      // A verified key never changes again, including back to a claimed key (certifiedReregistrationKey).
+      let tokenInstanceKey: string | null = null
+      if (next.launchId !== current.launchId && next.processId === first.processId && request.idToken !== undefined) {
         try {
           const claims = readUnverifiedTokenClaims(request.idToken, { generation: true })
-          sameLaunch = next.launchId === formatInstanceId(claims.sid, claims.gen)
+          tokenInstanceKey = formatInstanceId(claims.sid, claims.gen)
         } catch (error) {
           next.client.close()
           throw error
         }
       }
+      const sameLaunch =
+        certifiedReregistrationKey({
+          currentKey: current.launchId,
+          nextKey: next.launchId,
+          claimedKey: deriveTribePersonaLaunchIdentity(request.name, providerLaunchId).providerLaunchKey,
+          tokenInstanceKey,
+        }) !== null
       if (!sameLaunch || next.processId !== first.processId) {
         next.client.close()
         throw new Error(
@@ -460,6 +462,29 @@ function tokenSidClaim(token: string): string | undefined {
  * equal the derived one. A daemon that returns none keyed the launch id it was sent, so the derived id certifies: an old
  * daemon plus this client keeps joining (@cto 57e5f42a). A returned parent pid that is not this harness's refuses.
  */
+/**
+ * The one re-registration transition every long-lived registered client applies (connectTribeLaunch's
+ * reregister latch and the stdio adapter's service registration): the same key keeps the launch; a claimed
+ * derived key may promote exactly once to the token's exact verified instance (`tokenInstanceKey`); a
+ * verified key never changes again, including back to the claimed key. Returns the key the launch is now
+ * certified under, or null when `nextKey` is not this launch. Same-process keying is the caller's check.
+ */
+export function certifiedReregistrationKey(input: {
+  readonly currentKey: string
+  readonly nextKey: string
+  readonly claimedKey: string
+  readonly tokenInstanceKey: string | null
+}): string | null {
+  if (input.nextKey === input.currentKey) return input.currentKey
+  if (
+    input.currentKey === input.claimedKey &&
+    input.tokenInstanceKey !== null &&
+    input.nextKey === input.tokenInstanceKey
+  )
+    return input.nextKey
+  return null
+}
+
 export function keyedLaunchId(
   registration: { readonly launchId?: unknown; readonly launchParentPid?: unknown },
   derived: string,

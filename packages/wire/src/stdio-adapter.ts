@@ -54,7 +54,7 @@ import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
 import { launchSender, type LaunchSender } from "./service-send.ts"
-import { keyedLaunchId } from "./launch-registration.ts"
+import { certifiedReregistrationKey, keyedLaunchId } from "./launch-registration.ts"
 import { deriveTribePersonaLaunchIdentity, formatInstanceId } from "./lib/persona-launch-identity.ts"
 import { readUnverifiedTokenClaims } from "./lib/identity-token.ts"
 import { isIdentityTokenMissingRefusal } from "./lib/identity-token-missing-refusal.ts"
@@ -783,20 +783,22 @@ function certifyServiceRegistration(reg: {
     certifiedServiceLaunchKey = key
     return
   }
-  if (key === certifiedServiceLaunchKey) return
-  if (certifiedServiceLaunchKey === derived) {
-    // The one promotion: claimed derived key -> the token's exact verified
-    // instance (`<sid>@<gen>` from the token's own claims, as
-    // connectTribeLaunch's latch computes it), never any other generation.
-    const claims = readUnverifiedTokenClaims(SERVICE_SENDER.idToken, { generation: true })
-    if (claims.gen !== undefined && key === formatInstanceId(claims.sid, claims.gen)) {
-      certifiedServiceLaunchKey = key
-      return
-    }
+  // The shared re-registration transition (launch-registration): same key, or
+  // the one promotion from the claimed derived key to the token's exact
+  // verified instance; any other key is a different launch.
+  const claims = readUnverifiedTokenClaims(SERVICE_SENDER.idToken, { generation: true })
+  const nextKey = certifiedReregistrationKey({
+    currentKey: certifiedServiceLaunchKey,
+    nextKey: key,
+    claimedKey: derived,
+    tokenInstanceKey: formatInstanceId(claims.sid, claims.gen),
+  })
+  if (nextKey === null) {
+    throw new Error(
+      `Tribe re-registered ${SERVICE_SENDER.name} as launch ${key}, not its own ${certifiedServiceLaunchKey}`,
+    )
   }
-  throw new Error(
-    `Tribe re-registered ${SERVICE_SENDER.name} as launch ${key}, not its own ${certifiedServiceLaunchKey}`,
-  )
+  certifiedServiceLaunchKey = nextKey
 }
 
 function errorMessage(err: unknown): string {
