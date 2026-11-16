@@ -2195,7 +2195,10 @@ describe("reply and taking convenience commands (25028)", () => {
     }>
     sendAppliedDue?: { request_id: string; previous_expires_at: number | null; expires_at: number }
     sendError?: string
-    pendingByOwner?: Record<string, { rows: NonNullable<MockDaemonOptions["pendingRows"]>; error?: string }>
+    pendingByOwner?: Record<
+      string,
+      { rows: NonNullable<MockDaemonOptions["pendingRows"]>; error?: string; rpcError?: string }
+    >
     pendingError?: string
     pendingRpcError?: string
     fetchLookup?: { status: string; detail: string }
@@ -2229,10 +2232,17 @@ describe("reply and taking convenience commands (25028)", () => {
   async function runMockDaemon(
     args: string[],
     opts: MockDaemonOptions = {},
-  ): Promise<{ code: number | null; stdout: string; stderr: string; sent: Array<Record<string, unknown>> }> {
+  ): Promise<{
+    code: number | null
+    stdout: string
+    stderr: string
+    sent: Array<Record<string, unknown>>
+    requests: Array<{ method: string; params?: Record<string, unknown> }>
+  }> {
     const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-reply-taking-"))
     const socketPath = join(tmp, "tribe.sock")
     const sent: Array<Record<string, unknown>> = []
+    const requests: Array<{ method: string; params?: Record<string, unknown> }> = []
 
     const server = createServer((socket) => {
       let buffer = ""
@@ -2245,9 +2255,12 @@ describe("reply and taking convenience commands (25028)", () => {
           newline = buffer.indexOf("\n")
           if (!line.trim()) continue
           const request = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> }
-          if (request.method === "tribe.pending" && opts.pendingRpcError !== undefined) {
+          requests.push(request)
+          const pendingRpcError =
+            opts.pendingByOwner?.[request.params?.owner as string]?.rpcError ?? opts.pendingRpcError
+          if (request.method === "tribe.pending" && pendingRpcError !== undefined) {
             socket.write(
-              `${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: opts.pendingRpcError } })}\n`,
+              `${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: pendingRpcError } })}\n`,
             )
             continue
           }
@@ -2378,7 +2391,7 @@ describe("reply and taking convenience commands (25028)", () => {
         child.on("close", (code) => resolveProc({ code, stdout, stderr }))
       })
 
-      return { ...outcome, sent }
+      return { ...outcome, sent, requests }
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
@@ -2428,26 +2441,39 @@ describe("reply and taking convenience commands (25028)", () => {
     const request = { request_id: ref, message_id: "member-108", sender: "@dev/8", recipient: "@chief" }
     for (const scenario of [
       { name: "requester", rows: [request], warns: false },
+      { name: "expired", rows: [{ ...request, status: "expired" }], warns: false },
+      { name: "message alias", rows: [request], ref: request.message_id, warns: false },
       { name: "unknown", rows: [], warns: true },
       { name: "foreign sender", rows: [{ ...request, sender: "@dev/9" }], warns: true },
       { name: "foreign recipient", rows: [{ ...request, recipient: "@dev/9" }], warns: true },
       { name: "unavailable", rows: [request], error: "tracker unavailable", warns: true },
+      { name: "RPC unavailable", rows: [request], rpcError: "recipient tracker unavailable", warns: true },
+      { name: "broadcast", rows: [request], to: "*", warns: true },
+      { name: "multiple recipients", rows: [request], to: "@chief,@dev/9", warns: true },
     ]) {
-      const res = await runMockDaemon(
-        ["send", "@chief", scenario.name, "--type", "status", "--ref", ref, "--json"],
-        {
-          pendingRows: [],
-          pendingByOwner: { "@chief": { rows: scenario.rows, error: scenario.error } },
-          fetchEvents: Array.from({ length: 50 }, (_, i) => ({ id: `member-${i}`, from: "@dev/8" })),
-          fetchLookup: { status: "partial", detail: `request ${ref}: 59 of 109 member(s) not returned at limit 50` },
-        },
-      )
+      const typedRef = scenario.ref ?? ref
+      const to = scenario.to ?? "@chief"
+      const res = await runMockDaemon(["send", to, scenario.name, "--type", "status", "--ref", typedRef, "--json"], {
+        pendingRows: [],
+        pendingByOwner: { "@chief": { rows: scenario.rows, error: scenario.error, rpcError: scenario.rpcError } },
+        fetchEvents: Array.from({ length: 50 }, (_, i) => ({ id: `member-${i}`, from: "@dev/8" })),
+        fetchLookup: { status: "partial", detail: `request ${ref}: 59 of 109 member(s) not returned at limit 50` },
+      })
       expect(res.code, scenario.name).toBe(0)
       expect(JSON.parse(res.stdout), scenario.name).toMatchObject({ sent: true })
       expect(res.sent, scenario.name).toHaveLength(1)
-      expect(res.sent[0], scenario.name).toMatchObject({ to: "@chief", type: "status", ref })
+      expect(res.sent[0], scenario.name).toMatchObject({ to, type: "status", ref: typedRef })
       expect(res.sent[0], scenario.name).not.toHaveProperty("reply")
-      expect(res.stderr.includes("unresolved-ref"), scenario.name).toBe(scenario.warns)
+      expect(res.stderr.match(/unresolved-ref —/g)?.length ?? 0, scenario.name).toBe(scenario.warns ? 1 : 0)
+      const owners = res.requests.filter((call) => call.method === "tribe.pending").map((call) => call.params)
+      expect(owners, scenario.name).toEqual(
+        to === "@chief" ? [{ owner: "@dev/8" }, { owner: "@chief" }] : [{ owner: "@dev/8" }],
+      )
+      expect(
+        res.requests.filter((call) => call.method === "tribe.fetch"),
+        scenario.name,
+      ).toEqual([expect.objectContaining({ params: { ids: [typedRef] } })])
+      if (scenario.rpcError ?? scenario.error) expect(res.stderr).toContain(scenario.rpcError ?? scenario.error)
     }
   })
 
