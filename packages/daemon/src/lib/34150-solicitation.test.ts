@@ -5,6 +5,9 @@
  * owed by nobody. The first atomic claim converts it to one ordinary
  * directed owed ball; decline never settles; unclaimed expiry lands on the
  * sender. Replays the Nov 13 cca70c96 case at 17 recipients.
+ *
+ * @testonly none: the lifecycle is exercised through the public tribe.send
+ * and tribe.pending handlers; no test-only exports are added.
  */
 
 import type { Database } from "bun:sqlite"
