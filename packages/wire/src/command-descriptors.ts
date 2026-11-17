@@ -485,8 +485,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           owed: {
             type: "boolean",
-            description:
-              "With expired: only rows a live pending request still backs (deadline passed, still open).",
+            description: "With expired: only rows a live pending request still backs (deadline passed, still open).",
           },
           owner: { type: "string", description: "Owner seat name (default: the caller)." },
           emitter: {
