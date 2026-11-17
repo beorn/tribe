@@ -1,5 +1,30 @@
 import { DEFAULT_INBOX_WAIT_READINESS_MS } from "./packages/wire/src/lib/inbox-wait-options.ts"
 
+/**
+ * Wire's MCP stdio adapter as a structural declaration (32327 R1, @cto option (b) 2026-11-17): the value an agent kind
+ * lowers into the MCP server a seat mounts. Ag owns the input type (`TribeMcpDeclaration`, @ag/harness/acp-proxy), the
+ * selection by `kind` and the lowering, and its test proves this value assignable to that type; Wire imports nothing
+ * from Ag. The `wire` service below stays the one service definition.
+ *
+ * `entry` is relative to this package, so a consumer resolves it against the package source it recorded, never the
+ * agent's cwd. Only the three socket selectors are copied from `options.env`, so the adapter dials the socket the daemon
+ * serves (`stateRoots` below); the seat's identity, account, filter and forwarded authority stay with the launch. Pure:
+ * it reads no ambient environment and starts nothing.
+ */
+export function wireMcp(options: { readonly env?: Readonly<Record<string, string | undefined>> } = {}) {
+  const env: { TRIBE_SOCKET?: string; XDG_RUNTIME_DIR?: string; HOME?: string } = {}
+  for (const selector of ["TRIBE_SOCKET", "XDG_RUNTIME_DIR", "HOME"] as const) {
+    const value = options.env?.[selector]
+    if (value !== undefined) env[selector] = value
+  }
+  return {
+    kind: "tribe-stdio" as const,
+    name: "tribe",
+    entry: "./plugins/claude/server.ts",
+    ...(Object.keys(env).length === 0 ? {} : { env }),
+  }
+}
+
 export default {
   wire: {
     owner: "@chief",
