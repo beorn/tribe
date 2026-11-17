@@ -310,6 +310,8 @@ describe("service CLI admission", () => {
           type: "status",
           ref: "service-request",
           summary: "Taking service work",
+          // Every send mints its own id so a timed-out send can be read back by it (611378c6, 34062).
+          message_id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
         },
       },
     ])
