@@ -82,16 +82,16 @@ afterEach(() => {
 })
 
 describe("Recall refresh completion", () => {
-  /** @failure A transcript longer than the old shared window left the vault embed pass with no time, so the hourly index embedded nothing. */
+  /** @failure A transcript longer than the old shared window left the vault embed pass with no time, so the scheduled index embedded nothing. */
   test.each([15_000, 45_002, 65_487])(
-    "vault embed pass gets a fresh 60s budget after %i ms of transcripts",
+    "vault embed pass gets a fresh 240s budget after %i ms of transcripts",
     async (transcriptMs) => {
       corpus.vaultDb = dbPath
       vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(transcriptMs)
       vi.mocked(runVaultEmbedPass).mockImplementation(async ({ timeLeftMs }) => {
-        expect(timeLeftMs()).toBe(60_000)
+        expect(timeLeftMs()).toBe(240_000)
         vi.spyOn(Date, "now").mockReturnValue(transcriptMs + 1_000)
-        expect(timeLeftMs()).toBe(59_000)
+        expect(timeLeftMs()).toBe(239_000)
         return {
           generation: 1,
           published: true,
@@ -109,7 +109,7 @@ describe("Recall refresh completion", () => {
       await cmdIndex({ incremental: true })
       expect(runVaultEmbedPass).toHaveBeenCalledOnce()
       const output = vi.mocked(console.log).mock.calls.flat().join("\n")
-      expect(output).toContain(`transcript phase ${transcriptMs} ms; embed window remaining 60000 ms`)
+      expect(output).toContain(`transcript phase ${transcriptMs} ms; embed window remaining 240000 ms`)
       expect(output).toContain("0 chunks embedded")
       expect(output).toContain("275 uncovered")
       expect(output).not.toContain("embed window spent before embedding started")

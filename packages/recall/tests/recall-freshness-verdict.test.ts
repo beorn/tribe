@@ -89,20 +89,20 @@ afterEach(() => {
 describe("the one freshness verdict", () => {
   test("judges the documented window and names itself the default", () => {
     const fresh = judgeIndexFreshness(stampAgedBy(60_000))
-    expect(RECALL_INDEX_CADENCE).toBe("1h")
-    expect(RECALL_STALE_THRESHOLD_DEFAULT).toBe("75m")
+    expect(RECALL_INDEX_CADENCE).toBe("4h")
+    expect(RECALL_STALE_THRESHOLD_DEFAULT).toBe("255m")
     expect(parseThreshold(RECALL_STALE_THRESHOLD_DEFAULT)).toBe(
       parseThreshold(RECALL_INDEX_CADENCE) + parseThreshold(RECALL_INDEX_RUN_ALLOWANCE),
     )
     expect(fresh.windowMs).toBe(getStaleThresholdMs())
-    expect(fresh.windowMs).toBe(75 * 60 * 1000)
+    expect(fresh.windowMs).toBe(255 * 60 * 1000)
     expect(fresh.windowSource).toBe("default")
     expect(fresh.root).toBe(INDEX_FRESHNESS_ROOT)
     expect(fresh.provenance).toBe("complete")
   })
 
   /**
-   * @failure The reader window stays 75m when the recall-index timeout doubles,
+   * @failure The reader window stays 255m when the recall-index timeout doubles,
    *          because allowance is a second literal instead of timeout plus slack.
    * @level l1
    * @consumer @i/1-instruments/28594/28600/28613 AC3 — window derived from cadence plus run time
@@ -110,12 +110,12 @@ describe("the one freshness verdict", () => {
    */
   test("allowance is timeout plus slack, so a timeout mutation changes the window", () => {
     const src = readFileSync(new URL("../src/lib/staleness.ts", import.meta.url), "utf8")
-    expect(evaluateStaleDefaultMs(src)).toBe(75 * 60 * 1000)
+    expect(evaluateStaleDefaultMs(src)).toBe(255 * 60 * 1000)
     const mutated = src.replace(
       /export const RECALL_INDEX_RUN_TIMEOUT_SEC = 600/,
       "export const RECALL_INDEX_RUN_TIMEOUT_SEC = 1200",
     )
-    expect(evaluateStaleDefaultMs(mutated)).toBe(85 * 60 * 1000)
+    expect(evaluateStaleDefaultMs(mutated)).toBe(265 * 60 * 1000)
     expect(RECALL_INDEX_RUN_TIMEOUT_SEC).toBe(600)
     expect(parseThreshold(RECALL_INDEX_RUN_ALLOWANCE)).toBe(
       parseThreshold(`${RECALL_INDEX_RUN_TIMEOUT_SEC}s`) + parseThreshold(RECALL_INDEX_RUN_SLACK),
@@ -123,9 +123,9 @@ describe("the one freshness verdict", () => {
   })
 
   test("a stamp past the window is stale, and the verdict carries the age it judged", () => {
-    const stale = judgeIndexFreshness(stampAgedBy(80 * 60 * 1000))
+    const stale = judgeIndexFreshness(stampAgedBy(260 * 60 * 1000))
     expect(stale.provenance).toBe("stale")
-    expect(stale.ageMs).toBeGreaterThanOrEqual(80 * 60 * 1000)
+    expect(stale.ageMs).toBeGreaterThanOrEqual(260 * 60 * 1000)
     expect(stale.lastRebuild).toBeTruthy()
   })
 
@@ -144,24 +144,24 @@ describe("the one freshness verdict", () => {
   })
 
   test("a stale answer names the root and the window it judged", () => {
-    const named = describeFreshness(judgeIndexFreshness(stampAgedBy(80 * 60 * 1000)))
+    const named = describeFreshness(judgeIndexFreshness(stampAgedBy(260 * 60 * 1000)))
     expect(named).toContain(INDEX_FRESHNESS_ROOT)
     expect(named).toContain("window")
     expect(named).toContain("old")
-    expect(named).toContain("80m old vs 75m window (default)")
+    expect(named).toContain("260m old vs 255m window (default)")
   })
 
   /**
-   * @failure Normal 1h timer cycles are rejected by a shorter reader allowance.
+   * @failure Normal 4h timer cycles are rejected by a shorter reader allowance.
    * @level l1
    * @consumer recall search/status using the recall-index timer's completed stamp
    * @testonly none
    */
   test.each([
     [30 * 60_000, "complete"],
-    [75 * 60_000, "complete"],
-    [75 * 60_000 + 1, "stale"],
-    [80 * 60_000, "stale"],
+    [255 * 60_000, "complete"],
+    [255 * 60_000 + 1, "stale"],
+    [260 * 60_000, "stale"],
   ] as const)("judges scheduled-cycle age %dms as %s", (ageMs, provenance) => {
     const now = Date.now()
     const verdict = judgeIndexFreshness(new Date(now - ageMs).toISOString(), now)
@@ -181,7 +181,7 @@ describe("search and status cannot disagree about one stamp", () => {
   })
 
   test("a stamp past the window reads stale and IS stale, in both instruments", async () => {
-    setIndexMeta(getDb(), "last_rebuild", stampAgedBy(80 * 60 * 1000))
+    setIndexMeta(getDb(), "last_rebuild", stampAgedBy(260 * 60 * 1000))
     const search = readIndexProvenance({})
     const review = await reviewMemorySystem(process.cwd(), { skipLlm: true, skipSearchBenchmarks: true, vaultDb: null })
     // The defect @ag/recall/27930 was this pair reading "stale" beside
@@ -191,15 +191,15 @@ describe("search and status cannot disagree about one stamp", () => {
     expect(review.indexHealth.freshness.provenance).toBe(search)
     expect(review.indexHealth.freshness).toMatchObject({
       root: INDEX_FRESHNESS_ROOT,
-      windowMs: 75 * 60 * 1000,
+      windowMs: 255 * 60 * 1000,
     })
   })
 
   test("the search answer itself carries the root and window it judged", () => {
-    setIndexMeta(getDb(), "last_rebuild", stampAgedBy(80 * 60 * 1000))
+    setIndexMeta(getDb(), "last_rebuild", stampAgedBy(260 * 60 * 1000))
     const freshness = readIndexFreshness({})
     expect(freshness.provenance).toBe("stale")
     expect(freshness.root).toBe(INDEX_FRESHNESS_ROOT)
-    expect(freshness).toMatchObject({ windowMs: 75 * 60 * 1000 })
+    expect(freshness).toMatchObject({ windowMs: 255 * 60 * 1000 })
   })
 })

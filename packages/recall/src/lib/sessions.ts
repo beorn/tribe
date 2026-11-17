@@ -24,7 +24,7 @@ export const RECALL_INDEX_BUSY_EXIT = 4
 /** The incremental share-cap prune was refused: report the incomplete provenance (25462). */
 export const RECALL_INDEX_PRUNE_REFUSED_EXIT = 5
 /** Vault embed phase: cooperative budget measured from embed-pass entry, not from index start. */
-export const RECALL_VAULT_EMBED_STOP_MS = 60_000
+export const RECALL_VAULT_EMBED_STOP_MS = 240_000
 
 export async function cmdIndex(opts: {
   incremental?: boolean

@@ -950,7 +950,7 @@ describe("recall search output", () => {
   })
 
   test("concurrent stale searches report unproven without starting index refreshes", async () => {
-    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString())
 
     mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
     const previousExitCode = process.exitCode
@@ -971,10 +971,10 @@ describe("recall search output", () => {
       // The stale answer names the root and window it judged (@ag/recall/27930);
       // this row failed while status carried its own 1h window on the same stamp.
       expect(callsText(logSpy)).toMatch(
-        /0 results — UNPROVEN \(stale index: 2\.0h old vs \d+m window \(\w+\) on index_meta\.last_rebuild\) for "nohits-a"/,
+        /0 results — UNPROVEN \(stale index: 300m old vs \d+m window \(\w+\) on index_meta\.last_rebuild\) for "nohits-a"/,
       )
       expect(callsText(logSpy)).toMatch(
-        /0 results — UNPROVEN \(stale index: 2\.0h old vs \d+m window \(\w+\) on index_meta\.last_rebuild\) for "nohits-b"/,
+        /0 results — UNPROVEN \(stale index: 300m old vs \d+m window \(\w+\) on index_meta\.last_rebuild\) for "nohits-b"/,
       )
       expect(process.exitCode).toBe(3)
     } finally {
@@ -983,7 +983,7 @@ describe("recall search output", () => {
   })
 
   test("a stale index cannot produce authoritative empty JSON", async () => {
-    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString())
     const previousExitCode = process.exitCode
     process.exitCode = 0
 
@@ -1044,7 +1044,7 @@ describe("recall search output", () => {
 
   test("degraded index provenance preserves useful positive JSON hits", async () => {
     seedMessage("stalepositive evidence remains useful even when freshness is degraded")
-    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString())
     const previousExitCode = process.exitCode
     process.exitCode = 0
 
@@ -1062,7 +1062,7 @@ describe("recall search output", () => {
   })
 
   test("degraded default JSON discriminates an unproven empty result", async () => {
-    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString())
     const previousExitCode = process.exitCode
     process.exitCode = 0
 
@@ -1079,7 +1079,7 @@ describe("recall search output", () => {
   })
 
   test("degraded agent JSON discriminates an unproven empty result", async () => {
-    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString())
     mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
     const previousExitCode = process.exitCode
     process.exitCode = 0
@@ -1221,6 +1221,31 @@ describe("recall search output", () => {
 
       expect(process.exitCode).toBe(3)
       expect(callsText(logSpy)).toContain('0 matches — UNPROVEN (unknown index) for "nohits"')
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
+  /**
+   * @failure At the 4h recall-index cadence (33868) a complete-but-hours-old transcript index printed a bare
+   *          "No matches found", read as "nothing happened" though later sessions may not be indexed yet.
+   * @level l1
+   * @consumer recall search raw text output read by agents and the operator
+   */
+  test("a complete empty raw answer names the transcript index's rebuild time and age", async () => {
+    const rebuilt = new Date(Date.now() - 30 * 60_000).toISOString()
+    setIndexMeta(getDb(), "last_rebuild", rebuilt)
+    const previousExitCode = process.exitCode
+    process.exitCode = 0
+
+    try {
+      await cmdSearch("nohits", { raw: true, project: "*", limit: "5" })
+
+      const text = callsText(logSpy)
+      expect(text).toContain('No matches found for "nohits"')
+      expect(text).toContain(
+        `transcript index rebuilt ${rebuilt} (30m ago, within its 255m schedule window); sessions after that may be absent`,
+      )
     } finally {
       process.exitCode = previousExitCode
     }
@@ -1506,6 +1531,7 @@ describe("recall search output", () => {
         expect(stdoutLines()).toEqual([
           `\x1b[2mSearching: "goldenneedle" last 30d\x1b[0m\n`,
           `Found 8 matches for "goldenneedle" in 0ms:\n`,
+          "\x1b[2m  transcript index rebuilt 2026-10-20T12:00:00.000Z (0s ago, within its 255m schedule window); sessions after that may be absent\x1b[0m",
           HEAVY,
           "\u{1F4C1} golden-a...  |  /test/golden  |  2h ago",
           HEAVY,
@@ -1578,6 +1604,7 @@ describe("recall search output", () => {
         expect(stdoutLines()).toEqual([
           `\x1b[2mSearching: "livegoldenneedle" last 30d\x1b[0m\n`,
           `Found 5 matches for "livegoldenneedle" in 0ms:\n`,
+          "\x1b[2m  transcript index rebuilt 2026-10-20T12:00:00.000Z (0s ago, within its 255m schedule window); sessions after that may be absent\x1b[0m",
           HEAVY,
           "\u{1F534} CURRENT SESSION  |  4 matches",
           HEAVY,

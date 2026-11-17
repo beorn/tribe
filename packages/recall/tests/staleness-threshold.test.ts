@@ -1,5 +1,5 @@
 /**
- * @failure  RECALL_STALE_THRESHOLD parsing accepts a bad duration or drifts from the 75m default, so the
+ * @failure  RECALL_STALE_THRESHOLD parsing accepts a bad duration or drifts from the 255m default, so the
  *           freshness verdict calls a fresh index stale or a stale one fresh (@km/bearly/19216-recall-freshness-shrink-threshold)
  * @level    l0
  * @consumer lib/staleness.ts getStaleThresholdMs, read by the recall freshness verdict
@@ -43,9 +43,9 @@ describe("parseThreshold", () => {
     expect(() => parseThreshold("")).toThrow(/invalid duration/)
   })
 
-  test('default RECALL_STALE_THRESHOLD_DEFAULT is "75m" — covers the scheduled rebuild', () => {
-    expect(RECALL_STALE_THRESHOLD_DEFAULT).toBe("75m")
-    expect(parseThreshold(RECALL_STALE_THRESHOLD_DEFAULT)).toBe(75 * 60 * 1000)
+  test('default RECALL_STALE_THRESHOLD_DEFAULT is "255m" — covers the scheduled 4h rebuild (33868)', () => {
+    expect(RECALL_STALE_THRESHOLD_DEFAULT).toBe("255m")
+    expect(parseThreshold(RECALL_STALE_THRESHOLD_DEFAULT)).toBe(255 * 60 * 1000)
   })
 })
 
@@ -57,9 +57,9 @@ describe("getStaleThresholdMs (env override)", () => {
     else process.env.RECALL_STALE_THRESHOLD = originalEnv
   })
 
-  test("defaults to 75m when env unset", () => {
+  test("defaults to 255m when env unset", () => {
     delete process.env.RECALL_STALE_THRESHOLD
-    expect(getStaleThresholdMs()).toBe(75 * 60 * 1000)
+    expect(getStaleThresholdMs()).toBe(255 * 60 * 1000)
   })
 
   test('honors RECALL_STALE_THRESHOLD="10m"', () => {

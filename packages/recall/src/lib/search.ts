@@ -97,7 +97,7 @@ export function resolveProjectScope(project: string | undefined, _cwd = process.
 // Read-only index provenance — see @i/20-search-and-memory/23189
 // ============================================================================
 
-import { describeFreshness, judgeIndexFreshness } from "./staleness"
+import { describeFreshness, describeMs, judgeIndexFreshness } from "./staleness"
 
 /** Read `last_rebuild` index meta — returns null if missing, throws on DB access errors. */
 function readLastRebuild(): string | null {
@@ -141,6 +141,22 @@ export function readIndexFreshness(options: { refresh?: boolean }): IndexProvena
 
 export function readIndexProvenance(options: { refresh?: boolean }): IndexProvenance {
   return readIndexFreshness(options).provenance
+}
+
+/**
+ * 33868: "complete" means inside the declared schedule window (cadence plus run time, 255m at 4h), not "through now".
+ * Name the transcript index's rebuild time on complete text answers so an empty or short answer is never read as
+ * "nothing happened since". Vault lexical search reads its own bound DB and is not covered by this stamp.
+ */
+function indexAgeLine(provenance: IndexProvenance, freshness?: IndexProvenanceDetail): string | null {
+  if (provenance !== "complete" || freshness === undefined || freshness.provenance === "snapshot") return null
+  if (freshness.ageMs === null) return null
+  return `${DIM}  transcript index rebuilt ${freshness.lastRebuild} (${describeMs(freshness.ageMs)} ago, within its ${describeMs(freshness.windowMs)} schedule window); sessions after that may be absent${RESET}`
+}
+
+function printIndexAge(provenance: IndexProvenance, freshness?: IndexProvenanceDetail): void {
+  const line = indexAgeLine(provenance, freshness)
+  if (line !== null) console.log(line)
 }
 
 function unprovenSuffix(provenance: IndexProvenance, freshness?: IndexProvenanceDetail): string {
@@ -620,6 +636,7 @@ async function formatRecallOutput(result: RecallResult, options: { json?: boolea
       console.log(`No results returned from partial search for "${result.query}"`)
     } else if (result.provenance === "complete") {
       console.log(`No results found for "${result.query}"`)
+      printIndexAge(result.provenance, result.provenanceDetail)
     } else {
       console.log(`0 results${unprovenSuffix(result.provenance, result.provenanceDetail)} for "${result.query}"`)
     }
@@ -645,6 +662,7 @@ async function formatRecallOutput(result: RecallResult, options: { json?: boolea
   console.log(
     `${DIM}${result.results.length} results${unprovenSuffix(result.provenance, result.provenanceDetail)} from ${uniqueSessions} sessions (${timingParts.join(", ")})${RESET}`,
   )
+  printIndexAge(result.provenance, result.provenanceDetail)
   if (costText) console.log(`${DIM}${costText}${RESET}`)
 }
 
@@ -689,6 +707,7 @@ function formatRawRecallResults(result: RecallResult): void {
   console.log(
     `${BOLD}${result.results.length} results${unprovenSuffix(result.provenance, result.provenanceDetail)}${RESET} for "${result.query}":\n`,
   )
+  printIndexAge(result.provenance, result.provenanceDetail)
   printResultEntries(result.results)
 
   const timingParts = [`${result.durationMs}ms`]
@@ -1171,6 +1190,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     const queryPart = query ? ` for "${query}"` : ""
     if (provenance === "complete") {
       console.log(`No matches found${queryPart} (searched in ${duration}ms)`)
+      printIndexAge(provenance, provenanceDetail)
     } else {
       console.log(`0 matches${unprovenSuffix(provenance, provenanceDetail)}${queryPart} (searched in ${duration}ms)`)
     }
@@ -1182,6 +1202,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   console.log(
     `Found ${totalWithLive} matches${unprovenSuffix(provenance, provenanceDetail)}${queryPart} in ${duration}ms:\n`,
   )
+  printIndexAge(provenance, provenanceDetail)
 
   // Display live session results first
   if (liveResults.length > 0) {
