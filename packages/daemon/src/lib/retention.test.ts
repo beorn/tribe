@@ -17,6 +17,7 @@ import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { gunzipSync, gzipSync } from "node:zlib"
+import { connect } from "node:net"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createScope } from "tribe-wire"
 
@@ -27,7 +28,7 @@ import { resolveRetentionConfig, runRetentionSweep, type RetentionConfig } from 
 import { handleToolCall, readAttentionProjection, type HandlerOpts } from "./handlers.ts"
 import { cleanupOldData } from "./session.ts"
 import { createBaseTribe } from "./compose/base.ts"
-import { withClientRegistry } from "./compose/with-client-registry.ts"
+import { DEFAULT_RECONNECT_GRACE_MS, withClientRegistry } from "./compose/with-client-registry.ts"
 import { withSocketServer } from "./compose/with-socket-server.ts"
 import { withRuntime } from "./compose/with-runtime.ts"
 
@@ -188,19 +189,23 @@ describe("journal retention sweep", () => {
   })
 
   // @failure Startup retention archives the journal before the socket binds,
+  // runs on the fleet's reconnect burst instead of after the startup reconnect
+  // grace (33937: a ~6.7 s block at listen), runs twice or after disposal,
   // the initial sweep replaces/duplicates the existing six-hour cadence,
   // startup ignores min(configured batchSize, 500), or a failed bind escapes
   // run() before the daemon's own handler disposes it.
   // @level l2
   // @consumer The daemon's real socket/runtime lifecycle and journal history.
   it.each([
-    ["listening", 2],
-    ["listening", 600],
-    ["failed", 600],
+    ["listening", 2, "grace-after-bind"],
+    ["listening", 600, "grace-after-bind"],
+    ["listening", 600, "grace-before-bind"],
+    ["listening", 600, "disposed-in-grace"],
+    ["failed", 600, "grace-after-bind"],
   ] as const)(
-    "33749: %s startup preserves retention lifecycle and caps startup batch at min(%i, 500)",
-    async (binding, configuredBatchSize) => {
-      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+    "33749/33937: %s startup preserves retention lifecycle and caps startup batch at min(%i, 500) (%s)",
+    async (binding, configuredBatchSize, order) => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] })
       const prevArchiveWindow = process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS
       const prevBatchSize = process.env.TRIBE_RETENTION_BATCH_SIZE
       process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS = String(3 * DAY)
@@ -242,6 +247,7 @@ describe("journal retention sweep", () => {
         ).n
 
       let runSettled: Promise<"resolved" | "rejected"> | undefined
+      let secondRun: Promise<"resolved" | "rejected"> | undefined
       try {
         const registryShape = withClientRegistry()(createBaseTribe({ scope }))
         const socketShape = withSocketServer()({
@@ -263,12 +269,20 @@ describe("journal retention sweep", () => {
           () => "resolved" as const,
           () => "rejected" as const,
         )
+        // A repeated run() must not run startup retention twice (the batch counts below prove once).
+        secondRun = subject.run().then(
+          () => "resolved" as const,
+          () => "rejected" as const,
+        )
+        // The grace timer may fire before the listen callback: retention must still wait for listen.
+        if (order === "grace-before-bind") vi.advanceTimersByTime(DEFAULT_RECONNECT_GRACE_MS)
 
         if (binding === "failed") {
           // The real socket fails with ENOENT; daemon-run owns its diagnostic,
           // root-scope disposal and exit. Runtime must not race that handler.
           await expect(socketShape.socket.binding).rejects.toMatchObject({ code: "ENOENT" })
           expect(await runSettled).toBe("resolved")
+          vi.advanceTimersByTime(DEFAULT_RECONNECT_GRACE_MS)
           expect(liveIds(db)).toContain(initial)
           expect(archivedIds(db)).not.toContain(initial)
           expect(countRetentionOnlyLive()).toBe(retentionOnlyTotal)
@@ -280,6 +294,27 @@ describe("journal retention sweep", () => {
         expect(liveIds(db)).toContain(initial)
         await expect(socketShape.socket.binding).resolves.toBe("listening")
         await new Promise<void>((resolve) => setImmediate(resolve))
+        if (order !== "grace-before-bind") {
+          // Inside the reconnect grace the socket accepts a real client while retention has not run.
+          const client = connect(join(tmpDir, "runtime.sock"))
+          await new Promise<void>((resolve, reject) => {
+            client.once("connect", resolve)
+            client.once("error", reject)
+          })
+          client.destroy()
+          expect(liveIds(db)).toContain(initial)
+          expect(countRetentionOnlyArchived()).toBe(0)
+          if (order === "disposed-in-grace") {
+            await scope[Symbol.asyncDispose]()
+            vi.advanceTimersByTime(DEFAULT_RECONNECT_GRACE_MS)
+            expect(liveIds(db)).toContain(initial)
+            expect(countRetentionOnlyArchived()).toBe(0)
+            return
+          }
+          vi.advanceTimersByTime(DEFAULT_RECONNECT_GRACE_MS - 1_000)
+          expect(liveIds(db)).toContain(initial)
+          vi.advanceTimersByTime(1_000)
+        }
         expect(liveIds(db)).not.toContain(initial)
         expect(archivedIds(db)).toContain(initial)
         expect(vi.getTimerCount()).toBe(1)
@@ -290,7 +325,8 @@ describe("journal retention sweep", () => {
         expect(countRetentionOnlyLive()).toBe(retentionOnlyTotal - expectedStartupBatch)
 
         const later = seed()
-        vi.advanceTimersByTime(6 * 60 * 60 * 1000 - 1)
+        // The six-hour cadence counts from composition; the grace already advanced is part of it.
+        vi.advanceTimersByTime(6 * 60 * 60 * 1000 - DEFAULT_RECONNECT_GRACE_MS - 1)
         expect(liveIds(db)).toContain(later)
         vi.advanceTimersByTime(1)
         expect(liveIds(db)).not.toContain(later)
@@ -306,6 +342,7 @@ describe("journal retention sweep", () => {
         else process.env.TRIBE_RETENTION_BATCH_SIZE = prevBatchSize
         await scope[Symbol.asyncDispose]()
         await runSettled
+        await secondRun
         db.close()
         vi.useRealTimers()
       }

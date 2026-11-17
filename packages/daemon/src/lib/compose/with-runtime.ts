@@ -275,9 +275,9 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
       if (reapTimer !== null) clearTimeout(reapTimer)
     })
 
-    // Cleanup tick — registers on root scope so disposal stops it. The normal
-    // initial data-retention cleanup waits for socket listen; stale transports wait for daemon
-    // startup reconnect grace, then share this existing six-hour cadence as
+    // Cleanup tick — registers on root scope so disposal stops it. The initial
+    // data-retention cleanup waits for socket listen AND daemon startup reconnect
+    // grace (33937); stale transports wait for that grace, then share this existing six-hour cadence as
     // the backstop for anything the disconnect-driven collection above missed
     // (a daemon that died before its timer fired, rows from an older build).
     //
@@ -312,8 +312,26 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     }
     cleanupInterval.unref?.()
     t.scope.defer(() => clearInterval(cleanupInterval as unknown as ReturnType<typeof setInterval>))
+    // 33937: startup data retention (uncapped cleanupOldData plus a cold archive
+    // export/delete, ~6.7 s measured) blocks the event loop. Running it at listen
+    // put that block exactly on the fleet's reconnect burst, so it waits for BOTH
+    // a successful listen and the end of the existing startup reconnect grace,
+    // runs once, and never after the scope is disposed (the database closes then).
+    let socketListening = false
+    let startupGraceElapsed = false
+    let startupRetentionRan = false
+    const runStartupRetentionOnce = (): void => {
+      if (startupRetentionRan || !socketListening || !startupGraceElapsed || t.scope.signal.aborted) return
+      startupRetentionRan = true
+      cleanupOldData(t.daemonCtx, { liveWindowMs: retentionConfig.liveWindowMs })
+      runRetention(startupRetentionConfig)
+    }
     const startupReapDelayMs = t.registry.startupReconnectGraceRemainingMs(Date.now())
-    const startupReapTimer = setTimeout(reapStaleTransports, startupReapDelayMs) as unknown as {
+    const startupReapTimer = setTimeout(() => {
+      startupGraceElapsed = true
+      reapStaleTransports()
+      runStartupRetentionOnce()
+    }, startupReapDelayMs) as unknown as {
       unref?: () => void
     }
     startupReapTimer.unref?.()
@@ -370,17 +388,13 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
 
     opts.publishShutdown(shutdown)
 
-    let startupRetentionRan = false
     async function run(): Promise<void> {
       // daemon-run owns bind-error reporting, scope disposal and exit. Do not
       // reject its top-level run() while that handler is still disposing.
       const binding = await t.socket.binding.catch(() => "failed" as const)
       if (binding !== "listening" || t.scope.signal.aborted) return
-      if (!startupRetentionRan) {
-        startupRetentionRan = true
-        cleanupOldData(t.daemonCtx, { liveWindowMs: retentionConfig.liveWindowMs })
-        runRetention(startupRetentionConfig)
-      }
+      socketListening = true
+      runStartupRetentionOnce()
       return new Promise((resolve) => {
         if (t.scope.signal.aborted) {
           resolve()
