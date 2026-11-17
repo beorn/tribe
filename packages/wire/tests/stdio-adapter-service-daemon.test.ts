@@ -4,6 +4,7 @@
  *           silently degrades to an uncertified name on the daemon.
  * @level    l1
  * @consumer @i/6-dev/30968 (@cto delta GO: repair the existing stdio adapter's service registration)
+ * @testonly none
  *
  * Real daemon + real stdio adapters: a service-token adapter must register as a certified service principal
  * (principal_class service, keyed under its own pid, pull delivery), consume its own inbox, settle its own

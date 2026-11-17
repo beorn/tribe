@@ -4,6 +4,7 @@
  *           lifetime, reconnect latch, and ball ownership attach to an identity nobody certified.
  * @level    l1
  * @consumer @i/6-dev/30968 (@cto delta GO: repair the existing stdio adapter's service registration)
+ * @testonly none
  *
  * Fake-daemon wire contract for the adapter's service registration: the register carries principalClass
  * service, the exact token actor, this process as pid and launchParentPid, and pull delivery; hostile ACKs

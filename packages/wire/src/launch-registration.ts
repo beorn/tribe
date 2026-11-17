@@ -480,8 +480,9 @@ export function certifiedReregistrationKey(input: {
     input.currentKey === input.claimedKey &&
     input.tokenInstanceKey !== null &&
     input.nextKey === input.tokenInstanceKey
-  )
+  ) {
     return input.nextKey
+  }
   return null
 }
 
