@@ -1986,11 +1986,11 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
      * @consumer wire-rename-refuse: @cto 71cf50a5 conditions 1 and 2.
      */
     it.each([
-      { method: "tribe.join", params: { name: "dev/luna5" } },
-      { method: "tribe.rename", params: { new_name: "dev/luna5" } },
+      { method: "tribe.join", params: { name: "dev/other" }, claimed: "dev/other" },
+      { method: "tribe.rename", params: { new_name: "@dev/other" }, claimed: "@dev/other" },
     ])(
       "refuses $method to a name the token does not prove, naming both names and the retry, and changes nothing",
-      async ({ method, params }) => {
+      async ({ method, params, claimed }) => {
         const harness = createDispatcherHarness({ identityVerifier: lunaVerifier() })
         cleanup = harness.dispose
         await registerLuna(harness, "conn-luna", 7101)
@@ -2017,14 +2017,14 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
 
         const refusal = parseError(await call(harness, "conn-luna", method, params))
         expect(refusal.code).toBe(-32003)
-        expect(refusal.message).toContain('requested "dev/luna5"')
+        expect(refusal.message).toContain(`requested "${claimed}"`)
         expect(refusal.message).toContain('verified "@dev/luna5"')
         expect(refusal.message).toContain("join as @dev/luna5 or omit the name")
         // @cto 5d2291ef item 4: the refusal names the two names this verified persona may hold.
         expect(refusal.message).toContain('allowed "@dev/luna5" or "@dev/luna5/prev"')
         expect(refusal.data).toMatchObject({
           kind: "identity-name-mismatch",
-          claimed: "dev/luna5",
+          claimed,
           actor: "@dev/luna5",
           allowed: ["@dev/luna5", "@dev/luna5/prev"],
         })
@@ -2036,6 +2036,71 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
             .sessions.map((s) => s.name)
             .sort(),
         ).toEqual(["@dev/luna5", "@dev/peer"])
+      },
+    )
+
+    /**
+     * @failure A verified seat that types its own name without the sigil (`dev/luna5`) is refused, or (before the
+     *          refusal) joined a second identity nobody addresses (30379); it must answer exactly as the sigiled call.
+     * @level l1
+     * @consumer tribe.join / tribe.rename typed by hand or by /up; @cto e820c238 (amends 71cf50a5 condition 2 for a
+     *           missing `@` only): canonical name in every effective parameter, the answer and the stored row.
+     */
+    it.each([
+      { method: "tribe.join", field: "name", bare: "dev/luna5" },
+      { method: "tribe.rename", field: "new_name", bare: "dev/luna5" },
+      { method: "tribe.rename", field: "new_name", bare: "dev/luna5/prev" },
+    ])(
+      "$method $bare answers and stores exactly what @$bare does: one identity, cursors and the open ball kept",
+      async ({ method, field, bare }) => {
+        const outcome = async (name: string) => {
+          const harness = createDispatcherHarness({ identityVerifier: lunaVerifier() })
+          cleanup = harness.dispose
+          await registerLuna(harness, "conn-luna", 7101)
+          harness.addPendingClient("conn-peer")
+          parseResult<RegisterResult>(
+            await harness.register("conn-peer", {
+              name: "@dev/peer",
+              pid: 7201,
+              project: "/tmp/p",
+              launchId: "sid-peer@1",
+              launchParentPid: 7200,
+              idToken: "token-peer",
+            }),
+          )
+          toolText(
+            await call(harness, "conn-peer", "tribe.send", { to: "@dev/luna5", message: "open ball", type: "request" }),
+          )
+          const answer = toolText<Record<string, unknown>>(await call(harness, "conn-luna", method, { [field]: name }))
+          // Session and ball ids are random per daemon; compare what the fleet sees (names, cursors, holders).
+          const raw = memberState(harness) as {
+            rows: Record<string, unknown>[]
+            balls: Record<string, unknown>[]
+            saved: unknown[]
+            messages: unknown
+          }
+          const state = {
+            ...raw,
+            rows: raw.rows
+              .map(({ id: _id, ...row }) => row)
+              .sort((a, b) => String(a.name).localeCompare(String(b.name))),
+            balls: raw.balls.map(({ request_id: _rid, ...ball }) => ball),
+          }
+          const names = parseResult<CliStatusResult>(await harness.cliStatus())
+            .sessions.map((s) => s.name)
+            .sort()
+          cleanup = null
+          await harness.dispose()
+          return { answer, state, names }
+        }
+
+        const canonical = await outcome(`@${bare}`)
+        const spelled = await outcome(bare)
+        expect(canonical.answer).not.toHaveProperty("error")
+        expect(spelled).toEqual(canonical)
+        if (field === "name") expect(spelled.answer).toMatchObject({ joined: true, name: `@${bare}` })
+        expect(spelled.names).toEqual([`@${bare}`, "@dev/peer"].sort())
+        expect(spelled.state.balls).toEqual([expect.objectContaining({ recipient: "@dev/luna5", sender: "@dev/peer" })])
       },
     )
 

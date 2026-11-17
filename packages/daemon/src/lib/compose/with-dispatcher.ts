@@ -3235,15 +3235,25 @@ export function withDispatcher<
               client &&
               (method === TRIBE_COORD_METHODS.join || method === TRIBE_COORD_METHODS.rename)
             ) {
-              const requestedName = method === TRIBE_COORD_METHODS.rename ? p.new_name : p.name
+              const nameField = method === TRIBE_COORD_METHODS.rename ? "new_name" : "name"
+              let requestedName = p[nameField]
               // wire-rename-refuse (@cto 71cf50a5 conditions 1-2, 5d2291ef): a session whose token verified at register
-              // answers only to the two names that persona may hold (namesHeldByVerifiedPersona). Exact compare:
-              // "dev/luna5" is not "@dev/luna5". Refused before the handler runs, so the row, cursors, balls and the
-              // name others address stay as they were. A nameless join lands on the saved exempt name if this launch
-              // has one (a successor that already claimed <base>), else the verified name.
+              // answers only to the two names that persona may hold (namesHeldByVerifiedPersona). Refused before the
+              // handler runs, so the row, cursors, balls and the name others address stay as they were. A nameless
+              // join lands on the saved exempt name if this launch has one (a successor that already claimed <base>),
+              // else the verified name. A bare spelling of one of those names ("dev/luna5" for "@dev/luna5") is that
+              // name, never a second identity: it is rewritten to the sigiled form before the check (30379).
               const verifiedName = client.verifiedName
               if (verifiedName !== undefined) {
                 const allowed = namesHeldByVerifiedPersona(verifiedName)
+                if (
+                  typeof requestedName === "string" &&
+                  !requestedName.startsWith("@") &&
+                  allowed.includes(`@${requestedName}`)
+                ) {
+                  requestedName = `@${requestedName}`
+                  toolParams = { ...toolParams, [nameField]: requestedName }
+                }
                 if (method === TRIBE_COORD_METHODS.join && requestedName === undefined) {
                   toolParams = { ...toolParams, name: savedExemptName(ctx.sessionId, allowed) ?? verifiedName }
                 } else if (typeof requestedName === "string" && !allowed.includes(requestedName)) {
