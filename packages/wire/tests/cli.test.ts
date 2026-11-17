@@ -595,6 +595,96 @@ export async function verifyIdentity(token) {
       rmSync(dir, { recursive: true, force: true })
     }
   }, 45_000)
+
+  // 34603: the CLI minted a message id for every send (34062), and the daemon refuses a client id on a recipient
+  // list, so 'tribe send @a,@b' and its JSON spelling failed before storage. Each recipient now gets its own row.
+  it("sends to two recipients in comma and JSON form, and each recipient receives its row", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-list-send-"))
+    const socketPath = join(dir, "tribe.sock")
+    const dbPath = join(dir, "tribe.db")
+    const verifierPath = join(dir, "verifier.ts")
+    writeFileSync(
+      verifierPath,
+      `export const IDENTITY_VERIFIER_INTERFACE = 1
+export const IDENTITY_VERIFIER_SUPPLIES_GEN = true
+export async function verifyIdentity(token) {
+  const claims = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"))
+  return { result: "verified", actor: claims.act.sub, kind: claims.act.kind, sid: claims.sid, gen: claims.gen }
+}
+`,
+    )
+    const env: NodeJS.ProcessEnv = { ...process.env }
+    for (const name of tribeAmbientEnvironmentNames()) delete env[name]
+    Object.assign(env, {
+      TRIBE_SOCKET: socketPath,
+      TRIBE_DB: dbPath,
+      TRIBE_NO_AUTOSTART: "1",
+      TRIBE_SUMMARIZER_MODEL: "off",
+      HAB_ID_TOKEN: launchToken("list-sender-launch", "list-sender", "service"),
+    })
+    const daemon = spawn(
+      BUN_BIN,
+      [
+        DAEMON,
+        "--socket",
+        socketPath,
+        "--db",
+        dbPath,
+        "--idle-quit-after",
+        "never",
+        "--no-lore",
+        "--identity-verifier",
+        verifierPath,
+      ],
+      { env, stdio: "pipe" },
+    )
+    const daemonExit = new Promise<void>((resolveExit) => daemon.once("close", () => resolveExit()))
+    let daemonError = ""
+    daemon.stderr!.on("data", (chunk) => {
+      daemonError += chunk.toString("utf8")
+    })
+    daemon.stdout!.resume()
+    try {
+      await waitForSocket(socketPath, 10_000).catch((error) => {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}\n${daemonError}`)
+      })
+      const receivers = await Promise.all(["receiver-a", "receiver-b"].map(() => connectToDaemon(socketPath)))
+      try {
+        for (const [index, name] of ["receiver-a", "receiver-b"].entries()) {
+          await receivers[index]!.call("register", {
+            name,
+            idToken: launchToken(`${name}-launch`, name),
+            launchId: `${name}-launch`,
+            launchParentPid: process.pid,
+            principalClass: "agent",
+            delivery: "pull",
+          })
+        }
+        const db = new Database(dbPath, { readonly: true })
+        try {
+          for (const [to, content] of [
+            ["receiver-a,receiver-b", "comma list hello"],
+            ['["receiver-a","receiver-b"]', "json list hello"],
+          ] as const) {
+            const sent = await runCliAsync(["send", to, content, "--summary", "list probe"], env, { timeoutMs: 30_000 })
+            expect(sent.code, sent.stderr).toBe(0)
+            expect(sent.stderr).not.toContain("recipient lists do not support message_id")
+            expect(
+              db.query("SELECT recipient FROM messages WHERE content = ? ORDER BY recipient").all(content),
+            ).toEqual([{ recipient: "receiver-a" }, { recipient: "receiver-b" }])
+          }
+        } finally {
+          db.close()
+        }
+      } finally {
+        for (const receiver of receivers) receiver.close()
+      }
+    } finally {
+      daemon.kill("SIGTERM")
+      await daemonExit
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 45_000)
 })
 
 /** A daemon whose bridge-lost paging is armed (25662): doctor reads it from cli_health. */

@@ -1020,7 +1020,10 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   // one, so a send whose daemon call times out can be read back by that id
   // (the daemon dedupes a retry carrying the same id) instead of leaving the
   // sender to guess whether the row was written.
-  const sendMessageId = input.messageId ?? randomUUID()
+  // 34603: a recipient list stores one row per recipient, each with its own id, so the daemon refuses a client id
+  // there; a list send carries none. `to` is in its comma spelling here (the JSON form is decoded at the argument).
+  const recipientList = input.to.includes(",")
+  const sendMessageId = input.messageId ?? (recipientList ? undefined : randomUUID())
   let rawSendResult: unknown
   try {
     rawSendResult = await callDaemon(
@@ -1031,6 +1034,15 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     )
   } catch (error) {
     if (!isDaemonCallTimeoutError(error)) throw error
+    if (sendMessageId === undefined) {
+      const seconds = `${Number((error.timeoutMs / 1000).toFixed(1))} s`
+      console.error(
+        `tribe.send: timed out after ${seconds}; a recipient-list send carries no client id, so whether its rows were written is unknown.`,
+      )
+      console.error(`Check each recipient before retrying: tribe fetch --with <recipient> (recipients: ${input.to})`)
+      if (input.json) await writeJsonStdout({ sent: false, to: input.to, error: "timed out; write state unknown" })
+      process.exit(1)
+    }
     await reportSendTimeout(input, sendMessageId, error.timeoutMs)
     return
   }
