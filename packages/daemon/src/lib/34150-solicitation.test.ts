@@ -99,6 +99,10 @@ describe("34150 solicitation/claim", () => {
     }
   }
 
+  function seat(i: number): TribeContext {
+    return seats[i]!
+  }
+
   function sendSolicitation(expiresInMs = 3_600_000): string {
     const opened = parseToolJson(
       handleToolCall(
@@ -150,15 +154,15 @@ describe("34150 solicitation/claim", () => {
    */
   it("first claim converts to exactly one directed owed ball; second claim refused", () => {
     const id = sendSolicitation()
-    const claimed = parseToolJson(handleToolCall(seats[3], "tribe.pending", { claim: id }, opts()))
+    const claimed = parseToolJson(handleToolCall(seat(3), "tribe.pending", { claim: id }, opts()))
     expect(claimed.claimed).toBe(true)
-    expect(owedIds(seats[3])).toContain(id)
+    expect(owedIds(seat(3))).toContain(id)
     for (const [i, seat] of seats.entries()) if (i !== 3) expect(owedIds(seat)).not.toContain(id)
 
-    const second = parseToolJson(handleToolCall(seats[4], "tribe.pending", { claim: id }, opts()))
+    const second = parseToolJson(handleToolCall(seat(4), "tribe.pending", { claim: id }, opts()))
     expect(second.claimed).toBe(false)
     expect(second.claimed_by).toBe(RECIPIENTS[3])
-    expect(owedIds(seats[4])).not.toContain(id)
+    expect(owedIds(seat(4))).not.toContain(id)
   })
 
   /**
@@ -169,10 +173,10 @@ describe("34150 solicitation/claim", () => {
    */
   it("duplicate claim by the same claimant returns the previous result", () => {
     const id = sendSolicitation()
-    parseToolJson(handleToolCall(seats[0], "tribe.pending", { claim: id }, opts()))
-    const again = parseToolJson(handleToolCall(seats[0], "tribe.pending", { claim: id }, opts()))
+    parseToolJson(handleToolCall(seat(0), "tribe.pending", { claim: id }, opts()))
+    const again = parseToolJson(handleToolCall(seat(0), "tribe.pending", { claim: id }, opts()))
     expect(again.claimed).toBe(true)
-    expect(owedIds(seats[0]).filter((row) => row === id)).toHaveLength(1)
+    expect(owedIds(seat(0)).filter((row) => row === id)).toHaveLength(1)
   })
 
   /**
@@ -185,16 +189,16 @@ describe("34150 solicitation/claim", () => {
     const id = sendSolicitation()
     const declined = parseToolJson(
       handleToolCall(
-        seats[1],
+        seat(1),
         "tribe.send",
         { to: "@chief", message: "not mine", summary: "not mine", type: "status", ref: id },
         opts(),
       ),
     )
     expect(declined.sent).toBe(true)
-    const claimed = parseToolJson(handleToolCall(seats[2], "tribe.pending", { claim: id }, opts()))
+    const claimed = parseToolJson(handleToolCall(seat(2), "tribe.pending", { claim: id }, opts()))
     expect(claimed.claimed).toBe(true)
-    expect(owedIds(seats[2])).toContain(id)
+    expect(owedIds(seat(2))).toContain(id)
   })
 
   /**
@@ -205,17 +209,17 @@ describe("34150 solicitation/claim", () => {
    */
   it("claimant settles through the ordinary response rail", () => {
     const id = sendSolicitation()
-    parseToolJson(handleToolCall(seats[5], "tribe.pending", { claim: id }, opts()))
+    parseToolJson(handleToolCall(seat(5), "tribe.pending", { claim: id }, opts()))
     const settled = parseToolJson(
       handleToolCall(
-        seats[5],
+        seat(5),
         "tribe.send",
         { to: "@chief", message: "mine — files written in my scratch", summary: "mine", type: "response", reply: id },
         opts(),
       ),
     )
     expect(settled.sent).toBe(true)
-    expect(owedIds(seats[5])).not.toContain(id)
+    expect(owedIds(seat(5))).not.toContain(id)
   })
 
   /**
@@ -226,17 +230,17 @@ describe("34150 solicitation/claim", () => {
    */
   it("claimant drop returns it open; sender reject excludes the rejected claimant", () => {
     const id = sendSolicitation()
-    parseToolJson(handleToolCall(seats[0], "tribe.pending", { claim: id }, opts()))
-    const dropped = parseToolJson(handleToolCall(seats[0], "tribe.pending", { unclaim: id }, opts()))
+    parseToolJson(handleToolCall(seat(0), "tribe.pending", { claim: id }, opts()))
+    const dropped = parseToolJson(handleToolCall(seat(0), "tribe.pending", { unclaim: id }, opts()))
     expect(dropped).toMatchObject({ unclaimed: true, returned_to: "open" })
-    expect(owedIds(seats[0])).not.toContain(id)
+    expect(owedIds(seat(0))).not.toContain(id)
 
-    parseToolJson(handleToolCall(seats[1], "tribe.pending", { claim: id }, opts()))
+    parseToolJson(handleToolCall(seat(1), "tribe.pending", { claim: id }, opts()))
     const rejected = parseToolJson(handleToolCall(sender, "tribe.pending", { unclaim: id }, opts()))
     expect(rejected).toMatchObject({ unclaimed: true, returned_to: "open" })
-    const reclaim = parseToolJson(handleToolCall(seats[1], "tribe.pending", { claim: id }, opts()))
+    const reclaim = parseToolJson(handleToolCall(seat(1), "tribe.pending", { claim: id }, opts()))
     expect(reclaim.claimed).toBe(false)
-    const other = parseToolJson(handleToolCall(seats[2], "tribe.pending", { claim: id }, opts()))
+    const other = parseToolJson(handleToolCall(seat(2), "tribe.pending", { claim: id }, opts()))
     expect(other.claimed).toBe(true)
   })
 
@@ -248,8 +252,8 @@ describe("34150 solicitation/claim", () => {
    */
   it("unclaim after the deadline goes straight to one sender obligation", () => {
     const id = sendSolicitation(1)
-    parseToolJson(handleToolCall(seats[6], "tribe.pending", { claim: id }, opts()))
-    const released = parseToolJson(handleToolCall(seats[6], "tribe.pending", { unclaim: id }, opts()))
+    parseToolJson(handleToolCall(seat(6), "tribe.pending", { claim: id }, opts()))
+    const released = parseToolJson(handleToolCall(seat(6), "tribe.pending", { unclaim: id }, opts()))
     expect(released).toMatchObject({ unclaimed: true, returned_to: "sender" })
     expect(owedIds(sender)).toContain(id)
     for (const seat of seats) expect(owedIds(seat)).not.toContain(id)
@@ -269,7 +273,7 @@ describe("34150 solicitation/claim", () => {
       count: number
     }
     expect(rows.count).toBe(0)
-    const claim = parseToolJson(handleToolCall(seats[0], "tribe.pending", { claim: id }, opts()))
+    const claim = parseToolJson(handleToolCall(seat(0), "tribe.pending", { claim: id }, opts()))
     expect(claim.claimed).toBe(false)
   })
 
