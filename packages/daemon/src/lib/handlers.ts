@@ -56,6 +56,7 @@ import {
   serializeIncidentData,
   parseIncidentCurrent,
   IncidentCurrentConflict,
+  settleExpiredSolicitations,
 } from "./messaging.ts"
 import { ACTIONABLE_TYPES_SET, AUTO_TRACK_TYPES_SET } from "./database.ts"
 import {
@@ -912,6 +913,21 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       error: 'tribe.send: invalid request - "true" is reserved for generated tracking, pass boolean true',
     })
   }
+  // #34150: solicitation is a tracked broadcast nobody owes until claimed.
+  const solicitationArg = a.solicitation
+  if (solicitationArg !== undefined && typeof solicitationArg !== "boolean") {
+    return jsonResult({ error: "tribe.send: invalid solicitation - must be true or omitted" })
+  }
+  if (solicitationArg === true) {
+    if (!Array.isArray(recipients) && recipients !== "*") {
+      return jsonResult({
+        error: "tribe.send: solicitation requires a broadcast (*) or recipient list - nobody can owe an unknown-owner question addressed to one seat",
+      })
+    }
+    if (replyArg !== undefined) {
+      return jsonResult({ error: "tribe.send: solicitation cannot carry reply - it opens, it does not settle" })
+    }
+  }
   const requestFlag = requestArg === true
   const requestId = typeof requestArg === "string" ? requestArg.trim() : null
   const replyId = typeof replyArg === "string" ? replyArg : null
@@ -1015,6 +1031,8 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     })
   }
   const sender = ctx.getName()
+  // #34150: write-path expiry conversion for unclaimed solicitations.
+  settleExpiredSolicitations(ctx, Date.now())
   // An authenticated broadcast uses the same owner snapshot and transaction as explicit tracking.
   // Unattributed pending callers remain ambient and must not advertise a nonexistent request id.
   const senderIdentity = ctx.stmts.selectSessionAuthority.get({ $id: ctx.sessionId }) as {
@@ -1025,7 +1043,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     AUTO_TRACK_TYPES_SET.has(msgType) &&
     senderIdentity !== null &&
     sessionAuthority(senderIdentity) === "verified"
-  const trackWithMessageId = requestFlag || (requestId === null && trackBroadcast)
+  const trackWithMessageId = requestFlag || solicitationArg === true || (requestId === null && trackBroadcast)
   const hasImplicitOwner = Array.isArray(recipients)
     ? recipients.some((recipient) => recipient !== sender)
     : recipients !== "*" && recipients !== sender
@@ -1113,6 +1131,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       requestId,
       replyId,
       fanout: fanoutArg,
+      solicitation: solicitationArg === true,
       expiresInMs,
       summary,
       summaryDerived,
@@ -1183,6 +1202,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
         owner: resolution.state === "bounced" ? resolution.to : undefined,
         reply: replyId ?? undefined,
         fanout: fanoutArg,
+        solicitation: solicitationArg === true ? true : undefined,
         expiresInMs,
         owners: broadcastOwners,
         incident,
@@ -1357,6 +1377,7 @@ function handleMultiSend(input: {
   requestId: string | null
   replyId: string | null
   fanout: "first" | "all" | undefined
+  solicitation?: boolean
   expiresInMs: number | undefined
   summary: string
   summaryDerived: boolean
@@ -1370,7 +1391,7 @@ function handleMultiSend(input: {
     AUTO_TRACK_TYPES_SET.has(input.msgType) && input.recipients.some((recipient) => recipient !== input.sender)
   const sharedRequestId = input.requestFlag
     ? randomUUID()
-    : (input.requestId ?? (implicitlyTracked ? randomUUID() : null))
+    : (input.requestId ?? (implicitlyTracked || input.solicitation ? randomUUID() : null))
   const explicitlyTracked = input.requestFlag || input.requestId !== null
   const resolutions = resolveDirectRecipients(input.recipients, (recipient) =>
     input.resolveRecipient(
@@ -1413,6 +1434,7 @@ function handleMultiSend(input: {
         owner: resolution.state === "bounced" ? resolution.to : undefined,
         reply: input.replyId ?? undefined,
         fanout: input.fanout,
+        solicitation: input.solicitation ? true : undefined,
         expiresInMs: input.expiresInMs,
       },
     )
@@ -2131,7 +2153,8 @@ function pendingOutcomeBall(
 
 function pendingBallsForOwner(ctx: TribeContext, owner: string, now: number): PendingBall[] {
   const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as PendingBallRow[]
-  return sortPendingBalls(rows.map((row) => pendingBall(row, now)))
+  // #34150: solicitation rows are attention, never an owed ball.
+  return sortPendingBalls(rows.filter((row) => row.request_kind !== "solicitation").map((row) => pendingBall(row, now)))
 }
 
 function untakenPendingRequestIds(ctx: TribeContext, owner: string): ReadonlySet<string> {
@@ -2143,7 +2166,9 @@ function untakenPendingRequestIds(ctx: TribeContext, owner: string): ReadonlySet
 
 function pendingBallsForOwnerWithContent(ctx: TribeContext, owner: string, now: number): PendingBallWithContent[] {
   const rows = ctx.stmts.selectPendingForRecipientWithContent.all({ $recipient: owner }) as PendingBallRow[]
-  return sortPendingBalls(rows.map((row) => pendingBallWithContent(row, now)))
+  return sortPendingBalls(
+    rows.filter((row) => row.request_kind !== "solicitation").map((row) => pendingBallWithContent(row, now)),
+  )
 }
 
 /**
@@ -2923,7 +2948,127 @@ function pendingExplicitOwner(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined
 }
 
+type SolicitationMeta = {
+  request_id: string
+  sender: string
+  message_id: string
+  owners: string
+  declined: string
+  claimed_by: string | null
+  epoch: number
+}
+
+/** #34150: first atomic claim converts a solicitation to one directed ball. */
+function claimSolicitation(ctx: TribeContext, caller: string, requestId: string): Record<string, unknown> {
+  return ctx.db.transaction(() => {
+    const meta = ctx.stmts.selectSolicitationMeta.get({ $request_id: requestId }) as SolicitationMeta | undefined
+    if (!meta) return { claimed: false, request_id: requestId, reason: "no such solicitation" }
+    if (meta.claimed_by !== null) {
+      return meta.claimed_by === caller
+        ? { claimed: true, request_id: requestId, claimed_by: caller, already: true }
+        : { claimed: false, request_id: requestId, claimed_by: meta.claimed_by }
+    }
+    const rows = ctx.stmts.selectSolicitationRows.all({ $request_id: requestId }) as Array<{
+      recipient: string
+      expires_at: number | null
+    }>
+    const mine = rows.find((row) => row.recipient === caller)
+    if (!mine) return { claimed: false, request_id: requestId, reason: "not a recipient of this solicitation" }
+    const owners = rows.map((row) => row.recipient)
+    ctx.stmts.deleteSolicitationRows.run({ $request_id: requestId })
+    ctx.stmts.openPendingRequest.run({
+      $request_id: requestId,
+      $recipient: caller,
+      $sender: meta.sender,
+      $opened_at: Date.now(),
+      $expires_at: mine.expires_at,
+      $message_id: meta.message_id,
+      $fanout: "first",
+    })
+    ctx.stmts.updateSolicitationMeta.run({
+      $request_id: requestId,
+      $declined: meta.declined,
+      $claimed_by: caller,
+      $epoch: meta.epoch + 1,
+    })
+    // Owners snapshot for a possible return-to-open.
+    ctx.db
+      .prepare("UPDATE solicitation_meta SET owners = ? WHERE request_id = ?")
+      .run(JSON.stringify(owners), requestId)
+    return { claimed: true, request_id: requestId, claimed_by: caller }
+  })()
+}
+
+/** #34150: claimant drops the claim, or the sender rejects it — while active. */
+function unclaimSolicitation(ctx: TribeContext, caller: string, requestId: string): Record<string, unknown> {
+  return ctx.db.transaction(() => {
+    const meta = ctx.stmts.selectSolicitationMeta.get({ $request_id: requestId }) as SolicitationMeta | undefined
+    if (!meta) return { unclaimed: false, request_id: requestId, reason: "no such solicitation" }
+    if (meta.claimed_by === null) return { unclaimed: false, request_id: requestId, reason: "not claimed" }
+    const claimant = meta.claimed_by
+    const rejected = caller === meta.sender && caller !== claimant
+    if (caller !== claimant && !rejected) {
+      return { unclaimed: false, request_id: requestId, reason: "only the claimant or the sender may release a claim" }
+    }
+    const ball = ctx.db
+      .prepare(
+        "SELECT expires_at FROM pending_request WHERE request_id = ? AND recipient = ? AND request_kind = 'request'",
+      )
+      .get(requestId, claimant) as { expires_at: number | null } | null
+    if (!ball) return { unclaimed: false, request_id: requestId, reason: "claim is no longer active" }
+    ctx.stmts.deleteClaimedBallRow.run({ $request_id: requestId, $recipient: claimant })
+    const declined = JSON.parse(meta.declined) as string[]
+    if (rejected && !declined.includes(claimant)) declined.push(claimant)
+    const now = Date.now()
+    if (ball.expires_at !== null && ball.expires_at <= now) {
+      // Return after the deadline: straight to one sender obligation.
+      ctx.stmts.deleteSolicitationMeta.run({ $request_id: requestId })
+      ctx.stmts.openPendingRequest.run({
+        $request_id: requestId,
+        $recipient: meta.sender,
+        $sender: meta.sender,
+        $opened_at: now,
+        $expires_at: null,
+        $message_id: meta.message_id,
+        $fanout: "first",
+      })
+      return { unclaimed: true, request_id: requestId, returned_to: "sender" }
+    }
+    const owners = JSON.parse(meta.owners) as string[]
+    for (const owner of owners) {
+      if (declined.includes(owner)) continue
+      ctx.stmts.openSolicitationRequest.run({
+        $request_id: requestId,
+        $recipient: owner,
+        $sender: meta.sender,
+        $opened_at: now,
+        $expires_at: ball.expires_at,
+        $message_id: meta.message_id,
+      })
+    }
+    ctx.stmts.updateSolicitationMeta.run({
+      $request_id: requestId,
+      $declined: JSON.stringify(declined),
+      $claimed_by: null,
+      $epoch: meta.epoch + 1,
+    })
+    return { unclaimed: true, request_id: requestId, returned_to: "open" }
+  })()
+}
+
 function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
+  // #34150: solicitation claim / release, before every other pending branch.
+  if (typeof a.claim === "string" || typeof a.unclaim === "string") {
+    if (a.claim !== undefined && a.unclaim !== undefined) {
+      return jsonResult({ error: "tribe.pending: claim and unclaim are mutually exclusive" })
+    }
+    const caller = ctx.getName()
+    return jsonResult(
+      typeof a.claim === "string"
+        ? claimSolicitation(ctx, caller, a.claim)
+        : unclaimSolicitation(ctx, caller, a.unclaim as string),
+    )
+  }
   if (
     a.close_evidence !== undefined &&
     (typeof a.close_evidence !== "string" ||

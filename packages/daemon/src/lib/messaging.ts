@@ -155,6 +155,13 @@ export type BallTracker = {
    * Ignored if `request` is not set.
    */
   fanout?: "first" | "all"
+  /**
+   * #34150: this tracked broadcast is a solicitation — recipients get
+   * actionable attention but owe nothing until one of them claims it
+   * through tribe.pending. Only meaningful with `request` on a broadcast
+   * or multi-recipient send.
+   */
+  solicitation?: boolean
   /** Snapshot owners for one persisted broadcast request. Ownership rows are
    * committed with the broadcast before its publish callback can observe it. */
   owners?: readonly string[]
@@ -679,6 +686,73 @@ function settleDirectReply(
  * pass `broadcast`; journal-only events should pass `event` (and route via
  * `logEvent` which sets the type prefix).
  */
+type SolicitationMetaRow = {
+  request_id: string
+  sender: string
+  message_id: string
+  owners: string
+  declined: string
+  claimed_by: string | null
+  epoch: number
+}
+
+/**
+ * #34150: an unclaimed solicitation past its deadline becomes one ordinary
+ * owed ball for its SENDER, and every recipient row is removed so no
+ * non-owner's attention or Stop hook can block on it. Runs on write paths
+ * only (send), never on a pending read. Returns converted request ids.
+ */
+export function settleExpiredSolicitations(ctx: TribeContext, now: number): string[] {
+  const expired = ctx.stmts.selectExpiredSolicitations.all({ $now: now }) as Array<{
+    request_id: string
+    sender: string
+    message_id: string
+    expires_at: number
+  }>
+  const converted: string[] = []
+  for (const row of expired) {
+    const meta = ctx.stmts.selectSolicitationMeta.get({ $request_id: row.request_id }) as
+      | SolicitationMetaRow
+      | undefined
+    if (meta?.claimed_by) continue
+    ctx.stmts.deleteSolicitationRows.run({ $request_id: row.request_id })
+    ctx.stmts.deleteSolicitationMeta.run({ $request_id: row.request_id })
+    ctx.stmts.openPendingRequest.run({
+      $request_id: row.request_id,
+      $recipient: row.sender,
+      $sender: row.sender,
+      $opened_at: now,
+      $expires_at: null,
+      $message_id: row.message_id,
+      $fanout: "first",
+    })
+    converted.push(row.request_id)
+  }
+  return converted
+}
+
+/** #34150: record a recipient's "not mine" (status + ref) as a decline. */
+export function recordSolicitationDecline(ctx: TribeContext, requestId: string, recipient: string): boolean {
+  const meta = ctx.stmts.selectSolicitationMeta.get({ $request_id: requestId }) as SolicitationMetaRow | undefined
+  if (!meta || meta.claimed_by !== null || recipient === meta.sender) return false
+  const row = ctx.db
+    .prepare("SELECT recipient FROM pending_request WHERE request_id = ? AND recipient = ? AND request_kind = 'solicitation'")
+    .get(requestId, recipient) as { recipient: string } | null
+  if (!row) return false
+  const declined = JSON.parse(meta.declined) as string[]
+  if (!declined.includes(recipient)) declined.push(recipient)
+  ctx.stmts.updateSolicitationMeta.run({
+    $request_id: requestId,
+    $declined: JSON.stringify(declined),
+    $claimed_by: meta.claimed_by,
+    $epoch: meta.epoch,
+  })
+  ctx.db
+    .prepare("DELETE FROM pending_request WHERE request_id = ? AND recipient = ? AND request_kind = 'solicitation'")
+    .run(requestId, recipient)
+  return true
+}
+
 export function sendMessage(
   ctx: TribeContext,
   recipient: string,
@@ -930,6 +1004,11 @@ export function sendMessage(
         ? null
         : (ctx.stmts.selectRefBoundOpenRequest.get({ $rowid: rowid }) as { requester: string | null } | null)
     const refBoundOpenRequest = refBoundOpenRow?.requester == null ? null : { requester: refBoundOpenRow.requester }
+    // #34150: a status + ref from a solicitation recipient is their "not
+    // mine" — recorded as a decline, never a settlement or a claim.
+    if (type === "status" && correlationRef) {
+      recordSolicitationDecline(ctx, correlationRef, sender)
+    }
     const redue = ballTracker.redue
     if (redue !== undefined) {
       const moved = ctx.stmts.updatePendingDue.run({
@@ -946,7 +1025,23 @@ export function sendMessage(
     // snapshots remain handleSend's responsibility; direct rows are complete
     // before this transaction returns.
     if (resolvedKind === "direct") {
-      if (requestId) {
+      if (requestId && ballTracker.solicitation === true && incidentRequestId === null) {
+        ctx.stmts.insertSolicitationMeta.run({
+          $request_id: requestId,
+          $sender: sender,
+          $message_id: id,
+          $owners: "[]",
+        })
+        const opened = ctx.stmts.openSolicitationRequest.run({
+          $request_id: requestId,
+          $recipient: ballTracker.owner ?? recipient,
+          $sender: sender,
+          $opened_at: ts,
+          $expires_at: expiresInMs === undefined ? null : ts + expiresInMs,
+          $message_id: id,
+        })
+        if (opened.changes > 0) openedOwners.push(ballTracker.owner ?? recipient)
+      } else if (requestId) {
         const openRequest = incidentRequestId === null ? ctx.stmts.openPendingRequest : ctx.stmts.openIncidentRequest
         const opened = openRequest.run({
           $request_id: requestId,
@@ -989,7 +1084,26 @@ export function sendMessage(
         tracker = settleDirectReply(ctx, canonicalReplyId, pendingReply, sender, ts)
       }
     }
-    if (resolvedKind === "broadcast" && requestId) {
+    if (resolvedKind === "broadcast" && requestId && ballTracker.solicitation === true) {
+      ctx.stmts.insertSolicitationMeta.run({
+        $request_id: requestId,
+        $sender: sender,
+        $message_id: id,
+        $owners: "[]",
+      })
+      for (const owner of ballTracker.owners ?? []) {
+        const opened = ctx.stmts.openSolicitationRequest.run({
+          $request_id: requestId,
+          $recipient: owner,
+          $sender: sender,
+          $opened_at: ts,
+          $expires_at: expiresInMs === undefined ? null : ts + expiresInMs,
+          $message_id: id,
+        })
+        if (opened.changes > 0) openedOwners.push(owner)
+      }
+    }
+    if (resolvedKind === "broadcast" && requestId && ballTracker.solicitation !== true) {
       for (const owner of ballTracker.owners ?? []) {
         const opened = ctx.stmts.openPendingRequest.run({
           $request_id: requestId,

@@ -170,8 +170,21 @@ export function openDatabase(path: string): Database {
 		expires_at INTEGER,
 		message_id TEXT NOT NULL,
 		fanout     TEXT NOT NULL DEFAULT 'first',
-		request_kind TEXT NOT NULL DEFAULT 'request' CHECK (request_kind IN ('request', 'incident')),
+		request_kind TEXT NOT NULL DEFAULT 'request' CHECK (request_kind IN ('request', 'incident', 'solicitation')),
 		PRIMARY KEY (request_id, recipient)
+	)`)
+  // #34150 — solicitation lifecycle state that is not a ball: the owner
+  // snapshot a claim must restore on return-to-open, who declined (never
+  // re-woken), and who currently holds the claim. One row per solicitation,
+  // written in the same transaction as its pending_request rows.
+  db.run(`CREATE TABLE IF NOT EXISTS solicitation_meta (
+		request_id TEXT PRIMARY KEY,
+		sender     TEXT NOT NULL,
+		message_id TEXT NOT NULL,
+		owners     TEXT NOT NULL,
+		declined   TEXT NOT NULL DEFAULT '[]',
+		claimed_by TEXT,
+		epoch      INTEGER NOT NULL DEFAULT 1
 	)`)
 
   // `cursors` and `reads` tables removed by migration v9 — the event-bus
@@ -1680,6 +1693,53 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 46,
+    name: "solicitation-kind",
+    /**
+     * #34150: pending_request gains the 'solicitation' kind. SQLite cannot
+     * widen a CHECK in place, so the table is rebuilt with its rows copied;
+     * the surrounding schema block recreates the pending indexes on every
+     * open. solicitation_meta carries the non-ball lifecycle state.
+     */
+    up(db) {
+      const table = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_request'")
+        .get() as { name: string } | null
+      if (table) {
+        const sql = db
+          .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_request'")
+          .get() as { sql: string }
+        if (!sql.sql.includes("'solicitation'")) {
+          db.run(`CREATE TABLE pending_request_solicitation (
+						request_id TEXT NOT NULL,
+						recipient  TEXT NOT NULL,
+						sender     TEXT NOT NULL,
+						opened_at  INTEGER NOT NULL,
+						expires_at INTEGER,
+						message_id TEXT NOT NULL,
+						fanout     TEXT NOT NULL DEFAULT 'first',
+						request_kind TEXT NOT NULL DEFAULT 'request' CHECK (request_kind IN ('request', 'incident', 'solicitation')),
+						PRIMARY KEY (request_id, recipient)
+					)`)
+          db.run(
+            "INSERT INTO pending_request_solicitation (request_id, recipient, sender, opened_at, expires_at, message_id, fanout, request_kind) SELECT request_id, recipient, sender, opened_at, expires_at, message_id, fanout, request_kind FROM pending_request",
+          )
+          db.run("DROP TABLE pending_request")
+          db.run("ALTER TABLE pending_request_solicitation RENAME TO pending_request")
+        }
+      }
+      db.run(`CREATE TABLE IF NOT EXISTS solicitation_meta (
+				request_id TEXT PRIMARY KEY,
+				sender     TEXT NOT NULL,
+				message_id TEXT NOT NULL,
+				owners     TEXT NOT NULL,
+				declined   TEXT NOT NULL DEFAULT '[]',
+				claimed_by TEXT,
+				epoch      INTEGER NOT NULL DEFAULT 1
+			)`)
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -2259,6 +2319,44 @@ export function createStatements(db: Database) {
 		VALUES ($request_id, $recipient, $sender, $opened_at, $expires_at, $message_id, $fanout)
 		ON CONFLICT(request_id, recipient) DO NOTHING
 	`),
+
+    /** #34150: solicitation rows — actionable attention, never an owed ball. */
+    openSolicitationRequest: db.prepare(`
+			INSERT INTO pending_request (request_id, recipient, sender, opened_at, expires_at, message_id, fanout, request_kind)
+			VALUES ($request_id, $recipient, $sender, $opened_at, $expires_at, $message_id, 'first', 'solicitation')
+			ON CONFLICT(request_id, recipient) DO NOTHING
+		`),
+    insertSolicitationMeta: db.prepare(`
+			INSERT INTO solicitation_meta (request_id, sender, message_id, owners, declined, claimed_by, epoch)
+			VALUES ($request_id, $sender, $message_id, $owners, '[]', NULL, 1)
+			ON CONFLICT(request_id) DO NOTHING
+		`),
+    selectSolicitationMeta: db.prepare(`
+			SELECT request_id, sender, message_id, owners, declined, claimed_by, epoch
+			FROM solicitation_meta WHERE request_id = $request_id
+		`),
+    updateSolicitationMeta: db.prepare(`
+			UPDATE solicitation_meta SET declined = $declined, claimed_by = $claimed_by, epoch = $epoch
+			WHERE request_id = $request_id
+		`),
+    deleteSolicitationMeta: db.prepare(`DELETE FROM solicitation_meta WHERE request_id = $request_id`),
+    deleteSolicitationRows: db.prepare(
+      `DELETE FROM pending_request WHERE request_id = $request_id AND request_kind = 'solicitation'`,
+    ),
+    selectSolicitationRows: db.prepare(`
+			SELECT recipient, expires_at FROM pending_request
+			WHERE request_id = $request_id AND request_kind = 'solicitation'
+			ORDER BY recipient ASC
+		`),
+    deleteClaimedBallRow: db.prepare(
+      `DELETE FROM pending_request WHERE request_id = $request_id AND recipient = $recipient AND request_kind = 'request'`,
+    ),
+    selectExpiredSolicitations: db.prepare(`
+			SELECT p.request_id, p.sender, p.message_id, MIN(p.expires_at) AS expires_at
+			FROM pending_request p
+			WHERE p.request_kind = 'solicitation' AND p.expires_at IS NOT NULL AND p.expires_at <= $now
+			GROUP BY p.request_id, p.sender, p.message_id
+		`),
 
     /** Incident insert: the typed discriminator, not the request-id spelling,
      *  owns emitter-only settlement. Reassertion promotes a legacy row after
