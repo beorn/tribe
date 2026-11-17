@@ -240,7 +240,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           solicitation: {
             type: "boolean",
             description:
-              "#34150: broadcast or recipient-list only. A tracked solicitation: recipients get actionable attention but owe nothing until one claims it with tribe pending claim; a status + ref from a recipient is a recorded not-mine decline; unclaimed expiry lands on the sender.",
+              "Broadcast/list only: owed by none until claimed (pending claim); a recipient's status + ref declines; unclaimed expiry is yours.",
           },
           incident: {
             type: "object",
@@ -481,12 +481,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           expired: {
             type: "boolean",
             description:
-              "Requires owed: derive deadline-passed outcomes from live rows, journal facts, and replies. The unbounded form (expired without owed) is refused by name: its fold reads every settled fact on the live store and holds the shared daemon for about 13 s. Answered rows are omitted.",
+              "Requires owed: derive deadline-passed outcomes. The unbounded form (expired without owed) is refused by name. Answered rows are omitted.",
           },
           owed: {
             type: "boolean",
-            description:
-              "With expired: only rows a live pending request still backs (deadline passed, still open, needs the owner's decision). This is the bound that keeps the expired read off the full history fold.",
+            description: "With expired: only rows a live pending request still backs (deadline passed, still open).",
           },
           owner: { type: "string", description: "Owner seat name (default: the caller)." },
           emitter: {
@@ -512,12 +511,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           claim: {
             type: "string",
             description:
-              "#34150: claim a solicitation by request id. The first claim converts it to one ordinary directed ball owned by the claimant; a second claim is refused with claimed_by.",
+              "Claim a solicitation by request id; the first claim makes it your ball, later ones are refused.",
           },
           unclaim: {
             type: "string",
             description:
-              "#34150: release a claim by request id — the claimant drops it, or the sender rejects it — while the claim is active. After the deadline the solicitation goes straight to one sender obligation.",
+              "Drop an active claim by request id (claimant, or sender to reject); after the deadline it goes to the sender.",
           },
         },
       },
