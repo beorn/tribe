@@ -53,6 +53,8 @@ import {
   oneShotRegisterParams,
   resolveLaunchSeat,
 } from "../launch-seat.ts"
+import { randomUUID } from "node:crypto"
+import { isDaemonCallTimeoutError } from "../client.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { writeJsonStdout } from "./json-output.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
@@ -923,6 +925,50 @@ function parseDomains(values: string[] | undefined): string[] {
 // Command implementations
 // ---------------------------------------------------------------------------
 
+/**
+ * 34062: a `tribe.send` call that timed out on the client. The daemon sat in
+ * disk wait long enough that the first send often settled while the client
+ * saw only the deadline — so before any retry is suggested, read the row
+ * back by the client-minted message id and say which of the three states
+ * holds. Exit codes keep the send contract: 0 stored, 1 not confirmed stored.
+ */
+async function reportSendTimeout(input: SendPayloadInput, messageId: string, timeoutMs: number): Promise<void> {
+  const seconds = `${Number((timeoutMs / 1000).toFixed(1))} s`
+  let written: boolean | undefined
+  try {
+    const res = mcpJsonContent(await callDaemon("tribe.fetch", { ids: [messageId], receipt: false })) as {
+      events?: Array<{ id?: string }>
+      error?: string
+    }
+    if (typeof res.error !== "string" || res.error.length === 0) {
+      written = (res.events ?? []).some((event) => event.id === messageId)
+    }
+  } catch {
+    written = undefined
+  }
+  if (written === true) {
+    console.error(
+      `tribe.send: timed out after ${seconds}, but the row was written (message ${messageId}, read back by id) — do not resend.`,
+    )
+    if (input.json) await writeJsonStdout({ sent: true, id: messageId, to: input.to, timeout_recovered: true })
+    process.exit(0)
+  }
+  if (written === false) {
+    console.error(
+      `tribe.send: timed out after ${seconds} and the read-back by id (${messageId}) found no row — the send was not written.`,
+    )
+    console.error(`Retry safely with the same id (the daemon dedupes it): --message-id ${messageId}`)
+    if (input.json) await writeJsonStdout({ sent: false, id: messageId, error: "timed out; not written" })
+    process.exit(1)
+  }
+  console.error(
+    `tribe.send: timed out after ${seconds} and the read-back by id (${messageId}) also failed — whether the row was written is unknown.`,
+  )
+  console.error(`Check before retrying: tribe fetch --ids ${messageId}`)
+  if (input.json) await writeJsonStdout({ sent: false, id: messageId, error: "timed out; write state unknown" })
+  process.exit(1)
+}
+
 async function cmdSend(input: SendPayloadInput): Promise<void> {
   rejectUnstructuredMessageIntent(input)
   const oversized = oversizedMessageError(input.message)
@@ -970,7 +1016,25 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     input.ref = await warnUnresolvedRef(caller, input.ref, ownedPending, input.to)
   }
 
-  const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller, !input.anonymous)) as {
+  // 34062: mint the message id on the client when the caller did not pass
+  // one, so a send whose daemon call times out can be read back by that id
+  // (the daemon dedupes a retry carrying the same id) instead of leaving the
+  // sender to guess whether the row was written.
+  const sendMessageId = input.messageId ?? randomUUID()
+  let rawSendResult: unknown
+  try {
+    rawSendResult = await callDaemon(
+      "tribe.send",
+      buildSendPayload({ ...input, messageId: sendMessageId }),
+      caller,
+      !input.anonymous,
+    )
+  } catch (error) {
+    if (!isDaemonCallTimeoutError(error)) throw error
+    await reportSendTimeout(input, sendMessageId, error.timeoutMs)
+    return
+  }
+  const result = mcpJsonContent(rawSendResult) as {
     sent?: boolean
     id?: string
     request_id?: string

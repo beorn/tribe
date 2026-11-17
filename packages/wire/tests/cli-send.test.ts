@@ -288,6 +288,77 @@ describe("registerSendCommands", () => {
     }
   })
 
+  // 34062: a send whose daemon call times out (10 s) must say whether the row
+  // was written — read back by the client-minted message id — before any retry
+  // is suggested. The fake daemon below stores the send but never replies to
+  // it; tribe.fetch by id is how the CLI learns the row landed.
+  test("send that times out reads back by message id and reports the row was written", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-timeout-"))
+    const socketPath = join(tmp, "tribe.sock")
+    let sentMessageId: string | undefined
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as {
+            id: number
+            method: string
+            params?: { message_id?: string; ids?: string[] }
+          }
+          if (request.method === "tribe.send") {
+            // Stored, never answered: the client call times out at 10 s.
+            sentMessageId = request.params?.message_id
+            continue
+          }
+          const result =
+            request.method === "cli_inbox_status_by_launch_v1"
+              ? { session: "@dev/2", launch_id: "launch-dev2", launch_parent_pid: 123 }
+              : request.method === "register"
+                ? { name: "@dev/2", role: "member" }
+                : request.method === "tribe.fetch"
+                  ? { events: sentMessageId === undefined ? [] : [{ id: sentMessageId, from: "@dev/2" }] }
+                  : { error: `unexpected call ${request.method}` }
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+        }
+      })
+    })
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const run = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProcess) => {
+        const child = spawn(BUN_BIN, [CLI, "send", "@dev/3", "did", "this", "land", "--summary", "timeout probe"], {
+          env: { ...process.env, TRIBE_SOCKET: socketPath, ...launchEnvironment("launch-dev2") },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProcess({ code, stdout, stderr }))
+      })
+      expect(sentMessageId).toBeDefined()
+      expect(run.code).toBe(0)
+      expect(run.stderr).toContain("timed out")
+      expect(run.stderr).toContain("was written")
+      expect(run.stderr).toContain(sentMessageId ?? "")
+      expect(run.stderr).toContain("do not resend")
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
+    }
+  }, 60_000)
+
   test("send verb formats plain one-line error without duplicate prefix and reveals detail on --verbose (24994)", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-plain-error-"))
     const socketPath = join(tmp, "tribe.sock")
@@ -1728,26 +1799,35 @@ describe("registerSendCommands", () => {
 
       expect(await runSend("@sender/1", "first")).toEqual({ code: 0, stderr: "" })
       expect(await runSend("@sender/2", "second")).toEqual({ code: 0, stderr: "" })
-      expect(calls.filter((call) => call.method === "tribe.send")).toEqual([
-        {
-          method: "tribe.send",
-          params: {
-            to: "@reviewer",
-            message: "first",
-            type: "notify",
-            request: true,
+      // 34062: each send also carries a client-minted message_id (the timeout
+      // read-back key); the boolean tracking shape is otherwise unchanged.
+      const sendCalls = calls.filter((call) => call.method === "tribe.send")
+      expect(sendCalls.map(({ params }) => typeof params.message_id)).toEqual(["string", "string"])
+      expect(new Set(sendCalls.map(({ params }) => params.message_id)).size).toBe(2)
+      expect(sendCalls.map(({ method, params }) => ({ method, params: { ...params, message_id: undefined } }))).toEqual(
+        [
+          {
+            method: "tribe.send",
+            params: {
+              to: "@reviewer",
+              message: "first",
+              type: "notify",
+              request: true,
+              message_id: undefined,
+            },
           },
-        },
-        {
-          method: "tribe.send",
-          params: {
-            to: "@reviewer",
-            message: "second",
-            type: "notify",
-            request: true,
+          {
+            method: "tribe.send",
+            params: {
+              to: "@reviewer",
+              message: "second",
+              type: "notify",
+              request: true,
+              message_id: undefined,
+            },
           },
-        },
-      ])
+        ],
+      )
     } finally {
       server.close()
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
