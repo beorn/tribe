@@ -278,7 +278,7 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
 
   it("keeps routing and admission on the live transport: a pull seat between waits keeps its mail", () => {
     const resolveDelivery = parseDeliveryFallbackPolicy(
-      tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS,
+      tribeHabModule.wire.env.TRIBE_DELIVERY_FALLBACKS,
     )?.resolveDelivery
     const pullSeat = { delivery: "pull", connected: true, readableMailbox: true, ownerWaiting: false } as const
     addSeat({ ...pullSeat, name: "@ci", lastReadAgeMs: 2 * MINUTE }, 2)
@@ -324,7 +324,7 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
 
   it("32959: a live, registered @cpo/update keeps its mail; the hab fallback to @chief/update fires only once it is not live", () => {
     const resolveDelivery = parseDeliveryFallbackPolicy(
-      tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS,
+      tribeHabModule.wire.env.TRIBE_DELIVERY_FALLBACKS,
     )?.resolveDelivery
     const pullSeat = { delivery: "pull", connected: true, readableMailbox: true, ownerWaiting: false } as const
     addSeat({ ...pullSeat, name: "@cpo/update", lastReadAgeMs: MINUTE }, 2)
@@ -616,7 +616,7 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
       3,
     )
     const resolveDelivery = parseDeliveryFallbackPolicy(
-      tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS,
+      tribeHabModule.wire.env.TRIBE_DELIVERY_FALLBACKS,
     )?.resolveDelivery
     const sent = toolJson(
       handleToolCall(

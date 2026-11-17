@@ -329,7 +329,7 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
         { to: "@ci", message: "who holds admission", type: "request" },
         {
           ...optsWithLive([liveInfo("sess-chief", "@chief")]),
-          resolveDelivery: parseDeliveryFallbackPolicy(tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS)
+          resolveDelivery: parseDeliveryFallbackPolicy(tribeHabModule.wire.env.TRIBE_DELIVERY_FALLBACKS)
             ?.resolveDelivery,
         },
       ),

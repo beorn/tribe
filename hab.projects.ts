@@ -1,8 +1,6 @@
 import { DEFAULT_INBOX_WAIT_READINESS_MS } from "./packages/wire/src/lib/inbox-wait-options.ts"
 
 export default {
-  name: "tribe",
-  habitants: {
     wire: {
       owner: "@chief",
       // --idle-quit-after never: this daemon never stops itself. Set 2026-08-11
@@ -70,5 +68,4 @@ export default {
       },
       sourceDigest: "bun-closure" as const,
     },
-  },
 }

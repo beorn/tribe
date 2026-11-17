@@ -81,7 +81,7 @@ describe("generic direct-message delivery resolution", () => {
   })
 
   it("routes the intentionally unstaffed CI coordinator role to its declared holder", () => {
-    const raw = tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS
+    const raw = tribeHabModule.wire.env.TRIBE_DELIVERY_FALLBACKS
     const resolve = parseDeliveryFallbackPolicy(raw)?.resolveDelivery
     expect(resolve?.({ recipient: "@ci", answerableNames: new Set(["@chief"]) })).toMatchObject({
       status: "accepted",
@@ -96,7 +96,7 @@ describe("generic direct-message delivery resolution", () => {
     ["@cpo/update", "@chief/update"],
     ["@cpo/terminal", "@cpo/term"],
   ])("keeps mail on live renamed seat %s and bounces to %s only when it has no live transport", (old, successor) => {
-    const policy = parseDeliveryFallbackPolicy(tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS)
+    const policy = parseDeliveryFallbackPolicy(tribeHabModule.wire.env.TRIBE_DELIVERY_FALLBACKS)
     expect(policy?.resolveDelivery({ recipient: old, answerableNames: new Set([old, successor]) })).toEqual({
       status: "accepted",
       state: "online",
@@ -115,7 +115,7 @@ describe("generic direct-message delivery resolution", () => {
   // counts-permanent-history-as-degraded), so it belongs with the other
   // terminal identity below, not with @ci's live bounce.
   it("refuses the retired Yrd identity even when a stale transport is answer-capable", () => {
-    const raw = tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS
+    const raw = tribeHabModule.wire.env.TRIBE_DELIVERY_FALLBACKS
     const resolve = parseDeliveryFallbackPolicy(raw)?.resolveDelivery
     expect(resolve?.({ recipient: "@yrd", answerableNames: new Set(["@yrd", "@chief"]) })).toEqual({
       status: "refused",
@@ -132,7 +132,7 @@ describe("generic direct-message delivery resolution", () => {
   })
 
   it("refuses the retired Fleet identity even when a stale transport is answer-capable", () => {
-    const raw = tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS
+    const raw = tribeHabModule.wire.env.TRIBE_DELIVERY_FALLBACKS
     const resolve = parseDeliveryFallbackPolicy(raw)?.resolveDelivery
     expect(resolve?.({ recipient: "@fleet", answerableNames: new Set(["@fleet", "@chief"]) })).toEqual({
       status: "refused",
@@ -501,7 +501,7 @@ describe("generic direct-message delivery resolution", () => {
       logEvent(recentRecipient, "session.left", undefined, { name: "@fleet", reason: "peer-close" })
 
       const resolveDelivery = parseDeliveryFallbackPolicy(
-        tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS,
+        tribeHabModule.wire.env.TRIBE_DELIVERY_FALLBACKS,
       )?.resolveDelivery
 
       const refused = resultJson(
@@ -531,7 +531,7 @@ describe("generic direct-message delivery resolution", () => {
 
   it("refuses untracked Fleet mail before creating a direct-message row", () => {
     const resolveDelivery = parseDeliveryFallbackPolicy(
-      tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS,
+      tribeHabModule.wire.env.TRIBE_DELIVERY_FALLBACKS,
     )?.resolveDelivery
     const refused = resultJson(
       handleToolCall(
@@ -555,7 +555,7 @@ describe("generic direct-message delivery resolution", () => {
     const content = `mixed retired ${type} ${to.join(" then ")}`
     const request = `req-mixed-${type}-${to[0] === "@fleet" ? "retired-first" : "retired-last"}`
     const resolveDelivery = parseDeliveryFallbackPolicy(
-      tribeHabModule.habitants.wire.env.TRIBE_DELIVERY_FALLBACKS,
+      tribeHabModule.wire.env.TRIBE_DELIVERY_FALLBACKS,
     )?.resolveDelivery
     const refused = resultJson(
       handleToolCall(

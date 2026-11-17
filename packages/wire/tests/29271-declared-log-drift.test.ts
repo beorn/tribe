@@ -12,7 +12,7 @@ import { describe, expect, test } from "vitest"
 import wireProjects from "../../../hab.projects.ts"
 import { activityLogDir, activityLogFilename, isActivityLogFilename } from "../src/activity-log-contract.ts"
 
-const WIRE = wireProjects.habitants.wire
+const WIRE = wireProjects.wire
 
 describe("29271 declared log drift", () => {
   test("wire's declared log is the stream its own writer produces", () => {
