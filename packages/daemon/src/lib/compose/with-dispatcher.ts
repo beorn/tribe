@@ -524,6 +524,7 @@ export function withDispatcher<
       | { kind: "inbox-ack"; limit: unknown; peek: boolean }
       | { kind: "pending-read"; expired: boolean; owed: boolean; staleMs?: number }
       | { kind: "pending-close"; owner: string; close: string | string[]; closeEvidence?: string }
+      | { kind: "pending-claim"; claim?: string; unclaim?: string }
       | { kind: "pending-prune"; owner: string; staleMs: number }
       | { kind: "fetch-read"; args: FetchReadArgs }
 
@@ -910,6 +911,19 @@ export function withDispatcher<
               resolution.context,
               TRIBE_COORD_METHODS.pending,
               { owner: capability.owner, close: capability.close, close_evidence: capability.closeEvidence },
+              DAEMON_HANDLER_OPTS,
+              connId,
+            ),
+          }
+        case "pending-claim":
+          return {
+            result: await handleToolCall(
+              resolution.context,
+              TRIBE_COORD_METHODS.pending,
+              {
+                ...(capability.claim !== undefined ? { claim: capability.claim } : {}),
+                ...(capability.unclaim !== undefined ? { unclaim: capability.unclaim } : {}),
+              },
               DAEMON_HANDLER_OPTS,
               connId,
             ),
@@ -3717,6 +3731,35 @@ export function withDispatcher<
                 close,
                 ...(typeof p.close_evidence === "string" ? { closeEvidence: p.close_evidence } : {}),
               },
+              connId,
+            )
+            if (!("result" in outcome)) {
+              return makeError(id, outcome.errorCode, outcome.errorMessage, outcome.errorData)
+            }
+            return makeResponse(id, outcome.result)
+          }
+
+          /** #34150: authenticated one-shot solicitation claim/release. */
+          case "cli_session_pending_claim_v1": {
+            if (
+              ["session", "name", "launch_id", "launch_parent_pid", "pid", "owner", "all", "close", "prune"].some(
+                (key) => Object.prototype.hasOwnProperty.call(p, key),
+              )
+            ) {
+              return makeError(
+                id,
+                -32602,
+                "Pending claim derives caller identity from authority; identity overrides are forbidden",
+              )
+            }
+            const claim = typeof p.claim === "string" && p.claim.length > 0 ? p.claim : undefined
+            const unclaim = typeof p.unclaim === "string" && p.unclaim.length > 0 ? p.unclaim : undefined
+            if ((claim === undefined) === (unclaim === undefined)) {
+              return makeError(id, -32602, "Authenticated pending claim requires exactly one of claim or unclaim")
+            }
+            const outcome = await dispatchAuthenticatedSessionCapability(
+              { authority: p.authority, idToken: p.idToken },
+              { kind: "pending-claim", ...(claim !== undefined ? { claim } : { unclaim }) },
               connId,
             )
             if (!("result" in outcome)) {

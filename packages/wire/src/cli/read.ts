@@ -904,6 +904,8 @@ async function cmdPending(
   emitter?: string,
   evidence?: string,
   jsonToFile?: string,
+  claim?: string,
+  unclaim?: string,
 ): Promise<void> {
   if (emitter !== undefined) {
     const outcome = await tribeDaemonCalls(`tribe pending emitter ${JSON.stringify(emitter)}`).pendingForEmitter(
@@ -949,11 +951,17 @@ async function cmdPending(
   if (staleMs !== undefined) args.stale_ms = staleMs
   if (close) args.close = close
   if (evidence !== undefined) args.close_evidence = evidence
+  if (claim) args.claim = claim
+  if (unclaim) args.unclaim = unclaim
   const explicitRecoveryCommand = pendingReadRecoveryCommand(expired, owed, staleMs)
   let method = "tribe.pending"
   let rawResult: unknown
   try {
-    if (close) {
+    if (claim || unclaim) {
+      method = "cli_session_pending_claim_v1"
+      const idToken = readIdentityTokenFromEnvironment(process.env)
+      if (idToken !== null) args.idToken = idToken
+    } else if (close) {
       method = "cli_session_pending_close_v1"
       // No token is deliberate: the daemon records the refused capability
       // attempt and returns a typed -32004 without ever reaching pending-row
@@ -1029,6 +1037,22 @@ async function cmdPending(
   }
   if (json) {
     await writeJsonStdout(payload, 2)
+    return
+  }
+  if (claim || unclaim) {
+    const view = payload as typeof payload & {
+      claimed?: boolean
+      claimed_by?: string
+      unclaimed?: boolean
+      returned_to?: string
+      reason?: string
+    }
+    if (view.claimed) console.log(`Claimed ${claim}: you now own the directed ball.`)
+    else if (view.unclaimed) console.log(`Released ${unclaim}: returned to ${view.returned_to ?? "open"}.`)
+    else
+      console.log(
+        `Not ${claim ? "claimed" : "released"}: ${view.reason ?? `held by ${view.claimed_by ?? "another seat"}`}`,
+      )
     return
   }
   if (close) {
@@ -3054,6 +3078,8 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
   const pendingOwed = cliOption(PENDING_CLI, "owed")
   const pendingStale = cliOption(PENDING_CLI, "stale")
   const pendingClose = cliOption(PENDING_CLI, "close")
+  const pendingClaim = cliOption(PENDING_CLI, "claim")
+  const pendingUnclaim = cliOption(PENDING_CLI, "unclaim")
   const pendingEvidence = cliOption(PENDING_CLI, "evidence")
   program
     .command(PENDING_CLI.name)
@@ -3075,6 +3101,8 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     .option(pendingEmitter.flags, pendingEmitter.description)
     .option(pendingStale.flags, pendingStale.description)
     .option(pendingClose.flags, pendingClose.description)
+    .option(pendingClaim.flags, pendingClaim.description)
+    .option(pendingUnclaim.flags, pendingUnclaim.description)
     .option(pendingEvidence.flags, pendingEvidence.description)
     .option(JSON_TO_FILE_FLAG, JSON_TO_FILE_DESCRIPTION)
     .action(
@@ -3089,6 +3117,8 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
         close?: string
         evidence?: string
         jsonToFile?: string
+        claim?: string
+        unclaim?: string
       }) => {
         if (
           opts.evidence !== undefined &&
@@ -3158,6 +3188,8 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
           opts.emitter,
           opts.evidence,
           opts.jsonToFile,
+          opts.claim,
+          opts.unclaim,
         )
       },
     )

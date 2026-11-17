@@ -304,7 +304,7 @@ export type PendingSettlementRow = {
   fanout: "first" | "all"
   /** 29289 - the settled ball's kind. The identity-wake retire below runs only for an incident
    *  settlement, so an ordinary answered request pays nothing for it. */
-  request_kind: "request" | "incident"
+  request_kind: "request" | "incident" | "solicitation"
   summary: string | null
 }
 
@@ -592,7 +592,7 @@ type PendingReplyRow = {
   fanout: string
   expires_at: number | null
   sender: string
-  request_kind: "request" | "incident"
+  request_kind: "request" | "incident" | "solicitation"
 }
 
 function resolveReplyState(
@@ -736,7 +736,9 @@ export function recordSolicitationDecline(ctx: TribeContext, requestId: string, 
   const meta = ctx.stmts.selectSolicitationMeta.get({ $request_id: requestId }) as SolicitationMetaRow | undefined
   if (!meta || meta.claimed_by !== null || recipient === meta.sender) return false
   const row = ctx.db
-    .prepare("SELECT recipient FROM pending_request WHERE request_id = ? AND recipient = ? AND request_kind = 'solicitation'")
+    .prepare(
+      "SELECT recipient FROM pending_request WHERE request_id = ? AND recipient = ? AND request_kind = 'solicitation'",
+    )
     .get(requestId, recipient) as { recipient: string } | null
   if (!row) return false
   const declined = JSON.parse(meta.declined) as string[]

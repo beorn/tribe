@@ -172,6 +172,7 @@ type SendPayloadInput = {
   anonymous?: boolean
   fanout?: Fanout
   expiresInMs?: number
+  solicitation?: boolean
   /** Raw `--incident emitter:subject:condition` value. */
   incident?: string
   /** `--incident-cleared`: the condition no longer holds. */
@@ -194,6 +195,7 @@ type SendPayload = {
   reply?: string
   fanout?: Fanout
   expires_in_ms?: number
+  solicitation?: boolean
   incident?: IncidentIdentity & { active?: boolean }
 }
 
@@ -211,6 +213,7 @@ export function buildSendPayload(input: SendPayloadInput): SendPayload {
   if (input.reply) payload.reply = input.reply
   if (input.fanout) payload.fanout = input.fanout
   if (input.expiresInMs !== undefined) payload.expires_in_ms = input.expiresInMs
+  if (input.solicitation) payload.solicitation = true
   if (input.incident !== undefined) {
     // Parsed here rather than split inline so the CLI and the daemon share one
     // definition of a well-formed identity. A bad key fails at the CLI with the
@@ -1370,6 +1373,7 @@ export function registerSendCommands(program: Command): void {
   const sendRequest = cliOption(SEND_CLI, "request")
   const sendFanout = cliOption(SEND_CLI, "fanout")
   const sendExpiresInMs = cliOption(SEND_CLI, "expires-in-ms")
+  const sendSolicitation = cliOption(SEND_CLI, "solicitation")
   const sendIncident = cliOption(SEND_CLI, "incident")
   const sendIncidentCleared = cliOption(SEND_CLI, "incident-cleared")
   const sendVerbose = cliOption(SEND_CLI, "verbose")
@@ -1389,6 +1393,7 @@ export function registerSendCommands(program: Command): void {
     .option(sendRequest.flags, sendRequest.description, refuseSeatShapedId("--request"))
     .option(sendFanout.flags, sendFanout.description)
     .option(sendExpiresInMs.flags, sendExpiresInMs.description)
+    .option(sendSolicitation.flags, sendSolicitation.description)
     .option(sendIncident.flags, sendIncident.description)
     .option(sendIncidentCleared.flags, sendIncidentCleared.description)
     .option(sendVerbose.flags, sendVerbose.description)
@@ -1423,6 +1428,7 @@ export function registerSendCommands(program: Command): void {
           anonymous?: boolean
           fanout?: string
           expiresInMs?: string
+          solicitation?: boolean
           incident?: string
           incidentCleared?: boolean
           verbose?: boolean
@@ -1528,6 +1534,7 @@ export function registerSendCommands(program: Command): void {
           anonymous: opts.anonymous,
           fanout: opts.fanout as Fanout | undefined,
           expiresInMs,
+          solicitation: opts.solicitation,
           incident: opts.incident,
           incidentCleared: opts.incidentCleared,
           verbose: opts.verbose,

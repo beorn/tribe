@@ -1707,9 +1707,9 @@ const MIGRATIONS: readonly Migration[] = [
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_request'")
         .get() as { name: string } | null
       if (table) {
-        const sql = db
-          .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_request'")
-          .get() as { sql: string }
+        const sql = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_request'").get() as {
+          sql: string
+        }
         if (!sql.sql.includes("'solicitation'")) {
           db.run(`CREATE TABLE pending_request_solicitation (
 						request_id TEXT NOT NULL,

@@ -237,6 +237,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             description:
               "Reply deadline for a tracked send (default 20 minutes, max 30 days). On a status + ref receipt for a ball you own, re-sets its due from now, deadline passed or not; on an incident ball it is the quiet-until.",
           },
+          solicitation: {
+            type: "boolean",
+            description:
+              "#34150: broadcast or recipient-list only. A tracked solicitation: recipients get actionable attention but owe nothing until one claims it with tribe pending claim; a status + ref from a recipient is a recorded not-mine decline; unclaimed expiry lands on the sender.",
+          },
           incident: {
             type: "object",
             properties: {
@@ -426,6 +431,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           mapsTo: "expires_in_ms",
         },
         {
+          name: "solicitation",
+          flags: "--solicitation",
+          description:
+            "#34150: tracked broadcast nobody owes until claimed (recipient list or *); claim with tribe pending --claim",
+        },
+        {
           name: "incident",
           flags: "--incident <emitter:subject:condition>",
           description:
@@ -498,6 +509,16 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "string",
             description: "Verbatim attestation for one incident close; recorded with the actor, not verified.",
           },
+          claim: {
+            type: "string",
+            description:
+              "#34150: claim a solicitation by request id. The first claim converts it to one ordinary directed ball owned by the claimant; a second claim is refused with claimed_by.",
+          },
+          unclaim: {
+            type: "string",
+            description:
+              "#34150: release a claim by request id — the claimant drops it, or the sender rejects it — while the claim is active. After the deadline the solicitation goes straight to one sender obligation.",
+          },
         },
       },
       outputSchema: OBJ(
@@ -523,6 +544,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           count: { type: "number", description: "Requests in the selected view." },
           request_id: { type: "string", description: "Request id closed by close." },
           closed: { type: "number", description: "Pending rows closed by close." },
+          claimed: { type: "boolean", description: "#34150: true when this caller holds the claim." },
+          claimed_by: { type: "string", description: "#34150: current claimant of a solicitation." },
+          unclaimed: { type: "boolean", description: "#34150: true when a claim was released." },
+          returned_to: { type: "string", description: "#34150: open (re-opened) or sender (after deadline)." },
           warning: {
             type: "string",
             description: "When close closed 0 rows: the journal-backed cause, then the owner's other open ids.",
@@ -585,6 +610,16 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           mapsTo: "close_evidence",
           description: "Record verbatim attestation for one incident manual clear; requires --close",
           requires: ["close"],
+        },
+        {
+          name: "claim",
+          flags: "--claim <request_id>",
+          description: "#34150: claim a solicitation; first claim converts it to your directed ball",
+        },
+        {
+          name: "unclaim",
+          flags: "--unclaim <request_id>",
+          description: "#34150: drop your claim, or (sender) reject it, while it is active",
         },
       ],
     }),

@@ -921,7 +921,8 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   if (solicitationArg === true) {
     if (!Array.isArray(recipients) && recipients !== "*") {
       return jsonResult({
-        error: "tribe.send: solicitation requires a broadcast (*) or recipient list - nobody can owe an unknown-owner question addressed to one seat",
+        error:
+          "tribe.send: solicitation requires a broadcast (*) or recipient list - nobody can owe an unknown-owner question addressed to one seat",
       })
     }
     if (replyArg !== undefined) {
@@ -1865,7 +1866,7 @@ function maybeRefIsOwnOpenBallNote(
   let open = ctx.stmts.selectPendingForReplyRecipient.get({
     $reply_id: ref,
     $recipient: owner,
-  }) as { request_id: string; request_kind: "request" | "incident" } | null
+  }) as { request_id: string; request_kind: "request" | "incident" | "solicitation" } | null
   if (open === null && ref.length >= 8) {
     const prefixMatches = ctx.stmts.selectOpenBallIdsByPrefix.all({
       $name: owner,
@@ -1876,7 +1877,7 @@ function maybeRefIsOwnOpenBallNote(
       open = ctx.stmts.selectPendingForReplyRecipient.get({
         $reply_id: only.request_id,
         $recipient: owner,
-      }) as { request_id: string; request_kind: "request" | "incident" } | null
+      }) as { request_id: string; request_kind: "request" | "incident" | "solicitation" } | null
     }
   }
   if (open === null || open.request_kind === "incident") return undefined
@@ -1927,7 +1928,7 @@ type PendingBallRow = {
   expires_at: number | null
   message_id: string
   fanout: "first" | "all"
-  request_kind: "request" | "incident"
+  request_kind: "request" | "incident" | "solicitation"
   summary: string | null
   content?: string | null
 }
@@ -1943,7 +1944,7 @@ type PendingBall = {
   fanout: "first" | "all"
   /** Persisted ownership class. Missing only on historical journal outcomes
    *  written before the discriminator existed. */
-  request_kind?: "request" | "incident"
+  request_kind?: "request" | "incident" | "solicitation"
   summary: string | null
   status: "active" | "expired" | "unanswered"
   /** Full question body, joined from the messages table on the pending
@@ -2502,7 +2503,7 @@ function declaredUnrunRows(
     expires_at: number | null
     message_id: string
     fanout: "first" | "all"
-    request_kind: "request" | "incident"
+    request_kind: "request" | "incident" | "solicitation"
     summary: string | null
   }>
   const defaultTtl = defaultBallTtlMs("request", true)
@@ -2734,7 +2735,7 @@ function pendingCloseAuthorityRefusalResult(
   const kind = ctx.stmts.selectPendingKindForRecipient.get({
     $request_id: refusal.requestId,
     $recipient: owner,
-  }) as { request_kind: "request" | "incident" } | null
+  }) as { request_kind: "request" | "incident" | "solicitation" } | null
   const allowedClosers =
     kind?.request_kind === "incident"
       ? `For this incident, its owner or ${ANDON_OWNER} may record a manual-close with ` +
@@ -2791,7 +2792,7 @@ function incidentCloseRefusal(
       const row = ctx.stmts.selectPendingKindForRecipient.get({
         $request_id: requestId,
         $recipient: owner,
-      }) as { request_kind: "request" | "incident" } | null
+      }) as { request_kind: "request" | "incident" | "solicitation" } | null
       return row?.request_kind === "incident"
     })
   if (incidentId === undefined) return undefined
@@ -3057,6 +3058,22 @@ function unclaimSolicitation(ctx: TribeContext, caller: string, requestId: strin
 }
 
 function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
+  // #34150: sender withdraw of an unclaimed solicitation, before close.
+  if (typeof a.close === "string") {
+    const meta = ctx.stmts.selectSolicitationMeta.get({ $request_id: a.close }) as SolicitationMeta | undefined
+    if (meta && meta.sender === ctx.getName()) {
+      if (meta.claimed_by !== null) {
+        return jsonResult({
+          error:
+            "tribe.pending: a claimed solicitation cannot be withdrawn - the directed ball settles or is released by its claimant",
+        })
+      }
+      const rows = ctx.stmts.selectSolicitationRows.all({ $request_id: a.close }) as Array<{ recipient: string }>
+      ctx.stmts.deleteSolicitationRows.run({ $request_id: a.close })
+      ctx.stmts.deleteSolicitationMeta.run({ $request_id: a.close })
+      return jsonResult({ closed: rows.length, request_id: a.close, owner: meta.sender })
+    }
+  }
   // #34150: solicitation claim / release, before every other pending branch.
   if (typeof a.claim === "string" || typeof a.unclaim === "string") {
     if (a.claim !== undefined && a.unclaim !== undefined) {
@@ -3184,7 +3201,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
       : (ctx.stmts.selectPendingKindForRecipient.get({
           $request_id: pendingRequestIdForOwner(ctx, owner, a.close as string),
           $recipient: owner,
-        }) as { request_kind: "request" | "incident" } | null)
+        }) as { request_kind: "request" | "incident" | "solicitation" } | null)
   if (closeEvidence !== undefined && evidenceKind !== null && evidenceKind.request_kind !== "incident") {
     return jsonResult({
       error:

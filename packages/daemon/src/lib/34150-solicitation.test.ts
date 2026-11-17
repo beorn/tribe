@@ -185,6 +185,43 @@ describe("34150 solicitation/claim", () => {
     expect(owedIds(seats[5])).not.toContain(id)
   })
 
+  it("claimant drop returns it open; sender reject excludes the rejected claimant", () => {
+    const id = sendSolicitation()
+    parseToolJson(handleToolCall(seats[0], "tribe.pending", { claim: id }, opts()))
+    const dropped = parseToolJson(handleToolCall(seats[0], "tribe.pending", { unclaim: id }, opts()))
+    expect(dropped).toMatchObject({ unclaimed: true, returned_to: "open" })
+    expect(owedIds(seats[0])).not.toContain(id)
+
+    parseToolJson(handleToolCall(seats[1], "tribe.pending", { claim: id }, opts()))
+    const rejected = parseToolJson(handleToolCall(sender, "tribe.pending", { unclaim: id }, opts()))
+    expect(rejected).toMatchObject({ unclaimed: true, returned_to: "open" })
+    const reclaim = parseToolJson(handleToolCall(seats[1], "tribe.pending", { claim: id }, opts()))
+    expect(reclaim.claimed).toBe(false)
+    const other = parseToolJson(handleToolCall(seats[2], "tribe.pending", { claim: id }, opts()))
+    expect(other.claimed).toBe(true)
+  })
+
+  it("unclaim after the deadline goes straight to one sender obligation", () => {
+    const id = sendSolicitation(1)
+    parseToolJson(handleToolCall(seats[6], "tribe.pending", { claim: id }, opts()))
+    const released = parseToolJson(handleToolCall(seats[6], "tribe.pending", { unclaim: id }, opts()))
+    expect(released).toMatchObject({ unclaimed: true, returned_to: "sender" })
+    expect(owedIds(sender)).toContain(id)
+    for (const seat of seats) expect(owedIds(seat)).not.toContain(id)
+  })
+
+  it("sender withdraw before a claim removes every recipient row", () => {
+    const id = sendSolicitation()
+    const withdrawn = parseToolJson(handleToolCall(sender, "tribe.pending", { close: id }, opts()))
+    expect(withdrawn.closed).toBe(17)
+    const rows = db.prepare("SELECT COUNT(*) AS count FROM pending_request WHERE request_id = ?").get(id) as {
+      count: number
+    }
+    expect(rows.count).toBe(0)
+    const claim = parseToolJson(handleToolCall(seats[0], "tribe.pending", { claim: id }, opts()))
+    expect(claim.claimed).toBe(false)
+  })
+
   it("unclaimed expiry lands on the sender as one owed ball, never on recipients", () => {
     const id = sendSolicitation(1)
     // Any later write path runs the expiry conversion; the sender sending an
