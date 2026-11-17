@@ -127,12 +127,24 @@ describe("34150 solicitation/claim", () => {
     return pending.map((row) => row.request_id)
   }
 
+  /**
+   * @failure A solicitation owed by every recipient blocks all non-owners at turn end (cca70c96).
+   * @level l2
+   * @consumer Tribe senders whose question only one unknown seat can answer.
+   * @seam tribe.pending claim lifecycle over pending_request + solicitation_meta.
+   */
   it("17-recipient solicitation owes nobody before a claim (cca70c96 replay)", () => {
     const id = sendSolicitation()
     for (const seat of seats) expect(owedIds(seat)).not.toContain(id)
     expect(owedIds(sender)).not.toContain(id)
   })
 
+  /**
+   * @failure Two claimants or none converts leaves ownership ambiguous.
+   * @level l2
+   * @consumer The claiming seat and the sender.
+   * @seam tribe.pending claim lifecycle over pending_request + solicitation_meta.
+   */
   it("first claim converts to exactly one directed owed ball; second claim refused", () => {
     const id = sendSolicitation()
     const claimed = parseToolJson(handleToolCall(seats[3], "tribe.pending", { claim: id }, opts()))
@@ -146,6 +158,12 @@ describe("34150 solicitation/claim", () => {
     expect(owedIds(seats[4])).not.toContain(id)
   })
 
+  /**
+   * @failure A retried claim opens a second ball for the same claimant.
+   * @level l1
+   * @consumer Claimants on a flaky transport.
+   * @seam tribe.pending claim lifecycle over pending_request + solicitation_meta.
+   */
   it("duplicate claim by the same claimant returns the previous result", () => {
     const id = sendSolicitation()
     parseToolJson(handleToolCall(seats[0], "tribe.pending", { claim: id }, opts()))
@@ -154,6 +172,12 @@ describe("34150 solicitation/claim", () => {
     expect(owedIds(seats[0]).filter((row) => row === id)).toHaveLength(1)
   })
 
+  /**
+   * @failure A not-mine reply settles the question for the real owner.
+   * @level l1
+   * @consumer Non-owner recipients.
+   * @seam tribe.pending claim lifecycle over pending_request + solicitation_meta.
+   */
   it("decline (status + ref) never settles and blocks no claim", () => {
     const id = sendSolicitation()
     const declined = parseToolJson(
@@ -170,6 +194,12 @@ describe("34150 solicitation/claim", () => {
     expect(owedIds(seats[2])).toContain(id)
   })
 
+  /**
+   * @failure A claimed solicitation needs a second, new settlement path.
+   * @level l1
+   * @consumer The claimant answering.
+   * @seam tribe.pending claim lifecycle over pending_request + solicitation_meta.
+   */
   it("claimant settles through the ordinary response rail", () => {
     const id = sendSolicitation()
     parseToolJson(handleToolCall(seats[5], "tribe.pending", { claim: id }, opts()))
@@ -185,6 +215,12 @@ describe("34150 solicitation/claim", () => {
     expect(owedIds(seats[5])).not.toContain(id)
   })
 
+  /**
+   * @failure A dropped or rejected claim silently dies or re-wakes the rejected seat.
+   * @level l2
+   * @consumer Claimant, sender, and remaining recipients.
+   * @seam tribe.pending claim lifecycle over pending_request + solicitation_meta.
+   */
   it("claimant drop returns it open; sender reject excludes the rejected claimant", () => {
     const id = sendSolicitation()
     parseToolJson(handleToolCall(seats[0], "tribe.pending", { claim: id }, opts()))
@@ -201,6 +237,12 @@ describe("34150 solicitation/claim", () => {
     expect(other.claimed).toBe(true)
   })
 
+  /**
+   * @failure Return-to-open after the deadline re-wakes seventeen seats for an expired question.
+   * @level l2
+   * @consumer The sender.
+   * @seam tribe.pending claim lifecycle over pending_request + solicitation_meta.
+   */
   it("unclaim after the deadline goes straight to one sender obligation", () => {
     const id = sendSolicitation(1)
     parseToolJson(handleToolCall(seats[6], "tribe.pending", { claim: id }, opts()))
@@ -210,6 +252,12 @@ describe("34150 solicitation/claim", () => {
     for (const seat of seats) expect(owedIds(seat)).not.toContain(id)
   })
 
+  /**
+   * @failure A withdrawn solicitation still claims or blocks recipients.
+   * @level l1
+   * @consumer The sender withdrawing.
+   * @seam tribe.pending claim lifecycle over pending_request + solicitation_meta.
+   */
   it("sender withdraw before a claim removes every recipient row", () => {
     const id = sendSolicitation()
     const withdrawn = parseToolJson(handleToolCall(sender, "tribe.pending", { close: id }, opts()))
@@ -222,6 +270,12 @@ describe("34150 solicitation/claim", () => {
     expect(claim.claimed).toBe(false)
   })
 
+  /**
+   * @failure An unanswered solicitation expires onto nobody, or onto every recipient.
+   * @level l2
+   * @consumer The sender.
+   * @seam tribe.pending claim lifecycle over pending_request + solicitation_meta.
+   */
   it("unclaimed expiry lands on the sender as one owed ball, never on recipients", () => {
     const id = sendSolicitation(1)
     // Any later write path runs the expiry conversion; the sender sending an
