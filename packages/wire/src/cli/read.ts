@@ -1049,10 +1049,11 @@ async function cmdPending(
     }
     if (view.claimed) console.log(`Claimed ${claim}: you now own the directed ball.`)
     else if (view.unclaimed) console.log(`Released ${unclaim}: returned to ${view.returned_to ?? "open"}.`)
-    else
+    else {
       console.log(
         `Not ${claim ? "claimed" : "released"}: ${view.reason ?? `held by ${view.claimed_by ?? "another seat"}`}`,
       )
+    }
     return
   }
   if (close) {
