@@ -367,6 +367,34 @@ describe("generic direct-message delivery resolution", () => {
     expect(db.prepare("SELECT request_id FROM pending_request").get()).toBeNull()
   })
 
+  it("writes the dead-letter under its own id when the bounced send carries a client message id (34683)", () => {
+    // The wire CLI mints a message_id on every send (34062). The dead-letter is a second row, so it must not
+    // reuse that id: the daemon dedupes on it, and the fallback owner would get no attention row.
+    const messageId = "8f0c2b7e-34ad-4a8e-9c61-34683dead001"
+    const send = () =>
+      resultJson(
+        handleToolCall(
+          sender,
+          "tribe.send",
+          { to: "@dev/s2-gone", message: "hello", type: "request", request: "req-dead-id", message_id: messageId },
+          opts(),
+        ),
+      )
+    const sent = send()
+    expect(sent).toMatchObject({ sent: true, id: messageId, delivery: { state: "bounced", recipient: "@dev" } })
+    send()
+
+    const rows = db
+      .prepare("SELECT id, type, recipient, request FROM messages WHERE kind = 'direct' ORDER BY rowid")
+      .all() as Array<{ id: string; type: string; recipient: string; request: string | null }>
+    expect(rows.map(({ type, recipient, request }) => ({ type, recipient, request }))).toEqual([
+      { type: "request", recipient: "@dev/s2-gone", request: "req-dead-id" },
+      { type: "dead-letter", recipient: "@dev", request: "req-dead-id" },
+    ])
+    expect(rows[0]?.id).toBe(messageId)
+    expect(rows[1]?.id).not.toBe(messageId)
+  })
+
   it.each(["invalid", "unresolved"] as const)("refuses a %s target without persisting mail", (status) => {
     const refused = resultJson(
       handleToolCall(

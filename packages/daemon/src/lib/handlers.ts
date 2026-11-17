@@ -1647,6 +1647,9 @@ function persistDeadLetter(
   requestId: string | null,
 ): void {
   if (resolution.state !== "bounced") return
+  // The dead-letter is its own row: the send's client message id names the original mail, and reusing it would make
+  // the daemon dedupe this row away (34683).
+  const { messageId: _originalMessageId, ...deadLetterClassification } = classification
   sendMessage(
     ctx,
     resolution.to,
@@ -1656,7 +1659,7 @@ function persistDeadLetter(
     args.ref as string | undefined,
     "direct",
     {
-      ...classification,
+      ...deadLetterClassification,
       attentionRequired: true,
       ...(requestId ? { correlationRequest: requestId } : {}),
     },
