@@ -3358,6 +3358,111 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       expect(page.content).toContain("exact incarnation proof is unavailable")
     },
   )
+  // @failure 34667: a refused newer generation leaves an incident nobody can act on (no pids, births, proof branch
+  // or incumbent socket state), and nothing ever clears it once the conflict ends, so the owner holds a stale ball.
+  // @level l2 @consumer The incident owner deciding whether the incumbent is a dead record or a second live process.
+  it("a duplicate-join incident carries both incarnations and clears when one generation holds the seat alone", async () => {
+    const oldPid = process.ppid
+    const newPid = process.pid
+    const oldBirth = readProcessStartTime(oldPid)
+    expect(typeof oldBirth).toBe("string")
+    const verifier = {
+      ...identityVerifier,
+      verify: async (token: string): Promise<IdentityVerdict> =>
+        token === "token-g4"
+          ? { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 4, habitatRoot: "/test/habitat" }
+          : token === "token-g3"
+            ? { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 3, habitatRoot: "/test/habitat" }
+            : identityVerifier.verify(token),
+    }
+    const harness = createDispatcherHarness({ identityVerifier: verifier }, undefined, {
+      duplicateIncidentOwner: "@chief",
+      duplicateYieldMode: "observe",
+    })
+    cleanup = harness.dispose
+    harness.addPendingClient("old-pull")
+    parseResult<RegisterResult>(
+      await harness.register("old-pull", {
+        name: "@dev/7",
+        pid: oldPid,
+        project: "/tmp/p",
+        launchParentPid: oldPid,
+        idToken: "token-g3",
+        delivery: "pull",
+        takeover: true,
+      }),
+    )
+    const successor = (connId: string) => {
+      harness.addPendingClient(connId)
+      return harness.register(connId, {
+        name: "@dev/7",
+        pid: newPid,
+        project: "/tmp/p",
+        launchParentPid: newPid,
+        idToken: "token-g4",
+        delivery: "pull",
+        takeover: true,
+      })
+    }
+    // The live shape (2026-11-17 @dev/hallo): the successor's Ag pid/birth is absent, so no yield notice is armed.
+    const refusal = parseError(await successor("new-pull-1")) as { data?: Record<string, unknown> }
+    const reason = "successor Ag PID/birth is absent, unreadable or differs from its launch parent"
+    const incumbent = {
+      generation: 3,
+      agPid: oldPid,
+      agBirth: oldBirth,
+      agObservedBirth: oldBirth,
+      transportPid: oldPid,
+      transportAlive: true,
+      socketDestroyed: false,
+      socketWritable: true,
+    }
+    const successorFacts = {
+      generation: 4,
+      agPid: null,
+      agBirth: null,
+      agObservedBirth: null,
+      launchParentPid: newPid,
+      transportPid: newPid,
+    }
+    expect(refusal.data).toMatchObject({
+      kind: "verified-duplicate-join",
+      reason,
+      incumbent,
+      successor: successorFacts,
+    })
+    expect((refusal.data?.incumbent as { connectedForMs?: unknown }).connectedForMs).toEqual(expect.any(Number))
+    parseError(await successor("new-pull-2"))
+    const pages = harness.db
+      .prepare(
+        "SELECT content, wakes_owner, incident_data FROM messages WHERE type = 'health:duplicate-join' ORDER BY rowid",
+      )
+      .all() as Array<{ content: string; wakes_owner: number; incident_data: string | null }>
+    // One page per change of state: the repeat is journaled but never wakes the owner again.
+    expect(pages.map((page) => page.wakes_owner)).toEqual([1, 0])
+    expect(JSON.parse(pages[0]?.incident_data ?? "null")).toMatchObject({
+      reason,
+      incumbent,
+      successor: successorFacts,
+    })
+    const open = () =>
+      harness.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM pending_request WHERE request_kind = 'incident' AND recipient = '@chief' AND request_id LIKE '%duplicate-join-%'",
+        )
+        .get() as { n: number }
+    expect(open().n).toBe(1)
+    // The incumbent leaves (a dead record finally closes, or a restart drops it); the successor's retry now holds the
+    // seat alone, so the conflict the incident names has ended and the incident clears on that edge.
+    harness.dropClient("old-pull")
+    parseResult<RegisterResult>(await successor("new-pull-3"))
+    expect(open().n).toBe(0)
+    const cleared = harness.db
+      .prepare("SELECT content FROM messages WHERE type = 'health:duplicate-join' ORDER BY rowid DESC LIMIT 1")
+      .get() as { content: string }
+    expect(cleared.content).toContain("generation 4 holds @dev/7 alone")
+  })
+
   const sessionRow = (harness: ReturnType<typeof createDispatcherHarness>, sessionId: string) =>
     harness.db
       .prepare(

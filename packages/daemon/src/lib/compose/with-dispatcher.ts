@@ -287,6 +287,37 @@ export function withDispatcher<
     let identityVerifierFaultIssue = priorIdentityIncident?.summary ?? null
     let tokenlessByLaunchRefusals = { count: 0, last_at: null as string | null, last_launch_id: null as string | null }
 
+    /** 34667: a duplicate-join incident names two generations competing for one seat. It ends when a verified
+     *  generation registers and every connection holding that seat is that generation; clear it on that edge. */
+    function clearEndedDuplicateJoin(client: ClientSession, sid: string | null, gen: number | null): void {
+      const owner = t.config.duplicateIncidentOwner
+      if (!owner || sid === null || gen === null) return
+      const incident = {
+        emitter: "wire",
+        subject: `duplicate-join-${encodeURIComponent(client.name)}`,
+        condition: "conflict",
+      } as const
+      if (stmts.selectIncidentCondition.get({ $request_id: incidentKey(incident), $recipient: owner }) === null) return
+      for (const other of clients.values()) {
+        if (other.name !== client.name) continue
+        const held = holderIdentity(other.ctx.sessionId)
+        if (held.sid !== sid || held.gen !== gen) return
+      }
+      const summary = `${client.name}: generation ${gen} holds ${client.name} alone; the duplicate-join conflict ended`
+      sendMessage(
+        daemonCtx,
+        owner,
+        summary,
+        "health:duplicate-join",
+        undefined,
+        undefined,
+        "direct",
+        { delivery: "push", topic: "health:duplicate-join", summary },
+        { incident: { ...incident, active: false } },
+      )
+      log.info?.(summary)
+    }
+
     function recordIdentityVerifierFault(verifier: string, cause: string): void {
       const issue = `identity verifier ${verifier} failed: ${cause}`
       if (identityVerifierFaultIssue === issue) return
@@ -2497,6 +2528,29 @@ export function withDispatcher<
                           ? "successor Ag PID/birth is absent, unreadable or differs from its launch parent"
                           : null
                 const subject = `duplicate-join-${encodeURIComponent(resolvedName)}`
+                // 34667: what the owner needs to tell a dead record from a second live process — both Ag incarnations as
+                // recorded and as observed now, which proof branch fired, and the incumbent's transport and socket state.
+                const incarnations = {
+                  incumbent: {
+                    generation: held.gen,
+                    agPid: oldPid,
+                    agBirth: oldBirth,
+                    agObservedBirth: oldObserved,
+                    transportPid: predecessor.pid,
+                    transportAlive: predecessor.pid > 0 && readProcessStartTime(predecessor.pid) !== null,
+                    socketDestroyed: predecessor.socket.destroyed,
+                    socketWritable: predecessor.socket.writable,
+                    connectedForMs: Date.now() - predecessor.registeredAt,
+                  },
+                  successor: {
+                    generation: verifiedGen,
+                    agPid: newPid,
+                    agBirth: newBirth,
+                    agObservedBirth: newObserved,
+                    launchParentPid: launchIdentity?.parentPid ?? null,
+                    transportPid: clientPid,
+                  },
+                }
                 const summary =
                   proofGap === null
                     ? `${resolvedName}: verified live generation ${verifiedGen} (Ag ${newPid}/${newBirth}) ` +
@@ -2514,7 +2568,10 @@ export function withDispatcher<
                   undefined,
                   "direct",
                   { delivery: "push", topic: "health:duplicate-join", summary },
-                  { incident: { emitter: "wire", subject, condition: "conflict", active: true } },
+                  {
+                    incident: { emitter: "wire", subject, condition: "conflict", active: true },
+                    incidentData: { reason: proofGap, ...incarnations },
+                  },
                 )
                 log.warn?.(summary)
                 if (proofGap === null && t.config.duplicateYieldMode === "act") {
@@ -2557,6 +2614,7 @@ export function withDispatcher<
                       reason: proofGap ?? "incumbent-yield-pending",
                       incumbentGeneration: held.gen,
                       successorGeneration: verifiedGen,
+                      ...incarnations,
                     },
                   },
                   // 29686 (@cto B1 of c81bc71d): the record names the instance the VERIFIER proved, the successor's
@@ -2849,6 +2907,7 @@ export function withDispatcher<
               adapterExitRecord,
             })
             registry.markTransportConnected(client.ctx.sessionId)
+            clearEndedDuplicateJoin(client, verifiedSid, verifiedGen)
 
             resetOffsetsToTail(client)
             announceJoin(client)
