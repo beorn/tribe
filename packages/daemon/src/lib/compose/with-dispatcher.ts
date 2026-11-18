@@ -4185,8 +4185,9 @@ export function withDispatcher<
         log.warn?.("operation.failed", {
           ...connectionLogIdentity(failedClient, connId),
           operation: operationLogName(method),
-          error_type: err instanceof Error ? err.name : "NonError",
-          error_code: err instanceof Error ? errorCode(err) : "UNKNOWN",
+          // Type and code only, never the message or stack: they can carry a peer's request content.
+          "exception.type": err instanceof Error ? err.name : "NonError",
+          "error.type": err instanceof Error ? errorCode(err) : "UNKNOWN",
         })
         return makeError(id, -32603, msg)
       }
@@ -4311,8 +4312,9 @@ export function withDispatcher<
         log.warn?.("connection.error", {
           ...connectionLogIdentity(client, connId),
           reason: "socket-error",
-          error_code: code,
-          error_type: err.name,
+          // Type and code only, never the message: one exception shape (loggily 0.14), selective on purpose.
+          "error.type": code,
+          "exception.type": err.name,
         })
         sock.destroy()
       })

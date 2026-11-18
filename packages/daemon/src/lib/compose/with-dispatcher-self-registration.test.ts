@@ -985,7 +985,8 @@ describe("dispatcher operational logging", () => {
       member_id: registered.sessionId,
       name: "@agent/4",
       reason: "socket-error",
-      error_code: "ECONNRESET",
+      "exception.type": "Error",
+      "error.type": "ECONNRESET",
     })
     expect(
       logs.find((event) => event.level === "info" && event.message === "session.disconnected")?.props,
@@ -996,7 +997,11 @@ describe("dispatcher operational logging", () => {
       reason: "socket-error",
     })
     const disconnected = logs.find((event) => event.level === "info" && event.message === "session.disconnected")
-    expect(disconnected?.props).not.toHaveProperty("error_code")
+    expect(disconnected?.props).not.toHaveProperty("error.type")
+    const errored = logs.find((event) => event.level === "warn" && event.message === "connection.error")?.props
+    for (const key of ["exception.message", "exception.stacktrace", "error_code", "error_type"]) {
+      expect(errored).not.toHaveProperty(key)
+    }
     expect(disconnected?.props).not.toHaveProperty("operations")
     expect(JSON.stringify(logs)).not.toContain(socketError.message)
   })
@@ -1093,6 +1098,39 @@ describe("dispatcher operational logging", () => {
     },
   )
 
+  it("logs a failed operation with its error type and code only, never the message or stack", async () => {
+    const logs = captureDispatcherLogs()
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+    await harness.register(client.connId, {
+      name: "@agent/4",
+      pid: liveHolderPid,
+      project: "/tmp/km-wt4",
+    })
+    // A closed store makes the next operation throw a plain Error the dispatcher does not classify.
+    harness.db.close()
+
+    const response = await harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "send-after-close",
+        method: "tribe.send",
+        params: { to: "@agent/7", message: "sensitive request content", type: "notify" },
+      },
+      client.connId,
+    )
+
+    expect(JSON.parse(response) as { error?: { code: number } }).toMatchObject({ error: { code: -32603 } })
+    const failed = logs.find((event) => event.level === "warn" && event.message === "operation.failed")?.props
+    expect(failed).toMatchObject({ operation: "tribe.send", "error.type": "UNKNOWN" })
+    expect(typeof failed?.["exception.type"]).toBe("string")
+    for (const key of ["exception.message", "exception.stacktrace", "error_code", "error_type"]) {
+      expect(failed).not.toHaveProperty(key)
+    }
+    expect(JSON.stringify(logs)).not.toContain("sensitive request content")
+  })
+
   it("preserves the socket-error reason through a real Unix socket close", async () => {
     const logs = captureDispatcherLogs()
     const harness = createDispatcherHarness()
@@ -1146,7 +1184,8 @@ describe("dispatcher operational logging", () => {
           member_id: registered.sessionId,
           name: "@agent/4",
           reason: "socket-error",
-          error_code: "ECONNRESET",
+          "exception.type": "Error",
+          "error.type": "ECONNRESET",
         },
       )
       expect(
