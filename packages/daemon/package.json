@@ -26,7 +26,7 @@
     "@bearly/durable-file": "0.1.0",
     "@bearly/flock": "^0.1.0",
     "@bearly/sqlite": "0.1.0",
-    "loggily": "^0.11.0 || ^0.14.0",
+    "loggily": "^0.11.0",
     "removely": "0.4.0",
     "tribe-injection-envelope": "workspace:*",
     "tribe-recall": "workspace:*",
