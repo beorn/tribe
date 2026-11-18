@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "tribe": {
-      "command": "bash",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/launch.sh"]
-    }
-  }
-}
