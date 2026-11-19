@@ -1,11 +1,24 @@
 import { Database } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
-import { existsSync, mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs"
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { CURRENT_SCHEMA_VERSION, MIGRATION_STEPS, initSchema } from "../../src/history/db-schema.ts"
-import { getSession, insertMessage, upsertSession } from "../../src/history/db-queries.ts"
+import { getSession, insertMessage, updateSessionStatus, upsertSession } from "../../src/history/db-queries.ts"
+import { getPersistedFailedSessions } from "../../src/lib/status.ts"
 import { getMessageCount } from "../helpers/db-queries.ts"
 import { closeDb, getDb } from "../../src/history/db.ts"
 import { rebuildIndex } from "../../src/history/indexer.ts"
@@ -85,7 +98,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
       writeFileSync(file, content, "utf8")
     }
 
-    // Malformed file in the middle (line 2 invalid JSON, line 1 valid message to verify rollback)
+    // Malformed file in the middle (line 2 invalid JSON; the valid line 1 is kept, 33868)
     const badFile = join(projDir, "sess-005.jsonl")
     writeFileSync(
       badFile,
@@ -93,6 +106,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
         "\nINVALID JSON SYNTAX\n",
       "utf8",
     )
+    writeFileSync(join(projDir, "sess-011.jsonl"), "NOT JSON\nALSO NOT JSON\n", "utf8")
 
     const result = await rebuildIndex(db, { incremental: true, skipCodex: true })
 
@@ -108,11 +122,20 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     expect(sess10?.status).toBe("complete")
     expect(getMessageCount(db, "sess-010")).toBe(2)
 
-    // The malformed file should have rolled back its messages and marked stale-unreadable
+    // The malformed line is skipped and recorded; the valid record before it stays indexed (33868)
     const badSess = getSession(db, "sess-005")
     expect(badSess).toBeDefined()
-    expect(badSess?.status).toBe("stale-unreadable")
-    expect(getMessageCount(db, "sess-005")).toBe(0)
+    expect(badSess?.status).toBe("complete")
+    expect(badSess?.failure_reason).toContain(
+      "Malformed JSON in Claude transcript: skipped 1 record(s), first at line 2",
+    )
+    expect(getMessageCount(db, "sess-005")).toBe(1)
+    expect(result.claudeFailures?.some((f) => f.id === "sess-005" && f.reason.includes("line 2"))).toBe(true)
+
+    // A source with no valid record at all still rolls back and is marked stale-unreadable
+    const allBad = getSession(db, "sess-011")
+    expect(allBad?.status).toBe("stale-unreadable")
+    expect(getMessageCount(db, "sess-011")).toBe(0)
   })
 
   test("A7: chunked commits — commit is called once per chunk, not per file", async () => {
@@ -477,5 +500,143 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
       probeDb.close()
       safeRemoveSync(root, { within: tmpdir() })
     }
+  })
+
+  // --------------------------------------------------------------------------
+  // 33868: a growing transcript with a malformed record is read once, not from byte 0 every pass
+  // --------------------------------------------------------------------------
+
+  describe("33868: malformed records in a growing transcript", () => {
+    const PAD = "p".repeat(5000)
+    const record = (uuid: string, text: string) =>
+      JSON.stringify({ type: "user", uuid, message: { role: "user", content: text + " " + PAD } })
+    // A completed non-JSON line exactly as long as `record(uuid, text)`, so it can later be swapped in place.
+    const brokenLike = (uuid: string, text: string) => "{" + "#".repeat(record(uuid, text).length - 1)
+    const contents = (id: string) =>
+      (db.prepare("SELECT content FROM messages WHERE session_id = ?").all(id) as { content: string }[]).map(
+        (r) => r.content.split(" ")[0],
+      )
+    const reopen = () => {
+      closeDb()
+      db.close()
+      db = new Database(dbPath)
+    }
+    // Rewrite one line in place, same length, so size, head block and tail block are unchanged. If a later pass
+    // re-read the prefix, the replacement text would reach the index; a pass that starts at the saved cursor
+    // never sees it.
+    const swapInPlace = (file: string, from: string, to: string) => {
+      const text = readFileSync(file, "utf8")
+      const at = text.indexOf(from)
+      expect(at).toBeGreaterThan(4096)
+      expect(to.length).toBe(from.length)
+      const fd = openSync(file, "r+")
+      writeSync(fd, to, Buffer.byteLength(text.slice(0, at)))
+      closeSync(fd)
+    }
+
+    test("valid-bad-valid keeps both valid records, and an append after a reopen reads only the new bytes", async () => {
+      const projDir = join(projectsDir, "p1")
+      mkdirSync(projDir, { recursive: true })
+      const file = join(projDir, "sess-grow.jsonl")
+      writeFileSync(
+        file,
+        [record("a", "alpha"), brokenLike("g", "ghost"), record("o", "omega")].join("\n") + "\n",
+        "utf8",
+      )
+
+      const first = await rebuildIndex(db, { incremental: true, skipCodex: true })
+      const indexed = getSession(db, "sess-grow")
+      expect(indexed?.status).toBe("complete")
+      expect(contents("sess-grow").sort()).toEqual(["alpha", "omega"])
+      expect(indexed?.tail_offset).toBe(statSync(file).size)
+      const finding = indexed?.failure_reason
+      expect(finding).toContain("Malformed JSON in Claude transcript: skipped 1 record(s), first at line 2")
+      expect(first.claudeFailures?.some((f) => f.id === "sess-grow" && f.reason === finding)).toBe(true)
+      expect(getPersistedFailedSessions(db).some((f) => f.id === "sess-grow")).toBe(true)
+
+      reopen()
+      swapInPlace(file, brokenLike("g", "ghost"), record("g", "ghost"))
+      appendFileSync(file, record("d", "delta") + "\n", "utf8")
+
+      const second = await rebuildIndex(db, { incremental: true, skipCodex: true })
+      const grown = getSession(db, "sess-grow")
+      expect(contents("sess-grow").sort()).toEqual(["alpha", "delta", "omega"])
+      expect(grown?.tail_offset).toBe(statSync(file).size)
+      expect(grown?.status).toBe("complete")
+      // The hole is still on record after a clean append and a reopen; this pass found nothing new.
+      expect(grown?.failure_reason).toBe(finding)
+      expect(getPersistedFailedSessions(db).some((f) => f.id === "sess-grow")).toBe(true)
+      expect(second.claudeFailures?.some((f) => f.id === "sess-grow")).toBe(false)
+
+      // A full replacement with no malformed record covers the damaged input, so it clears the finding.
+      writeFileSync(file, [record("r1", "repaired"), record("r2", "again")].join("\n") + "\n", "utf8")
+      await rebuildIndex(db, { incremental: true, skipCodex: true })
+      const repaired = getSession(db, "sess-grow")
+      expect(contents("sess-grow").sort()).toEqual(["again", "repaired"])
+      expect(repaired?.failure_reason).toBeNull()
+      expect(getPersistedFailedSessions(db).some((f) => f.id === "sess-grow")).toBe(false)
+    })
+
+    test("an incomplete last line waits; a newly malformed append is skipped and recorded at its position", async () => {
+      const projDir = join(projectsDir, "p1")
+      mkdirSync(projDir, { recursive: true })
+      const file = join(projDir, "sess-tail.jsonl")
+      writeFileSync(file, [record("a", "alpha"), record("b", "beta")].join("\n") + "\n", "utf8")
+      await rebuildIndex(db, { incremental: true, skipCodex: true })
+      const clean = getSession(db, "sess-tail")
+      expect(clean?.failure_reason).toBeNull()
+      const boundary = clean?.tail_offset ?? -1
+      expect(boundary).toBe(statSync(file).size)
+
+      appendFileSync(file, record("c", "gamma"), "utf8")
+      await rebuildIndex(db, { incremental: true, skipCodex: true })
+      expect(getSession(db, "sess-tail")?.tail_offset).toBe(boundary)
+      expect(contents("sess-tail").sort()).toEqual(["alpha", "beta"])
+
+      appendFileSync(file, "\nNOT JSON\n" + record("e", "epsilon") + "\n", "utf8")
+      const pass = await rebuildIndex(db, { incremental: true, skipCodex: true })
+      const tail = getSession(db, "sess-tail")
+      expect(contents("sess-tail").sort()).toEqual(["alpha", "beta", "epsilon", "gamma"])
+      expect(tail?.tail_offset).toBe(statSync(file).size)
+      expect(tail?.status).toBe("complete")
+      expect(tail?.failure_reason).toContain(
+        "Malformed JSON in Claude transcript after byte " +
+          boundary +
+          ": skipped 1 record(s), first at line 2 of the append",
+      )
+      expect(pass.claudeFailures?.some((f) => f.id === "sess-tail" && f.reason === tail?.failure_reason)).toBe(true)
+      expect(getPersistedFailedSessions(db).some((f) => f.id === "sess-tail")).toBe(true)
+    })
+
+    test("a session refused for a malformed record before 33868 resumes from its saved cursor and keeps its rows", async () => {
+      const projDir = join(projectsDir, "p1")
+      mkdirSync(projDir, { recursive: true })
+      const file = join(projDir, "sess-legacy.jsonl")
+      writeFileSync(file, [record("a", "alpha"), record("m", "middle"), record("o", "omega")].join("\n") + "\n", "utf8")
+      await rebuildIndex(db, { incremental: true, skipCodex: true })
+      const good = getSession(db, "sess-legacy")
+      expect(good?.status).toBe("complete")
+
+      // The state the old tail pass left: it threw on the malformed append and marked the session refused,
+      // keeping the old rows and the old cursor. Every later pass then re-read the file from byte 0.
+      appendFileSync(file, "NOT JSON\n" + record("n", "nu") + "\n", "utf8")
+      const refusedAt = statSync(file)
+      const legacyReason = "Malformed JSON in Claude transcript tail at line 1: JSON Parse error"
+      updateSessionStatus(db, "sess-legacy", "stale-unreadable", {
+        failureReason: legacyReason,
+        failureTime: Date.now(),
+        sizeBytes: refusedAt.size,
+        mtimeMs: refusedAt.mtime.getTime() - 1,
+      })
+
+      swapInPlace(file, record("m", "middle"), record("m", "ghost!"))
+      await rebuildIndex(db, { incremental: true, skipCodex: true })
+      const resumed = getSession(db, "sess-legacy")
+      expect(contents("sess-legacy").sort()).toEqual(["alpha", "middle", "nu", "omega"])
+      expect(resumed?.tail_offset).toBe(statSync(file).size)
+      expect(resumed?.status).toBe("complete")
+      expect(resumed?.failure_reason).toBe(legacyReason)
+      expect(getPersistedFailedSessions(db).some((f) => f.id === "sess-legacy")).toBe(true)
+    })
   })
 })

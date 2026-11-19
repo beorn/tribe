@@ -299,6 +299,14 @@ export function parseSessionPath(
 
 const TAIL_BLOCK_SIZE = 4096
 
+/**
+ * Prefix of every malformed-record finding on a Claude transcript (33868). A completed line that is not JSON is
+ * skipped and recorded under this prefix in the session's `failure_reason`, so the valid records around it stay
+ * indexed and the saved cursor moves past it. A session whose recorded failure carries this prefix may resume from
+ * its verified tail cursor; any other recorded failure is never tail-eligible.
+ */
+const MALFORMED_CLAUDE_JSON = "Malformed JSON in Claude transcript"
+
 function computeFingerprint(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex")
 }
@@ -339,7 +347,7 @@ export async function indexSessionFile(
   filePath: string,
   options: IndexOptions = {},
   existingStats?: fs.Stats,
-): Promise<{ messages: number; writes: number }> {
+): Promise<{ messages: number; writes: number; issue?: string }> {
   const relativePath = path.relative(currentProjectsDir(), filePath)
   const projectPath = projectPathFromRelative(relativePath)
   let stats: fs.Stats
@@ -382,12 +390,16 @@ export async function indexSessionFile(
     }
   }
 
-  // Check if candidate for tail indexing (B2)
+  // Check if candidate for tail indexing (B2). A session refused for a malformed record before 33868 still holds
+  // the good generation it had indexed and that generation's cursor and fingerprints, so a verified append resumes
+  // from that cursor instead of re-reading the whole file every pass. Any other recorded failure re-reads in full.
+  const malformedBefore =
+    existing?.status === "stale-unreadable" && (existing.failure_reason?.startsWith(MALFORMED_CLAUDE_JSON) ?? false)
   let canTailIndex = false
   if (
     !options.force &&
     existing &&
-    (existing.status == null || existing.status === "complete") &&
+    (existing.status == null || existing.status === "complete" || malformedBefore) &&
     typeof existing.tail_offset === "number" &&
     existing.tail_offset > 0 &&
     typeof existing.head_fingerprint === "string" &&
@@ -474,6 +486,8 @@ export async function indexSessionFile(
 
       try {
         let lineNum = 0
+        let skipped = 0
+        let firstSkipped = ""
         for await (const line of rl) {
           lineNum++
           if (!line.trim()) continue
@@ -482,10 +496,10 @@ export async function indexSessionFile(
           try {
             record = JSON.parse(line) as JsonlRecord
           } catch (parseErr) {
-            throw new Error(
-              `Malformed JSON in Claude transcript tail at line ${lineNum}: ${(parseErr as Error).message}`,
-              { cause: parseErr },
-            )
+            // A completed line that is not JSON: skip it, keep the records around it (33868).
+            skipped++
+            if (skipped === 1) firstSkipped = `line ${lineNum} of the append: ${(parseErr as Error).message}`
+            continue
           }
 
           if (!extractedCwd && record.cwd && typeof record.cwd === "string" && record.cwd.trim().length > 0) {
@@ -557,6 +571,12 @@ export async function indexSessionFile(
           }
         }
 
+        // The cursor moves past skipped lines too. A finding already on the session is kept as is: a clean append
+        // is no proof the earlier hole was repaired, so only a full re-read that covers it clears it.
+        const issue =
+          skipped === 0
+            ? undefined
+            : `${MALFORMED_CLAUDE_JSON} after byte ${offset}: skipped ${skipped} record(s), first at ${firstSkipped}`
         updateSessionTail(
           db,
           sessionId,
@@ -568,9 +588,10 @@ export async function indexSessionFile(
           Math.max(existing.updated_at, lastTimestamp ?? mtime),
           lastTimestamp,
           extractedCwd,
+          issue === undefined ? undefined : { failureReason: issue, failureTime: Date.now() },
         )
         db.run(assertSingleStatement(`RELEASE SAVEPOINT ${spId}`))
-        return { messages: newMessageCount, writes: newWriteCount }
+        return { messages: newMessageCount, writes: newWriteCount, ...(issue === undefined ? {} : { issue }) }
       } catch (err) {
         db.run(assertSingleStatement(`ROLLBACK TO SAVEPOINT ${spId}`))
         db.run(assertSingleStatement(`RELEASE SAVEPOINT ${spId}`))
@@ -648,6 +669,10 @@ export async function indexSessionFile(
       db.prepare("DELETE FROM writes WHERE session_id = ?").run(sessionId)
 
       let lineNum = 0
+      let parsed = 0
+      let skipped = 0
+      let firstSkipped = ""
+      let firstSkippedError: unknown = null
       for await (const line of rl) {
         lineNum++
         if (!line.trim()) continue
@@ -656,10 +681,15 @@ export async function indexSessionFile(
         try {
           record = JSON.parse(line) as JsonlRecord
         } catch (parseErr) {
-          throw new Error(`Malformed JSON in Claude transcript at line ${lineNum}: ${(parseErr as Error).message}`, {
-            cause: parseErr,
-          })
+          // A completed line that is not JSON: skip it, keep the records around it (33868).
+          skipped++
+          if (skipped === 1) {
+            firstSkipped = `line ${lineNum}: ${(parseErr as Error).message}`
+            firstSkippedError = parseErr
+          }
+          continue
         }
+        parsed++
 
         if (!extractedCwd && record.cwd && typeof record.cwd === "string" && record.cwd.trim().length > 0) {
           extractedCwd = record.cwd.trim()
@@ -736,6 +766,19 @@ export async function indexSessionFile(
         )
       }
 
+      // Skipped records salvage a source with no clean generation yet. They never replace an index that holds
+      // one (rows indexed with no recorded finding): that refusal rolls back and keeps the old rows, as before.
+      // A source with no valid record at all is not salvaged either.
+      const holdsCleanGeneration =
+        existing != null &&
+        existing.message_count > 0 &&
+        !((existing.status == null || existing.status === "complete") && existing.failure_reason != null)
+      if (skipped > 0 && (parsed === 0 || holdsCleanGeneration)) {
+        throw new Error(`${MALFORMED_CLAUDE_JSON} at ${firstSkipped}`, { cause: firstSkippedError })
+      }
+      const issue =
+        skipped === 0 ? undefined : `${MALFORMED_CLAUDE_JSON}: skipped ${skipped} record(s), first at ${firstSkipped}`
+
       const isShrink = existing && existing.tail_offset != null && stats.size < existing.tail_offset
       upsertSession(
         db,
@@ -759,10 +802,13 @@ export async function indexSessionFile(
           tailFingerprint,
           shrinkOldCount: isShrink ? (existing?.message_count ?? null) : null,
           shrinkNewCount: isShrink ? messageCount : null,
+          // A full re-read covers the whole source, so it records this pass's finding or clears an earlier one.
+          failureReason: issue ?? null,
+          failureTime: issue === undefined ? null : Date.now(),
         },
       )
       db.run(assertSingleStatement(`RELEASE SAVEPOINT ${spId}`))
-      return { messages: messageCount, writes: writeCount }
+      return { messages: messageCount, writes: writeCount, ...(issue === undefined ? {} : { issue }) }
     } catch (err) {
       db.run(assertSingleStatement(`ROLLBACK TO SAVEPOINT ${spId}`))
       db.run(assertSingleStatement(`RELEASE SAVEPOINT ${spId}`))
@@ -1192,9 +1238,10 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
 
         ensureTransaction()
         try {
-          const { messages, writes } = await indexSessionFile(db, sessionFile, options, stats)
+          const { messages, writes, issue } = await indexSessionFile(db, sessionFile, options, stats)
           totalMessages += messages
           totalWrites += writes
+          if (issue !== undefined) claudeFailures.push({ id: sessionInfo.id, file: relativePath, reason: issue })
         } catch (err) {
           const errMsg = (err as Error).message || String(err)
           recordClaudeFailure(
@@ -1246,9 +1293,10 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
 
     db.run("BEGIN IMMEDIATE")
     try {
-      const { messages, writes } = await indexSessionFile(db, absPath, options)
+      const { messages, writes, issue } = await indexSessionFile(db, absPath, options)
       totalMessages += messages
       totalWrites += writes
+      if (issue !== undefined) claudeFailures.push({ id: sessionInfo.id, file: relativePath, reason: issue })
       db.run("COMMIT")
     } catch (err) {
       const errMsg = (err as Error).message || String(err)

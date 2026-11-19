@@ -167,7 +167,10 @@ export function updateSessionTail(
   updatedAt: number,
   lastEventAtMs: number | null,
   cwd?: string | null,
+  skipped?: { failureReason: string; failureTime: number },
 ): void {
+  // A recorded failure survives a tail append: an earlier finding is never cleared here, and a new one is
+  // recorded only when the session has none (33868).
   db.prepare(`
     UPDATE sessions SET
       tail_offset = ?,
@@ -178,9 +181,23 @@ export function updateSessionTail(
       updated_at = MAX(updated_at, ?),
       last_event_at_ms = COALESCE(?, last_event_at_ms),
       cwd = COALESCE(?, cwd),
+      failure_time = CASE WHEN failure_reason IS NULL THEN ? ELSE failure_time END,
+      failure_reason = COALESCE(failure_reason, ?),
       status = 'complete'
     WHERE id = ?
-  `).run(tailOffset, tailFingerprint, newMessagesCount, sizeBytes, mtimeMs, updatedAt, lastEventAtMs, cwd ?? null, id)
+  `).run(
+    tailOffset,
+    tailFingerprint,
+    newMessagesCount,
+    sizeBytes,
+    mtimeMs,
+    updatedAt,
+    lastEventAtMs,
+    cwd ?? null,
+    skipped?.failureTime ?? null,
+    skipped?.failureReason ?? null,
+    id,
+  )
 }
 
 export function updateSessionTitle(db: Database, id: string, title: string | null): void {

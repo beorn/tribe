@@ -2850,7 +2850,7 @@ if (args.includes("list")) {
       expect(failedAfter.some((f) => f.id === "session-preserve")).toBe(false)
     })
 
-    test("public rebuild records reason-coded failure for brand new malformed Claude session and recovers cleanly", async () => {
+    test("public rebuild salvages a brand new malformed Claude session with a reason-coded finding and recovers cleanly", async () => {
       const claudeDir = join(tempDir, "claude-new-fail")
       mkdirSync(claudeDir, { recursive: true })
       const sessionPath = join(claudeDir, "session-new-fail.jsonl")
@@ -2865,17 +2865,17 @@ if (args.includes("list")) {
       // Public rebuild on this brand-new path
       await rebuildIndex(db, { path: sessionPath, skipCodex: true })
 
-      // Crucial: session row DOES exist with reason-coded failure in existing storage!
+      // A brand-new source keeps its valid record and carries the reason-coded finding in existing storage (33868)
       const statusDetails = getSessionStatus(db, "session-new-fail")
       expect(statusDetails).toBeDefined()
-      expect(statusDetails?.status).toBe("stale-unreadable")
-      expect(statusDetails?.messageCount).toBe(0)
+      expect(statusDetails?.status).toBe("complete")
+      expect(statusDetails?.messageCount).toBe(1)
       expect(statusDetails?.failureReason).toContain("Malformed JSON in Claude transcript")
       expect(typeof statusDetails?.failureTime).toBe("number")
 
       // Appears in persisted failed sessions
       const failed = getPersistedFailedSessions(db)
-      expect(failed.some((f) => f.id === "session-new-fail" && f.status === "stale-unreadable")).toBe(true)
+      expect(failed.some((f) => f.id === "session-new-fail" && f.failure_reason !== null)).toBe(true)
 
       // Recovery: repair the file with 2 valid records
       const recoveryLines = [
