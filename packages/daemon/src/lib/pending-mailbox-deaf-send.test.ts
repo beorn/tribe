@@ -244,11 +244,32 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
         optsWithLive([liveInfo("sess-telegram", "telegram")]),
       ),
     )
-    expect(String(sent.error ?? "")).toContain("tribe.send: failed to deliver to telegram - not online")
+    expect(String(sent.error ?? "")).toContain("tribe.send: failed to deliver to telegram - mailbox unreadable")
     expect(String(sent.detail ?? "")).toContain("mailbox_read_capability.state is unavailable")
     expect(String(sent.detail ?? "")).toContain("self-mailbox-authority-missing")
     const remaining = stmts.selectPendingForRecipient.all({ $recipient: "telegram" }) as unknown[]
     expect(remaining).toHaveLength(0)
+  })
+
+  // 24576 AC2: beorn-mac (2026-11-18, delivery failure ec95b5bb) and the unimac seats (2026-10-20) are connected and
+  // read by name, yet a tracked request to them said "not online". The refusal stays (the remedy is @cto's ruling);
+  // its one-line reason must name the real cause, and the detail must say what gives a seat that authority.
+  it("refuses a connected, tokenless, connection-registered seat as mailbox-unreadable, never as not online (24576 AC2)", () => {
+    addSession(db, stmts, "sess-mac", "beorn-mac", null)
+    const sender = makeContext(db, stmts, "sess-chief", "@chief")
+    const sent = parseToolJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "beorn-mac", message: "update km", type: "request" },
+        optsWithLive([liveInfo("sess-mac", "beorn-mac")]),
+      ),
+    )
+    expect(String(sent.error ?? "")).not.toContain("not online")
+    expect(String(sent.error ?? "")).toContain("tribe.send: failed to deliver to beorn-mac - mailbox unreadable")
+    expect(String(sent.detail ?? "")).toContain("connected")
+    expect(String(sent.detail ?? "")).toContain("HAB_ID_TOKEN")
+    expect(stmts.selectPendingForRecipient.all({ $recipient: "beorn-mac" })).toHaveLength(0)
   })
 
   it("delivers an untracked notify to telegram and opens no ball", () => {

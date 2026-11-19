@@ -212,7 +212,9 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
         deliveries.set(seat.name, sent.delivery)
         continue
       }
-      expect(String(sent.error), seat.name).toContain(`tribe.send: failed to deliver to ${seat.name} - not online`)
+      expect(String(sent.error), seat.name).toContain(
+        `tribe.send: failed to deliver to ${seat.name} - mailbox unreadable`,
+      )
       expect(String(sent.detail), seat.name).toContain("mailbox_read_capability.state is unavailable")
       stmts.openPendingRequest.run({
         $request_id: `req-${seat.name}`,

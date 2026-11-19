@@ -24,6 +24,7 @@ import type { TribeContext } from "./context.ts"
 import type { MailboxReadCapability, MemberObservation } from "tribe-wire/records"
 import type { TribeRole } from "tribe-wire/lib/config"
 import { isExplicitTribePersonaName } from "tribe-wire/lib/persona-name"
+import { HAB_ID_TOKEN_ENV } from "tribe-wire/lib/identity-token"
 import { TRIBE_PROTOCOL_VERSION } from "tribe-wire/lib/socket"
 import {
   TRIBE_FETCH_DEFAULT_LIMIT,
@@ -1522,15 +1523,21 @@ function resolveDirectDelivery(
     const snapshot = transport.observe(resolvedOwner).owner_transport_observed_at
     const reason = transport.mailboxDeafReasons.get(resolvedOwner) ?? "self-mailbox-authority-missing"
     const lastSeen = transport.lastSeenMin(resolvedOwner)
-    const shortReason =
-      lastSeen !== null ? `not online (last seen ${lastSeen} mins ago)` : "not online (last seen: unknown)"
+    const seen = lastSeen !== null ? `last seen ${lastSeen} mins ago` : "last seen: unknown"
+    // 24576 AC2: a connected seat is online; what it lacks is the authority to read its own mailbox, so say that.
+    // A bounced request keeps "not online": the addressed recipient itself has no live transport.
+    const connectedOwner = resolution.state !== "bounced" && transport.liveTransportNames.has(resolvedOwner)
+    const shortReason = connectedOwner
+      ? `mailbox unreadable (connected, no identity token; ${seen})`
+      : `not online (${seen})`
     const longDetail =
       `resolved owner ${JSON.stringify(resolvedOwner)} for recipient ${JSON.stringify(recipient)} ` +
-      `at admission snapshot ${snapshot}: ` +
+      `at admission snapshot ${snapshot}${connectedOwner ? " is connected, but its" : ":"} ` +
       `mailbox_read_capability.state is unavailable (${reason}); a tracked ball promises an answer ` +
       `this mailbox cannot read. Restore mailbox authority for ${JSON.stringify(resolvedOwner)} ` +
-      "before retrying an answer-required request. Use untracked notify only for a relay notification " +
-      "that needs no answer (24581)."
+      `before retrying an answer-required request: a session reads its own mailbox only under a verified ${HAB_ID_TOKEN_ENV}, ` +
+      "which a Hab-launched seat inherits; a session Hab did not launch cannot hold one yet (24576, 30968). " +
+      "Use untracked notify only for a relay notification that needs no answer (24581)."
     return {
       status: "unresolved",
       reason: `failed to deliver to ${recipient} - ${shortReason}`,

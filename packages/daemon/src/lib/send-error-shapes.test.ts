@@ -124,7 +124,10 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
       ),
     )
 
-    expect(sent.error).toBe("tribe.send: failed to deliver to @adhoc/1 - not online (last seen 5 mins ago)")
+    // 24576 AC2: @adhoc/1 is connected, so the cause is its unreadable mailbox, not "not online".
+    expect(sent.error).toBe(
+      "tribe.send: failed to deliver to @adhoc/1 - mailbox unreadable (connected, no identity token; last seen 5 mins ago)",
+    )
     expect(String(sent.detail)).toContain(
       "mailbox_read_capability.state is unavailable (self-mailbox-authority-missing)",
     )
