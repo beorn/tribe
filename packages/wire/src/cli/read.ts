@@ -49,7 +49,7 @@ import {
 import { describeSettlementConflict, type BallSettlementReason } from "../lib/ball-outcome.ts"
 import { HAB_ID_TOKEN_ENV, readIdentityTokenFromEnvironment } from "../lib/identity-token.ts"
 import { HAB_SERVICE_NAME_ENV } from "../lib/hab-session-env.ts"
-import { describeDaemonOutcome, tribeDaemonCalls } from "../service-send.ts"
+import { describeDaemonOutcome, launchSender, registerLaunchSender, tribeDaemonCalls } from "../service-send.ts"
 import { readLaunchInboxTargetFromEnvironment } from "../launch-seat.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
@@ -611,7 +611,15 @@ async function cmdFetch(opts: {
 
   let raw: unknown
   try {
-    raw = await callDaemon("cli_session_fetch_read_v1", params)
+    const sender = idToken === null ? null : launchSender("tribe.fetch", process.env)
+    raw =
+      sender?.kind === "service"
+        ? await withCliDaemonClient(async (client) => {
+            // A scheduled service can read before its first send has registered its launch (#37231).
+            await registerLaunchSender(client, sender, { producer: "tribe.fetch", socketPath: resolveSocketPath() })
+            return client.call("cli_session_fetch_read_v1", params)
+          })
+        : await callDaemon("cli_session_fetch_read_v1", params)
   } catch (error) {
     console.error(`tribe fetch: ${error instanceof Error ? error.message : String(error)}`)
     process.exitCode = 2

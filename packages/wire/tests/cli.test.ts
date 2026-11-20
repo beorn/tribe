@@ -370,7 +370,7 @@ describe("service CLI admission", () => {
     }
   }, 40_000)
 
-  it("registers a fresh service and sends one verified actionable; refuses a forged signature and tracked reply", async () => {
+  it("registers a fresh service for snapshot reads and sends; refuses a forged signature and tracked reply", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-service-cli-"))
     const socketPath = join(dir, "tribe.sock")
     const dbPath = join(dir, "tribe.db")
@@ -445,6 +445,28 @@ export async function verifyIdentity(token) {
       const db = new Database(dbPath, { readonly: true })
       try {
         expect(db.query("SELECT name FROM sessions WHERE name = ?").all("heartbeat-service")).toEqual([])
+        // A scheduled reader can fetch before its first send (#37231); mocked fetch responses miss registration.
+        const cited = mcpJsonContent(
+          await receiver.call("tribe.send", {
+            to: "receiver",
+            message: "request cited by a service reader",
+            type: "request",
+            summary: "cited request",
+          }),
+        ) as { id: string }
+        const read = await runCliAsync(["fetch", "--ids", cited.id, "--json"], env, { timeoutMs: 30_000 })
+        expect(read.code, read.stderr).toBe(0)
+        expect(JSON.parse(read.stdout).events).toContainEqual(
+          expect.objectContaining({ id: cited.id, content: "request cited by a service reader" }),
+        )
+        const forgedRead = await runCliAsync(
+          ["fetch", "--ids", cited.id, "--json"],
+          { ...env, HAB_ID_TOKEN: `${unsigned}.${Buffer.alloc(64).toString("base64url")}` },
+          { timeoutMs: 30_000 },
+        )
+        expect(forgedRead.code).not.toBe(0)
+        expect(forgedRead.stdout).toBe("")
+        expect(forgedRead.stderr).toContain("invalid service signature")
         const fresh = await runCliAsync(
           ["send", "receiver", "service heartbeat", "--type", "request", "--summary", "heartbeat", "--json"],
           env,
