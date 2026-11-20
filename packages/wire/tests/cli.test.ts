@@ -456,9 +456,11 @@ export async function verifyIdentity(token) {
         ) as { id: string }
         const read = await runCliAsync(["fetch", "--ids", cited.id, "--json"], env, { timeoutMs: 30_000 })
         expect(read.code, read.stderr).toBe(0)
-        expect(JSON.parse(read.stdout).events).toContainEqual(
-          expect.objectContaining({ id: cited.id, content: "request cited by a service reader" }),
-        )
+        expect(JSON.parse(read.stdout)).toMatchObject({
+          events: expect.arrayContaining([
+            expect.objectContaining({ id: cited.id, content: "request cited by a service reader" }),
+          ]),
+        })
         const forgedRead = await runCliAsync(
           ["fetch", "--ids", cited.id, "--json"],
           { ...env, HAB_ID_TOKEN: `${unsigned}.${Buffer.alloc(64).toString("base64url")}` },
