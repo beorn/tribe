@@ -652,6 +652,22 @@ describe("ruling 5: ordinary own-mailbox rights only", () => {
     ["another identity's inbox", "tribe.inbox.wait", { session: CHIEF, timeoutMs: 1 }],
     ["join as another name", "tribe.join", { name: "@dev/1" }],
     ["fleet restart", "tribe.restart", {}],
+    // Peer read f9d8f3a9: fetch's history and snapshot reads are journal-wide, so none is a participant's right.
+    ["fetch by ids", "tribe.fetch", { ids: ["abcdef12"] }],
+    ["fetch with a peer", "tribe.fetch", { with: CHIEF }],
+    ["fetch from a sender", "tribe.fetch", { from: CHIEF }],
+    ["fetch to a recipient", "tribe.fetch", { to: CHIEF }],
+    ["fetch since a rowid", "tribe.fetch", { since: 0 }],
+    ["fetch before a rowid", "tribe.fetch", { before: 100 }],
+    ["fetch by topics", "tribe.fetch", { topics: ["git:*"] }],
+    ["writing the coordination log", "log_event", { type: "x" }],
+    ["discovering sessions", "discover", {}],
+    ["reading coordination state", "get_state", {}],
+    // tools/call is gated on the method it names, so the registry's own handlers (recall) hold the same rights.
+    ["a recall tool through tools/call", "tools/call", { name: "tribe.ask", arguments: { query: "x" } }],
+    ["rename through tools/call", "tools/call", { name: "tribe.rename", arguments: { new_name: "@ext/other" } }],
+    ["a journal-wide fetch through tools/call", "tools/call", { name: "tribe.fetch", arguments: { since: 0 } }],
+    ["a nested tools/call", "tools/call", { name: "tools/call", arguments: { name: "tribe.fetch" } }],
   ] as const)("refuses %s by name", async (_what, method, params) => {
     const h = harness()
     const { mac } = await connectedPair(h)
@@ -668,5 +684,12 @@ describe("ruling 5: ordinary own-mailbox rights only", () => {
     const { mac } = await connectedPair(h)
     expect((await h.call(mac.connId, "tribe.pending", {})).error).toBeUndefined()
     expect((await h.call(mac.connId, "tribe.join", { name: PARTICIPANT })).error).toBeUndefined()
+  })
+
+  it("keeps the default attention fetch, its own mailbox, as a participant right", async () => {
+    const h = harness()
+    const { mac } = await connectedPair(h)
+    expect((await h.call(mac.connId, "tribe.fetch", {})).error).toBeUndefined()
+    expect((await h.call(mac.connId, "tribe.fetch", { limit: 10 })).error).toBeUndefined()
   })
 })

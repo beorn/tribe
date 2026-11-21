@@ -1998,9 +1998,8 @@ export function withDispatcher<
       TRIBE_COORD_METHODS.lifecycle,
       "subscribe",
       "leave",
-      "log_event",
-      "discover",
-      "get_state",
+      // #30968 peer read f9d8f3a9: no log_event, discover or get_state. An outside principal neither writes the
+      // coordination log nor reads coordination state; it reads its own mailbox.
       "cli_protocol",
       "cli_status",
       "cli_health",
@@ -2009,6 +2008,8 @@ export function withDispatcher<
       "tools/call",
       "ping",
     ])
+    /** fetch arguments that read the whole journal rather than the caller's own mailbox. */
+    const PARTICIPANT_JOURNAL_WIDE_FETCH_KEYS = ["ids", "with", "from", "to", "since", "before", "topics"] as const
     /** The calls that read or write the participant's mailbox: each re-verifies its token (ruling 4). */
     const PARTICIPANT_PROTECTED_METHODS: ReadonlySet<string> = new Set([
       TRIBE_COORD_METHODS.send,
@@ -2033,6 +2034,39 @@ export function withDispatcher<
       }
       const self = client.name
       const names = (value: unknown): boolean => typeof value === "string" && value !== self && `@${value}` !== self
+      /** The argument forms of a permitted method that reach past the participant's own mailbox; null when none does. */
+      function participantRightRefusal(name: string, args: Record<string, unknown>): string | null {
+        if (name === TRIBE_COORD_METHODS.join && names(args.name)) return "join as another name"
+        if (name === TRIBE_COORD_METHODS.send && args.incident !== undefined) return "incident raise or clear"
+        if (name === TRIBE_COORD_METHODS.pending) {
+          if (args.all === true) return "fleet pending (--all)"
+          if (args.claim !== undefined || args.unclaim !== undefined) return "claiming solicitations"
+          if (args.prune !== undefined) return "pruning pending balls"
+          if (args.emitter !== undefined) return "incident pending reads"
+          if (names(args.owner)) return "another identity's pending"
+        }
+        if ((name === TRIBE_COORD_METHODS.inboxWait || name === TRIBE_COORD_METHODS.fetch) && names(args.session)) {
+          return "another identity's inbox"
+        }
+        // fetch's history and snapshot reads (ids, with, from, to, since, before, topics) are journal-wide, never
+        // scoped to the caller (handlers.ts ids lookup and querySnapshotRows), so a participant keeps the default
+        // attention fetch only (#30968 peer read f9d8f3a9).
+        if (name === TRIBE_COORD_METHODS.fetch) {
+          const journalWide = PARTICIPANT_JOURNAL_WIDE_FETCH_KEYS.filter((key) => args[key] !== undefined)
+          if (journalWide.length > 0) return `journal-wide fetch (${journalWide.join(", ")})`
+        }
+        return null
+      }
+      // An MCP tools/call names its own method: gate that method and its arguments here, at the outer call, so a tool
+      // the registry runs directly (with-mcp-server path 2, the recall tools) holds the same rights as one the
+      // dispatcher re-enters (#30968 peer read f9d8f3a9). The inner dispatcher call re-verifies a protected method.
+      if (method === "tools/call") {
+        const inner = typeof p.name === "string" ? p.name : ""
+        if (inner === "tools/call" || !PARTICIPANT_PERMITTED_METHODS.has(inner)) return refuseRight(inner || "tools/call")
+        const args = typeof p.arguments === "object" && p.arguments !== null ? (p.arguments as Record<string, unknown>) : {}
+        const refusedInner = participantRightRefusal(inner, args)
+        return refusedInner === null ? null : refuseRight(refusedInner)
+      }
       if (!PARTICIPANT_PERMITTED_METHODS.has(method)) {
         return refuseRight(
           method === TRIBE_COORD_METHODS.rename
@@ -2042,20 +2076,11 @@ export function withDispatcher<
               : `${method}`,
         )
       }
-      if (method === TRIBE_COORD_METHODS.join && names(p.name)) return refuseRight("join as another name")
-      if (method === TRIBE_COORD_METHODS.send && p.incident !== undefined) return refuseRight("incident raise or clear")
-      if (method === TRIBE_COORD_METHODS.pending) {
-        if (p.all === true) return refuseRight("fleet pending (--all)")
-        if (p.claim !== undefined || p.unclaim !== undefined) return refuseRight("claiming solicitations")
-        if (p.prune !== undefined) return refuseRight("pruning pending balls")
-        if (p.emitter !== undefined) return refuseRight("incident pending reads")
-        if (names(p.owner)) return refuseRight("another identity's pending")
-      }
-      if ((method === TRIBE_COORD_METHODS.inboxWait || method === TRIBE_COORD_METHODS.fetch) && names(p.session)) {
-        return refuseRight("another identity's inbox")
-      }
+      const refused = participantRightRefusal(method, p)
+      if (refused !== null) return refuseRight(refused)
       if (!PARTICIPANT_PROTECTED_METHODS.has(method)) return null
       return reverifyParticipant(client, method, id)
+
     }
 
     function holderIdentity(sessionId: string): {
