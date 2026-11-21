@@ -119,15 +119,17 @@ describe("37291 tribe MCP tool annotations", () => {
     expect(listed(name)).toEqual({ readOnlyHint: true })
   })
 
-  it.each(["send", "join", "rename", "filter", "pending", "health.publish", "lifecycle.publish"])(
+  it.each(["send", "join", "rename", "filter", "health.publish", "lifecycle.publish"])(
     "%s writes without destroying",
     (name) => {
       expect(listed(name)).toEqual({ readOnlyHint: false, destructiveHint: false })
     },
   )
 
-  it("restart is destructive", () => {
-    expect(listed("restart")).toEqual({ readOnlyHint: false, destructiveHint: true })
+  // pending's prune settles live requests away and retires incident wakes (@dev/12 bb039b77): one multiplexed tool, so
+  // its most destructive input sets the hint.
+  it.each(["restart", "pending"])("%s is destructive", (name) => {
+    expect(listed(name)).toEqual({ readOnlyHint: false, destructiveHint: true })
   })
 
   it("every listed tool carries annotations", () => {

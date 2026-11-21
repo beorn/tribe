@@ -481,7 +481,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
       "Ball-tracker query: list active requests where the owner must reply, or derive expired/unanswered outcomes from active rows, journal facts, and replies. Default owner is the caller's session.",
     lifetime: "live-session",
     mcpList: "listed",
-    effect: "write",
+    effect: "destructive",
     mcp: {
       name: "pending",
       description:
