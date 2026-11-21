@@ -92,6 +92,7 @@ import {
 import {
   DELIVERY_LEDGER_WINDOW_MS,
   openDeliveryLedgerWindow,
+  recordDeliveryWakeFailure,
   resumeDeliveryLedger,
   saveDeliveryLedger,
   type DeliveryLedgerState,
@@ -183,6 +184,11 @@ function wakeHostedSeat(row: NonNullable<TribeFetchResult["events"]>[number]): v
     if (reported) return
     reported = true
     process.stderr.write(`tribe hosted wake: ${myName} message ${id} failed: ${cause}\n`)
+    // #37430 - NO SILENT ERRORS: a hosted seat's MCP launch configures no reader
+    // for this stderr, so the line above reaches nobody. Record the failure in
+    // the same per-pane ledger the delivery report reads, so the row id and the
+    // cause survive the pane.
+    recordHostedWakeFailure(id, cause)
   }
   try {
     const wake = spawnHostedWake(
@@ -1948,6 +1954,22 @@ function persistDeliveryLedger(now: number): void {
     }
     log.error?.(`Failed to persist tribe delivery ledger ${deliveryLedgerFilePath}: ${message}`)
   }
+}
+
+/**
+ * #37430 - the durable half of a failed hosted wake. The stderr line stays (a
+ * test and any attached terminal still see it), but a hosted seat's MCP launch
+ * leaves that pipe with no reader; this writes the same row id and cause into
+ * the per-pane ledger the delivery report reads. No kpi root means no durable
+ * home (25231): the stderr line is then the only record, and the report says so
+ * by showing no failure rows, never an invented zero.
+ */
+function recordHostedWakeFailure(rowId: string, cause: string): void {
+  const now = Date.now()
+  ensureDeliveryLedger(now)
+  if (deliveryLedgerFilePath === null || deliveryLedgerState === null) return
+  deliveryLedgerState = recordDeliveryWakeFailure(deliveryLedgerState, { rowId, cause, atMs: now })
+  persistDeliveryLedger(now)
 }
 
 /**

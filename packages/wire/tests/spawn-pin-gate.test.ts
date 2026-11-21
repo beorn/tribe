@@ -196,26 +196,40 @@ describe("socket owner — hab's socket is never taken by a standalone daemon (2
     expect(unknown.reason, "an owner the sidecar cannot prove is allowed out loud").toContain("owner")
   })
 
-  test("a client launched by hab never starts a daemon for the socket hab handed it", () => {
-    const decision = evaluateHabLaunchedClient({
+  test("a client launched by hab never starts a daemon — with or without TRIBE_SOCKET (33946)", () => {
+    // The seat's real shape: all three markers, TRIBE_SOCKET unset (hh.hab.tsx exports it for the wire
+    // service, not for ordinary seats). A reboot wiped the socket and its pin sidecar, and this call
+    // minted a standalone daemon with no identity verifier because the old gate keyed on TRIBE_SOCKET.
+    const seat = evaluateHabLaunchedClient({ env: { ...habLaunch }, socketPath: "/run/user/3001/tribe.sock" })
+    expect(seat.allow).toBe(false)
+    expect(seat.reason).toContain("/hh/main.hab")
+    expect(seat.reason).toContain("hh-hab up wire")
+
+    const handed = evaluateHabLaunchedClient({
       env: { ...habLaunch, TRIBE_SOCKET: "/run/user/3001/tribe.sock" },
       socketPath: "/run/user/3001/tribe.sock",
     })
-    expect(decision.allow).toBe(false)
-    expect(decision.reason).toContain("/hh/main.hab")
-    expect(decision.reason).toContain("hh-hab up wire")
+    expect(handed.allow).toBe(false)
   })
 
-  test("the launch rule is scoped to hab's socket and to a caller hab actually launched", () => {
-    expect(
-      evaluateHabLaunchedClient({
-        env: { ...habLaunch, TRIBE_SOCKET: "/run/user/3001/tribe.sock" },
-        socketPath: "/tmp/a-test-socket/tribe.sock",
-      }).allow,
-    ).toBe(true)
+  test("the launch rule demands hab's markers, not a socket; a hab service keeps its own lifecycle owner", () => {
+    // Never a client: an explicit daemon start by a process hab did not launch.
     expect(
       evaluateHabLaunchedClient({
         env: { TRIBE_SOCKET: "/run/user/3001/tribe.sock" },
+        socketPath: "/run/user/3001/tribe.sock",
+      }).allow,
+    ).toBe(true)
+    // Naming another socket does not turn a client into a daemon owner: still refused.
+    expect(
+      evaluateHabLaunchedClient({
+        env: { ...habLaunch, TRIBE_SOCKET: "/tmp/a-test-socket/tribe.sock" },
+        socketPath: "/tmp/a-test-socket/tribe.sock",
+      }).allow,
+    ).toBe(false)
+    expect(
+      evaluateHabLaunchedClient({
+        env: { ...habLaunch, HAB_SERVICE_NAME: "wire" },
         socketPath: "/run/user/3001/tribe.sock",
       }).allow,
     ).toBe(true)

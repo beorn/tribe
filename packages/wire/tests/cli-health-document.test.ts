@@ -159,6 +159,38 @@ describe("health service-probe and full diagnostic capture contracts", () => {
     expect(response.methods).toEqual(["cli_status"])
   })
 
+  it("reports a refused managed registration as unhealthy, not healthy (33946)", async () => {
+    const cause = "registration refused for @seat/probe (name-conflict) 3s ago; no live transport holds the name"
+    const response = await runHealthReply(["--json"], {
+      result: {
+        daemon: { pid: 42, uptime: 100, clients: 2 },
+        sessions: [],
+        authority_issues: [],
+        registration_issues: [cause],
+      },
+    })
+    expectOneDocument(response.stdout, response.code)
+    expect(response.code).toBe(2)
+    expect(JSON.parse(response.stdout)).toMatchObject({
+      state: "unhealthy",
+      error: { code: "wire-registration-refused", cause },
+    })
+    expect(response.methods).toEqual(["cli_status"])
+  })
+
+  it("stays healthy when the daemon reports no unresolved registration refusal", async () => {
+    const response = await runHealthReply(["--json"], {
+      result: {
+        daemon: { pid: 42, uptime: 100, clients: 2 },
+        sessions: [{ name: "a" }],
+        authority_issues: [],
+        registration_issues: [],
+      },
+    })
+    expectOneDocument(response.stdout, response.code)
+    expect(response.code).toBe(0)
+  })
+
   // The existing liveness cases cannot detect a dropped diagnostic body or a raw malformed dump.
   it.each([
     ["default human", []],

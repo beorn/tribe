@@ -17,6 +17,7 @@ import { dirname, join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { describe, expect, it } from "vitest"
 import {
+  DELIVERY_WAKE_FAILURE_CAP,
   DELIVERY_LEDGER_VERSION,
   DELIVERY_LEDGER_WINDOW_MS,
   deliveryLedgerDir,
@@ -24,6 +25,7 @@ import {
   deliveryLedgerPath,
   loadDeliveryLedger,
   openDeliveryLedgerWindow,
+  recordDeliveryWakeFailure,
   resumeDeliveryLedger,
   saveDeliveryLedger,
   TRIBE_DELIVERY_LEDGER_DIR_ENV,
@@ -619,5 +621,68 @@ describe("colliding personas and current ledger resume (#28376, #28409)", () => 
     writeFileSync(explicit, fixture(ORIGINAL, NOW - 60_000, ["row"]), "utf8")
     const r = resumeDeliveryLedger({ pane: ORIGINAL, env })
     expect(r?.load.state?.ids).toEqual(["row"])
+  })
+})
+
+// #37430 - a failed hosted wake's stderr line has no reader in a hosted launch.
+// The ledger is the durable half, so it must round-trip, stay bounded, and keep
+// an older ledger readable as an empty list rather than a gap.
+describe("failed hosted wakes (#37430)", () => {
+  const opened = (): DeliveryLedgerState =>
+    openDeliveryLedgerWindow({
+      existing: null,
+      coverage: { restarts: 0, gap: false, gapReason: "none" },
+      pane: "@dev/luna6",
+      now: NOW,
+    })
+
+  it("records newest-first and caps the list", () => {
+    let state = opened()
+    for (let index = 0; index < DELIVERY_WAKE_FAILURE_CAP + 2; index += 1) {
+      state = recordDeliveryWakeFailure(state, {
+        rowId: `row-${String(index)}`,
+        cause: `cause-${String(index)}`,
+        atMs: NOW + index,
+      })
+    }
+    expect(state.wakeFailures).toHaveLength(DELIVERY_WAKE_FAILURE_CAP)
+    expect(state.wakeFailures?.[0]).toEqual({ rowId: "row-6", cause: "cause-6", atMs: NOW + 6 })
+  })
+
+  it("round-trips a recorded failure through the atomic save", () => {
+    const path = tempPath()
+    saveDeliveryLedger(
+      path,
+      recordDeliveryWakeFailure(opened(), { rowId: "3898c622", cause: "exit 1: config-invalid", atMs: NOW }),
+    )
+    const loaded = loadDeliveryLedger(path)
+    expect(loaded.coverage.gap).toBe(false)
+    expect(loaded.state?.wakeFailures).toEqual([{ rowId: "3898c622", cause: "exit 1: config-invalid", atMs: NOW }])
+    rmSync(path, { force: true })
+  })
+
+  it("reads a ledger written before this field as an empty list, never a gap", () => {
+    const path = tempPath()
+    const { wakeFailures: _omitted, ...legacy } = opened()
+    writeFileSync(path, JSON.stringify(legacy))
+    const loaded = loadDeliveryLedger(path)
+    expect(loaded.coverage.gap).toBe(false)
+    expect(loaded.state?.wakeFailures).toEqual([])
+    rmSync(path, { force: true })
+  })
+
+  it("drops a malformed entry without losing the window", () => {
+    const path = tempPath()
+    writeFileSync(
+      path,
+      JSON.stringify({
+        ...opened(),
+        wakeFailures: [{ rowId: "ok", cause: "boom", atMs: NOW }, { rowId: "", cause: "x", atMs: NOW }, null],
+      }),
+    )
+    const loaded = loadDeliveryLedger(path)
+    expect(loaded.coverage.gap).toBe(false)
+    expect(loaded.state?.wakeFailures).toEqual([{ rowId: "ok", cause: "boom", atMs: NOW }])
+    rmSync(path, { force: true })
   })
 })

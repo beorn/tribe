@@ -224,21 +224,31 @@ export function evaluateSocketOwnerForSocket(socketPath: string, binderOwner: So
 }
 
 /**
- * A client hab launched never starts a daemon for the socket hab handed it
- * (TRIBE_SOCKET): hab owns that daemon and brings it back. Scoped to hab's
- * socket and to a caller carrying every marker a hab launch always carries (HAB_LAUNCH_REQUIRED_MARKERS).
+ * A client hab launched never starts a daemon: hab owns the daemon it declares and brings it back.
+ * The proof is every marker a hab launch always carries (HAB_LAUNCH_REQUIRED_MARKERS).
+ *
+ * 33946: the marker test is the whole proof, and TRIBE_SOCKET is NOT one of the markers. On
+ * 2026-11-12 a reboot wiped /run/user/3001 (socket and pin sidecar) while hab's wire unit was still
+ * stuck spawning; a seat hook then minted a standalone daemon on hab's socket with no identity
+ * verifier. The gate scoped itself by TRIBE_SOCKET, which hh.hab.tsx never exports for ordinary
+ * seats, so `handed` was always undefined and the gate always allowed — inert exactly where it
+ * mattered. A client hab launched does not start a daemon on ANY socket: hab supervises the one it
+ * declares, and an explicit `tribe daemon`/`tribe-wire` start is the sanctioned manual door (it is
+ * not a client start).
+ *
+ * A hab SERVICE is exempt: it is the supervised binder itself, and its hot-reload mints the
+ * lifecycle owner for the socket it owns.
  */
 export function evaluateHabLaunchedClient(input: {
   env: Readonly<NodeJS.ProcessEnv>
   socketPath: string
 }): SpawnSourceDecision {
   const { env, socketPath } = input
-  const handed = env.TRIBE_SOCKET?.trim()
-  if (!handed || resolve(handed) !== resolve(socketPath)) return { allow: true, reason: null }
   if (!HAB_LAUNCH_REQUIRED_MARKERS.every((name) => env[name]?.trim())) return { allow: true, reason: null }
+  if (env[HAB_SERVICE_NAME_ENV]?.trim()) return { allow: true, reason: null }
   return {
     allow: false,
-    reason: `this process was launched by hab (habitat ${env[HAB_SESSION_HABITAT_ROOT_ENV]}), which owns the daemon for ${socketPath} — not starting one here; restart it with: hh-hab up wire (24906)`,
+    reason: `this process was launched by hab (habitat ${env[HAB_SESSION_HABITAT_ROOT_ENV]}), which owns the daemon for ${socketPath} — not starting one here; start it with: hh-hab up wire (24906)`,
   }
 }
 
