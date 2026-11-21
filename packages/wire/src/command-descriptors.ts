@@ -790,6 +790,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
       "Read tribe messages. Default returns attention (unread actionables plus self-owned pending balls), drains the bounded chronological event window, and advances its cursor; `events` omits rows already carried in `attention.actionable_unread`, so a message body appears once per read. ids/with/from/to reads are snapshots. since scans the journal and advances only with advance:true.",
     lifetime: "live-session",
     mcpList: "listed",
+    // advances the caller's own read cursor; no other state (@cto 2a50c694)
     effect: "read",
     mcp: {
       name: "fetch",
