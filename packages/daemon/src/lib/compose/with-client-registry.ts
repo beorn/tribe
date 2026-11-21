@@ -41,8 +41,12 @@ export type ClientSession = {
   name: string
   role: TribeRole
   domains: string[]
-  /** Omission is the legacy agent class; services declare their connection lifetime. */
-  principalClass?: "agent" | "service"
+  /** Omission is the legacy agent class; services declare their connection lifetime; a participant (#30968) is the
+   *  class its verified token named. */
+  principalClass?: "agent" | "service" | "participant"
+  /** #30968 ruling 4: the grant a participant transport registered with — its token, re-verified at every protected
+   *  call, and the (sid, gen) that token proved. Held only in memory, only for kind participant. */
+  participant?: { readonly token: string; readonly sid: string; readonly gen: number }
   project: string
   projectName: string
   projectId: string

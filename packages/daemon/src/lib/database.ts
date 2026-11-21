@@ -61,7 +61,8 @@ export function openDatabase(path: string): Database {
 		delivery     TEXT NOT NULL DEFAULT 'push',
 		account    TEXT,
 		provider   TEXT,
-		adapter_exit_record TEXT
+		adapter_exit_record TEXT,
+		participant_grant TEXT
 	)`)
 
     // Migrations table — tracks schema version so we can evolve the DB without
@@ -1740,6 +1741,21 @@ const MIGRATIONS: readonly Migration[] = [
 			)`)
     },
   },
+  {
+    version: 47,
+    name: "session-participant-grant",
+    /**
+     * #30968 F4b: a participant row records the verifier's last verdict on its grant, written at every protected
+     * call — JSON `{state: active|revoked|expired|unavailable, checked_at, exp?, reason?}`. One nullable column, NULL
+     * on every agent and service row; no existing column carries a verdict and its time.
+     */
+    up(db) {
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!columns.has("participant_grant")) db.run("ALTER TABLE sessions ADD COLUMN participant_grant TEXT")
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -3044,7 +3060,7 @@ export function createStatements(db: Database) {
     ),
 
     allSessions: db.prepare(
-      "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_sid, launch_id, launch_parent_pid, launch_parent_start_time, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery, provider FROM sessions",
+      "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_sid, principal_class, participant_grant, launch_id, launch_parent_pid, launch_parent_start_time, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery, provider FROM sessions",
     ),
 
     messageHistory: db.prepare(`
@@ -3085,7 +3101,7 @@ export function createStatements(db: Database) {
     // can serve. See derivedLaunchPrefixUpperBound for the upper bound.
     getSessionsByProviderLaunchId: db.prepare(
       assertSingleStatement(
-        "SELECT id, name, principal_class, launch_id, launch_parent_pid, updated_at, delivery, identity_sid FROM sessions " +
+        "SELECT id, name, principal_class, participant_grant, launch_id, launch_parent_pid, updated_at, delivery, identity_sid FROM sessions " +
           "WHERE launch_id = $launch_id " +
           "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) " +
           // A verified session is keyed "<sid>@<gen>" (25074 3c-2b), and the managed launch id's provider part IS that

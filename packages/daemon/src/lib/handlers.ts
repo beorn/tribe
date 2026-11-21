@@ -453,11 +453,13 @@ function ownerTransportObservationProjector<IncludeRecipientDirectory extends bo
   includeRecipientDirectory: IncludeRecipientDirectory,
 ) {
   const sessionRows = ctx.db
-    .prepare("SELECT id, name, identity_sid, updated_at, filter_mode FROM sessions")
+    .prepare("SELECT id, name, identity_sid, principal_class, participant_grant, updated_at, filter_mode FROM sessions")
     .all() as Array<{
     id: string
     name: string
     identity_sid: string | null
+    principal_class: string | null
+    participant_grant: string | null
     updated_at: number
     filter_mode: string | null
   }>
@@ -1527,6 +1529,21 @@ function resolveDirectDelivery(
     // 24576 AC2: a connected seat is online; what it lacks is the authority to read its own mailbox, so say that.
     // A bounced request keeps "not online": the addressed recipient itself has no live transport.
     const connectedOwner = resolution.state !== "bounced" && transport.liveTransportNames.has(resolvedOwner)
+    // #30968 ruling 4: a participant whose grant's last verdict was not active is refused under that reason,
+    // connected or not; the journal keeps everything already sent to it and no ball opens.
+    const participantGrant = reason.startsWith("participant-grant-")
+    if (participantGrant) {
+      return {
+        status: "unresolved",
+        reason: `failed to deliver to ${recipient} - mailbox unreadable (${reason}; ${seen})`,
+        detail:
+          `resolved owner ${JSON.stringify(resolvedOwner)} for recipient ${JSON.stringify(recipient)} ` +
+          `at admission snapshot ${snapshot}: its mailbox_read_capability.state is unavailable (${reason}): ` +
+          "the participant's grant did not verify at its last protected call, so a tracked ball promising an " +
+          "answer is refused and opens no ball; messages already sent to it stay in the journal. A participant " +
+          "answers again once `hab participant mint` issues it a live token and it calls under that token (30968).",
+      }
+    }
     const shortReason = connectedOwner
       ? `mailbox unreadable (connected, no identity token; ${seen})`
       : `not online (${seen})`
@@ -3442,10 +3459,69 @@ type DurableMembershipSessionRow = MembershipSessionRow & {
  * and heartbeat while unable to read its own canonical inbox. A session reads by the identity token it registered with
  * (its recorded sid); without one it is unavailable (25074 3d-3: the launcher-minted bearer that also counted is gone).
  */
-function projectMailboxReadCapability(session: { readonly identity_sid: string | null }): MailboxReadCapability {
+function projectMailboxReadCapability(session: MailboxAuthorityRow): MailboxReadCapability {
+  // #30968 F4b: a participant reads its mailbox only while its grant does. Its row records the verifier's last
+  // verdict at every protected call; that verdict, not a connected socket, is what this projects (ruling 4).
+  if (session.principal_class === "participant") {
+    const grant = readParticipantGrant(session.participant_grant)
+    if (grant === null || session.identity_sid === null) {
+      return {
+        state: "unavailable",
+        evidence_kind: "observed",
+        reason: "participant-grant-unavailable",
+        ...(grant === null ? {} : { grant_checked_at: grant.checked_at }),
+      }
+    }
+    return grant.state === "active"
+      ? {
+          state: "available",
+          evidence_kind: "observed",
+          reason: "self-mailbox-authority-token",
+          grant_checked_at: grant.checked_at,
+        }
+      : {
+          state: "unavailable",
+          evidence_kind: "observed",
+          reason: `participant-grant-${grant.state}`,
+          grant_checked_at: grant.checked_at,
+        }
+  }
   return session.identity_sid !== null
     ? { state: "available", evidence_kind: "observed", reason: "self-mailbox-authority-token" }
     : { state: "unavailable", evidence_kind: "observed", reason: "self-mailbox-authority-missing" }
+}
+
+/** The columns a mailbox-read projection needs. Every reader selects all three, so a participant row is never read
+ *  as an ordinary token row because a query left its class out. */
+export type MailboxAuthorityRow = {
+  readonly identity_sid: string | null
+  readonly principal_class: string | null
+  readonly participant_grant: string | null
+}
+
+export type ParticipantGrantState = "active" | "revoked" | "expired" | "unavailable"
+export type ParticipantGrantRecord = {
+  readonly state: ParticipantGrantState
+  /** ISO time of the verdict this records. */
+  readonly checked_at: string
+  /** The grant's token expiry (epoch seconds), from the last verified verdict. */
+  readonly exp?: number
+  readonly reason?: string
+}
+
+/** Parse the `participant_grant` column (#30968 F4b); a value outside its shape is invalid state, said loudly. */
+export function readParticipantGrant(value: string | null): ParticipantGrantRecord | null {
+  if (value === null) return null
+  const parsed = JSON.parse(value) as Partial<ParticipantGrantRecord> | null
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    !["active", "revoked", "expired", "unavailable"].includes(parsed.state as string) ||
+    typeof parsed.checked_at !== "string"
+  ) {
+    throw new Error(`sessions.participant_grant holds a value outside its shape: ${value.slice(0, 200)}`)
+  }
+  return parsed as ParticipantGrantRecord
 }
 
 /** Shared by full diagnostics and the cheap status probe; callers supply current registrations only. */
@@ -3469,7 +3545,12 @@ export function projectMailboxReadIssues(
     if (session.identity_sid === undefined) {
       return [`mailbox read unavailable for ${session.name}: its connected registration has no stored authority record`]
     }
-    return projectMailboxReadCapability({ identity_sid: session.identity_sid }).state === "available"
+    // Only durable-launch rows reach here, and a participant row is never one (its lifetime is participant-grant).
+    return projectMailboxReadCapability({
+      identity_sid: session.identity_sid,
+      principal_class: null,
+      participant_grant: null,
+    }).state === "available"
       ? []
       : [
           `mailbox read unavailable for ${session.name}: no verified authority to read its inbox; ` +
@@ -4039,8 +4120,7 @@ export function projectSessionRowTransport(
     readonly name: string
     readonly updated_at: number
     readonly delivery: string
-    readonly identity_sid: string | null
-  },
+  } & MailboxAuthorityRow,
   activeIds: ReadonlySet<string>,
   activeInfo: readonly ActiveSessionInfo[],
   mailbox: {
@@ -4117,7 +4197,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       SELECT s.id, s.name, s.role, s.domains, s.pid, s.cwd,
         s.claude_session_id, s.claude_session_name, s.started_at, s.updated_at,
         s.account, s.provider, s.identity_sid, s.launch_id, s.launch_parent_pid, s.delivery,
-        s.adapter_exit_record
+        s.adapter_exit_record, s.principal_class, s.participant_grant
       FROM sessions s
       ORDER BY s.started_at, s.id
     `)
@@ -4139,6 +4219,8 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     launch_parent_pid: number | null
     delivery: "push" | "pull"
     adapter_exit_record: string | null
+    principal_class: string | null
+    participant_grant: string | null
   }>
 
   const observedAt = Date.now()
@@ -4600,6 +4682,8 @@ type HealthSessionRow = {
   started_at: number
   updated_at: number
   identity_sid: string | null
+  principal_class: string | null
+  participant_grant: string | null
   launch_id: string | null
   launch_parent_pid: number | null
   launch_parent_start_time: string | null
@@ -4739,12 +4823,14 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
     const lifetime = classifySessionRegistrationLifetime({
       launchId: session.launch_id,
       launchParentPid: session.launch_parent_pid,
+      principalClass: session.principal_class,
     })
     const row = {
       id: session.id,
       launch_id: session.launch_id,
       launch_parent_pid: session.launch_parent_pid,
       launch_parent_start_time: session.launch_parent_start_time,
+      principal_class: session.principal_class,
     }
     return { session, lifetime, verdict: classifyTransportRow(row, classifyCtx, now) }
   })
