@@ -1180,6 +1180,8 @@ export function evaluateWireHealthDocument(
     daemon?: { pid: number; uptime: number; clients: number }
     sessions?: unknown[]
     authority_issues?: unknown
+    /** 33946: registrations the daemon refused and no live transport has since taken over. */
+    registration_issues?: unknown
   } | null,
   error?: unknown,
   socketPath = resolveSocketPath(),
@@ -1244,6 +1246,50 @@ export function evaluateWireHealthDocument(
     uptime: result?.daemon?.uptime,
     clients: result?.daemon?.clients,
     sessions: Array.isArray(result?.sessions) ? result.sessions.length : 0,
+  }
+  // 33946: "a managed seat cannot register" is an unavailable rail, and it leaves no live session for the
+  // mailbox-authority arm to read. Absent (an older daemon) is not a measurement; present-but-malformed is.
+  const registrationIssues = result?.registration_issues
+  if (registrationIssues !== undefined) {
+    if (
+      !Array.isArray(registrationIssues) ||
+      !registrationIssues.every((issue): issue is string => typeof issue === "string" && issue.trim().length > 0)
+    ) {
+      return {
+        exitCode: 3,
+        document: {
+          schema: "hab-service-health/2",
+          service: "wire",
+          state: "unknown",
+          verdict: {
+            kind: "unknown",
+            reason: "unparsed",
+            observed:
+              "cli_status supplied a malformed registration_issues value; inspect the running daemon version",
+          },
+        },
+      }
+    }
+    if (registrationIssues.length > 0) {
+      return {
+        exitCode: 2,
+        document: {
+          schema: "hab-service-health/2",
+          service: "wire",
+          state: "unhealthy",
+          verdict: { kind: "running" },
+          facts,
+          error: {
+            code: "wire-registration-refused",
+            cause: registrationIssues.join("; "),
+            resolution: [
+              "Inspect the named seat's transport and the holder with: tribe members",
+              "Clear the holder (hh-hab up <seat> --relaunch) or wait for the refusal window to expire.",
+            ],
+          },
+        },
+      }
+    }
   }
   if (authorityIssues.length > 0) {
     return {
@@ -1311,6 +1357,8 @@ async function cmdHealth(opts?: { json?: boolean; full?: boolean }): Promise<voi
       content: Array<{ type: string; text: string }>
       sessions?: Array<{ name: string; role: string; pid: number; cwd?: string; uptimeMs: number; idleMs: number }>
       daemon: { pid: number; uptime: number; clients: number }
+      authority_issues?: unknown
+      registration_issues?: unknown
     }
     try {
       try {
