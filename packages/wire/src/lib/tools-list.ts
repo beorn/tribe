@@ -11,7 +11,12 @@
  * is not listed: it stays a daemon verb the adapter answers by name.
  */
 
-import { TRIBE_COMMAND_DESCRIPTORS, type TribeMcpTool } from "../command-descriptors.ts"
+import {
+  TRIBE_COMMAND_DESCRIPTORS,
+  type TribeCommandDescriptor,
+  type TribeMcpTool,
+  type TribeMcpToolAnnotations,
+} from "../command-descriptors.ts"
 import { DEFAULT_TRIBE_DELIVERY_CAPABILITY, type TribeDeliveryCapability } from "./delivery.ts"
 
 /** MCP verbs the installed CLI covers instead of tools/list: MCP name → CLI spelling. */
@@ -39,12 +44,19 @@ function projectMcpTool(tool: TribeMcpTool, capability: TribeDeliveryCapability)
   }
 }
 
+/** The MCP hints a host reads before approving a call, from the descriptor's one `effect` (37291). */
+function annotationsFor(effect: TribeCommandDescriptor["effect"]): TribeMcpToolAnnotations {
+  if (effect === "read") return { readOnlyHint: true }
+  return { readOnlyHint: false, destructiveHint: effect === "destructive" }
+}
+
 export function toolListForDeliveryCapability(
   capability: TribeDeliveryCapability = DEFAULT_TRIBE_DELIVERY_CAPABILITY,
 ): TribeMcpTool[] {
-  return TRIBE_COMMAND_DESCRIPTORS.filter((descriptor) => descriptor.mcpList === "listed").map((descriptor) =>
-    projectMcpTool(descriptor.mcp, capability),
-  )
+  return TRIBE_COMMAND_DESCRIPTORS.filter((descriptor) => descriptor.mcpList === "listed").map((descriptor) => ({
+    ...projectMcpTool(descriptor.mcp, capability),
+    annotations: annotationsFor(descriptor.effect),
+  }))
 }
 
 export const TOOLS_LIST = toolListForDeliveryCapability()

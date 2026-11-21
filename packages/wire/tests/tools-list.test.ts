@@ -100,3 +100,37 @@ describe("tribe MCP tools list", () => {
     for (const [name, bytes] of Object.entries(sizes)) expect(bytes, name).toBeLessThanOrEqual(4_000)
   })
 })
+
+/**
+ * 37291: Codex under approval_policy on-request treats an MCP tool with no readOnlyHint as an approval candidate, so a
+ * hosted seat's first Tribe health/members call waited on an approval nobody answered. The hints come from each
+ * descriptor's one `effect` declaration (@cto c66fa3b7).
+ */
+describe("37291 tribe MCP tool annotations", () => {
+  const listed = (name: string) => {
+    const tool = toolListForDeliveryCapability(resolveDeliveryCapability({ delivery: "pull", channel: false, pullTransport: "mcp" })).find(
+      (one) => one.name === name,
+    )
+    expect(tool, `${name} is listed`).toBeTruthy()
+    return tool?.annotations
+  }
+
+  it.each(["fetch", "health", "members", "lifecycle", "debug", "inbox.wait"])("%s is read-only", (name) => {
+    expect(listed(name)).toEqual({ readOnlyHint: true })
+  })
+
+  it.each(["send", "join", "rename", "filter", "pending", "health.publish", "lifecycle.publish"])(
+    "%s writes without destroying",
+    (name) => {
+      expect(listed(name)).toEqual({ readOnlyHint: false, destructiveHint: false })
+    },
+  )
+
+  it("restart is destructive", () => {
+    expect(listed("restart")).toEqual({ readOnlyHint: false, destructiveHint: true })
+  })
+
+  it("every listed tool carries annotations", () => {
+    for (const tool of TOOLS_LIST) expect(tool.annotations, tool.name).toBeDefined()
+  })
+})
