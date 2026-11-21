@@ -2062,8 +2062,11 @@ export function withDispatcher<
       // dispatcher re-enters (#30968 peer read f9d8f3a9). The inner dispatcher call re-verifies a protected method.
       if (method === "tools/call") {
         const inner = typeof p.name === "string" ? p.name : ""
-        if (inner === "tools/call" || !PARTICIPANT_PERMITTED_METHODS.has(inner)) return refuseRight(inner || "tools/call")
-        const args = typeof p.arguments === "object" && p.arguments !== null ? (p.arguments as Record<string, unknown>) : {}
+        if (inner === "tools/call" || !PARTICIPANT_PERMITTED_METHODS.has(inner)) {
+          return refuseRight(inner || "tools/call")
+        }
+        const args =
+          typeof p.arguments === "object" && p.arguments !== null ? (p.arguments as Record<string, unknown>) : {}
         const refusedInner = participantRightRefusal(inner, args)
         return refusedInner === null ? null : refuseRight(refusedInner)
       }
@@ -2080,7 +2083,6 @@ export function withDispatcher<
       if (refused !== null) return refuseRight(refused)
       if (!PARTICIPANT_PROTECTED_METHODS.has(method)) return null
       return reverifyParticipant(client, method, id)
-
     }
 
     function holderIdentity(sessionId: string): {
