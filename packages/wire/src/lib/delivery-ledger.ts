@@ -66,6 +66,22 @@ export type DeliveryLedgerCoverage = {
   gapReason: DeliveryGapReason
 }
 
+/**
+ * #37430 - one FAILED hosted wake, kept so an operator can see why a pushed row
+ * never started a turn. The adapter already names the failure on stderr, but a
+ * hosted seat's MCP launch configures no reader for that pipe (no LOG_FILE, no
+ * DEBUG_LOG, and no session log catches it), so stderr alone is a silent drop.
+ * This is the durable half: ids and causes only, never a message body.
+ */
+export type DeliveryWakeFailure = {
+  readonly rowId: string
+  readonly cause: string
+  readonly atMs: number
+}
+
+/** Bounded: the ledger is a diagnostic, not a log. The newest failures win. */
+export const DELIVERY_WAKE_FAILURE_CAP = 5
+
 export type DeliveryLedgerState = {
   version: typeof DELIVERY_LEDGER_VERSION
   pane: string
@@ -89,6 +105,11 @@ export type DeliveryLedgerState = {
    * instead of pretending the partial total is the window's.
    */
   costSinceMs?: number | null
+  /**
+   * #37430 - newest-first failed hosted wakes in this window. Optional so a v2
+   * file written before this field still reads as a complete window, not a gap.
+   */
+  wakeFailures?: DeliveryWakeFailure[]
   coverage: DeliveryLedgerCoverage
 }
 
@@ -231,6 +252,43 @@ function isCost(value: unknown): boolean {
 }
 
 /**
+ * #37430 - a lenient read of the failed-wake list. The field is optional (an
+ * older v2 file has none), and a malformed ENTRY is dropped rather than making
+ * the whole window a schema gap: these rows are diagnostics, and losing one
+ * costs a name, never a delivery count.
+ */
+function parseWakeFailures(value: unknown): DeliveryWakeFailure[] {
+  if (!Array.isArray(value)) return []
+  const failures: DeliveryWakeFailure[] = []
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue
+    const candidate = entry as Record<string, unknown>
+    if (typeof candidate.rowId !== "string" || candidate.rowId.trim() === "") continue
+    if (typeof candidate.cause !== "string") continue
+    if (typeof candidate.atMs !== "number" || !isRepresentableTime(candidate.atMs)) continue
+    failures.push({ rowId: candidate.rowId, cause: candidate.cause, atMs: candidate.atMs })
+    if (failures.length >= DELIVERY_WAKE_FAILURE_CAP) break
+  }
+  return failures
+}
+
+/**
+ * #37430 - append one failed hosted wake, newest first and capped. The caller
+ * persists the returned state through the same atomic save as the counters, so
+ * a failure and the window it belongs to are one write.
+ */
+export function recordDeliveryWakeFailure(
+  state: DeliveryLedgerState,
+  failure: DeliveryWakeFailure,
+): DeliveryLedgerState {
+  const next: DeliveryWakeFailure[] = [
+    { rowId: failure.rowId, cause: failure.cause, atMs: failure.atMs },
+    ...(state.wakeFailures ?? []),
+  ]
+  return { ...state, wakeFailures: next.slice(0, DELIVERY_WAKE_FAILURE_CAP) }
+}
+
+/**
  * A Date-representable epoch-ms value: finite, and inside the ECMAScript
  * TimeClip range (|t| <= 8.64e15) so `new Date(t).toISOString()` cannot throw.
  * JSON admits 1e400 as Infinity and huge finite numbers whose ISO formatting
@@ -305,6 +363,7 @@ export function loadDeliveryLedger(path: string): DeliveryLedgerLoad {
         counters: parsed.counters as DeliveryCounters,
         pendingBallSummary: parsePendingBallSummary(parsed.pendingBallSummary),
         costSinceMs: typeof parsed.costSinceMs === "number" ? parsed.costSinceMs : null,
+        wakeFailures: parseWakeFailures((parsed as { wakeFailures?: unknown }).wakeFailures),
         coverage: { restarts, gap, gapReason },
       },
       coverage: { restarts, gap, gapReason },
@@ -382,6 +441,10 @@ export function openDeliveryLedgerWindow(input: {
       // The summary throttle is orthogonal to the 4h counter window: carry its
       // fingerprint across a roll so a roll does not re-present an unchanged line.
       pendingBallSummary: existing.pendingBallSummary,
+      // #37430 - a failed wake is evidence for the NEXT window too: the row is
+      // still unread, so dropping the record at the 4h roll would hide exactly
+      // the case an operator is chasing.
+      wakeFailures: existing.wakeFailures ?? [],
       costSinceMs: null,
       coverage: { restarts: 0, gap: false, gapReason: "none" },
     }
@@ -394,6 +457,7 @@ export function openDeliveryLedgerWindow(input: {
     ids: [],
     counters: zeroCounters(),
     pendingBallSummary: null,
+    wakeFailures: [],
     costSinceMs: null,
     coverage: { restarts: 0, gap: coverage.gap, gapReason: coverage.gapReason },
   }

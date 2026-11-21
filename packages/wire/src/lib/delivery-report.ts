@@ -22,6 +22,7 @@ import {
   type DeliveryGapReason,
   type DeliveryLedgerCoverage,
   type DeliveryLedgerState,
+  type DeliveryWakeFailure,
 } from "./delivery-ledger.ts"
 
 /** @cto 9a077460 - strictly above this duplicateDelivery rate, with enough volume. */
@@ -80,6 +81,11 @@ export type SeatDeliveryReport = {
    * (a v1 file), never a silent zero.
    */
   cost: SeatDeliveryCost | null
+  /**
+   * #37430 - newest-first failed hosted wakes recorded by this pane, so the
+   * report can name WHY a pushed row never started a turn. Empty when none.
+   */
+  wakeFailures: DeliveryWakeFailure[]
 }
 
 export type SeatDeliveryCost = {
@@ -195,6 +201,7 @@ export function buildSeatDeliveryReport(state: DeliveryLedgerState, now: number)
     alertInconclusive: incomplete,
     pageEdges: null,
     cost: buildSeatCost(counters, state.costSinceMs ?? state.windowStartMs, state.updatedAtMs),
+    wakeFailures: state.wakeFailures ?? [],
   }
 }
 
@@ -334,6 +341,14 @@ export function formatFleetDeliveryReport(report: FleetDeliveryReport): string {
         `  ${seat.pane}  ${seat.deliveries} delivered (${seat.newDeliveries} new, ${seat.duplicateDeliveries} duplicate, ${rate}) - ${formatBytes(seat.duplicateBytes)} duplicate bytes - ${seat.suppressed} suppressed - restarts ${seat.coverage.restarts} - window ${window}${flags.length > 0 ? `  [${flags.join(" ")}]` : ""}`,
       )
       lines.push(`      ${formatSeatCost(seat.cost, seat.windowStartMs)}`)
+      const [newestWakeFailure] = seat.wakeFailures
+      if (newestWakeFailure !== undefined) {
+        // #37430 - NO SILENT ERRORS: a hosted wake that failed leaves this line,
+        // named by row id and cause, in the surface an operator already reads.
+        lines.push(
+          `      failed hosted wakes: ${seat.wakeFailures.length}; newest ${newestWakeFailure.rowId} at ${new Date(newestWakeFailure.atMs).toISOString()}: ${newestWakeFailure.cause}`,
+        )
+      }
     }
     if (report.seats.some((seat) => seat.cost !== null)) {
       lines.push(

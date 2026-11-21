@@ -9,7 +9,7 @@ import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeError, makeNotification, makeResponse } from "../src/rpc.ts"
 import { MAX_REPLAY_EVENTS } from "../src/lib/replay-cap.ts"
 import { NOTIFICATION_ONLY_MARKER } from "../src/lib/notification-only.ts"
-import { loadDeliveryLedger } from "../src/lib/delivery-ledger.ts"
+import { deliveryLedgerPath, loadDeliveryLedger } from "../src/lib/delivery-ledger.ts"
 import { buildFleetDeliveryReport } from "../src/lib/delivery-report.ts"
 import { launchEnvironment } from "./launch-token.ts"
 
@@ -608,6 +608,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
           ...launchEnvironment(""),
           TRIBE_DELIVERY: "push",
           TRIBE_NO_AUTOSTART: "1",
+          TRIBE_DELIVERY_LEDGER_DIR: join(tmpDir, "kpi"),
           TRIBE_HOSTED_WAKE_ARGV: JSON.stringify([BUN_BIN, wakeScript, capture, mode]),
         },
         stdio: ["pipe", "pipe", "pipe"],
@@ -639,6 +640,22 @@ setTimeout(() => process.exit(0), 35000);\n`,
       })
       expect(stderr().match(new RegExp(`message ${id} failed:`, "g"))).toHaveLength(1)
       expect(stderr()).toContain(mode === "timeout" ? "signal SIGKILL, timeout 30000ms" : "EXPECTED_WAKE_REFUSAL")
+      // #37430 - the stderr line above has no reader in a hosted launch; the same
+      // failure must survive the pane in the ledger the delivery report reads.
+      const ledgerPath = deliveryLedgerPath({
+        pane: "@agent/test",
+        env: { TRIBE_DELIVERY_LEDGER_DIR: join(tmpDir, "kpi") },
+      })
+      expect(ledgerPath).not.toBeNull()
+      await waitForCondition(
+        () => (ledgerPath === null ? false : (loadDeliveryLedger(ledgerPath).state?.wakeFailures?.length ?? 0) > 0),
+        "hosted wake failure recorded in the delivery ledger",
+        { timeoutMs: 5_000 },
+      )
+      const recordedWakeFailure =
+        ledgerPath === null ? undefined : loadDeliveryLedger(ledgerPath).state?.wakeFailures?.[0]
+      expect(recordedWakeFailure).toMatchObject({ rowId: id })
+      if (mode === "failure") expect(recordedWakeFailure?.cause).toContain("EXPECTED_WAKE_REFUSAL")
       expect(readFileSync(capture, "utf8").trim().split("\n")).toHaveLength(1)
       expect(
         daemon.requests
