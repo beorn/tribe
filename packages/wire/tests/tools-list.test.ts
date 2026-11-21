@@ -108,9 +108,9 @@ describe("tribe MCP tools list", () => {
  */
 describe("37291 tribe MCP tool annotations", () => {
   const listed = (name: string) => {
-    const tool = toolListForDeliveryCapability(resolveDeliveryCapability({ delivery: "pull", channel: false, pullTransport: "mcp" })).find(
-      (one) => one.name === name,
-    )
+    const tool = toolListForDeliveryCapability(
+      resolveDeliveryCapability({ delivery: "pull", channel: false, pullTransport: "mcp" }),
+    ).find((one) => one.name === name)
     expect(tool, `${name} is listed`).toBeTruthy()
     return tool?.annotations
   }
