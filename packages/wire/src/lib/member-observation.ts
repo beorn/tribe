@@ -2,7 +2,18 @@
 export type MailboxReadCapability = {
   state: "available" | "unavailable"
   evidence_kind: "observed"
-  reason: "self-mailbox-authority-token" | "self-mailbox-authority-missing"
+  /**
+   * #30968 F4b: a participant row reads available on `self-mailbox-authority-token` while its grant's last verdict is
+   * active, and unavailable under the participant reason the verifier's last verdict names.
+   */
+  reason:
+    | "self-mailbox-authority-token"
+    | "self-mailbox-authority-missing"
+    | "participant-grant-revoked"
+    | "participant-grant-expired"
+    | "participant-grant-unavailable"
+  /** Participant rows only: when that verdict was recorded (ISO). It is as fresh as the participant's last call. */
+  grant_checked_at?: string
 }
 
 export type MailboxProgress =
@@ -135,8 +146,15 @@ export function parseMembersObservation(value: unknown): MembersObservation {
       capability.evidence_kind !== "observed" ||
       !(
         (capability.state === "available" && capability.reason === "self-mailbox-authority-token") ||
-        (capability.state === "unavailable" && capability.reason === "self-mailbox-authority-missing")
-      )
+        (capability.state === "unavailable" &&
+          [
+            "self-mailbox-authority-missing",
+            "participant-grant-revoked",
+            "participant-grant-expired",
+            "participant-grant-unavailable",
+          ].includes(capability.reason as string))
+      ) ||
+      (capability.grant_checked_at !== undefined && typeof capability.grant_checked_at !== "string")
     ) {
       invalid(`${field}.mailbox_read_capability`)
     }

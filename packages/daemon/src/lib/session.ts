@@ -77,12 +77,22 @@ function listSessionNames(ctx: TribeContext, isActive?: (sessionId: string) => b
     .sort()
 }
 
-export type SessionRegistrationLifetime = "connection-scoped" | "durable-launch" | "malformed-launch-identity"
+export type SessionRegistrationLifetime =
+  | "connection-scoped"
+  | "durable-launch"
+  | "malformed-launch-identity"
+  | "participant-grant"
 
+/**
+ * #30968 ruling 3 / F3: a participant row's lifetime is its grant (`participant-grant`), read from the class its
+ * verified token recorded, never from a launch parent pid — the row carries `<sid>@<gen>` with a NULL parent.
+ */
 export function classifySessionRegistrationLifetime(input: {
   launchId: string | null
   launchParentPid: number | null
+  principalClass?: string | null
 }): SessionRegistrationLifetime {
+  if (input.principalClass === "participant") return "participant-grant"
   const hasLaunchId = typeof input.launchId === "string" && input.launchId.trim().length > 0
   const hasLaunchParentPid =
     typeof input.launchParentPid === "number" &&
@@ -156,6 +166,8 @@ export type TransportRowClassifyInput = {
   readonly launch_id: string | null
   readonly launch_parent_pid: number | null
   readonly launch_parent_start_time: string | null
+  /** The row's principal class; a participant's lifetime is its grant (#30968). Omitted reads as agent/service. */
+  readonly principal_class?: string | null
 }
 
 export type TransportRowClassifyContext = {
@@ -185,7 +197,16 @@ export function classifyTransportRow(
   const lifetime = classifySessionRegistrationLifetime({
     launchId: row.launch_id,
     launchParentPid: row.launch_parent_pid,
+    principalClass: row.principal_class ?? null,
   })
+  // #30968 slice A: a participant-grant row without a transport is reaped like a connection-scoped row once the
+  // reconnect grace lapses. Retaining it without a transport, until the verifier says the grant ended, is slice B.
+  if (lifetime === "participant-grant") {
+    if (ctx.isReconnectGraceProtected(row.id, nowMs)) {
+      return { disposition: "keep", reason: "reconnect_grace", owner: null }
+    }
+    return { disposition: "reap", reason: "connection_scoped", owner: null }
+  }
   const superseded =
     typeof row.launch_id === "string" &&
     row.launch_id.length > 0 &&
@@ -292,13 +313,13 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
     scoped === undefined
       ? null
       : db.prepare(
-          "SELECT id, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time FROM sessions WHERE id = $id",
+          "SELECT id, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time, principal_class FROM sessions WHERE id = $id",
         )
   const rows = (
     selectScopedRow === null
       ? db
           .prepare(
-            "SELECT id, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time FROM sessions ORDER BY id",
+            "SELECT id, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time, principal_class FROM sessions ORDER BY id",
           )
           .all()
       : [...(scoped as ReadonlySet<string>)].flatMap((sessionId) => selectScopedRow.all({ $id: sessionId }))
@@ -310,6 +331,7 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
     launch_id: string | null
     launch_parent_pid: number | null
     launch_parent_start_time: string | null
+    principal_class: string | null
   }>
   const reasonCounts: StaleTransportReapReasonCounts = {
     active_transport: 0,
@@ -351,7 +373,7 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
     return verdict
   }
   const getCurrent = db.prepare(
-    "SELECT id, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time FROM sessions WHERE id = $id LIMIT 1",
+    "SELECT id, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time, principal_class FROM sessions WHERE id = $id LIMIT 1",
   )
   const readCurrent = (memberId: string): ReapableRow | null =>
     (getCurrent.get({ $id: memberId }) as ReapableRow | null) ?? null

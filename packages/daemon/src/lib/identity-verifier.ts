@@ -52,9 +52,15 @@ export type IdentityVerdict = (
   | {
       readonly result: "verified"
       readonly actor: string
-      readonly kind?: "service"
+      /**
+       * #30968 slice A: a `participant` is a declared outside principal holding a Hab grant (ruling 3). Its verdict
+       * also carries `exp`, the token's expiry in epoch seconds, which the daemon re-checks at every protected call.
+       */
+      readonly kind?: "service" | "participant"
       readonly sid: string
       readonly gen?: number
+      /** Epoch seconds; present exactly when `kind` is `participant` (agent and service tokens carry none). */
+      readonly exp?: number
       readonly habitatRoot?: string
       /** Optional observed Ag process incarnation. Both fields must be present together. */
       readonly observedAgPid?: number
@@ -70,7 +76,12 @@ export type IdentityVerdict = (
   | { readonly result: "undecided"; readonly reason: string }
 ) & { readonly diagnostic?: IdentityDiagnostic }
 
-export type IdentityVerifier = (token: string) => Promise<IdentityVerdict>
+/**
+ * `fresh` (#30968 ruling 4) asks for a verdict probed now, never one served from the bounded verifier's cache: a
+ * participant's protected call re-verifies its token at the operation boundary, so a revoke lands on the next call.
+ */
+export type IdentityVerifyOptions = { readonly fresh?: boolean }
+export type IdentityVerifier = (token: string, options?: IdentityVerifyOptions) => Promise<IdentityVerdict>
 
 export type IncidentOperation = "read" | "raise" | "clear"
 export type IncidentPolicy = {
@@ -266,8 +277,8 @@ export function boundedIdentityVerifier(
     path: loaded.path,
     suppliesGen: loaded.suppliesGen,
     ...(loaded.readIncidentPolicy === undefined ? {} : { readIncidentPolicy: loaded.readIncidentPolicy }),
-    verify: async (token: string): Promise<IdentityVerdict> => {
-      const cached = fresh(token)
+    verify: async (token: string, verifyOptions?: IdentityVerifyOptions): Promise<IdentityVerdict> => {
+      const cached = verifyOptions?.fresh === true ? undefined : fresh(token)
       if (cached !== undefined) return cached
       const pending = probe(token)
       // Retain this call's existing probe metadata even if completion removes the map entry.
@@ -682,8 +693,19 @@ function checkedVerdict(value: unknown, path: string): IdentityVerdict {
   switch (verdict?.result) {
     case "verified":
       if (nonEmpty(verdict.actor) && nonEmpty(verdict.sid)) {
-        if (verdict.kind !== undefined && verdict.kind !== "service") break
-        const kind = verdict.kind === "service" ? { kind: "service" as const } : {}
+        if (verdict.kind !== undefined && verdict.kind !== "service" && verdict.kind !== "participant") break
+        // #30968: a participant verdict carries its token's expiry; no other kind does.
+        if (verdict.kind === "participant") {
+          if (typeof verdict.exp !== "number" || !Number.isSafeInteger(verdict.exp) || verdict.exp <= 0) break
+        } else if (verdict.exp !== undefined) {
+          break
+        }
+        const kind =
+          verdict.kind === "service"
+            ? { kind: "service" as const }
+            : verdict.kind === "participant"
+              ? { kind: "participant" as const, exp: verdict.exp as number }
+              : {}
         if (verdict.habitatRoot !== undefined && !nonEmpty(verdict.habitatRoot)) break
         const habitat = verdict.habitatRoot === undefined ? {} : { habitatRoot: verdict.habitatRoot }
         const hasPid = verdict.observedAgPid !== undefined
