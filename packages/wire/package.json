@@ -67,6 +67,7 @@
     "./lib/inbox-wait-errors": "./src/lib/inbox-wait-errors.ts",
     "./lib/inbox-wait-gap": "./src/lib/inbox-wait-gap.ts",
     "./lib/delivery-report": "./src/lib/delivery-report.ts",
+    "./lib/delivery-ledger": "./src/lib/delivery-ledger.ts",
     "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {
@@ -210,6 +211,10 @@
         "types": "./dist/lib/inbox-wait-gap.d.mts",
         "import": "./dist/lib/inbox-wait-gap.mjs"
       },
+      "./lib/delivery-ledger": {
+        "types": "./dist/lib/delivery-ledger.d.mts",
+        "import": "./dist/lib/delivery-ledger.mjs"
+      },
       "./lib/delivery-report": {
         "types": "./dist/lib/delivery-report.d.mts",
         "import": "./dist/lib/delivery-report.mjs"
@@ -276,6 +281,7 @@
       "src/lib/daemon-environment.ts",
       "src/lib/inbox-wait-errors.ts",
       "src/lib/inbox-wait-gap.ts",
+      "src/lib/delivery-ledger.ts",
       "src/lib/delivery-report.ts",
       "src/http-adapter.ts"
     ],
