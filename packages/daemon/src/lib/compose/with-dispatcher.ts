@@ -73,12 +73,15 @@ import {
   projectMailboxReadIssues,
   projectSessionRowTransport,
   readAttentionProjection,
+  readParticipantGrant,
   readUnackedAttentionRows,
   removedTribeMethodMessage,
   TRIBE_COORD_METHODS,
   readSeatTransportFacts,
   resolveRuntimeJoinIdentity,
   type HandlerOpts,
+  type ParticipantGrantRecord,
+  type ParticipantGrantState,
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import { readActionableLagRows } from "../health-cadence.ts"
@@ -264,10 +267,7 @@ export function withDispatcher<
     // check to read, so the incident's "unavailable managed registration" state had no carrier at all.
     // Cleared by that name's next successful register; expired by TTL so a one-off refusal cannot hold the
     // rail red for ever.
-    const registrationRefusals = new Map<
-      string,
-      { kind: string; at: number; pid: number; launchId: string | null }
-    >()
+    const registrationRefusals = new Map<string, { kind: string; at: number; pid: number; launchId: string | null }>()
     const REGISTRATION_REFUSAL_TTL_MS = 10 * 60_000
     const noteRegistrationRefusal = (
       name: string,
@@ -701,7 +701,7 @@ export function withDispatcher<
     type LaunchAuthorityRow = {
       id: string
       name: string
-      principal_class: "agent" | "service"
+      principal_class: "agent" | "service" | "participant"
       launch_id: string | null
       launch_parent_pid: number | null
     }
@@ -714,6 +714,9 @@ export function withDispatcher<
     function hasLaunchAuthority(session: LaunchAuthorityRow): boolean {
       if (isTombstonedSessionName(session.name)) return false
       if (session.principal_class === "agent") return true
+      // #30968 F2: a participant's authority is its verified grant, re-checked at every protected operation
+      // (participantOperationGate), never its transport; a one-shot participant is refused before it reaches here.
+      if (session.principal_class === "participant") return true
       if (session.principal_class !== "service") throw new Error(`invalid principal class for ${session.name}`)
       if (!registry.hasActiveTransport(session.id)) return false
       return Array.from(clients.values()).some(
@@ -832,11 +835,25 @@ export function withDispatcher<
             ),
           )
         case "verified":
+          // #30968 slice A (@cto 7e926481): a participant operates through its registered persistent transport only.
+          // A one-shot call (sessionless send, CLI fetch/inbox/pending by token) is refused by name, never half-run.
+          if (verdict.kind === "participant") return refuse(participantOneShotRefusal(verdict.actor))
           return { verdict }
         default: {
           const unreachable: never = verdict
           throw new Error(`identity verifier returned an unknown verdict ${JSON.stringify(unreachable)}`)
         }
+      }
+    }
+
+    function participantOneShotRefusal(actor: string): Extract<SessionAuthorityResolution, { errorCode: number }> {
+      return {
+        errorCode: -32003,
+        errorMessage:
+          `current session authority was refused: ${actor} is a participant, and one-shot participants arrive in ` +
+          "#30968 slice B; until then a participant operates only through its registered persistent transport " +
+          `(the tribe stdio adapter with ${HAB_ID_TOKEN_ENV}_FILE)`,
+        errorData: { kind: "unauthenticated", reason: "participant-one-shot-unsupported" },
       }
     }
 
@@ -1054,6 +1071,8 @@ export function withDispatcher<
             delivery: string
             mailbox_authority_hash: string | null
             identity_sid: string | null
+            principal_class: "agent" | "service" | "participant"
+            participant_grant: string | null
           }
         }
       | { errorCode: number; errorMessage: string; errorData?: Record<string, unknown> }
@@ -1191,6 +1210,7 @@ export function withDispatcher<
           delivery: string
           mailbox_authority_hash: string | null
           identity_sid: string | null
+          participant_grant: string | null
         }
       >
       const routableLaunchSessions = launchSessions.filter(hasLaunchAuthority)
@@ -1252,6 +1272,8 @@ export function withDispatcher<
           delivery: launchSession.delivery,
           mailbox_authority_hash: launchSession.mailbox_authority_hash,
           identity_sid: launchSession.identity_sid,
+          principal_class: launchSession.principal_class,
+          participant_grant: launchSession.participant_grant,
         },
       }
     }
@@ -1545,6 +1567,10 @@ export function withDispatcher<
           readonly gen: number | null
           /** The verified persona; present exactly when `sid` is, and equal to the register's requested name. */
           readonly actor?: string
+          /** #30968: the verified principal kind; absent for an agent. */
+          readonly kind?: "service" | "participant"
+          /** #30968: a participant token's expiry, epoch seconds. */
+          readonly exp?: number
           readonly habitatRoot?: string
           readonly observedAgPid?: number
           readonly observedAgStartTime?: string
@@ -1590,6 +1616,8 @@ export function withDispatcher<
               sid: verdict.sid,
               gen: verdict.gen ?? null,
               actor: verdict.actor,
+              ...(verdict.kind === undefined ? {} : { kind: verdict.kind }),
+              ...(verdict.exp === undefined ? {} : { exp: verdict.exp }),
               ...(verdict.habitatRoot === undefined ? {} : { habitatRoot: verdict.habitatRoot }),
               ...(verdict.observedAgPid === undefined
                 ? {}
@@ -1632,6 +1660,472 @@ export function withDispatcher<
             },
           }
       }
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // #30968 slice A — participant principals (plan r2.1, rulings 3-5; @cto 7e926481).
+    //
+    // A participant is a declared outside principal whose Hab grant the injected verifier judges. It registers over a
+    // persistent transport (the beorn-mac stdio adapter over SSH); its row is keyed `<sid>@<gen>` with no launch parent
+    // (F3), selected by (sid, gen, actor), and every protected call it makes re-verifies the token its transport
+    // registered with (ruling 4). Its row records the verifier's last verdict (F4b), which the mailbox-read
+    // capability projects.
+    // ---------------------------------------------------------------------------------------------------------------
+
+    type ParticipantRegisterFields = {
+      readonly delivery: "push" | "pull"
+      readonly filterMode: SessionFilterMode | undefined
+      readonly claudeSessionId: string | null
+      readonly claudeSessionName: string | null
+      readonly identityToken: string | null
+      readonly adapterExitRecord: string | null
+      readonly negotiatedProtocolVersion: number | null
+    }
+
+    /** Write the participant row's last verifier verdict (F4b); `exp` carries forward from the last verified one. */
+    function recordParticipantGrant(
+      sessionId: string,
+      state: ParticipantGrantState,
+      detail: { readonly exp?: number; readonly reason?: string } = {},
+    ): void {
+      const prior = db.prepare("SELECT participant_grant FROM sessions WHERE id = ?").get(sessionId) as {
+        participant_grant: string | null
+      } | null
+      const exp = detail.exp ?? readParticipantGrant(prior?.participant_grant ?? null)?.exp
+      const record: ParticipantGrantRecord = {
+        state,
+        checked_at: new Date().toISOString(),
+        ...(exp === undefined ? {} : { exp }),
+        ...(detail.reason === undefined ? {} : { reason: detail.reason }),
+      }
+      db.prepare("UPDATE sessions SET participant_grant = ? WHERE id = ?").run(JSON.stringify(record), sessionId)
+    }
+
+    function registerParticipant(
+      id: number | string,
+      connId: string,
+      p: Record<string, unknown>,
+      identity: {
+        readonly sid: string | null
+        readonly gen: number | null
+        readonly actor?: string
+        readonly exp?: number
+        readonly habitatRoot?: string
+      },
+      fields: ParticipantRegisterFields,
+    ): string {
+      const presented = typeof p.name === "string" ? p.name : "(no name)"
+      const clientPid = Number(p.pid ?? 0)
+      const refuse = (kind: string, message: string, extra: Record<string, unknown> = {}, target?: string): string => {
+        log.warn?.(message)
+        return refuseRegister(
+          id,
+          presented,
+          { message, data: { kind, claimed: presented, ...extra } },
+          { target, launch_id: provenInstanceId(identity.sid, identity.gen), pid: clientPid },
+        )
+      }
+      const { sid, gen, actor, exp } = identity
+      // verifyRegistrationIdentity proved actor === the requested name; the contract proved exp for this kind.
+      if (sid === null || actor === undefined || exp === undefined) {
+        throw new Error(`participant verdict for ${presented} reached registration without sid, actor or exp`)
+      }
+      const instance = proveInstanceId(sid, gen)
+      if ("defect" in instance || gen === null) {
+        return refuse(
+          "identity-verdict-without-gen",
+          `register refused: ${actor}'s participant token verified, but the verdict proves no usable instance — ` +
+            ("defect" in instance ? instance.defect : "it carries no gen"),
+        )
+      }
+      const launchId = instance.launch_id
+      // F3: sessions.pid stays NOT NULL; the registering caller's pid is recorded as information only.
+      if (!Number.isSafeInteger(clientPid) || clientPid <= 0) {
+        return makeError(id, -32602, "a participant register requires its own positive integer pid")
+      }
+      if (exp * 1000 <= Date.now()) {
+        return refuse(
+          "participant-grant-expired",
+          `register refused: ${actor}'s participant token expired at ${new Date(exp * 1000).toISOString()}; ` +
+            "mint a fresh one with hab participant mint",
+          { reason: "participant-grant-expired" },
+        )
+      }
+      // F6: the name names one principal for good, and one grant names one name. A row of this name under another
+      // sid, or a row of this sid under another name, is a different principal: refused, the row untouched.
+      const rows = db
+        .prepare(
+          "SELECT id, name, principal_class, identity_sid, identity_gen FROM sessions WHERE name = ? OR identity_sid = ?",
+        )
+        .all(actor, sid) as Array<{
+        id: string
+        name: string
+        principal_class: string
+        identity_sid: string | null
+        identity_gen: number | null
+      }>
+      const foreign = rows.find(
+        (row) =>
+          (row.name === actor && (row.identity_sid !== sid || row.principal_class !== "participant")) ||
+          (row.name !== actor && row.identity_sid === sid),
+      )
+      if (foreign !== undefined) {
+        return refuse(
+          "participant-principal-conflict",
+          foreign.name === actor
+            ? `register refused: ${actor} is held by another principal (session ${foreign.id}, ` +
+                `${foreign.identity_sid === null ? "claimed" : `sid ${foreign.identity_sid}`}, ${foreign.principal_class}); ` +
+                "a participant never takes over a name another principal holds, and its row is untouched"
+            : `register refused: ${actor}'s grant ${sid} is already registered as ${foreign.name}; ` +
+                "one grant names one participant, and that row is untouched",
+          { reason: "participant-principal-conflict", holder: foreign.name },
+          foreign.id,
+        )
+      }
+      const row = rows.find((candidate) => candidate.name === actor)
+      const heldGen = row?.identity_gen ?? null
+      if (row !== undefined && heldGen !== null && gen < heldGen) {
+        return refuse(
+          "foreign-identity-transport",
+          `register refused: ${actor} generation ${gen} is older than its registered generation ${heldGen}; ` +
+            "a replaced participant token never displaces its successor",
+          {
+            reason: "identity-generation-stale",
+            transport: { name: actor, gen },
+            holder: { name: actor, gen: heldGen },
+          },
+          row.id,
+        )
+      }
+      const superseding = row !== undefined && heldGen !== null && gen > heldGen
+      const liveHolders = Array.from(clients.values()).filter(
+        (client) => client.id !== connId && client.name === actor && client.role !== "pending",
+      )
+      if (superseding) {
+        // A higher generation of the same grant supersedes the lower one: its transports are retired, the row and
+        // mailbox stay the same principal's.
+        for (const holder of liveHolders) {
+          logEvent(holder.ctx, "session.superseded", undefined, {
+            name: actor,
+            old_pid: holder.pid,
+            new_pid: clientPid,
+            reason: `participant grant generation ${gen} supersedes ${String(heldGen)} (30968)`,
+          })
+          retireReplacedClient(holder, "identity-displacement")
+        }
+      }
+      const fanInHolder = superseding ? undefined : liveHolders.find((holder) => holder.ctx.sessionId === row?.id)
+      let role = detectRole(db, { role: p.role as string | undefined })
+      if (role === "daemon" || role === "pending") role = "member"
+      const project = String(p.project ?? process.cwd())
+      const projectName = String(p.projectName ?? project.split("/").pop() ?? "unknown")
+      const projectId = String(p.projectId ?? resolveProjectId(project))
+      const domains = (p.domains as string[]) ?? []
+      const token = p.idToken as string
+      let ctx: TribeContext
+      if (fanInHolder !== undefined) {
+        // The same (sid, gen, actor) registering again is idempotent: the same row, refreshed, one more transport.
+        ctx = fanInHolder.ctx
+        db.prepare("UPDATE sessions SET pid = ?, verified_id_token = ?, updated_at = ? WHERE id = ?").run(
+          clientPid,
+          token,
+          Date.now(),
+          ctx.sessionId,
+        )
+      } else {
+        ctx = createTribeContext({
+          db,
+          stmts,
+          sessionId: row?.id ?? randomUUID(),
+          sessionRole: role,
+          initialName: actor,
+          domains,
+          claudeSessionId: fields.claudeSessionId,
+          claudeSessionName: fields.claudeSessionName,
+          onMessageInserted,
+        })
+        registerSession(
+          ctx,
+          projectId,
+          (sessionId) => registry.hasActiveTransport(sessionId),
+          fields.identityToken,
+          clientPid,
+          fields.delivery,
+          project,
+          typeof p.account === "string" ? p.account : null,
+          typeof p.provider === "string" ? p.provider : null,
+          launchId,
+          null,
+          new Set(),
+          { sid, gen },
+        )
+      }
+      // F3: launch_id `<sid>@<gen>`, no launch parent; the class the verified token named.
+      db.prepare(
+        `UPDATE sessions SET principal_class = 'participant', identity_sid = ?, identity_gen = ?, verified_id_token = ?,
+           launch_id = ?, launch_parent_pid = NULL, launch_parent_start_time = NULL WHERE id = ?`,
+      ).run(sid, gen, token, launchId, ctx.sessionId)
+      recordParticipantGrant(ctx.sessionId, "active", { exp })
+      if (fields.filterMode !== undefined) applyLaunchDeclaredFilter(ctx, fields.filterMode)
+      const client = applyClient(connId, {
+        name: actor,
+        role,
+        domains,
+        principalClass: "participant",
+        project,
+        projectName,
+        projectId,
+        pid: clientPid,
+        launchId,
+        launchParentPid: null,
+        ...(identity.habitatRoot === undefined ? {} : { verifiedHabitatRoot: identity.habitatRoot }),
+        verifiedName: actor,
+        claudeSessionId: fields.claudeSessionId,
+        peerSocket: (p.peerSocket as string) ?? null,
+        ctx,
+        protocolVersion: fields.negotiatedProtocolVersion,
+        delivery: fields.delivery,
+        adapterExitRecord: fields.adapterExitRecord,
+        participant: { token, sid, gen },
+      })
+      registry.markTransportConnected(client.ctx.sessionId)
+      if (fanInHolder === undefined) {
+        resetOffsetsToTail(client)
+        announceJoin(client)
+      }
+      log.info?.("session.identified", {
+        ...identityLogFields(client),
+        operation: "register",
+        principal_class: "participant",
+      })
+      if (client.delivery === "push" && countUnackedAttention(client.ctx, client.name) > 0) {
+        setImmediate(() => {
+          notifyWakeupForReplay(client.ctx.sessionId, client.name, connId)
+        })
+      }
+      const coordState = db
+        .prepare("SELECT key, value FROM coordination WHERE project_id = ?")
+        .all(projectId) as Array<{ key: string; value: string | null }>
+      return makeResponse(id, {
+        sessionId: client.ctx.sessionId,
+        launchId: client.launchId,
+        launchParentPid: client.launchParentPid,
+        name: client.name,
+        role: client.role,
+        principalClass: "participant",
+        protocolVersion: fields.negotiatedProtocolVersion ?? TRIBE_PROTOCOL_VERSION,
+        transportDelivery: client.delivery,
+        delivery: registry.getSessionDelivery(client.ctx.sessionId),
+        supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
+        coordinationState: coordState,
+        daemon: { pid: process.pid, uptime: Math.floor((Date.now() - socket.startedAt) / 1000) },
+      })
+    }
+
+    /**
+     * Ruling 4: re-verify a participant transport's own token at the operation boundary, fresh (never the bounded
+     * verifier's cache), and record the verdict on its row. Returns null when the grant is live, else the refusal.
+     * A verifier that cannot answer is refused as unavailable authority and never marks the grant revoked; nothing
+     * here settles, discards or reroutes a message or a ball.
+     */
+    async function reverifyParticipant(
+      client: ClientSession,
+      operation: string,
+      id: number | string,
+    ): Promise<string | null> {
+      const held = client.participant
+      const refuse = (reason: string, message: string): string =>
+        makeError(id, -32003, `${operation} refused: ${message}`, {
+          kind: "unauthenticated",
+          reason,
+          rule: "#30968 ruling 4: a participant's token is re-verified at every protected call",
+        })
+      if (held === undefined) {
+        throw new Error(`participant transport ${client.id} (${client.name}) registered without its token`)
+      }
+      const row = db
+        .prepare("SELECT name, identity_sid, identity_gen, participant_grant FROM sessions WHERE id = ?")
+        .get(client.ctx.sessionId) as {
+        name: string
+        identity_sid: string | null
+        identity_gen: number | null
+        participant_grant: string | null
+      } | null
+      if (row === null || row.identity_sid !== held.sid || row.identity_gen !== held.gen || row.name !== client.name) {
+        // A transport of a superseded generation, or of a row that moved: refused without judging the row's grant,
+        // which belongs to whichever generation holds it now.
+        return refuse(
+          "participant-generation-superseded",
+          `${client.name}'s transport registered grant ${held.sid} generation ${held.gen}, which no longer holds ` +
+            `its row${row === null ? " (the row is gone)" : ` (generation ${String(row.identity_gen)})`}; reconnect under the current token`,
+        )
+      }
+      const verifier = hooks.identityVerifier
+      if (!verifier) {
+        recordParticipantGrant(client.ctx.sessionId, "unavailable", { reason: "no identity verifier" })
+        return refuse(
+          "identity-verifier-fault",
+          `current session authority could not be evaluated: this daemon runs without an identity verifier`,
+        )
+      }
+      const exp = readParticipantGrant(row.participant_grant)?.exp
+      let verdict: IdentityVerdict
+      try {
+        verdict = await verifier.verify(held.token, { fresh: true })
+      } catch (error) {
+        const fault = redactIdentityToken(error instanceof Error ? error.message : String(error), held.token)
+        recordIdentityVerifierFault(verifier.path, fault)
+        log.error?.(`identity verifier ${verifier.path} failed on participant ${client.name}'s token: ${fault}`)
+        recordParticipantGrant(client.ctx.sessionId, "unavailable", { reason: "identity-verifier-fault" })
+        return refuse(
+          "identity-verifier-fault",
+          `current session authority could not be evaluated: the identity verifier failed: ${fault}; retry ` +
+            "(the grant is not marked revoked)",
+        )
+      }
+      if (verdict.result === "undecided") {
+        recordParticipantGrant(client.ctx.sessionId, "unavailable", { reason: "identity-undecided" })
+        return refuse(
+          "identity-undecided",
+          `current session authority could not be evaluated: the identity verdict is undecided (${verdict.reason}); retry`,
+        )
+      }
+      if (verdict.result === "verified") {
+        clearIdentityVerifierFault()
+        if (
+          verdict.kind !== "participant" ||
+          verdict.sid !== held.sid ||
+          verdict.gen !== held.gen ||
+          verdict.actor !== client.name ||
+          verdict.exp === undefined
+        ) {
+          return refuse(
+            "participant-generation-superseded",
+            `${client.name}'s token now verifies as ${verdict.actor} (${verdict.kind ?? "agent"}, sid ${verdict.sid}, ` +
+              `generation ${String(verdict.gen)}), not the participant grant its transport registered`,
+          )
+        }
+        if (verdict.exp * 1000 <= Date.now()) {
+          recordParticipantGrant(client.ctx.sessionId, "expired", { exp: verdict.exp, reason: "token exp passed" })
+          return refuse(
+            "participant-grant-expired",
+            `${client.name}'s participant grant expired at ${new Date(verdict.exp * 1000).toISOString()} ` +
+              "(participant-grant-expired); mint a fresh token with hab participant mint",
+          )
+        }
+        recordParticipantGrant(client.ctx.sessionId, "active", { exp: verdict.exp })
+        return null
+      }
+      // contradicted / unreadable / absent: the grant no longer verifies. Its last verified expiry tells an expired
+      // grant from a revoked one; the verifier's own reason is kept beside it.
+      const why = "reason" in verdict ? redactIdentityToken(verdict.reason, held.token) : verdict.result
+      const expired = exp !== undefined && exp * 1000 <= Date.now()
+      const state = expired ? "expired" : "revoked"
+      recordParticipantGrant(client.ctx.sessionId, state, { reason: why })
+      return refuse(
+        `participant-grant-${state}`,
+        `${client.name}'s participant grant no longer verifies (participant-grant-${state}): ${why}`,
+      )
+    }
+
+    /** Ruling 5: ordinary own-mailbox rights. Everything outside this list is refused for kind participant by name. */
+    const PARTICIPANT_PERMITTED_METHODS: ReadonlySet<string> = new Set([
+      TRIBE_COORD_METHODS.send,
+      TRIBE_COORD_METHODS.fetch,
+      TRIBE_COORD_METHODS.pending,
+      TRIBE_COORD_METHODS.inboxWait,
+      TRIBE_COORD_METHODS.members,
+      TRIBE_COORD_METHODS.health,
+      TRIBE_COORD_METHODS.join,
+      TRIBE_COORD_METHODS.filter,
+      TRIBE_COORD_METHODS.lifecycle,
+      "subscribe",
+      "leave",
+      // #30968 peer read f9d8f3a9: no log_event, discover or get_state. An outside principal neither writes the
+      // coordination log nor reads coordination state; it reads its own mailbox.
+      "cli_protocol",
+      "cli_status",
+      "cli_health",
+      "initialize",
+      "tools/list",
+      "tools/call",
+      "ping",
+    ])
+    /** fetch arguments that read the whole journal rather than the caller's own mailbox. */
+    const PARTICIPANT_JOURNAL_WIDE_FETCH_KEYS = ["ids", "with", "from", "to", "since", "before", "topics"] as const
+    /** The calls that read or write the participant's mailbox: each re-verifies its token (ruling 4). */
+    const PARTICIPANT_PROTECTED_METHODS: ReadonlySet<string> = new Set([
+      TRIBE_COORD_METHODS.send,
+      TRIBE_COORD_METHODS.fetch,
+      TRIBE_COORD_METHODS.pending,
+      TRIBE_COORD_METHODS.inboxWait,
+    ])
+
+    /** Ruling 5's refusals and ruling 4's re-verify for one call on a participant transport; null lets it run. */
+    async function participantOperationGate(
+      method: string,
+      p: Record<string, unknown>,
+      client: ClientSession,
+      id: number | string,
+    ): Promise<string | null> {
+      const refuseRight = (what: string): string => {
+        const message =
+          `${method} refused: ${client.name} is a participant, and ${what} is not one of its rights; a participant ` +
+          "may send as itself, read its own mailbox and pending, and settle the balls it owns (#30968 ruling 5)"
+        log.warn?.(message)
+        return makeError(id, -32003, message, { kind: "unauthenticated", reason: "participant-right-refused", what })
+      }
+      const self = client.name
+      const names = (value: unknown): boolean => typeof value === "string" && value !== self && `@${value}` !== self
+      /** The argument forms of a permitted method that reach past the participant's own mailbox; null when none does. */
+      function participantRightRefusal(name: string, args: Record<string, unknown>): string | null {
+        if (name === TRIBE_COORD_METHODS.join && names(args.name)) return "join as another name"
+        if (name === TRIBE_COORD_METHODS.send && args.incident !== undefined) return "incident raise or clear"
+        if (name === TRIBE_COORD_METHODS.pending) {
+          if (args.all === true) return "fleet pending (--all)"
+          if (args.claim !== undefined || args.unclaim !== undefined) return "claiming solicitations"
+          if (args.prune !== undefined) return "pruning pending balls"
+          if (args.emitter !== undefined) return "incident pending reads"
+          if (names(args.owner)) return "another identity's pending"
+        }
+        if ((name === TRIBE_COORD_METHODS.inboxWait || name === TRIBE_COORD_METHODS.fetch) && names(args.session)) {
+          return "another identity's inbox"
+        }
+        // fetch's history and snapshot reads (ids, with, from, to, since, before, topics) are journal-wide, never
+        // scoped to the caller (handlers.ts ids lookup and querySnapshotRows), so a participant keeps the default
+        // attention fetch only (#30968 peer read f9d8f3a9).
+        if (name === TRIBE_COORD_METHODS.fetch) {
+          const journalWide = PARTICIPANT_JOURNAL_WIDE_FETCH_KEYS.filter((key) => args[key] !== undefined)
+          if (journalWide.length > 0) return `journal-wide fetch (${journalWide.join(", ")})`
+        }
+        return null
+      }
+      // An MCP tools/call names its own method: gate that method and its arguments here, at the outer call, so a tool
+      // the registry runs directly (with-mcp-server path 2, the recall tools) holds the same rights as one the
+      // dispatcher re-enters (#30968 peer read f9d8f3a9). The inner dispatcher call re-verifies a protected method.
+      if (method === "tools/call") {
+        const inner = typeof p.name === "string" ? p.name : ""
+        if (inner === "tools/call" || !PARTICIPANT_PERMITTED_METHODS.has(inner)) {
+          return refuseRight(inner || "tools/call")
+        }
+        const args =
+          typeof p.arguments === "object" && p.arguments !== null ? (p.arguments as Record<string, unknown>) : {}
+        const refusedInner = participantRightRefusal(inner, args)
+        return refusedInner === null ? null : refuseRight(refusedInner)
+      }
+      if (!PARTICIPANT_PERMITTED_METHODS.has(method)) {
+        return refuseRight(
+          method === TRIBE_COORD_METHODS.rename
+            ? "rename"
+            : method === TRIBE_COORD_METHODS.lifecyclePublish
+              ? "lifecycle publish"
+              : `${method}`,
+        )
+      }
+      const refused = participantRightRefusal(method, p)
+      if (refused !== null) return refuseRight(refused)
+      if (!PARTICIPANT_PROTECTED_METHODS.has(method)) return null
+      return reverifyParticipant(client, method, id)
     }
 
     function holderIdentity(sessionId: string): {
@@ -1919,7 +2413,7 @@ export function withDispatcher<
         name: string
         role: TribeRole
         domains: string[]
-        principalClass: "agent" | "service"
+        principalClass: "agent" | "service" | "participant"
         project: string
         projectName: string
         projectId: string
@@ -1934,6 +2428,8 @@ export function withDispatcher<
         protocolVersion: number | null
         delivery: "push" | "pull"
         adapterExitRecord: string | null
+        /** #30968: a participant transport's registered grant; absent for every other class. */
+        participant?: ClientSession["participant"]
       },
     ): ClientSession {
       const existing = clients.get(connId)
@@ -1968,6 +2464,7 @@ export function withDispatcher<
         recall: existing.recall,
         protocolVersion: fields.protocolVersion,
         delivery: fields.delivery,
+        ...(fields.participant === undefined ? {} : { participant: fields.participant }),
       }
       registry.attachTransport(connId, client)
       onActiveClient()
@@ -2065,6 +2562,11 @@ export function withDispatcher<
             `launch authority for ${liveClient.name} is unavailable; its service owner is disconnected`,
           )
         }
+        // #30968 rulings 4-5: a participant transport's rights, and its token re-verified at each protected call.
+        if (method !== "register" && liveClient?.principalClass === "participant") {
+          const refused = await participantOperationGate(method, p, liveClient, id)
+          if (refused !== null) return refused
+        }
         switch (method) {
           case "register": {
             const delivery = p.delivery === undefined ? "push" : p.delivery
@@ -2109,8 +2611,13 @@ export function withDispatcher<
             if (p.adapterExitRecord !== undefined && adapterExitRecord === null) {
               return makeError(id, -32602, "register adapterExitRecord must be an absolute file path")
             }
-            if (p.principalClass !== undefined && p.principalClass !== "agent" && p.principalClass !== "service") {
-              return makeError(id, -32602, "register principalClass must be agent or service")
+            if (
+              p.principalClass !== undefined &&
+              p.principalClass !== "agent" &&
+              p.principalClass !== "service" &&
+              p.principalClass !== "participant"
+            ) {
+              return makeError(id, -32602, "register principalClass must be agent, service or participant")
             }
             if (p.idToken !== undefined && (typeof p.idToken !== "string" || p.idToken.length === 0)) {
               return makeError(
@@ -2171,6 +2678,34 @@ export function withDispatcher<
                 // in the refusal's own `data`, where it names what the transport claimed rather than what it is.
                 { launch_id: provenInstanceId(verifiedSid, verifiedGen), pid: Number(p.pid ?? 0) },
               )
+            }
+            // #30968 ruling 3: the participant class is the verified token's kind, never the caller's word. A declared
+            // class that disagrees with the token is refused by name, either way round.
+            if (
+              p.principalClass !== undefined &&
+              (p.principalClass === "participant") !== (identity.kind === "participant")
+            ) {
+              const message =
+                `register refused: ${String(p.name)} declared principalClass ${String(p.principalClass)}, but its ` +
+                `identity token verifies kind ${identity.kind ?? (verifiedSid === null ? "(no verified token)" : "agent")}`
+              log.warn?.(message)
+              return refuseRegister(
+                id,
+                typeof p.name === "string" ? p.name : "(no name)",
+                { message, data: { kind: "principal-class-mismatch", claimed: p.name } },
+                { launch_id: provenInstanceId(verifiedSid, verifiedGen), pid: Number(p.pid ?? 0) },
+              )
+            }
+            if (identity.kind === "participant") {
+              return registerParticipant(id, connId, p, identity, {
+                delivery,
+                filterMode,
+                claudeSessionId,
+                claudeSessionName,
+                identityToken,
+                adapterExitRecord,
+                negotiatedProtocolVersion: negotiatedProtocolVersion ?? null,
+              })
             }
             const tokenKeyed = verifiedSid !== null && (verifiedGen !== null || !hasLaunchId)
             // 29686 generation half (@cto ruling 4 of 43f630c5, his cdeab187 item 2): "this verdict proved no usable
@@ -4062,6 +4597,12 @@ export function withDispatcher<
               // Only the caller waiting on its own mailbox consumes it (24664).
               consumesMailbox: client?.role === "member" && client.name === sessionName,
             })
+            // #30968 ruling 4: a participant's wait re-verifies as it returns content, so a grant revoked while it
+            // waited returns nothing; what arrived stays in the journal for a live grant to read.
+            if (client?.principalClass === "participant") {
+              const refused = await reverifyParticipant(client, method, id)
+              if (refused !== null) return refused
+            }
             if (client?.role === "member") {
               // Attribute the read to the authenticated caller, never to an
               // explicit target supplied in params.

@@ -463,6 +463,45 @@ describe("loadIdentityVerifier", () => {
 })
 
 /**
+ * @failure A participant verdict reaches the daemon without the expiry it re-checks at every call, or an agent or
+ *          service verdict starts carrying one unnoticed (#30968 F5).
+ * @level l2 — real loader and verifier child.
+ * @consumer The participant per-call re-verify in with-dispatcher.ts.
+ * The existing contract test covers agent and service verdicts only.
+ */
+describe("participant verdicts (#30968 slice A)", () => {
+  it("a participant verdict carries its exp through; one without exp, or an agent one with exp, is outside the contract", async () => {
+    const ok = moduleAt(
+      "participant-ok.ts",
+      `export const IDENTITY_VERIFIER_INTERFACE = 1
+       export async function verifyIdentity() {
+         return { result: "verified", actor: "@ext/beorn-mac", kind: "participant", sid: "g1", gen: 3, exp: 4102444800 }
+       }`,
+    )
+    await expect((await loadIdentityVerifier(ok)).verify("t")).resolves.toMatchObject({
+      result: "verified",
+      kind: "participant",
+      gen: 3,
+      exp: 4102444800,
+    })
+    for (const [name, body] of [
+      ["participant-no-exp", `{ result: "verified", actor: "@ext/x", kind: "participant", sid: "g1", gen: 1 }`],
+      ["agent-with-exp", `{ result: "verified", actor: "@dev/7", sid: "s7", gen: 1, exp: 4102444800 }`],
+      ["unknown-kind", `{ result: "verified", actor: "@dev/7", kind: "guest", sid: "s7", gen: 1 }`],
+    ] as const) {
+      const path = moduleAt(
+        `${name}.ts`,
+        `export const IDENTITY_VERIFIER_INTERFACE = 1
+         export async function verifyIdentity() { return ${body} }`,
+      )
+      await expect((await loadIdentityVerifier(path)).verify("t")).rejects.toThrow(
+        `identity verifier ${path} returned a verdict outside the contract`,
+      )
+    }
+  })
+})
+
+/**
  * The bounded verifier (28927, @cto f7046649): the daemon never waits on a raw liveness probe on the
  * dispatcher path. One row per pin of the ruling.
  */
