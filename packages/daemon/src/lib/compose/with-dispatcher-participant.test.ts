@@ -13,7 +13,8 @@
  * Existing registration tests cover agent and service tokens only; none exercises a participant kind, a per-call
  * re-verify on a connected socket, or a grant-state capability.
  */
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync } from "node:fs"
+import { safeRemoveSync } from "removely"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Server, Socket as NetSocket } from "node:net"
@@ -125,11 +126,11 @@ type RpcError = { code: number; message: string; data?: Record<string, unknown> 
 
 function harness() {
   const stub = grantVerifier()
-  const tempDir = mkdtempSync(join(tmpdir(), "tribe-participant-"))
+  const tempDir = mkdtempSync(join(realpathSync(tmpdir()), "tribe-participant-"))
   const scope = createScope("dispatcher-participant-test")
   const db = openDatabase(join(tempDir, "tribe.sqlite"))
   const stmts = createStatements(db)
-  scope.defer(() => rmSync(tempDir, { recursive: true, force: true }))
+  scope.defer(() => safeRemoveSync(tempDir, { within: realpathSync(tmpdir()) }))
   scope.defer(() => db.close())
   const daemonCtx = createTribeContext({
     db,
