@@ -49,6 +49,8 @@ import {
 import { describeSettlementConflict, type BallSettlementReason } from "../lib/ball-outcome.ts"
 import { HAB_ID_TOKEN_ENV, readIdentityTokenFromEnvironment } from "../lib/identity-token.ts"
 import { HAB_SERVICE_NAME_ENV } from "../lib/hab-session-env.ts"
+import { deliveryLedgerDir } from "../lib/delivery-ledger.ts"
+import { buildFleetDeliveryReport, readDeliveryLedgers } from "../lib/delivery-report.ts"
 import { describeDaemonOutcome, launchSender, registerLaunchSender, tribeDaemonCalls } from "../service-send.ts"
 import { readLaunchInboxTargetFromEnvironment } from "../launch-seat.ts"
 
@@ -1264,8 +1266,7 @@ export function evaluateWireHealthDocument(
           verdict: {
             kind: "unknown",
             reason: "unparsed",
-            observed:
-              "cli_status supplied a malformed registration_issues value; inspect the running daemon version",
+            observed: "cli_status supplied a malformed registration_issues value; inspect the running daemon version",
           },
         },
       }
@@ -1333,6 +1334,36 @@ export function evaluateWireHealthDocument(
 export async function writeHealthDocument(document: WireHealthDocument, exitCode: 0 | 1 | 2 | 3): Promise<void> {
   process.exitCode = exitCode
   await writeJsonStdout(document, 2)
+}
+
+/**
+ * #37430 (@cto 7d6af1c0) - a failed hosted wake is recorded in the per-pane
+ * ledger, but a record no command reads is still silent. This is the reader:
+ * `tribe health` names every seat whose ledger holds a failed wake, with the
+ * newest row id, its cause and when it happened. Two states are named rather
+ * than rendered as "none failed": no kpi root at all (25231 - the failure has
+ * nowhere durable to land) and no ledger directory yet, each showing its path.
+ */
+export function formatDeliveryWakeHealth(env: NodeJS.ProcessEnv, now: number): string[] {
+  const dir = deliveryLedgerDir(env)
+  if (dir === null) {
+    return [
+      "  Wake failures: not durable - no habitat kpi root, so a failed hosted wake has nowhere to be recorded (25231)",
+    ]
+  }
+  const read = readDeliveryLedgers(dir)
+  if (!read.dirExists) return [`  Wake failures: no ledger directory at ${dir} yet - nothing recorded`]
+  const fleet = buildFleetDeliveryReport({ states: read.states, gaps: read.gaps, now, source: dir })
+  const lines: string[] = []
+  for (const seat of fleet.seats) {
+    const newest = seat.wakeFailures[0]
+    if (newest === undefined) continue
+    lines.push(
+      `    ${seat.pane}: ${seat.wakeFailures.length} failed hosted wake(s); newest ${newest.rowId} at ${new Date(newest.atMs).toISOString()}: ${newest.cause}`,
+    )
+  }
+  if (lines.length === 0) return []
+  return ["  Failed hosted wakes (a pushed row never started a turn):", ...lines]
 }
 
 async function cmdHealth(opts?: { json?: boolean; full?: boolean }): Promise<void> {
@@ -1484,6 +1515,13 @@ async function cmdHealth(opts?: { json?: boolean; full?: boolean }): Promise<voi
   } catch {
     // Fallback: just print the raw result
     await writeJsonStdout(result, 2)
+  }
+  // #37430 - the wake-failure record has a reader: this is it. Outside the
+  // section try/catch so a ledger problem can never suppress the health view.
+  const wakeLines = formatDeliveryWakeHealth(process.env, Date.now())
+  if (wakeLines.length > 0) {
+    console.log("\n  Delivery:")
+    for (const line of wakeLines) console.log(line)
   }
 }
 
