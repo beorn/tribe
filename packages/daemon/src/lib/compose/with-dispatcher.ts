@@ -267,10 +267,7 @@ export function withDispatcher<
     // check to read, so the incident's "unavailable managed registration" state had no carrier at all.
     // Cleared by that name's next successful register; expired by TTL so a one-off refusal cannot hold the
     // rail red for ever.
-    const registrationRefusals = new Map<
-      string,
-      { kind: string; at: number; pid: number; launchId: string | null }
-    >()
+    const registrationRefusals = new Map<string, { kind: string; at: number; pid: number; launchId: string | null }>()
     const REGISTRATION_REFUSAL_TTL_MS = 10 * 60_000
     const noteRegistrationRefusal = (
       name: string,
