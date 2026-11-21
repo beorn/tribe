@@ -1698,6 +1698,7 @@ if (CWD_EVAL.kind === "warn" || CWD_EVAL.kind === "refuse") {
 // Watch transcript file for /rename slug changes and auto-sync to tribe
 import { resolveTranscriptPath, readTranscriptSlug } from "./lib/transcript.ts"
 import { createTranscriptSlugSync } from "./lib/transcript-slug-sync.ts"
+import { createClaimAutoRename } from "./lib/claim-auto-rename.ts"
 {
   const transcriptPath = resolveTranscriptPath(CLAUDE_SESSION_ID)
   if (transcriptPath) {
@@ -1733,42 +1734,41 @@ import { createTranscriptSlugSync } from "./lib/transcript-slug-sync.ts"
 }
 
 // Auto-rename: when this session claims a bead, rename to the bead scope
-// e.g., claiming "km-storage.foo" renames session to "km-storage"
+// e.g., claiming "km-storage.foo" renames session to "km-storage".
+// 34204: the decision lives in claim-auto-rename.ts so its refusals are testable; nothing here swallows one.
 let autoRenamed = false
-function tryAutoRenameOnClaim(content: string): void {
-  if (autoRenamed) return
-  // Only auto-rename if session still has auto-generated name (km-N-XXX pattern)
-  if (!/^km-\d+-[a-z0-9]{3}$/.test(myName)) return
-  // Match "[by:claude:XXXXXXXX]" in claim message and check if it's this session
-  const byMatch = content.match(/\[by:claude:([a-f0-9]+)\]/)
-  if (!byMatch) return
-  const claimSessionPrefix = byMatch[1]
-  if (claimSessionPrefix === undefined) return
-  if (!CLAUDE_SESSION_ID || !CLAUDE_SESSION_ID.startsWith(claimSessionPrefix)) return
-  // Extract bead scope from "Claimed: km-<scope>.<suffix> — ..."
-  const beadMatch = content.match(/^Claimed: (km-[a-z][\w-]*?)\./)
-  if (!beadMatch) return
-  const scope = beadMatch[1]
-  if (scope === myName) return
-  autoRenamed = true
-  daemon
-    ?.call("tribe.rename", { new_name: scope })
-    .then((result) => {
-      const r = result as { content: Array<{ type: string; text: string }> }
-      try {
-        const data = JSON.parse(r.content[0]?.text ?? "{}") as Record<string, string>
-        if (data.name) {
-          myName = data.name
-          reportSupervisedIdentity(myName)
-        }
-      } catch {
-        /* ignore */
+const claimAutoRename = createClaimAutoRename({
+  currentName: () => myName,
+  sessionId: () => CLAUDE_SESSION_ID ?? undefined,
+  rename: async (scope) => {
+    if (!daemon) throw new Error("the tribe daemon is not connected")
+    const result = (await daemon.call("tribe.rename", { new_name: scope })) as {
+      content: Array<{ type: string; text: string }>
+    }
+    const text = result.content[0]?.text ?? "{}"
+    try {
+      const data = JSON.parse(text) as { name?: string; new_name?: string; error?: string }
+      const name = data.name ?? data.new_name
+      return {
+        ...(name === undefined ? {} : { name }),
+        ...(data.error === undefined ? {} : { error: data.error }),
       }
-      return undefined
-    })
-    .catch(() => {
-      /* rename failed, e.g. name taken — that's fine */
-    })
+    } catch {
+      return { error: "unparseable tribe.rename answer: " + text.slice(0, 200) }
+    }
+  },
+  onRenamed: (name) => {
+    myName = name
+    reportSupervisedIdentity(myName)
+  },
+  warn: (message) => log.warn?.(message),
+  renamed: () => autoRenamed,
+  markRenamed: () => {
+    autoRenamed = true
+  },
+})
+function tryAutoRenameOnClaim(content: string): void {
+  claimAutoRename(content)
 }
 
 async function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[number]): Promise<boolean> {
