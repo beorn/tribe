@@ -2195,7 +2195,9 @@ describe("21757 — retention live window, unread protection, prune notice", () 
       setLastRead(db, recipient, now - 8 * DAY)
       // A literal body, not an interpolated WHEN: the no-silent-fallbacks SQL gate refuses template-built statements,
       // and this fixture keeps exactly one live message, so every DELETE on messages is the one it means to abort.
-      db.prepare("CREATE TRIGGER fail_delete BEFORE DELETE ON messages BEGIN SELECT RAISE(ABORT, 'injected'); END").run()
+      db.prepare(
+        "CREATE TRIGGER fail_delete BEFORE DELETE ON messages BEGIN SELECT RAISE(ABORT, 'injected'); END",
+      ).run()
 
       expect(() => cleanupOldData(makeContext(db, stmts, "@daemon"), { liveWindowMs: 7 * DAY })).toThrow(/injected/)
       expect(liveIds(db)).toEqual([msg.id])
