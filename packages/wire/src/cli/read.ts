@@ -3376,7 +3376,7 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     .option("--limit <n>", "Maximum events to return (max 500)", int, 50)
     .option("--json", "Emit the canonical machine-readable attention projection")
     .option("--peek", "Inspect without consuming: rows stay actionable and this read does not count as your read")
-    .option("--consume", "Read and acknowledge the inbox (the default; kept for scripts)")
+    .option("--consume", "Read and acknowledge the inbox; --peek takes precedence")
     .option(JSON_TO_FILE_FLAG, JSON_TO_FILE_DESCRIPTION)
     .action(
       async (opts: { limit?: number; json?: boolean; peek?: boolean; consume?: boolean; jsonToFile?: string }) => {

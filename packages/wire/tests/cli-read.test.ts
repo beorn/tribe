@@ -1202,5 +1202,9 @@ describe("inbox read intent (37516)", () => {
     expect(cmd?.description()).toMatch(/--consume/)
     const peek = cmd?.options.find((option) => option.long === "--peek")
     expect(peek?.description).toMatch(/does not count as your read/)
+    // 37516 kept 30793's inspection default, so no option may claim to be default.
+    const consume = cmd?.options.find((option) => option.long === "--consume")
+    expect(consume?.description).toMatch(/acknowledge/)
+    expect(consume?.description).not.toMatch(/the default|by default/)
   })
 })
