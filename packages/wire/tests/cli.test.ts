@@ -1722,12 +1722,9 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
         expect(result.code).toBe(0)
         expect(calls).toEqual([{ method: "cli_self_inbox_v1", params: { idToken: true, limit: 50, peek } }])
-        // Only explicit consumption warns; stdout remains the file summary.
-        expect(result.stderr).toBe(
-          peek
-            ? ""
-            : "tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming. You owe no open ball.\n",
-        )
+        // Current merged peek behavior warns that these rows remain unacknowledged.
+        expect(result.stderr.includes("PEEK")).toBe(peek)
+        expect(result.stderr.includes("read was destructive")).toBe(!peek)
         expect(result.stdout).toBe(`tribe inbox: 2 row(s), cursor 99, written to ${path}\n`)
         expect(readFileSync(path, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
       } finally {
@@ -1794,7 +1791,8 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(result.stdout).toContain("verdict body")
     expect(result.stdout).toContain("Inspection leaves this notice unacknowledged.")
     expect(result.stdout).not.toContain("[CONSUMED]")
-    expect(result.stderr).toBe("")
+    expect(result.stderr).toContain("PEEK")
+    expect(result.stderr).not.toContain("read was destructive")
   })
 
   // 30270 — a consuming read must never advance the cursor before the file
