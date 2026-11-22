@@ -131,7 +131,39 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
     expect(String(sent.detail)).toContain(
       "mailbox_read_capability.state is unavailable (self-mailbox-authority-missing)",
     )
-    expect(String(sent.detail)).toContain('Restore mailbox authority for "@adhoc/1"')
+    expect(String(sent.detail)).toContain('before retrying an answer-required request give "@adhoc/1" one')
+  })
+
+  it("24576 AC4: a claimed, tokenless, connection-registered session is refused a tracked request with the fix named", () => {
+    // The unimac shape (30458): Hab did not launch it, so it registered by connection alone. Its row holds no launch
+    // id and no mailbox authority, so its authority is claimed. The outcome is refusal, @cto ruling 2304 option 1: a
+    // remote seat answers only once it is a declared, minted participant, so the refusal names that route.
+    addSession(db, stmts, "sess-unimac", "unimac/hhcorp")
+    const row = db.prepare("SELECT launch_id, mailbox_authority_hash FROM sessions WHERE id = ?").get("sess-unimac") as {
+      launch_id: string | null
+      mailbox_authority_hash: string | null
+    }
+    expect(row).toEqual({ launch_id: null, mailbox_authority_hash: null })
+    const sender = makeContext(db, stmts, "sess-chief", "@chief")
+    const sent = parseToolJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "unimac/hhcorp", message: "update km", type: "request" },
+        makeOpts([liveInfo("sess-unimac", "unimac/hhcorp")]),
+      ),
+    )
+
+    expect(String(sent.error)).toMatch(
+      /^tribe\.send: failed to deliver to unimac\/hhcorp - mailbox unreadable \(connected, no identity token; /,
+    )
+    expect(String(sent.error)).not.toContain("not online")
+    const detail = String(sent.detail)
+    expect(detail).toContain("self-mailbox-authority-missing")
+    expect(detail).toContain("declare it under `participants` in the habitat file")
+    expect(detail).toContain("run `hab participant mint @ext/<slug>`")
+    expect(detail).not.toContain("cannot hold one yet")
+    expect(stmts.selectPendingForRecipient.all({ $recipient: "unimac/hhcorp" })).toHaveLength(0)
   })
 
   it("pins no-live-transport refusal to one line and preserves detail", () => {

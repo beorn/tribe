@@ -362,7 +362,7 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
       expect(sent.detail).toContain("mailbox_read_capability.state is unavailable")
       expect(sent.detail).toContain('"@ci"')
       expect(sent.detail).toContain("self-mailbox-authority-missing")
-      expect(sent.detail).toContain('Restore mailbox authority for "@chief"')
+      expect(sent.detail).toContain('before retrying an answer-required request give "@chief" one')
       expect(
         db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = ?").get("who holds admission"),
       ).toBeNull()

@@ -1551,10 +1551,12 @@ function resolveDirectDelivery(
       `resolved owner ${JSON.stringify(resolvedOwner)} for recipient ${JSON.stringify(recipient)} ` +
       `at admission snapshot ${snapshot}${connectedOwner ? " is connected, but its" : ":"} ` +
       `mailbox_read_capability.state is unavailable (${reason}); a tracked ball promises an answer ` +
-      `this mailbox cannot read. Restore mailbox authority for ${JSON.stringify(resolvedOwner)} ` +
-      `before retrying an answer-required request: a session reads its own mailbox only under a verified ${HAB_ID_TOKEN_ENV}, ` +
-      "which a Hab-launched seat inherits; a session Hab did not launch cannot hold one yet (24576, 30968). " +
-      "Use untracked notify only for a relay notification that needs no answer (24581)."
+      `this mailbox cannot read. A session reads its own mailbox only under a verified ${HAB_ID_TOKEN_ENV}, so ` +
+      `before retrying an answer-required request give ${JSON.stringify(resolvedOwner)} one: a Hab seat inherits it ` +
+      "when Hab launches it (`hab up <seat>`); a session Hab did not launch (an outside agent, another machine) joins " +
+      'as a participant: declare it under `participants` in the habitat file as `"@ext/<slug>": { note: "<who>" }`, ' +
+      "run `hab participant mint @ext/<slug>`, and start it with HAB_ID_TOKEN_FILE naming the token file that mint " +
+      "prints (24576, 30968). Use untracked notify only for a relay notification that needs no answer (24581)."
     return {
       status: "unresolved",
       reason: `failed to deliver to ${recipient} - ${shortReason}`,
