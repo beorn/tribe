@@ -26,7 +26,7 @@ import { createStatements, openDatabase, type TribeStatements } from "./database
 import { sendMessage } from "./messaging.ts"
 import { resolveRetentionConfig, runRetentionSweep, type RetentionConfig } from "./retention.ts"
 import { handleToolCall, readAttentionProjection, type HandlerOpts } from "./handlers.ts"
-import { cleanupOldData } from "./session.ts"
+import { cleanupOldData, continueCleanupDrain } from "./session.ts"
 import { createBaseTribe } from "./compose/base.ts"
 import { DEFAULT_RECONNECT_GRACE_MS, withClientRegistry } from "./compose/with-client-registry.ts"
 import { withSocketServer } from "./compose/with-socket-server.ts"
@@ -1799,7 +1799,7 @@ describe("21757 — retention live window, unread protection, prune notice", () 
     }
   })
 
-  it("cleanupOldData's unbounded mover applies the same protection and records the same notice", () => {
+  it("cleanupOldData's bounded mover applies the same protection and records the same notice", () => {
     const { db, stmts } = setup()
     try {
       const now = Date.now()
@@ -1821,6 +1821,140 @@ describe("21757 — retention live window, unread protection, prune notice", () 
       expect(archivedIds(db).toSorted()).toEqual([ambient.id, dormantVerdict.id].toSorted())
       expect(pruneRow(db, "@live")).toBeNull()
       expect(pruneRow(db, "@dormant")).toEqual({ pruned_count: 1, pruned_before: now - 10 * DAY })
+    } finally {
+      db.close()
+    }
+  })
+
+  // @failure 33937 — cleanupOldData's seven-day move is one synchronous
+  //          unbounded pass: a large hot-log backlog blocks the daemon's event
+  //          loop past the 10 s client deadline, and a crash between the loss
+  //          accounting and the archive move can double the loss notice or
+  //          remove a hot row whose archive copy did not land.
+  // @level l1
+  // @consumer Tribe daemon socket latency and journal/archive integrity.
+  it("33937: one call moves exactly one bounded batch and reports the remaining backlog", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      const recipient = "@dormant/batch"
+      const total = 1_200
+      db.transaction(() => {
+        const insert = db.prepare(
+          `INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery)
+           VALUES (?, 'notify', 'wait-watch', ?, 'direct', 'ambient', ?, 'push')`,
+        )
+        for (let i = 0; i < total; i += 1) insert.run(`batch-bulk-${i}`, recipient, now - 10 * DAY + i)
+      })()
+
+      const first = cleanupOldData(makeContext(db, stmts, "@daemon"), { liveWindowMs: 7 * DAY, batchSize: 500 })
+      expect(first.more).toBe(true)
+      expect(first.batches).toBe(1)
+      expect(first.archived).toBe(500)
+      expect(first.deleted).toBe(500)
+      expect(liveIds(db)).toHaveLength(total - 500)
+      expect(archivedIds(db)).toHaveLength(500)
+    } finally {
+      db.close()
+    }
+  })
+
+  it("33937: the cooperative drain finishes a multi-batch backlog and yields between batches", async () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      const recipient = "@dormant/drain"
+      const total = 1_200
+      db.transaction(() => {
+        const insert = db.prepare(
+          `INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery)
+           VALUES (?, 'notify', 'wait-watch', ?, 'direct', 'ambient', ?, 'push')`,
+        )
+        for (let i = 0; i < total; i += 1) insert.run(`drain-bulk-${i}`, recipient, now - 10 * DAY + i)
+      })()
+      const ctx = makeContext(db, stmts, "@daemon")
+      const first = cleanupOldData(ctx, { liveWindowMs: 7 * DAY, batchSize: 500 })
+      let yields = 0
+      const done = await continueCleanupDrain(ctx, first, {
+        yieldToLoop: async () => {
+          yields += 1
+        },
+      })
+      expect(done.more).toBe(false)
+      expect(done.batches).toBe(3)
+      expect(done.archived).toBe(total)
+      expect(done.deleted).toBe(total)
+      expect(yields).toBe(2)
+      expect(liveIds(db)).toHaveLength(0)
+      expect(
+        db
+          .prepare("SELECT COUNT(*) AS n, COUNT(DISTINCT seq) AS d FROM messages_archive WHERE id LIKE 'drain-bulk-%'")
+          .get(),
+      ).toEqual({ n: total, d: total })
+    } finally {
+      db.close()
+    }
+  })
+
+  it("33937: interruption between batches neither doubles the loss notice nor loses a row", async () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      const recipient = "@dormant/loss"
+      const total = 1_200
+      const oldest = now - 10 * DAY
+      db.transaction(() => {
+        const insert = db.prepare(
+          `INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery)
+           VALUES (?, 'verdict', '@officer', ?, 'direct', 'lost verdict', ?, 'push')`,
+        )
+        for (let i = 0; i < total; i += 1) insert.run(`loss-bulk-${i}`, recipient, oldest + i)
+      })()
+      setLastRead(db, recipient, now - 8 * DAY)
+      const ctx = makeContext(db, stmts, "@daemon")
+      const first = cleanupOldData(ctx, { liveWindowMs: 7 * DAY, batchSize: 500 })
+      expect(first.attentionLoss).toEqual([{ recipient, lost: 500, before_ts: oldest + 499 }])
+      expect(pruneRow(db, recipient)).toEqual({ pruned_count: 500, pruned_before: oldest + 499 })
+
+      const paused = await continueCleanupDrain(ctx, first, { shouldStop: () => true })
+      expect(paused.stoppedEarly).toBe(true)
+      expect(paused.more).toBe(true)
+      expect(pruneRow(db, recipient)).toEqual({ pruned_count: 500, pruned_before: oldest + 499 })
+
+      const resumed = await continueCleanupDrain(ctx, paused, {})
+      expect(resumed.more).toBe(false)
+      expect(resumed.batches).toBe(3)
+      expect(resumed.archived).toBe(total)
+      expect(pruneRow(db, recipient)).toEqual({ pruned_count: total, pruned_before: oldest + total - 1 })
+      expect(liveIds(db)).toHaveLength(0)
+      expect(archivedIds(db)).toHaveLength(total)
+    } finally {
+      db.close()
+    }
+  })
+
+  it("33937: a failure inside the batch rolls back archive, delete and loss together", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      const recipient = "@dormant/atomic"
+      const msg = sendMessage(makeContext(db, stmts, "@officer"), recipient, "lost verdict", "verdict")
+      setMessageTs(db, msg.id, now - 10 * DAY)
+      setLastRead(db, recipient, now - 8 * DAY)
+      db.prepare(
+        `CREATE TRIGGER fail_delete BEFORE DELETE ON messages WHEN OLD.id = '${msg.id}' BEGIN SELECT RAISE(ABORT, 'injected'); END`,
+      ).run()
+
+      expect(() => cleanupOldData(makeContext(db, stmts, "@daemon"), { liveWindowMs: 7 * DAY })).toThrow(/injected/)
+      expect(liveIds(db)).toEqual([msg.id])
+      expect(archivedIds(db)).toEqual([])
+      expect(pruneRow(db, recipient)).toBeNull()
+
+      db.prepare("DROP TRIGGER fail_delete").run()
+      const after = cleanupOldData(makeContext(db, stmts, "@daemon"), { liveWindowMs: 7 * DAY })
+      expect(after.archived).toBe(1)
+      expect(archivedIds(db)).toEqual([msg.id])
+      expect(pruneRow(db, recipient)).toEqual({ pruned_count: 1, pruned_before: now - 10 * DAY })
     } finally {
       db.close()
     }

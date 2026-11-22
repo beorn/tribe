@@ -29,9 +29,9 @@
 
 import { createLogger } from "loggily"
 import { logSessionLeft, readOpenIncidents, sendMessage } from "../messaging.ts"
-import { cleanupOldData, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
+import { cleanupOldData, continueCleanupDrain, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
 import { judgeLaunchParentSafely } from "../session-transport-state.ts"
-import { resolveRetentionConfig, runRetentionSweep } from "../retention.ts"
+import { resolveRetentionConfig, runRetentionSweep, type RetentionConfig } from "../retention.ts"
 import { loadPlugins } from "../plugin-loader.ts"
 import type { TribeClientApi, TribePluginApi, TribePluginHandle } from "../plugin-api.ts"
 import type { BaseTribe } from "./base.ts"
@@ -303,28 +303,52 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
         )
       }
     }
-    const cleanupInterval = setInterval(() => {
-      cleanupOldData(t.daemonCtx, { liveWindowMs: retentionConfig.liveWindowMs })
+    // 33937 — one cooperative drain in flight. cleanupOldData commits ONE
+    // bounded atomic batch plus the small age-based tail; if that batch filled
+    // its cap, continueCleanupDrain finishes the backlog with a yield to socket
+    // I/O between committed batches. The startup call after listen + reconnect
+    // grace and the recurring tick share this guard, so a tick that fires
+    // mid-drain is skipped rather than stacked.
+    let cleanupDrain: Promise<void> | null = null
+    const runCleanup = (config: RetentionConfig, batchSize: number): void => {
+      if (cleanupDrain !== null || t.scope.signal.aborted) return
+      const first = cleanupOldData(t.daemonCtx, {
+        liveWindowMs: config.liveWindowMs,
+        batchSize,
+        shouldStop: () => t.scope.signal.aborted,
+      })
       reapStaleTransports()
-      runRetention()
+      runRetention(config)
+      if (!first.more) return
+      cleanupDrain = (async () => {
+        try {
+          await continueCleanupDrain(t.daemonCtx, first, { shouldStop: () => t.scope.signal.aborted })
+        } catch (error) {
+          log.error?.(`cleanup drain failed: ${error instanceof Error ? error.message : String(error)}`)
+        } finally {
+          cleanupDrain = null
+        }
+      })()
+    }
+    const cleanupInterval = setInterval(() => {
+      runCleanup(retentionConfig, retentionConfig.batchSize)
     }, cleanupIntervalMs) as unknown as {
       unref?: () => void
     }
     cleanupInterval.unref?.()
     t.scope.defer(() => clearInterval(cleanupInterval as unknown as ReturnType<typeof setInterval>))
-    // 33937: startup data retention (uncapped cleanupOldData plus a cold archive
-    // export/delete, ~6.7 s measured) blocks the event loop. Running it at listen
-    // put that block exactly on the fleet's reconnect burst, so it waits for BOTH
-    // a successful listen and the end of the existing startup reconnect grace,
-    // runs once, and never after the scope is disposed (the database closes then).
+    // 33937: startup data retention used to be one uncapped cleanupOldData pass
+    // (~6.7 s measured) exactly on the fleet's reconnect burst. It now waits for
+    // BOTH a successful listen and the existing startup reconnect grace, and the
+    // seven-day move itself is a bounded atomic batch whose backlog continues
+    // cooperatively. It runs once and never after the scope is disposed.
     let socketListening = false
     let startupGraceElapsed = false
     let startupRetentionRan = false
     const runStartupRetentionOnce = (): void => {
       if (startupRetentionRan || !socketListening || !startupGraceElapsed || t.scope.signal.aborted) return
       startupRetentionRan = true
-      cleanupOldData(t.daemonCtx, { liveWindowMs: retentionConfig.liveWindowMs })
-      runRetention(startupRetentionConfig)
+      runCleanup(startupRetentionConfig, startupRetentionConfig.batchSize)
     }
     const startupReapDelayMs = t.registry.startupReconnectGraceRemainingMs(Date.now())
     const startupReapTimer = setTimeout(() => {

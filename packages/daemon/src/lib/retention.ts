@@ -17,10 +17,10 @@
  *
  *   1. archive-move (live `messages` -> `messages_archive`) already exists,
  *      is tested, and works (session.ts's cleanupOldData, hardcoded 7d,
- *      always on, unbounded-per-tick since in steady state its per-tick
- *      volume is small). This module adds a SECOND, independently
- *      configurable, LIMIT-bounded archive-move as a defense-in-depth
- *      backstop — idempotent (INSERT OR IGNORE) and therefore harmless to
+ *      always on; 33937 makes it one atomic batch plus a cooperative
+ *      continuation so a large backlog yields to socket I/O). This module adds
+ *      a SECOND, independently configurable, LIMIT-bounded archive-move as a
+ *      defense-in-depth backstop — idempotent (INSERT OR IGNORE) and therefore harmless to
  *      run alongside the existing one. Under default config (14d) it is
  *      normally a no-op, because the existing 7d sweep already got there
  *      first; it only does real work if the existing mechanism is disabled,
@@ -171,7 +171,7 @@ export interface RetentionConfig {
 
 const DEFAULT_ARCHIVE_WINDOW_MS = 14 * DAY_MS
 const DEFAULT_DELETE_WINDOW_MS = 90 * DAY_MS
-const DEFAULT_BATCH_SIZE = 500
+export const DEFAULT_BATCH_SIZE = 500
 export const DEFAULT_LIVE_WINDOW_MS = 7 * DAY_MS
 
 /** Parse a required-positive-integer env var. Throws on garbage rather than
@@ -354,6 +354,71 @@ function archiveDeleteBatch(db: Database, ids: readonly string[]): number {
       .prepare(assertSingleStatement(`DELETE FROM messages_archive WHERE id IN (${placeholders})`))
       .run(...ids)
     return res.changes ?? 0
+  })()
+}
+
+export interface ExpiredMoveBatchResult {
+  readonly cutoff: number
+  readonly candidates: number
+  readonly archived: number
+  readonly deleted: number
+  readonly attentionLoss: ReadonlyArray<{ recipient: string; lost: number; before_ts: number }>
+}
+
+/** 33937 — one atomic batch for the always-on seven-day hot-log window.
+ *
+ * Selection, the 21757 per-recipient loss accounting, the archive INSERT and
+ * the hot DELETE all run in ONE transaction over the SAME ids. A crash or a
+ * retry therefore cannot record a loss notice twice for one row, and cannot
+ * remove a hot row whose archive copy did not land: the DELETE is additionally
+ * guarded by an EXISTS on messages_archive. Callers drain many of these with a
+ * yield to socket I/O between committed batches. */
+export function moveExpiredMessageBatch(
+  db: Database,
+  stmts: RetentionStatements,
+  opts: {
+    readonly cutoff: number
+    readonly liveCutoff: number
+    readonly batchSize: number
+    readonly now: number
+  },
+): ExpiredMoveBatchResult {
+  return db.transaction(() => {
+    const candidates = stmts.selectMessagesToArchiveBatch.all({
+      $cutoff: opts.cutoff,
+      $limit: opts.batchSize,
+      $live_cutoff: opts.liveCutoff,
+    }) as Array<{ rowid: number; id: string }>
+    if (candidates.length === 0) {
+      return { cutoff: opts.cutoff, candidates: 0, archived: 0, deleted: 0, attentionLoss: [] }
+    }
+    const ids = candidates.map((candidate) => candidate.id)
+    // Record the loss while the rows are still in `messages`: the untracked
+    // attention projection reads that table only, so after the move these rows
+    // are invisible to their recipient unless mailbox_prunes says otherwise.
+    const attentionLoss = recordArchiveAttentionLoss(db, stmts, ids, opts.now)
+    const placeholders = ids.map(() => "?").join(",")
+    const archived =
+      db
+        .prepare(
+          assertSingleStatement(`INSERT OR IGNORE INTO messages_archive (
+				seq, ${MESSAGE_ARCHIVE_COLUMNS}, archived_at
+			)
+			SELECT
+				rowid, ${MESSAGE_ARCHIVE_COLUMNS}, ?
+			FROM messages WHERE id IN (${placeholders})`),
+        )
+        .run(opts.now, ...ids).changes ?? 0
+    const deleted =
+      db
+        .prepare(
+          assertSingleStatement(
+            `DELETE FROM messages WHERE id IN (${placeholders})
+				AND EXISTS (SELECT 1 FROM messages_archive AS a WHERE a.id = messages.id)`,
+          ),
+        )
+        .run(...ids).changes ?? 0
+    return { cutoff: opts.cutoff, candidates: candidates.length, archived, deleted, attentionLoss }
   })()
 }
 

@@ -17,7 +17,12 @@ import {
 
 const log = createLogger("tribe:session")
 import { sendMessage, logEvent, logSessionLeft, settlePendingRows, type PendingSettlementRow } from "./messaging.ts"
-import { DEFAULT_LIVE_WINDOW_MS } from "./retention.ts"
+import {
+  DEFAULT_BATCH_SIZE,
+  DEFAULT_LIVE_WINDOW_MS,
+  moveExpiredMessageBatch,
+  type ExpiredMoveBatchResult,
+} from "./retention.ts"
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -860,10 +865,42 @@ export function persistRuntimeRename(ctx: TribeContext, name: string): void {
 // Cleanup
 // ---------------------------------------------------------------------------
 
+export interface CleanupOptions {
+  readonly liveWindowMs?: number
+  /** Row cap for one atomic batch. Defaults to retention's DEFAULT_BATCH_SIZE. */
+  readonly batchSize?: number
+  /** Checked before the batch; true skips the move (scope disposal/shutdown). */
+  readonly shouldStop?: () => boolean
+}
+
+export interface CleanupResult {
+  readonly now: number
+  readonly cutoff: number
+  readonly liveCutoff: number
+  readonly batchSize: number
+  readonly batches: number
+  readonly archived: number
+  readonly deleted: number
+  readonly attentionLoss: ReadonlyArray<{ recipient: string; lost: number; before_ts: number }>
+  /** True when the batch filled its cap: eligible rows remain for a continuation. */
+  readonly more: boolean
+  readonly stoppedEarly: boolean
+}
+
+const yieldToSocketIo = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve))
+
 /** Archive old messages before trimming the hot log. `event_log` was merged
  *  into `messages WHERE kind='event'` by migration v8, so this retention path
- *  covers both direct/broadcast traffic and journal events. */
-export function cleanupOldData(ctx: TribeContext, options: { readonly liveWindowMs?: number } = {}): void {
+ *  covers both direct/broadcast traffic and journal events.
+ *
+ *  33937 — one bounded, atomic batch, never an unbounded pass. The batch
+ *  selects, accounts for, archives and removes the same ids inside a single
+ *  transaction, and the small age-based tail (dedup/pending/rename GC) runs
+ *  after it. `more:true` means the selection filled the cap; the runtime calls
+ *  continueCleanupDrain to finish the backlog with a yield between batches.
+ *  A single short batch stays fully synchronous, so callers that only need the
+ *  steady-state tick pay no extra scheduling. */
+export function cleanupOldData(ctx: TribeContext, options: CleanupOptions = {}): CleanupResult {
   const SHORT_TTL = 7 * 24 * 60 * 60 * 1000 // 7 days
   const now_ms = Date.now()
   const cutoff = now_ms - SHORT_TTL
@@ -873,29 +910,14 @@ export function cleanupOldData(ctx: TribeContext, options: { readonly liveWindow
   // recipient's are archived by age and the loss is recorded so the seat is
   // told on its next read instead of finding an empty inbox.
   const liveCutoff = now_ms - (options.liveWindowMs ?? DEFAULT_LIVE_WINDOW_MS)
+  const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE
 
-  const attentionLoss = ctx.stmts.selectExpiredAttentionLoss.all({
-    $cutoff: cutoff,
-    $live_cutoff: liveCutoff,
-  }) as Array<{
-    recipient: string
-    lost: number
-    before_ts: number
-  }>
-  for (const row of attentionLoss) {
-    ctx.stmts.upsertMailboxPrune.run({
-      $recipient: row.recipient,
-      $count: row.lost,
-      $before: row.before_ts,
-      $now: now_ms,
-    })
-  }
-  const archived = ctx.stmts.archiveExpiredMessages.run({
-    $cutoff: cutoff,
-    $archived_at: now_ms,
-    $live_cutoff: liveCutoff,
-  })
-  const msgsDel = ctx.stmts.deleteExpiredMessages.run({ $cutoff: cutoff, $live_cutoff: liveCutoff })
+  const stoppedEarly = options.shouldStop?.() === true
+  const batch: ExpiredMoveBatchResult = stoppedEarly
+    ? { cutoff, candidates: 0, archived: 0, deleted: 0, attentionLoss: [] }
+    : moveExpiredMessageBatch(ctx.db, ctx.stmts, { cutoff, liveCutoff, batchSize, now: now_ms })
+  const attentionLoss = [...batch.attentionLoss]
+  if (stoppedEarly) log.info?.(`cleanup: skipped (shutdown in progress)`)
   // Clean short-lived poll/event dedup keys older than 1 day. The prepared
   // statement preserves durable authority namespaces such as launch takeover.
   ctx.stmts.cleanupDedup.run({ $cutoff: now_ms - 24 * 60 * 60 * 1000 })
@@ -914,7 +936,7 @@ export function cleanupOldData(ctx: TribeContext, options: { readonly liveWindow
   // comfortably outlives any seat; the table stays a handful of rows.
   ctx.stmts.gcOldLaunchRenames.run({ $cutoff: now_ms - 30 * 24 * 60 * 60 * 1000 })
 
-  if ((msgsDel.changes ?? 0) > 0 || pendingDel > 0 || attentionLoss.length > 0) {
+  if (batch.deleted > 0 || pendingDel > 0 || attentionLoss.length > 0) {
     const lossNote =
       attentionLoss.length === 0
         ? ""
@@ -922,7 +944,88 @@ export function cleanupOldData(ctx: TribeContext, options: { readonly liveWindow
             .map((l) => `${l.recipient}=${l.lost}`)
             .join(", ")}`
     log.info?.(
-      `cleanup: ${archived.changes ?? 0} msgs archived, ${msgsDel.changes ?? 0} msgs deleted, ${pendingDel} stale pending balls GC'd${lossNote}`,
+      `cleanup: ${batch.archived} msgs archived, ${batch.deleted} msgs deleted, ${pendingDel} stale pending balls GC'd${lossNote}`,
     )
+  }
+  return {
+    now: now_ms,
+    cutoff,
+    liveCutoff,
+    batchSize,
+    batches: batch.candidates === 0 ? 0 : 1,
+    archived: batch.archived,
+    deleted: batch.deleted,
+    attentionLoss,
+    more: batch.candidates === batchSize,
+    stoppedEarly,
+  }
+}
+
+/** 33937 — finish a backlog whose first batch filled the cap. Yields to socket
+ *  I/O before every committed batch, reuses the first call's window so the
+ *  cutoff does not drift mid-drain, and stops between batches on shutdown. */
+export async function continueCleanupDrain(
+  ctx: TribeContext,
+  previous: CleanupResult,
+  options: { readonly shouldStop?: () => boolean; readonly yieldToLoop?: () => Promise<void> } = {},
+): Promise<CleanupResult> {
+  const yieldToLoop = options.yieldToLoop ?? yieldToSocketIo
+  const loss = new Map(previous.attentionLoss.map((row) => [row.recipient, { ...row }]))
+  let batches = previous.batches
+  let archived = previous.archived
+  let deleted = previous.deleted
+  let more = previous.more
+  let stoppedEarly = false
+  const addLoss = (rows: ReadonlyArray<{ recipient: string; lost: number; before_ts: number }>): void => {
+    for (const row of rows) {
+      const prior = loss.get(row.recipient)
+      if (prior === undefined) loss.set(row.recipient, { ...row })
+      else {
+        prior.lost += row.lost
+        if (row.before_ts > prior.before_ts) prior.before_ts = row.before_ts
+      }
+    }
+  }
+  while (more) {
+    if (options.shouldStop?.()) {
+      stoppedEarly = true
+      break
+    }
+    await yieldToLoop()
+    if (options.shouldStop?.()) {
+      stoppedEarly = true
+      break
+    }
+    const batch = moveExpiredMessageBatch(ctx.db, ctx.stmts, {
+      cutoff: previous.cutoff,
+      liveCutoff: previous.liveCutoff,
+      batchSize: previous.batchSize,
+      now: previous.now,
+    })
+    if (batch.candidates === 0) {
+      more = false
+      break
+    }
+    batches += 1
+    archived += batch.archived
+    deleted += batch.deleted
+    addLoss(batch.attentionLoss)
+    more = batch.candidates === previous.batchSize
+  }
+  if (batches > previous.batches) {
+    log.info?.(
+      `cleanup drain: ${archived} msgs archived, ${deleted} msgs deleted across ${batches} batch(es)${
+        more ? " (backlog remains)" : ""
+      }`,
+    )
+  }
+  return {
+    ...previous,
+    batches,
+    archived,
+    deleted,
+    attentionLoss: [...loss.values()],
+    more,
+    stoppedEarly,
   }
 }

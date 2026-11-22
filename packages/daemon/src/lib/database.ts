@@ -2875,11 +2875,11 @@ export function createStatements(db: Database) {
     // -------------------------------------------------------------------
 
     /** Archive-move batch candidates: live messages old enough to move to
-     *  messages_archive, oldest-first, LIMIT-bounded so one sweep tick never
-     *  pays for a full-table pass. Same source predicate as the existing
-     *  unbounded archiveExpiredMessages (session.ts cleanupOldData, which
-     *  keeps running unchanged); this bounded, independently-configurable
-     *  batch is a defense-in-depth second mover, not a replacement. */
+     *  messages_archive, oldest-first, LIMIT-bounded so one committed batch
+     *  never pays for a full-table pass. This is the selection behind BOTH
+     *  movers: session.ts cleanupOldData's always-on seven-day drain (one
+     *  atomic batch, continued cooperatively) and retention.ts's independent
+     *  14-day sweep. */
     selectMessagesToArchiveBatch: db.prepare(
       assertSingleStatement(`
 		SELECT rowid, id FROM messages AS m
@@ -3401,20 +3401,6 @@ export function createStatements(db: Database) {
 			WHERE m.ts < $cutoff
 				AND NOT (${protectedUnreadAttentionPredicateSql("m")})
 		)
-	`),
-    ),
-
-    /** 21757 — what cleanupOldData's unbounded mover is about to take out of
-     *  attention, per dormant recipient (live recipients are protected, so
-     *  every row here belongs to a seat that will be told on its next read). */
-    selectExpiredAttentionLoss: db.prepare(
-      assertSingleStatement(`
-		SELECT m.recipient AS recipient, COUNT(*) AS lost, MAX(m.ts) AS before_ts
-		FROM messages AS m
-		WHERE m.ts < $cutoff
-			AND ${unreadDirectActionablePredicateSql("m")}
-			AND NOT (${protectedUnreadAttentionPredicateSql("m")})
-		GROUP BY m.recipient
 	`),
     ),
 
