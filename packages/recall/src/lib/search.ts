@@ -23,7 +23,7 @@ import {
 } from "../history/recall-shared.ts"
 import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
-import { retrieveCandidates, searchLiveSession, resolveSearchWindow } from "../history/search"
+import { refreshIndexBeforeRead, retrieveCandidates, searchLiveSession, resolveSearchWindow } from "../history/search"
 import { bindVaultDb, getVaultDbPath, type VaultMatch } from "../history/vault-fts.ts"
 import type { VaultSemanticSpans } from "../history/vault-semantic.ts"
 import { findSessionFiles, extractTextContent, parseSessionPath } from "../history/indexer"
@@ -280,7 +280,8 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   if (!regexMode && vaultDb === null) console.error("vault: not bound (pass --vault-db)")
 
   // Search is a read path: classify the index without starting index work.
-  // Lifecycle hints and the host scheduler own incremental indexing cadence.
+  // Lifecycle hints and the host scheduler own incremental indexing cadence, and the read itself refreshes only the
+  // transcripts its own roots gained (37777), so the verdict is judged again after the read where the index changed.
   const freshness = readIndexFreshness(options)
   const provenance = freshness.provenance
   if (!regexMode && provenance !== "complete" && provenance !== "snapshot") process.exitCode = 3
@@ -306,7 +307,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
 
   // If raw/implied-raw with query → direct FTS5 search (old `bun history` behavior)
   if (indexedRaw) {
-    rawSearch(query, {
+    await rawSearch(query, {
       ...options,
       project,
       provenance,
@@ -348,7 +349,12 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   reportVaultSemantic(result, json)
   // The CLI's own verdict names its root and window on the result it prints, so a
   // stale answer says what it judged without the caller running a second tool.
-  result.provenanceDetail = freshness
+  // 37777: recall judged the index again after its own refresh (it holds the only open connection that can), so keep
+  // its verdict and drop an exit 3 the pre-read default set for a lag this answer has already closed.
+  result.provenanceDetail ??= freshness
+  if ((result.provenance === "complete" || result.provenance === "snapshot") && process.exitCode === 3) {
+    process.exitCode = 0
+  }
   reportSearchSkips(result, json)
   await formatRecallOutput(result, { json })
   // A timed-out query model may still be loading natively, and agents wait for the process, not the output: once the
@@ -862,9 +868,9 @@ interface RawSearchOptions extends Omit<SearchOptions, "limit"> {
   vaultDb: string | null
 }
 
-function rawSearch(query: string | undefined, options: RawSearchOptions): void {
-  const { include, question, response, tool, since, project, session, limit, json, provenance, provenanceDetail } =
-    options
+async function rawSearch(query: string | undefined, options: RawSearchOptions): Promise<void> {
+  const { include, question, response, tool, since, project, session, limit, json } = options
+  let { provenance, provenanceDetail } = options
   const { vaultDb } = options
 
   // Parse time filter
@@ -920,6 +926,16 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     )
   }
   const db = getDb()
+
+  // 37777: `--raw` is the read most callers use, and the bead's own repro ran through it. It answers from the same
+  // index, so it takes the same foreground refresh — capped, and loud about whatever the cap left unread.
+  await refreshIndexBeforeRead({ refresh: options.refresh, projectRoot: project }, db)
+  // The refresh may have brought the index up to date; the printed suffix and age line describe the index just read.
+  const afterRefresh = readIndexFreshness({ refresh: options.refresh })
+  provenance = afterRefresh.provenance
+  provenanceDetail = afterRefresh
+  // A raw read that cured the index must not exit 3 for the lag it just closed (37777).
+  if ((provenance === "complete" || provenance === "snapshot") && process.exitCode === 3) process.exitCode = 0
 
   let resolvedSession = session
   if (session !== undefined) {

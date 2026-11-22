@@ -14,7 +14,7 @@ import type { Database } from "bun:sqlite"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { matchProjectGlob } from "../lib/format.ts"
-import { acquireIndexWriter, IndexWriterBusyError } from "./db.ts"
+import { acquireIndexWriter, getSnapshotPath, IndexWriterBusyError } from "./db.ts"
 import { currentProjectsDir, findSessionFiles, indexSessionFile, projectPathFromRelative } from "./indexer.ts"
 
 /** @cto a78c4127: the foreground share a query may spend on indexing before it must answer from what it has. */
@@ -51,6 +51,8 @@ export async function refreshIndexForQuery(
   })
   // An in-memory database holds seeded rows and cannot be shared with another process: nothing to read, nothing to guard.
   if (db.filename === ":memory:") return receipt()
+  // A snapshot is an immutable file: there is nothing to refresh, and a write to it must never be attempted.
+  if (getSnapshotPath() !== null) return receipt()
 
   const rows = db
     .prepare("SELECT jsonl_path AS p, mtime_ms AS m, size_bytes AS s FROM sessions WHERE jsonl_path IS NOT NULL")

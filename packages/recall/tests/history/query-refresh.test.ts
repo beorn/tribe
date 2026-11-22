@@ -13,6 +13,7 @@ import { tryAcquireFlock } from "@bearly/flock"
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { safeRemoveSync } from "removely"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 
@@ -190,5 +191,34 @@ describe("query-time index refresh (37777)", () => {
     reportQueryRefresh(receipt)
     expect(stderr()).toContain("transcript source missing")
     expect(stderr()).toContain("the index was not refreshed")
+  })
+
+  // The bead's own reproduction ran `recall <text> --raw`, which reads the index through a second CLI path: a refresh
+  // wired only into synthesis mode would leave the reported symptom exactly as it was.
+  test("--raw refreshes the index before it reads", async () => {
+    writeTranscript("projalpha", SESSION_A, "alpha body")
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        fileURLToPath(new URL("../../src/cli.ts", import.meta.url)),
+        "alpha body",
+        "--raw",
+        "--limit",
+        "3",
+      ],
+      {
+        env: { ...process.env, CLAUDE_DIR: claudeDir, RECALL_DB_PATH: dbPath },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
+    const [stdout, childErr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+    expect(code, childErr).toBe(0)
+    expect(childErr).toContain("indexed 1 new transcripts")
+    expect(stdout).toContain(TOKEN)
   })
 })

@@ -2,16 +2,25 @@
  * @reach fs-walk <fixture-only: snapshot sidecar checks list only this test's mkdtempSync directory>
  */
 import { assertSingleStatement } from "@bearly/sqlite"
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Database } from "bun:sqlite"
 import { safeRemoveSync } from "removely"
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
+import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { unavailableCostMethods } from "../helpers/llm-mock.ts"
 
 process.env.RECALL_DB_PATH = ":memory:"
+
+// 37777: a query refreshes the index from its own roots before it reads. These fixtures seed rows directly, so an
+// empty transcript root keeps every child CLI's refresh a no-op (and fast) unless a row names its own root.
+const emptyTranscriptRoot = mkdtempSync(join(tmpdir(), "recall-search-output-claude-"))
+mkdirSync(join(emptyTranscriptRoot, "projects"), { recursive: true })
+process.env.CLAUDE_DIR = emptyTranscriptRoot
+afterAll(() => {
+  safeRemoveSync(emptyTranscriptRoot, { within: realpathSync(tmpdir()), allowMissing: true })
+})
 
 async function runRecallCli(argv: string[], env: NodeJS.ProcessEnv) {
   const child = Bun.spawn([process.execPath, fileURLToPath(new URL("../../src/cli.ts", import.meta.url)), ...argv], {
@@ -455,7 +464,13 @@ describe("recall search output", () => {
       )
       const liveControl = join(dir, "live-control.db")
       writeFileSync(liveControl, before)
-      const liveEnv = { ...env, HOME: liveHome, CLAUDE_SESSION_ID: "live-fixture", RECALL_DB_PATH: liveControl }
+      const liveEnv = {
+        ...env,
+        HOME: liveHome,
+        CLAUDE_DIR: join(liveHome, ".claude"),
+        CLAUDE_SESSION_ID: "live-fixture",
+        RECALL_DB_PATH: liveControl,
+      }
       const control = await runRecallCli(["liveonlyneedle", "--raw", "-i", "m"], liveEnv)
       expect(control.stdout).toContain("should stay outside snapshot")
       const human = await runRecallCli(["--snapshot", snapshot, "liveonlyneedle", "--raw", "-i", "m"], liveEnv)

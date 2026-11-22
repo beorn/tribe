@@ -5,6 +5,7 @@
 import {
   getDb,
   closeDb,
+  getIndexMeta,
   ftsSearchWithSnippet,
   searchAll,
   getAllSessionTitles,
@@ -15,7 +16,8 @@ import {
 } from "./db.ts"
 import type { ContentType } from "./types.ts"
 import { synthesizeResults } from "./synthesize.ts"
-import { refreshIndexForQuery, reportQueryRefresh } from "./query-refresh.ts"
+import { refreshIndexForQuery, reportQueryRefresh, type QueryRefreshReceipt } from "./query-refresh.ts"
+import { judgeIndexFreshness } from "../lib/staleness.ts"
 import { loadLlm } from "../lib/llm-backend.ts"
 import {
   DEFAULT_SYNTHESIS_TIMEOUT_MS,
@@ -27,6 +29,7 @@ import {
   rejectedQuerySkip,
 } from "./recall-shared.ts"
 import type {
+  IndexProvenanceDetail,
   IndexProvenance,
   RecallOptions,
   RecallPhase,
@@ -460,6 +463,21 @@ export async function retrieveCandidatesYielding(
 // ============================================================================
 
 /**
+ * 37777 (@cto a78c4127): every CLI read path answers from the transcript index, so every one of them refreshes it
+ * first. `--no-refresh` opts a caller out, and hook mode is the caller that must keep its own wall — it answers a tool
+ * prompt, not a person waiting on a search.
+ */
+export async function refreshIndexBeforeRead(
+  options: { refresh?: boolean; projectRoot?: string },
+  db: Database = getDb(),
+): Promise<QueryRefreshReceipt | undefined> {
+  if (options.refresh === false) return undefined
+  const receipt = await refreshIndexForQuery(db, { projectRoot: options.projectRoot })
+  reportQueryRefresh(receipt)
+  return receipt
+}
+
+/**
  * Search session history and optionally synthesize results via cheap LLM.
  *
  * Searches both the messages FTS table and the unified content table
@@ -485,7 +503,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     excludeCurrentSession = false,
     mode = "exact",
   } = options
-  const provenance: IndexProvenance = options.provenance ?? "unknown"
+  let provenance: IndexProvenance = options.provenance ?? "unknown"
   const currentSessionId = excludeCurrentSession ? process.env[CLAUDE_SESSION_ID_ENV] : undefined
 
   const startTime = Date.now()
@@ -512,7 +530,14 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
   let hookSearch: HookMessageSearch | undefined
   let vaultQuery: VaultQuery | undefined
   let vaultSemantic: VaultSemanticReceipt | undefined
-  const said = (): Pick<RecallResult, "hookSearch" | "skipped" | "vaultQuery" | "vaultSemantic"> => ({
+  // A query's own refresh can bring the index current after the caller judged it; the result carries the later
+  // verdict so the printed age line and exit code describe the index this answer actually read (37777).
+  let refreshedDetail: IndexProvenanceDetail | undefined
+  const said = (): Pick<
+    RecallResult,
+    "hookSearch" | "skipped" | "vaultQuery" | "vaultSemantic" | "provenanceDetail"
+  > => ({
+    ...(refreshedDetail === undefined ? {} : { provenanceDetail: refreshedDetail }),
     ...(hookSearch === undefined
       ? {}
       : {
@@ -532,8 +557,14 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // 37777 (@cto a78c4127): the scheduled pass runs every 4 h, so a query can answer from an index older than its
     // own session. Read the queried roots' newer transcripts first — in the foreground, capped — and let the receipt
     // say loudly what the cap left unread. Hook mode keeps its wall: it answers a tool prompt, not a person.
-    if (options.refresh !== false && !hook) {
-      reportQueryRefresh(await refreshIndexForQuery(db, { projectRoot: projectFilter }))
+    if (!hook) {
+      const receipt = await refreshIndexBeforeRead({ refresh: options.refresh, projectRoot: projectFilter }, db)
+      // A completed whole-root pass has just recorded the index current, and this is the last moment this connection
+      // is open to judge it: recall closes the DB on the way out, so a later read would open an empty one.
+      if (receipt?.stoppedBy === undefined && projectFilter === undefined) {
+        refreshedDetail = judgeIndexFreshness(getIndexMeta(db, "last_rebuild") ?? null)
+        provenance = refreshedDetail.provenance
+      }
     }
     // Search messages table with FTS5
     const messageOpts: MessageSearchOptions = {
