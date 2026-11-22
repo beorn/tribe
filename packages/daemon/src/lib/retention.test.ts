@@ -367,7 +367,7 @@ describe("journal retention sweep", () => {
   // seven-day batch (starving socket I/O at the fleet reconnect burst), a
   // periodic tick stacks another sweep while the startup drain is still
   // in flight, or a shutdown that lands during the drain's yield still lets
-  // the sweep run.
+  // the sweep or one more seven-day batch run.
   // @level l2
   // @consumer The daemon's real socket/runtime lifecycle and journal history.
   it("33937: the sweep waits for a yield and a mid-drain tick is skipped", async () => {
@@ -510,6 +510,92 @@ describe("journal retention sweep", () => {
       else process.env.TRIBE_RETENTION_BATCH_SIZE = prevBatchSize
       await scope[Symbol.asyncDispose]()
       await runSettled2
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it("33937: a stop during the seven-day continuation's yield stops before the next batch", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] })
+    const prevArchiveWindow = process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS
+    const prevBatchSize = process.env.TRIBE_RETENTION_BATCH_SIZE
+    // A 14-day sweep window makes runRetention inert for eight-day rows, so the
+    // only batches here are cleanupOldData's seven-day move and its continuation.
+    process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS = String(14 * DAY)
+    process.env.TRIBE_RETENTION_BATCH_SIZE = "500"
+    const { db, stmts } = setup()
+    const scope = createScope("retention-continuation-stop")
+    const ctx = makeContext(db, stmts)
+    const flushYield = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve))
+    // Park scope abort behind an async disposer (as real socket/db teardown
+    // does), so the drain must see the synchronous stop latch, not the signal.
+    let releaseDisposer!: () => void
+    const disposing = new Promise<void>((resolve) => {
+      releaseDisposer = resolve
+    })
+    scope.defer(() => disposing)
+    db.transaction(() => {
+      const insert = db.prepare(
+        `INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery)
+         VALUES (?, 'notify', '@fable/1', '@chief', 'direct', 'retention-batch-row', ?, 'push')`,
+      )
+      for (let i = 0; i < 1_120; i += 1) insert.run(`ordering-${i}`, Date.now() - 8 * DAY + i)
+    })()
+    const countArchived = (): number =>
+      (
+        db.prepare("SELECT COUNT(*) AS n FROM messages_archive WHERE id LIKE 'ordering-%'").get() as {
+          n: number
+        }
+      ).n
+    let runSettled: Promise<"resolved" | "rejected"> | undefined
+    try {
+      const registryShape = withClientRegistry()(createBaseTribe({ scope }))
+      const socketShape = withSocketServer()({
+        ...registryShape,
+        config: { socketPath: join(tmpDir, "runtime3.sock"), inheritFd: null },
+        broadcast: { log: () => {} },
+      } as never)
+      const subject = withRuntime({
+        plugins: [],
+        buildPluginApi: () => ({}) as never,
+        publishActivePluginNames: () => {},
+        publishStopPlugins: () => {},
+        publishShutdown: () => {},
+      })({
+        ...socketShape,
+        db,
+        stmts,
+        daemonCtx: ctx,
+        recall: null,
+        idleQuit: { stop: () => {} },
+        dispatcher: { shutdown: () => {} },
+      } as never)
+      runSettled = subject.run().then(
+        () => "resolved" as const,
+        () => "rejected" as const,
+      )
+      await expect(socketShape.socket.binding).resolves.toBe("listening")
+      await flushYield()
+      vi.advanceTimersByTime(DEFAULT_RECONNECT_GRACE_MS)
+      // The capped seven-day first batch committed synchronously; 620 rows remain.
+      expect(countArchived()).toBe(500)
+      // The drain's own yield, then continueCleanupDrain's pre-batch yield.
+      await flushYield()
+      expect(countArchived()).toBe(500)
+      subject.runtime.shutdown()
+      // Abort is still parked behind the async disposer.
+      expect(scope.signal.aborted).toBe(false)
+      await flushYield()
+      // The continuation stops at its yield: no second batch after the stop began.
+      expect(countArchived()).toBe(500)
+    } finally {
+      releaseDisposer()
+      if (prevArchiveWindow === undefined) delete process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS
+      else process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS = prevArchiveWindow
+      if (prevBatchSize === undefined) delete process.env.TRIBE_RETENTION_BATCH_SIZE
+      else process.env.TRIBE_RETENTION_BATCH_SIZE = prevBatchSize
+      await scope[Symbol.asyncDispose]()
+      await runSettled
       db.close()
       vi.useRealTimers()
     }

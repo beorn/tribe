@@ -311,12 +311,18 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     // mid-drain is skipped rather than stacked.
     let cleanupDrain: Promise<void> | null = null
     const yieldToLoop = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve))
+    // The synchronous stop latch is set at the very top of shutdown(), before
+    // any teardown awaits. Scope abort trails async disposers (socket close,
+    // db close), so every drain check — admission, each shouldStop and the
+    // post-yield gate — reads this latch as well as the signal.
+    let exited = false
+    const stopped = (): boolean => exited || t.scope.signal.aborted
     const runCleanup = (config: RetentionConfig, batchSize: number): void => {
-      if (cleanupDrain !== null || t.scope.signal.aborted) return
+      if (cleanupDrain !== null || stopped()) return
       const first = cleanupOldData(t.daemonCtx, {
         liveWindowMs: config.liveWindowMs,
         batchSize,
-        shouldStop: () => t.scope.signal.aborted,
+        shouldStop: stopped,
       })
       reapStaleTransports()
       // 33937 (@cto dba4bdab): the seven-day first batch above is committed,
@@ -328,14 +334,10 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
       cleanupDrain = (async () => {
         try {
           await yieldToLoop()
-          // `exited` is the synchronous shutdown latch (set at the very top of
-          // shutdown(), before any teardown awaits): a shutdown that lands in
-          // the yield above must skip the sweep, not wait on scope abort, which
-          // can trail async disposers (socket close, db close).
-          if (exited || t.scope.signal.aborted) return
+          if (stopped()) return
           runRetention(config)
           if (first.more) {
-            await continueCleanupDrain(t.daemonCtx, first, { shouldStop: () => t.scope.signal.aborted })
+            await continueCleanupDrain(t.daemonCtx, first, { shouldStop: stopped })
           }
         } catch (error) {
           log.error?.(`cleanup drain failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -375,7 +377,6 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     startupReapTimer.unref?.()
     t.scope.defer(() => clearTimeout(startupReapTimer as unknown as ReturnType<typeof setTimeout>))
 
-    let exited = false
     function shutdown(): void {
       if (exited) return
       exited = true
