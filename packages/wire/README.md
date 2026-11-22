@@ -83,7 +83,9 @@ launch controller, not the Tribe daemon.
 **A wait reports; it does not consume.** `inbox-wait` retires no row and never
 advances the mailbox cursor, so a row a wait returned stays fetch-visible and
 unread until the caller's own read acknowledges it — a default `fetch` (receipt
-on) or `tribe-wire inbox --consume --json`. Plain `inbox` peeks.
+on) or `tribe-wire inbox --consume --json`. Plain `inbox` peeks, and it says so:
+a peek neither acknowledges the mailbox nor counts as the seat's read, so the
+fleet watcher can still see the demand (37516).
 Before a new wait, read your mailbox with that command; history/IDs inspection
 does not acknowledge it. See `tribe-wire fetch --help` for small history pages,
 continuation metadata and complete file output. A woken chunk also hands back a

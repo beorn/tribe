@@ -17,6 +17,8 @@ import {
   formatRestartResult,
   formatInboxStatus,
   formatInboxWaitTimeoutLine,
+  inboxPeekNotice,
+  inboxReadConsumes,
   registerReadCommands,
   renderInboxDrainFailure,
   resolveRepairOptions,
@@ -1168,5 +1170,37 @@ describe("renderInboxDrainFailure (01M3E1QX)", () => {
     } finally {
       spy.mockRestore()
     }
+  })
+})
+
+/**
+ * 37516 — the plain `inbox` verb inspects and a peek is not a read at all. A
+ * receipt:false read neither acknowledges the mailbox cursor nor stamps the
+ * attention-read clock the fleet watcher measures a seat by (21757), so while
+ * the plain verb showed rows it could not retire, a seat reading on schedule
+ * kept its demand open and was paged as demand-unconsumed. The default stays
+ * (@cto turn43: an events-only read that consumed lost a real verdict); the
+ * notice names the taking verb instead.
+ */
+describe("inbox read intent (37516)", () => {
+  test("the plain verb inspects, --consume takes, and --peek always wins", () => {
+    expect(inboxReadConsumes({})).toBe(false)
+    expect(inboxReadConsumes({ consume: true })).toBe(true)
+    expect(inboxReadConsumes({ peek: true })).toBe(false)
+    expect(inboxReadConsumes({ peek: true, consume: true })).toBe(false)
+  })
+
+  test("a peek names the rows it did not acknowledge and the verb that takes them", () => {
+    const notice = inboxPeekNotice(2)
+    expect(notice).toContain("2 actionable row(s) NOT acknowledged")
+    expect(notice).toMatch(/never retires an inbox row/)
+    expect(notice).toContain("tribe inbox --consume")
+  })
+
+  test("the help names --consume as the taking verb and a peek as not a read", () => {
+    const cmd = findCmd(buildProgram(), "inbox")
+    expect(cmd?.description()).toMatch(/--consume/)
+    const peek = cmd?.options.find((option) => option.long === "--peek")
+    expect(peek?.description).toMatch(/does not count as your read/)
   })
 })

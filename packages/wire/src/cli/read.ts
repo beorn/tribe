@@ -2444,6 +2444,35 @@ function inboxConsumeNotice(owedBalls: number | undefined): string {
   return `${notice}${owed}`
 }
 
+/**
+ * 37516 — one intent decides the read. 30793's default stands: the plain verb
+ * inspects, because an events-only read that consumed lost a real verdict
+ * (@cto turn43 ruling, 2026-11-22). What 37516 adds is the missing half: a
+ * receipt:false peek (21757) neither acknowledges the mailbox cursor nor stamps
+ * the attention-read clock the fleet watcher measures a seat by, so the reader
+ * must be told that the taking verb is the explicit `--consume`.
+ */
+export function inboxReadConsumes(opts: { peek?: boolean; consume?: boolean }): boolean {
+  return !opts.peek && (opts.consume ?? false)
+}
+
+/**
+ * 37516 — a peek is not a read. Say it where the rows are printed, so a seat
+ * cannot take the inspecting verb for the read that retires its mailbox.
+ */
+export function inboxPeekNotice(actionableRows: number): string {
+  return (
+    `tribe inbox: PEEK — ${actionableRows} actionable row(s) NOT acknowledged; a peek never retires an inbox row ` +
+    "and does not count as your read (a fleet watcher can page this seat as demand-unconsumed). " +
+    "Take the mailbox with: tribe inbox --consume"
+  )
+}
+
+function warnPeekNotAcknowledged(result: SelfInboxResult): void {
+  const count = result.attention?.actionable_unread?.length ?? 0
+  if (count > 0) console.error(inboxPeekNotice(count))
+}
+
 async function cmdInbox(opts: {
   limit?: number
   json?: boolean
@@ -2453,7 +2482,8 @@ async function cmdInbox(opts: {
 }): Promise<void> {
   // 30793: inspection is safe by default; owning reads opt into consumption.
   // Peek always wins; one intent controls the RPC and every output/file path.
-  const consume = !opts.peek && (opts.consume ?? false)
+  // 37516 keeps that default and makes the non-read say so (see the notice).
+  const consume = inboxReadConsumes(opts)
   const idToken = readIdentityTokenFromEnvironment(process.env)
   if (idToken === null) {
     throw new Error(
@@ -2493,12 +2523,16 @@ async function cmdInbox(opts: {
     // (on stderr; file mode keeps stdout to the single summary line).
     if (written && consume) {
       console.error(inboxConsumeNotice(result.attention?.pending_balls_summary?.total))
+    } else if (written) {
+      warnPeekNotAcknowledged(result)
     }
     return
   }
   if (opts.json) {
     if (consume) {
       console.error(inboxConsumeNotice(result.attention?.pending_balls_summary?.total))
+    } else {
+      warnPeekNotAcknowledged(result)
     }
     await writeJsonStdout(result)
     return
@@ -2546,6 +2580,7 @@ async function cmdInbox(opts: {
     console.log(
       `inbox (PEEK): ${actionable.length} actionable unread; ${pendingTotal} pending ball(s); cursor ${result.cursor ?? 0}.`,
     )
+    warnPeekNotAcknowledged(result)
   } else {
     console.log(
       `[CONSUMED] inbox: ${actionable.length} actionable unread; ${pendingTotal} pending ball(s); cursor ${result.cursor ?? 0}.`,
@@ -3337,11 +3372,11 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
 
   program
     .command("inbox")
-    .description("Inspect this managed session's canonical mailbox; use --consume to acknowledge it")
+    .description("Inspect this managed session's canonical mailbox; take and acknowledge it with --consume")
     .option("--limit <n>", "Maximum events to return (max 500)", int, 50)
     .option("--json", "Emit the canonical machine-readable attention projection")
-    .option("--peek", "Read the inbox without consuming messages or advancing the cursor")
-    .option("--consume", "Read and acknowledge the inbox; --peek takes precedence")
+    .option("--peek", "Inspect without consuming: rows stay actionable and this read does not count as your read")
+    .option("--consume", "Read and acknowledge the inbox (the default; kept for scripts)")
     .option(JSON_TO_FILE_FLAG, JSON_TO_FILE_DESCRIPTION)
     .action(
       async (opts: { limit?: number; json?: boolean; peek?: boolean; consume?: boolean; jsonToFile?: string }) => {

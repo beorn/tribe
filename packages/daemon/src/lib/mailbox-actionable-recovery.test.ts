@@ -451,6 +451,47 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetched.events?.map((event) => event.id)).not.toContain(request.id)
   })
 
+  /**
+   * 37516 — the bead's specimen: a direct RESPONSE carrying a reply ref settles
+   * its ball, yet the row stays in attention.actionable_unread. That is correct
+   * — settlement is not a read. What was wrong was the CLI: its documented
+   * `tribe inbox` verb was a receipt:false peek, which neither acknowledges the
+   * row nor stamps the attention-read clock the fleet watcher measures a seat
+   * by, so a seat reading on schedule left demand open and was paged dark.
+   */
+  it("a settled direct response survives repeated peeks and leaves only on a canonical read (37516)", () => {
+    const worker = connectAs("sess-37516-worker", NAME)
+    const chief = connectAs("sess-37516-chief", "@chief")
+    const request = parseToolJson(
+      handleToolCall(worker, "tribe.send", { to: "@chief", message: "is the review in?", type: "request" }, opts),
+    ) as { id: string }
+    const response = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: NAME, message: "in and green", type: "response", reply: request.id },
+        opts,
+      ),
+    ) as { id: string; tracker?: { request_id: string; closed: number } }
+    expect(response.tracker).toEqual({ request_id: request.id, closed: 1 })
+    const cursorBefore = stmts.getMailboxCursor.get({ $recipient: NAME })
+
+    // The CLI read the seat actually runs today, twice: receipt:false.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const peek = fetchJson(worker, opts, { receipt: false, limit: 500 }).json
+      expect((peek.attention?.actionable_unread ?? []).map((row) => row.id)).toContain(response.id)
+    }
+    // A peek is not a read: the attention clock is untouched (21757) — exactly
+    // why the watcher kept seeing demand this seat could not retire.
+    expect(stmts.getMailboxCursor.get({ $recipient: NAME })).toEqual(cursorBefore)
+
+    // The seat's own read DELIVERS it and retires it; the next read has nothing
+    // left, so the row leaves only on the canonical drain.
+    const drained = fetchJson(worker, opts, { limit: 500 }).json
+    expect((drained.attention?.actionable_unread ?? []).map((row) => row.id)).toContain(response.id)
+    expect(fetchJson(worker, opts, { limit: 500 }).json.attention?.actionable_unread).toEqual([])
+  })
+
   it("reply retirement does not advance the mailbox cursor or hide an unrelated older actionable", () => {
     const worker = connectAs("sess-reply-cursor-worker", NAME)
     const chief = connectAs("sess-reply-cursor-chief", "@chief")
