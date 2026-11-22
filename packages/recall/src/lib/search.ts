@@ -741,7 +741,13 @@ function renderSynthesisFailure(result: RecallResult, diag: SynthesisDiagnostics
     return
   }
 
-  console.log(`${BOLD}${RED}⚠ RECALL SYNTHESIS FAILED — THE TOOL IS BROKEN, NOT EMPTY${RESET}`)
+  // 37776: an excluded route is not a broken tool. When nothing was even raced because every candidate was excluded,
+  // the cause is the route (a logged-out CLI, a missing key, a host deny list), and the headline says so; "THE TOOL IS
+  // BROKEN, NOT EMPTY" stays for a synthesis that had a live candidate and failed anyway.
+  const nothingRaced = diag.batches.length === 0 && diag.excludedProviders.length > 0
+  console.log(
+    `${BOLD}${RED}⚠ RECALL SYNTHESIS FAILED — ${nothingRaced ? "NO CONFIGURED ROUTE CAN ANSWER" : "THE TOOL IS BROKEN, NOT EMPTY"}${RESET}`,
+  )
   console.log(
     `${BOLD}Lexical search found ${result.results.length} result(s)${unprovenSuffix(result.provenance, result.provenanceDetail)} for "${result.query}" — the LLM step that summarizes them did not complete.${RESET}`,
   )
@@ -805,7 +811,9 @@ function renderSynthesisFailure(result: RecallResult, diag: SynthesisDiagnostics
     const providers = [...new Set(diag.consideredProviders)].join(", ")
     console.log(`  • Retry with more time for ${providers}: bun recall ${q} --timeout ${suggestedTimeout}`)
   } else if (diag.excludedProviders.length > 0) {
-    console.log(`  • No provider was available to try — check API key env vars, or see "Excluded before racing" above.`)
+    // Every candidate was excluded before any call: the reason on each line above is the cause (a missing key, a
+    // logged-out CLI, the host deny list) — never assume it was the key.
+    console.log(`  • No configured route was available to try — see "Excluded before racing" above for why.`)
   } else {
     console.log(`  • No provider was available to try — see the summary above (likely TRIBE_LLM_DIR is unset).`)
   }

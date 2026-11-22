@@ -1194,6 +1194,37 @@ describe("recall search output", () => {
     }
   })
 
+  // 37776: a logged-out subscription CLI excludes the only configured route before any call is raced. That is a fact
+  // about the route, not a broken tool, and the reason — which names the sign-in — has to reach the reader.
+  test("an excluded-only failure says no configured route can answer, naming the route's reason", async () => {
+    const reason = "agy CLI is not authenticated — run agy in a terminal and complete the sign-in it prints"
+    mockAgent.result = async (query, options) => {
+      const base = synthesisFailureAgentResult(query, options)
+      return {
+        ...base,
+        synthesisFailure: {
+          ...base.synthesisFailure,
+          excludedProviders: [{ provider: "google", modelId: "gemini-2.5-flash", reason }],
+        },
+      } as never
+    }
+    const previousExitCode = process.exitCode
+    process.exitCode = 0
+
+    try {
+      await expect(cmdSearch("excludedneedle", { agent: true, project: "*", round2: "off" })).resolves.toBeUndefined()
+
+      const output = callsText(logSpy)
+      expect(output).toContain("RECALL SYNTHESIS FAILED — NO CONFIGURED ROUTE CAN ANSWER")
+      expect(output).toContain(reason)
+      expect(output).not.toContain("THE TOOL IS BROKEN, NOT EMPTY")
+      expect(output).toContain("Lexical search: OK")
+      expect(process.exitCode).toBe(3)
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
   test("agent mode JSON preserves lexical results on synthesis failure instead of throwing uncaught", async () => {
     mockAgent.result = async (query, options) => synthesisFailureAgentResult(query, options) as never
     const previousExitCode = process.exitCode
