@@ -1136,8 +1136,12 @@ describe("waitForInboxWithReconnect", () => {
 // exactly like the exhaustive one.
 describe("tribeLogScope", () => {
   test("a saturated bounded window says older messages exist", () => {
-    expect(tribeLogScope(20, 20, false)).toBe("last 20 — WINDOW FULL, older messages exist (use --limit N or --all)")
-    expect(tribeLogScope(30, 20, false)).toBe("last 30 — WINDOW FULL, older messages exist (use --limit N or --all)")
+    expect(tribeLogScope(20, 20, false)).toBe(
+      "last 20 — WINDOW FULL, older messages exist (use --limit N or --ref-prefix <id>)",
+    )
+    expect(tribeLogScope(30, 20, false)).toBe(
+      "last 30 — WINDOW FULL, older messages exist (use --limit N or --ref-prefix <id>)",
+    )
   })
 
   test("an exhaustive read says so — with --all, and when a small window held everything", () => {
@@ -1147,7 +1151,9 @@ describe("tribeLogScope", () => {
   })
 
   test("an empty bounded window warns that older messages may exist; an empty --all read does not", () => {
-    expect(tribeLogScope(0, 20, false)).toBe("No messages in the last 20. Older messages may exist — use --all.")
+    expect(tribeLogScope(0, 20, false)).toBe(
+      "No messages in the last 20. Older messages may exist — use --limit N or --ref-prefix <id>.",
+    )
     expect(tribeLogScope(0, 20, true)).toBe("No messages in tribe log.")
   })
 })

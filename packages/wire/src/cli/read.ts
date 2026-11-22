@@ -695,10 +695,12 @@ function fmtMsg(m: Msg): void {
  */
 export function tribeLogScope(count: number, limit: number, all: boolean): string {
   if (count === 0) {
-    return all ? "No messages in tribe log." : `No messages in the last ${limit}. Older messages may exist — use --all.`
+    return all
+      ? "No messages in tribe log."
+      : `No messages in the last ${limit}. Older messages may exist — use --limit N or --ref-prefix <id>.`
   }
   const saturated = !all && count >= limit
-  if (saturated) return `last ${count} — WINDOW FULL, older messages exist (use --limit N or --all)`
+  if (saturated) return `last ${count} — WINDOW FULL, older messages exist (use --limit N or --ref-prefix <id>)`
   return `${count} message${count !== 1 ? "s" : ""}${all ? "" : " (all that exist)"}`
 }
 
@@ -716,6 +718,12 @@ async function cmdLog(
   }
   if (follow && all) {
     console.error("tribe log: --follow and --all are mutually exclusive; omit --all for a bounded follow snapshot")
+    process.exit(2)
+  }
+  if (all && !refPrefix && !replyPrefix) {
+    console.error(
+      "tribe log: --all needs a correlation scope; pass --ref-prefix <id> or --reply-prefix <id>, or use --limit N. An unbounded read stalls every caller (33937)",
+    )
     process.exit(2)
   }
   const params: Record<string, unknown> = all ? { all: true } : { limit }
@@ -3293,7 +3301,10 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     .command("log")
     .description("Show recent messages")
     .option("-n, --limit <n>", "Number of messages", int, 20)
-    .option("-a, --all", "Return every message in the selected correlation-prefix scope")
+    .option(
+      "-a, --all",
+      "Return every message in the selected correlation-prefix scope (needs --ref-prefix or --reply-prefix)",
+    )
     .option("-f, --follow", "Follow live — stream new messages")
     .option("--json", "Print one machine-readable JSON snapshot")
     .option("--ref-prefix <prefix>", "Only messages whose durable ref starts with this literal prefix")

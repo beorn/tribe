@@ -143,6 +143,12 @@ const QUIET_RECEIPT_METHODS: ReadonlySet<string> = new Set([
 ])
 const IDENTITY_VERIFIER_INCIDENT = { emitter: "wire", subject: "identity-verifier", condition: "fault" } as const
 
+/**
+ * 33937: the most rows one bounded log read may ask for. Above it a read is unbounded with extra steps, so the
+ * dispatcher refuses rather than let one caller stall the single event loop for every other caller.
+ */
+export const CLI_LOG_MAX_LIMIT = 5000
+
 export interface DispatcherRuntimeHooks {
   /** Called from accept(). Default: no-op. Wire to withIdleQuit. */
   onActiveClient?: () => void
@@ -4190,6 +4196,26 @@ export function withDispatcher<
             const all = p.all === true
             const refPrefix = typeof p.ref_prefix === "string" && p.ref_prefix.length > 0 ? p.ref_prefix : null
             const replyPrefix = typeof p.reply_prefix === "string" && p.reply_prefix.length > 0 ? p.reply_prefix : null
+            // 33937: an unbounded read once every message and stalls every caller behind it on the single event
+            // loop (measured: 9.5 s to the 10 s client timeout on an idle daemon, 4.6x tail latency for everyone
+            // else). Refuse loudly; a silent cap would hand out partial history.
+            if (!Number.isFinite(limit) || limit < 0) {
+              return makeError(id, -32602, `cli_log refused: limit must be a number >= 0; got ${String(p.limit)}`)
+            }
+            if (all && !refPrefix && !replyPrefix) {
+              return makeError(
+                id,
+                -32602,
+                `unbounded log read refused; pass --limit N (max ${CLI_LOG_MAX_LIMIT}) or --ref-prefix/--reply-prefix`,
+              )
+            }
+            if (!all && limit > CLI_LOG_MAX_LIMIT) {
+              return makeError(
+                id,
+                -32602,
+                `log read refused; --limit ${limit} exceeds the maximum ${CLI_LOG_MAX_LIMIT}, so pass --ref-prefix/--reply-prefix or a smaller --limit`,
+              )
+            }
             const filters: string[] = []
             const values: Array<string | number> = []
             if (refPrefix) {

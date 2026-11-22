@@ -18,7 +18,7 @@ import { runRetentionSweep } from "../retention.ts"
 import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
 import { withClientRegistry } from "./with-client-registry.ts"
 import { createBaseTribe } from "./base.ts"
-import { withDispatcher } from "./with-dispatcher.ts"
+import { CLI_LOG_MAX_LIMIT, withDispatcher } from "./with-dispatcher.ts"
 import { boundedIdentityVerifier, type IdentityVerdict, type LoadedIdentityVerifier } from "../identity-verifier.ts"
 
 const managedToken = (name: string, sid: string) =>
@@ -1497,11 +1497,34 @@ describe("dispatcher bounded mailbox drain", () => {
 
     const log = parseResult<{ messages: Array<Record<string, unknown>> }>(
       await harness.dispatcher.handleRequest(
-        { jsonrpc: "2.0", id: "await-shadow-log", method: "cli_log", params: { all: true } },
+        { jsonrpc: "2.0", id: "await-shadow-log", method: "cli_log", params: { limit: 50 } },
         "conn-status",
       ),
     )
     expect(log.messages.at(-1)).not.toHaveProperty("rowid")
+
+    // 33937: the unbounded path and its door-by-another-name are refused; the bounded path still answers.
+    const unbounded = parseError(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "unbounded-log", method: "cli_log", params: { all: true } },
+        "conn-status",
+      ),
+    )
+    expect(unbounded.message).toMatch(/unbounded log read refused/)
+    const overCap = parseError(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "over-cap-log", method: "cli_log", params: { limit: CLI_LOG_MAX_LIMIT + 1 } },
+        "conn-status",
+      ),
+    )
+    expect(overCap.message).toMatch(/exceeds the maximum/)
+    const bounded = parseResult<{ messages: Array<Record<string, unknown>> }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "bounded-log", method: "cli_log", params: { limit: 1 } },
+        "conn-status",
+      ),
+    )
+    expect(bounded.messages).toHaveLength(1)
   })
 
   it("keeps legal names containing the tombstone marker routable", async () => {
@@ -1625,7 +1648,7 @@ describe("dispatcher bounded mailbox drain", () => {
       expect(limited).toHaveLength(1)
       expect([receipt.id, progress.id]).toContain(limited[0]!.id)
     }
-    expect((await log({ all: true })).messages.some((message) => message.id === receipt.id)).toBe(false)
+    expect((await log({ limit: 50 })).messages.some((message) => message.id === receipt.id)).toBe(false)
     expect(await status("requester")).toMatchObject(second)
 
     await send("owner", { to: "requester", type: "response", reply: "work", message: "done" })
@@ -2403,7 +2426,7 @@ describe("dispatcher durable log projection", () => {
       messages: Array<{ id: string; type: string; kind: string; content: string; topic: string | null }>
     }>(
       await harness.dispatcher.handleRequest(
-        { jsonrpc: "2.0", id: "demoted-daemon-activity-log", method: "cli_log", params: { all: true } },
+        { jsonrpc: "2.0", id: "demoted-daemon-activity-log", method: "cli_log", params: { limit: 100 } },
         "conn-log",
       ),
     )
