@@ -326,6 +326,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     allowMetered: options.allowMetered,
     raw: false,
     json: json,
+    refresh: options.refresh,
     since,
     until: options.until,
     limit: limitStr ? parseInt(limitStr, 10) : 10,

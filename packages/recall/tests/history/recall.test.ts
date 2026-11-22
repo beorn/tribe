@@ -382,9 +382,16 @@ describe("recall integration", () => {
   // (no DB under the test HOME) and, where a DB existed, missed fixed budgets under load in guard 2's runs.
   let fixtureDir = ""
   let previousDbPath: string | undefined
+  let previousClaudeDir: string | undefined
   beforeAll(() => {
     previousDbPath = process.env.RECALL_DB_PATH
     fixtureDir = fs.mkdtempSync(join(tmpdir(), "recall-integration-"))
+    // 37777: a query refreshes the index from its own roots before it answers. These rows seed their data directly
+    // and have no transcripts on disk, so an isolated empty root keeps the refresh a no-op instead of walking the
+    // operator's live tree (which spent the 10 s cap and timed these rows out).
+    previousClaudeDir = process.env.CLAUDE_DIR
+    process.env.CLAUDE_DIR = join(fixtureDir, "claude")
+    fs.mkdirSync(join(process.env.CLAUDE_DIR, "projects"), { recursive: true })
     closeDb()
     process.env.RECALL_DB_PATH = join(fixtureDir, "fixture.db")
     const db = getDb()
@@ -421,6 +428,8 @@ describe("recall integration", () => {
     closeDb()
     if (previousDbPath === undefined) delete process.env.RECALL_DB_PATH
     else process.env.RECALL_DB_PATH = previousDbPath
+    if (previousClaudeDir === undefined) delete process.env.CLAUDE_DIR
+    else process.env.CLAUDE_DIR = previousClaudeDir
     safeRemoveSync(fixtureDir, { within: tmpdir(), allowMissing: true })
   })
 

@@ -90,6 +90,11 @@ export interface RecallOptions {
   limit?: number // Max results to include (default 10)
   raw?: boolean // Return raw results without LLM synthesis
   since?: string // Time filter (1h, 1d, 1w, etc.)
+  /**
+   * 37777 (@cto a78c4127): false skips the foreground incremental index a query otherwise runs over its own roots.
+   * The CLI's --no-refresh sets it, so a caller that wants a pure read of the current index has one switch.
+   */
+  refresh?: boolean
   until?: string // Inclusive indexed upper bound, parsed by parseTimeToMs
   json?: boolean // Return structured JSON
   timeout?: number // Total timeout in ms (default DEFAULT_SYNTHESIS_TIMEOUT_MS)

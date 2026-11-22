@@ -15,6 +15,7 @@ import {
 } from "./db.ts"
 import type { ContentType } from "./types.ts"
 import { synthesizeResults } from "./synthesize.ts"
+import { refreshIndexForQuery, reportQueryRefresh } from "./query-refresh.ts"
 import { loadLlm } from "../lib/llm-backend.ts"
 import {
   DEFAULT_SYNTHESIS_TIMEOUT_MS,
@@ -528,6 +529,12 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
   const db = getDb()
 
   try {
+    // 37777 (@cto a78c4127): the scheduled pass runs every 4 h, so a query can answer from an index older than its
+    // own session. Read the queried roots' newer transcripts first — in the foreground, capped — and let the receipt
+    // say loudly what the cap left unread. Hook mode keeps its wall: it answers a tool prompt, not a person.
+    if (options.refresh !== false && !hook) {
+      reportQueryRefresh(await refreshIndexForQuery(db, { projectRoot: projectFilter }))
+    }
     // Search messages table with FTS5
     const messageOpts: MessageSearchOptions = {
       limit: limit * 2, // Fetch extra for dedup
