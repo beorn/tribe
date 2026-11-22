@@ -544,6 +544,97 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     expect((pending.pending as Array<unknown>).length).toBe(1)
   })
 
+  // AC4 (#30743): the complete fanout witness through the REAL send path — one
+  // multi-recipient tracked send (one shared request id, one message id per seat)
+  // plus a roster clock notify that only QUOTES that request id. Both id spaces
+  // must resolve to the same rows, an id the daemon knows no message for must land
+  // in settlement_unknown_ids (never in settlement_unresolved), and pending must
+  // agree with fetch on the count.
+  it("covers a multi-recipient tracked send and its clock notify: one request id, N message ids, an explicit unknown id", () => {
+    const third = "@dev/third"
+    const seats = [OTHER, third]
+    // A tracked ball promises an answer, so each seat needs a verified, readable
+    // mailbox (24581); mirror the 27229 fixture's verified identity.
+    const verified = (name: string, sessionId: string): TribeContext => {
+      const context = createTribeContext({
+        db,
+        stmts,
+        sessionId,
+        sessionRole: "member",
+        initialName: name,
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+      registerSession(context, "30743-ac4", () => true, null, process.pid, "pull", "/repo")
+      db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+        `sid-${sessionId}`,
+        context.sessionId,
+      )
+      return context
+    }
+    const sender = verified("@chief", "sess-30743-sender")
+    seats.forEach((seat, index) => verified(seat, `sess-30743-seat-${index}`))
+    const sent = parseToolJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        {
+          to: seats,
+          type: "request",
+          request: true,
+          message: "30743: fanout witness — one answer settles for everyone",
+          summary: "30743: fanout witness",
+        },
+        makeOpts(),
+      ),
+    )
+    const requestId = sent.request_id as string
+    const messageIds = sent.ids as string[]
+    expect(typeof requestId).toBe("string")
+    expect(messageIds).toHaveLength(seats.length)
+
+    // The roster-wide deadline clock notify: it quotes the shared request id in its
+    // ref and opens no ball of its own.
+    handleToolCall(
+      sender,
+      "tribe.send",
+      {
+        to: "*",
+        type: "notify",
+        message: `deadline in 10m — answer with --type response --reply ${requestId}`,
+        ref: requestId,
+        summary: "30743: clock notify quotes the shared request id",
+      },
+      makeOpts(),
+    )
+
+    const byRequest = read([requestId])
+    const byMessages = read(messageIds)
+    const absent = "9e8d7c6b-5a49-4382-9710-6f5e4d3c2b1a"
+    const withUnknown = read([requestId, absent])
+
+    expect(byRequest.settlement_unresolved ?? []).toEqual([])
+    expect(events(byRequest)).toEqual(events(byMessages))
+    expect(events(byRequest)).toHaveLength(seats.length)
+    expect(events(byRequest).every((row) => row.settlement === "open")).toBe(true)
+    expect(events(byRequest).map((row) => String(row.id)).sort()).toEqual([...messageIds].sort())
+
+    let pendingTotal = 0
+    for (const owner of seats) {
+      const pending = parseToolJson(handleToolCall(ctx, "tribe.pending", { owner }, makeOpts()))
+      const rows = pending.pending as Array<Record<string, unknown>>
+      expect(rows).toHaveLength(1)
+      expect(rows[0]?.request_id).toBe(requestId)
+      pendingTotal += rows.length
+    }
+    expect(pendingTotal).toBe(events(byRequest).filter((row) => row.settlement === "open").length)
+
+    expect(withUnknown.settlement_unknown_ids).toEqual([absent])
+    expect(withUnknown.settlement_unresolved ?? []).toEqual([])
+    expect(events(withUnknown)).toEqual(events(byRequest))
+  })
+
   it("resolves a closed request id to its settled row, not to an owed ball", () => {
     const closed = "aa11bb22-cc33-4d44-8e55-ff6600112233"
     closedBall("msg-30743-closed", SENDER, SEAT, closed)
