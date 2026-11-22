@@ -1050,7 +1050,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       // The second readiness reply advanced the baseline before the following poll failed.
       expect(business[1]?.params).toMatchObject({ after_seq: 38 })
       for (const wait of waits.slice(1)) {
-        expect(wait.params?.id_token === MANAGED_PENDING_TOKEN).toBe(true)
+        expect(wait.params?.id_token).toBe(true)
         expect(wait.params?.launch_id).toBe("sid-dev2")
       }
       if (["recovered", "disconnected-handshake", "shutdown"].includes(mode)) {
@@ -2338,13 +2338,13 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           recipient: "@chief",
           content: "x".repeat(400_000),
           bead_id: null,
-          ref: null,
+          ref: "pipe-flush-fixture",
           request: null,
           reply: null,
           ts: Date.parse("2026-08-13T00:00:00.000Z"),
         },
       ],
-      query: { all: true, ref_prefix: null, reply_prefix: null },
+      query: { all: true, ref_prefix: "pipe-flush-fixture", reply_prefix: null },
     }
     const expectedOutput = `${JSON.stringify(snapshot)}\n`
     const server = createServer((socket) => {
@@ -2366,7 +2366,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           resolveListen()
         })
       })
-      const result = await runCliAsync(["log", "--all", "--json"], {
+      const result = await runCliAsync(["log", "--all", "--ref-prefix", "pipe-flush-fixture", "--json"], {
         ...process.env,
         TRIBE_SOCKET: socketPath,
         TRIBE_NO_AUTOSTART: "1",
