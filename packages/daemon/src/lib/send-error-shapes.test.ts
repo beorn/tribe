@@ -139,7 +139,9 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
     // id and no mailbox authority, so its authority is claimed. The outcome is refusal, @cto ruling 2304 option 1: a
     // remote seat answers only once it is a declared, minted participant, so the refusal names that route.
     addSession(db, stmts, "sess-unimac", "unimac/hhcorp")
-    const row = db.prepare("SELECT launch_id, mailbox_authority_hash FROM sessions WHERE id = ?").get("sess-unimac") as {
+    const row = db
+      .prepare("SELECT launch_id, mailbox_authority_hash FROM sessions WHERE id = ?")
+      .get("sess-unimac") as {
       launch_id: string | null
       mailbox_authority_hash: string | null
     }
