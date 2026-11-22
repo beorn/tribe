@@ -121,6 +121,18 @@ type OneShotRpcOutcome = { result: unknown } | { error: { code: number; message:
 /** The managed launch's identity token a one-shot pending read presents (25074 3d-3: its only self-read credential). */
 const MANAGED_PENDING_TOKEN = launchToken("sid-dev2", "@dev/2")
 
+// Record credential equality, never bearer values, so a failed assertion cannot print them.
+function fixtureCall(
+  request: OneShotRpcRequest,
+  expectedToken: string,
+): { method: string; params?: Record<string, unknown> } {
+  const params = request.params === undefined ? undefined : { ...request.params }
+  for (const key of ["idToken", "id_token"]) {
+    if (params !== undefined && key in params) params[key] = params[key] === expectedToken
+  }
+  return { method: request.method, params }
+}
+
 async function runManagedPendingCliAgainst(
   outcomeFor: (
     request: OneShotRpcRequest,
@@ -143,7 +155,7 @@ async function runManagedPendingCliAgainst(
       for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
         const request = JSON.parse(buffer.slice(0, newline)) as OneShotRpcRequest
         buffer = buffer.slice(newline + 1)
-        calls.push({ method: request.method, params: request.params })
+        calls.push(fixtureCall(request, options.token ?? MANAGED_PENDING_TOKEN))
         let outcome: OneShotRpcOutcome | undefined | Promise<OneShotRpcOutcome | undefined>
         if (options.token !== undefined && request.method === "register") {
           serviceRegistration = request.params
@@ -199,10 +211,12 @@ async function runManagedPendingCliAgainst(
         resolveListen()
       })
     })
+    const env = { ...process.env }
+    for (const name of tribeAmbientEnvironmentNames()) delete env[name]
     const result = await runCliAsync(
       options.args ?? ["pending", "--json"],
       {
-        ...process.env,
+        ...env,
         TRIBE_SOCKET: socketPath,
         TRIBE_NO_AUTOSTART: "1",
         HAB_ID_TOKEN: options.token ?? MANAGED_PENDING_TOKEN,
@@ -235,7 +249,7 @@ async function runManagedFetchCliAgainst(
       const newline = buffer.indexOf("\n")
       if (newline < 0) return
       const request = JSON.parse(buffer.slice(0, newline)) as OneShotRpcRequest
-      calls.push({ method: request.method, params: request.params })
+      calls.push(fixtureCall(request, MANAGED_PENDING_TOKEN))
       socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, ...outcomeFor(request) })}\n`)
     })
   })
@@ -248,8 +262,10 @@ async function runManagedFetchCliAgainst(
         resolveListen()
       })
     })
+    const env = { ...process.env }
+    for (const name of tribeAmbientEnvironmentNames()) delete env[name]
     const result = await runCliAsync(args, {
-      ...process.env,
+      ...env,
       TRIBE_SOCKET: socketPath,
       TRIBE_NO_AUTOSTART: "1",
       HAB_ID_TOKEN: MANAGED_PENDING_TOKEN,
@@ -1034,7 +1050,8 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       // The second readiness reply advanced the baseline before the following poll failed.
       expect(business[1]?.params).toMatchObject({ after_seq: 38 })
       for (const wait of waits.slice(1)) {
-        expect(wait.params).toMatchObject({ launch_id: "sid-dev2", id_token: MANAGED_PENDING_TOKEN })
+        expect(wait.params?.id_token === MANAGED_PENDING_TOKEN).toBe(true)
+        expect(wait.params?.launch_id).toBe("sid-dev2")
       }
       if (["recovered", "disconnected-handshake", "shutdown"].includes(mode)) {
         expect(business[2]?.params).toMatchObject({ after_seq: 38 })
@@ -1327,7 +1344,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         "No pending query ran. For an explicit recovery or audit read, run " +
         "'tribe pending --owner <seat> --json'.\n",
     })
-    expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { idToken: MANAGED_PENDING_TOKEN } }])
+    expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { idToken: true } }])
   })
 
   it("managed pending reads preserve non-identity RPC remedies", async () => {
@@ -1366,7 +1383,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         "a pending array, and non-negative integer count matching its length. Run 'tribe doctor' to compare the running daemon " +
         "with this checkout before retrying.\n",
     })
-    expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { idToken: MANAGED_PENDING_TOKEN } }])
+    expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { idToken: true } }])
   })
 
   // 27519 — `tribe fetch` is the MCP fetch handler over a one-shot CLI: the
@@ -1388,7 +1405,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
     expect(result).toEqual({ code: 0, signal: null, stdout: `${JSON.stringify(payload)}\n`, stderr: "" })
     expect(calls).toEqual([
-      { method: "cli_session_fetch_read_v1", params: { idToken: MANAGED_PENDING_TOKEN, with: "@chief", limit: 10 } },
+      { method: "cli_session_fetch_read_v1", params: { idToken: true, with: "@chief", limit: 10 } },
     ])
   })
 
@@ -1417,7 +1434,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       {
         method: "cli_session_fetch_read_v1",
         params: {
-          idToken: MANAGED_PENDING_TOKEN,
+          idToken: true,
           ids: ["a", "b"],
           topics: ["github:*", "git:commit"],
           since: 42,
@@ -1463,7 +1480,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(calls).toEqual([
       {
         method: "cli_session_fetch_read_v1",
-        params: { idToken: MANAGED_PENDING_TOKEN, since: 0, topics: [], with: "", from: "" },
+        params: { idToken: true, since: 0, topics: [], with: "", from: "" },
       },
     ])
   })
@@ -1548,9 +1565,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
     expect(result.code).toBe(0)
     expect(result.stderr).toBe("")
-    expect(calls).toEqual([
-      { method: "cli_session_fetch_read_v1", params: { idToken: MANAGED_PENDING_TOKEN, before: 41 } },
-    ])
+    expect(calls).toEqual([{ method: "cli_session_fetch_read_v1", params: { idToken: true, before: 41 } }])
   })
 
   it("fetch refuses a bad --before before connecting, naming the value (29947)", async () => {
@@ -1679,9 +1694,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }))
     expect(result.code, result.stderr).toBe(0)
     expect(JSON.parse(result.stdout)).toEqual(payload)
-    expect(calls).toEqual([
-      { method: "cli_self_inbox_v1", params: { idToken: MANAGED_PENDING_TOKEN, limit: 50, peek } },
-    ])
+    expect(calls).toEqual([{ method: "cli_self_inbox_v1", params: { idToken: true, limit: 50, peek } }])
     expect(result.stderr.includes("read was destructive")).toBe(!peek)
   })
 
@@ -1708,9 +1721,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         }))
 
         expect(result.code).toBe(0)
-        expect(calls).toEqual([
-          { method: "cli_self_inbox_v1", params: { idToken: MANAGED_PENDING_TOKEN, limit: 50, peek } },
-        ])
+        expect(calls).toEqual([{ method: "cli_self_inbox_v1", params: { idToken: true, limit: 50, peek } }])
         // Only explicit consumption warns; stdout remains the file summary.
         expect(result.stderr).toBe(
           peek
@@ -1757,9 +1768,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
     }))
     expect(result.code, result.stderr).toBe(0)
-    expect(calls).toEqual([
-      { method: "cli_self_inbox_v1", params: { idToken: MANAGED_PENDING_TOKEN, limit: 50, peek: false } },
-    ])
+    expect(calls).toEqual([{ method: "cli_self_inbox_v1", params: { idToken: true, limit: 50, peek: false } }])
     expect(result.stderr).toContain("2 ball(s) you still owe remain in attention")
     expect(result.stderr, "the receipt names where to answer them").toContain("tribe pending")
     expect(result.stderr, "the durable first sentence is unchanged").toContain("read was destructive")
@@ -1781,9 +1790,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
     }))
     expect(result.code, result.stderr).toBe(0)
-    expect(calls).toEqual([
-      { method: "cli_self_inbox_v1", params: { idToken: MANAGED_PENDING_TOKEN, limit: 50, peek: true } },
-    ])
+    expect(calls).toEqual([{ method: "cli_self_inbox_v1", params: { idToken: true, limit: 50, peek: true } }])
     expect(result.stdout).toContain("verdict body")
     expect(result.stdout).toContain("Inspection leaves this notice unacknowledged.")
     expect(result.stdout).not.toContain("[CONSUMED]")
@@ -1828,7 +1835,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       expect(retried.result.code).toBe(0)
       expect(readFileSync(retryPath, "utf8")).toBe(`${JSON.stringify(payload, null, 2)}\n`)
       expect(retried.calls).toEqual([
-        { method: "cli_self_inbox_v1", params: { idToken: MANAGED_PENDING_TOKEN, limit: 50, peek: false } },
+        { method: "cli_self_inbox_v1", params: { idToken: true, limit: 50, peek: false } },
       ])
     } finally {
       rmSync(dir, { recursive: true, force: true })
