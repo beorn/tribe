@@ -248,6 +248,9 @@ function relPath(p: string): string {
   return p.startsWith(cwd + "/") ? p.slice(cwd.length + 1) : p
 }
 
+/** #30968 (@cto 51103f9d): the seats a participant may send to, declared on the tribe service row. */
+export const TRIBE_PARTICIPANT_SEATS_ENV = "TRIBE_PARTICIPANT_SEATS"
+
 export function withDispatcher<
   T extends BaseTribe &
     WithConfig &
@@ -2053,6 +2056,26 @@ export function withDispatcher<
     ])
     /** fetch arguments that read the whole journal rather than the caller's own mailbox. */
     const PARTICIPANT_JOURNAL_WIDE_FETCH_KEYS = ["ids", "with", "from", "to", "since", "before", "topics"] as const
+    /**
+     * #30968 (@cto 5ca32c74, fe467bec): a participant's send is an ALLOWLIST, never a deny-list. Only these types,
+     * only to these seats; everything else (broadcast, assign, query, notify, status, verdict, any other seat) is
+     * refused by name. The one exception is a response settling a ball the participant owns, which goes to that
+     * ball's requester. The seats are a daemon SETTING, never a policy in code (@cto 51103f9d): the tribe service's
+     * declared TRIBE_PARTICIPANT_SEATS (comma-separated), read once here at daemon start and logged. Missing or empty
+     * fails closed: a participant may then only answer its own balls. Per-grant seats are a follow-up.
+     */
+    const PARTICIPANT_SEND_TYPES: ReadonlySet<string> = new Set(["request", "response"])
+    const PARTICIPANT_NAMED_SEATS: ReadonlySet<string> = new Set(
+      (process.env[TRIBE_PARTICIPANT_SEATS_ENV] ?? "")
+        .split(",")
+        .map((seat) => seat.trim())
+        .filter((seat) => seat.length > 0),
+    )
+    log.info?.(
+      PARTICIPANT_NAMED_SEATS.size === 0
+        ? `tribe:dispatcher: ${TRIBE_PARTICIPANT_SEATS_ENV} unset: participants may only answer their own balls (#30968)`
+        : `tribe:dispatcher: ${TRIBE_PARTICIPANT_SEATS_ENV}=${[...PARTICIPANT_NAMED_SEATS].join(",")}: the seats a participant may send to (#30968)`,
+    )
     /** The calls that read or write the participant's mailbox: each re-verifies its token (ruling 4). */
     const PARTICIPANT_PROTECTED_METHODS: ReadonlySet<string> = new Set([
       TRIBE_COORD_METHODS.send,
@@ -2077,10 +2100,36 @@ export function withDispatcher<
       }
       const self = client.name
       const names = (value: unknown): boolean => typeof value === "string" && value !== self && `@${value}` !== self
+      /** The send allowlist (#30968 @cto fe467bec): the right a send lacks, or null when the grant names it. */
+      function participantSendRefusal(args: Record<string, unknown>): string | null {
+        if (args.incident !== undefined) return "incident raise or clear"
+        const type = typeof args.type === "string" ? args.type : "notify"
+        if (!PARTICIPANT_SEND_TYPES.has(type)) return `sending ${type} (a participant sends request or response only)`
+        const targets: unknown[] = Array.isArray(args.to) ? args.to : [args.to]
+        if (targets.length === 0 || targets.some((target) => typeof target !== "string" || target.length === 0)) {
+          return "sending to an unnamed address"
+        }
+        if (targets.includes("*")) return "broadcast"
+        const ungranted = (targets as string[]).filter((target) => !PARTICIPANT_NAMED_SEATS.has(target))
+        if (ungranted.length === 0) return null
+        if (type === "response" && targets.length === 1 && repliesToOwnBall(args.reply, targets[0] as string)) return null
+        if (PARTICIPANT_NAMED_SEATS.size === 0) {
+          return `sending to ${ungranted.join(", ")} (no participant seats declared: ${TRIBE_PARTICIPANT_SEATS_ENV} is unset, so a participant may only answer its own balls)`
+        }
+        return `sending to ${ungranted.join(", ")} (a participant reaches only ${[...PARTICIPANT_NAMED_SEATS].join(", ")}, or the requester of a ball it owns)`
+      }
+      /** True when `reply` names an open ball this participant owns whose requester is `target`. */
+      function repliesToOwnBall(reply: unknown, target: string): boolean {
+        if (typeof reply !== "string" || reply.length === 0) return false
+        const row = db
+          .prepare("SELECT 1 AS hit FROM pending_request WHERE request_id = ? AND recipient = ? AND sender = ? LIMIT 1")
+          .get(reply, self, target) as { hit: number } | null
+        return row !== null
+      }
       /** The argument forms of a permitted method that reach past the participant's own mailbox; null when none does. */
       function participantRightRefusal(name: string, args: Record<string, unknown>): string | null {
         if (name === TRIBE_COORD_METHODS.join && names(args.name)) return "join as another name"
-        if (name === TRIBE_COORD_METHODS.send && args.incident !== undefined) return "incident raise or clear"
+        if (name === TRIBE_COORD_METHODS.send) return participantSendRefusal(args)
         if (name === TRIBE_COORD_METHODS.pending) {
           if (args.all === true) return "fleet pending (--all)"
           if (args.claim !== undefined || args.unclaim !== undefined) return "claiming solicitations"

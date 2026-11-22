@@ -57,6 +57,7 @@ import { launchSender, type LaunchSender } from "./service-send.ts"
 import { certifiedReregistrationKey, keyedLaunchId } from "./launch-registration.ts"
 import { deriveTribePersonaLaunchIdentity, formatInstanceId } from "./lib/persona-launch-identity.ts"
 import { readUnverifiedTokenClaims } from "./lib/identity-token.ts"
+import { participantLaunchNameRefusal } from "./lib/participant-launch-name.ts"
 import { isIdentityTokenMissingRefusal } from "./lib/identity-token-missing-refusal.ts"
 import { TRIBE_NAME_ENV, TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE_ENV } from "./lib/session-identity-env.ts"
 import { AG_HOST_LAUNCH_GENERATION_ENV } from "./lib/ag-host-env.ts"
@@ -275,6 +276,8 @@ if (LAUNCH_NAME !== undefined && !isTribeNameShape(LAUNCH_NAME)) {
 }
 const REGISTER_WITH_LAUNCH_NAME =
   LAUNCH_NAME !== undefined && (!REQUIRE_EXPLICIT_JOIN || isExplicitTribePersonaName(LAUNCH_NAME))
+const participantNameRefusal = participantLaunchNameRefusal(process.env, LAUNCH_NAME)
+if (participantNameRefusal !== null) throw new Error(participantNameRefusal)
 let joined = !REQUIRE_EXPLICIT_JOIN || process.env[TRIBE_PLUGIN_RESUME_JOINED_ENV] === "1"
 let deliveryAcknowledgement: TribeDeliveryAcknowledgement = {
   acknowledged: false,

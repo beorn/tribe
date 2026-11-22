@@ -103,6 +103,8 @@ let cleanup: (() => Promise<void>) | null = null
 let logged: string[] = []
 beforeEach(() => {
   logged = []
+  // #30968 (@cto 51103f9d): the seats a participant may send to are the tribe daemon's declared setting.
+  vi.stubEnv("TRIBE_PARTICIPANT_SEATS", CHIEF)
   const capture = (...args: unknown[]) => {
     logged.push(args.map(String).join(" "))
   }
@@ -114,6 +116,7 @@ afterEach(async () => {
     (line) => / (WARN|ERROR) /.test(line) && !/ refused: |identity verifier \S+ failed on participant/.test(line),
   )
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
   if (cleanup) {
     const dispose = cleanup
     cleanup = null
@@ -453,7 +456,7 @@ describe("one-shot participants are refused by name until slice B (@cto 7e926481
   it("the same token on its registered persistent transport operates (the path beside the refusal)", async () => {
     const h = harness()
     const { mac } = await connectedPair(h)
-    const sent = await h.tool(mac.connId, "tribe.send", { to: CHIEF, type: "notify", message: "hello" })
+    const sent = await h.tool(mac.connId, "tribe.send", { to: CHIEF, type: "request", message: "hello" })
     expect(sent.error).toBeUndefined()
     expect(sent.body).toMatchObject({ sent: true })
   })
@@ -489,7 +492,7 @@ describe("ruling 4: every protected call re-verifies the participant's token", (
     const { mac } = await connectedPair(h)
     // A verifier that judged everything but the clock: tribe re-checks exp itself.
     vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2 * 3_600_000)
-    const refused = await h.tool(mac.connId, "tribe.send", { to: CHIEF, type: "notify", message: "late" })
+    const refused = await h.tool(mac.connId, "tribe.send", { to: CHIEF, type: "request", message: "late" })
     expect(refused.error?.data).toMatchObject({ reason: "participant-grant-expired" })
   })
 
@@ -501,7 +504,7 @@ describe("ruling 4: every protected call re-verifies the participant's token", (
       reason: "self-mailbox-authority-token",
     })
     h.revoke()
-    const refused = await h.tool(mac.connId, "tribe.send", { to: CHIEF, type: "notify", message: "after revoke" })
+    const refused = await h.tool(mac.connId, "tribe.send", { to: CHIEF, type: "request", message: "after revoke" })
     expect(refused.error?.data).toMatchObject({ reason: "participant-grant-revoked" })
     expect(h.messagesTo(CHIEF)).toBe(0)
     const seen = await h.capability(chief.connId)
@@ -691,5 +694,70 @@ describe("ruling 5: ordinary own-mailbox rights only", () => {
     const { mac } = await connectedPair(h)
     expect((await h.call(mac.connId, "tribe.fetch", {})).error).toBeUndefined()
     expect((await h.call(mac.connId, "tribe.fetch", { limit: 10 })).error).toBeUndefined()
+  })
+})
+
+describe("a participant's send is an allowlist: request or response, to declared seats only (@cto fe467bec, 51103f9d)", () => {
+  const refusedFor = (result: { error?: { data?: unknown } }) =>
+    (result.error?.data as { reason?: string; what?: string } | undefined) ?? {}
+
+  it("a request to a declared seat is allowed", async () => {
+    const h = harness()
+    const { mac } = await connectedPair(h)
+    const sent = await h.tool(mac.connId, "tribe.send", { to: CHIEF, type: "request", message: "allowed" })
+    expect(sent.error).toBeUndefined()
+    expect(h.messagesTo(CHIEF)).toBe(1)
+  })
+
+  it("a broadcast is refused by name and sends nothing", async () => {
+    const h = harness()
+    const { mac } = await connectedPair(h)
+    // The daemon's own join notices already address "*"; the participant's refused send adds none.
+    const before = h.messagesTo("*")
+    const sent = await h.tool(mac.connId, "tribe.send", { to: "*", type: "request", message: "everyone" })
+    expect(refusedFor(sent)).toMatchObject({ reason: "participant-right-refused", what: "broadcast" })
+    expect(h.messagesTo("*")).toBe(before)
+  })
+
+  it("assign, query, notify, status and verdict are refused by name, even to a declared seat", async () => {
+    const h = harness()
+    const { mac } = await connectedPair(h)
+    for (const type of ["assign", "query", "notify", "status", "verdict"]) {
+      const sent = await h.tool(mac.connId, "tribe.send", { to: CHIEF, type, message: type })
+      expect(refusedFor(sent)).toMatchObject({ reason: "participant-right-refused" })
+      expect(refusedFor(sent).what).toContain(`sending ${type}`)
+    }
+    expect(h.messagesTo(CHIEF)).toBe(0)
+  })
+
+  it("an undeclared seat, and a list mixing a declared and an undeclared seat, are refused", async () => {
+    const h = harness()
+    const { mac } = await connectedPair(h)
+    const alone = await h.tool(mac.connId, "tribe.send", { to: "@dev/7", type: "request", message: "x" })
+    expect(refusedFor(alone).what).toContain("sending to @dev/7")
+    const mixed = await h.tool(mac.connId, "tribe.send", { to: [CHIEF, "@dev/7"], type: "request", message: "x" })
+    expect(refusedFor(mixed).what).toContain("sending to @dev/7")
+    expect(h.messagesTo(CHIEF)).toBe(0)
+  })
+
+  it("with no seats declared, every send but a reply to its own ball is refused (fail closed)", async () => {
+    vi.stubEnv("TRIBE_PARTICIPANT_SEATS", "")
+    const h = harness()
+    const { chief, mac } = await connectedPair(h)
+    const unasked = await h.tool(mac.connId, "tribe.send", { to: CHIEF, type: "request", message: "x" })
+    expect(refusedFor(unasked).what).toContain("no participant seats declared")
+    const asked = await h.tool(chief.connId, "tribe.send", { to: PARTICIPANT, type: "request", message: "q" })
+    const requestId = asked.body?.request_id as string
+    const answered = await h.tool(mac.connId, "tribe.send", {
+      to: CHIEF,
+      type: "response",
+      message: "a",
+      reply: requestId,
+    })
+    expect(answered.error).toBeUndefined()
+    expect((answered.body?.tracker as { closed: number }).closed).toBeGreaterThan(0)
+    // A response citing no ball it owns is still refused.
+    const forged = await h.tool(mac.connId, "tribe.send", { to: CHIEF, type: "response", message: "a", reply: "nope" })
+    expect(refusedFor(forged).what).toContain("no participant seats declared")
   })
 })
