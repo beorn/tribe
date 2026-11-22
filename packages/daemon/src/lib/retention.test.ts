@@ -245,6 +245,9 @@ describe("journal retention sweep", () => {
             n: number
           }
         ).n
+      // The sweep now runs after the drain's first real event-loop turn (33937
+      // @cto ordering), so counts after a timer advance need one immediate.
+      const flushYield = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve))
 
       let runSettled: Promise<"resolved" | "rejected"> | undefined
       let secondRun: Promise<"resolved" | "rejected"> | undefined
@@ -319,6 +322,16 @@ describe("journal retention sweep", () => {
         expect(archivedIds(db)).toContain(initial)
         expect(vi.getTimerCount()).toBe(1)
 
+        if (order === "grace-after-bind") {
+          // 33937 (@cto dba4bdab): the seven-day batch above committed in the
+          // timer callback's synchronous turn, but the expensive retention
+          // sweep has NOT run yet — it sits behind the drain's first yield to
+          // the event loop, so socket I/O gets its turn first.
+          expect(countRetentionOnlyArchived()).toBe(0)
+          expect(countRetentionOnlyLive()).toBe(retentionOnlyTotal)
+        }
+        await flushYield()
+
         // Startup caps batchSize at min(configuredBatchSize, 500).
         const expectedStartupBatch = Math.min(configuredBatchSize, 500)
         expect(countRetentionOnlyArchived()).toBe(expectedStartupBatch)
@@ -331,6 +344,7 @@ describe("journal retention sweep", () => {
         vi.advanceTimersByTime(1)
         expect(liveIds(db)).not.toContain(later)
         expect(archivedIds(db)).toContain(later)
+        await flushYield()
         // The periodic tick uses the full declared configuredBatchSize.
         const expectedAfterTick = expectedStartupBatch + configuredBatchSize
         expect(countRetentionOnlyArchived()).toBe(expectedAfterTick)
@@ -348,6 +362,158 @@ describe("journal retention sweep", () => {
       }
     },
   )
+
+  // @failure The retention sweep runs in the same synchronous turn as the
+  // seven-day batch (starving socket I/O at the fleet reconnect burst), a
+  // periodic tick stacks another sweep while the startup drain is still
+  // in flight, or a shutdown that lands during the drain's yield still lets
+  // the sweep run.
+  // @level l2
+  // @consumer The daemon's real socket/runtime lifecycle and journal history.
+  it("33937: the sweep waits for a yield and a mid-drain tick is skipped", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] })
+    const prevArchiveWindow = process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS
+    const prevBatchSize = process.env.TRIBE_RETENTION_BATCH_SIZE
+    process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS = String(3 * DAY)
+    process.env.TRIBE_RETENTION_BATCH_SIZE = "500"
+    const { db, stmts } = setup()
+    const scope = createScope("retention-sweep-ordering")
+    const ctx = makeContext(db, stmts)
+    const flushYield = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve))
+    const retentionOnlyTotal = 1_120
+    const retentionOnlyTs = Date.now() - 5 * DAY
+    db.transaction(() => {
+      const insert = db.prepare(
+        `INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery)
+         VALUES (?, 'notify', '@fable/1', '@chief', 'direct', 'retention-batch-row', ?, 'push')`,
+      )
+      for (let i = 0; i < retentionOnlyTotal; i += 1) insert.run(`ordering-${i}`, retentionOnlyTs + i)
+    })()
+    const countArchived = (): number =>
+      (
+        db.prepare("SELECT COUNT(*) AS n FROM messages_archive WHERE id LIKE 'ordering-%'").get() as {
+          n: number
+        }
+      ).n
+    let runSettled: Promise<"resolved" | "rejected"> | undefined
+    try {
+      const registryShape = withClientRegistry()(createBaseTribe({ scope }))
+      const socketShape = withSocketServer()({
+        ...registryShape,
+        config: { socketPath: join(tmpDir, "runtime.sock"), inheritFd: null },
+        broadcast: { log: () => {} },
+      } as never)
+      const subject = withRuntime({
+        plugins: [],
+        buildPluginApi: () => ({}) as never,
+        publishActivePluginNames: () => {},
+        publishStopPlugins: () => {},
+        publishShutdown: () => {},
+      })({ ...socketShape, db, stmts, daemonCtx: ctx, recall: null } as never)
+      runSettled = subject.run().then(
+        () => "resolved" as const,
+        () => "rejected" as const,
+      )
+      await expect(socketShape.socket.binding).resolves.toBe("listening")
+      await flushYield()
+
+      // The grace elapsed: the startup seven-day batch commits in the timer
+      // callback's synchronous turn, the sweep does not.
+      vi.advanceTimersByTime(DEFAULT_RECONNECT_GRACE_MS)
+      expect(countArchived()).toBe(0)
+      // A six-hour tick fires while the drain still holds the one-in-flight
+      // guard: skipped outright, not stacked behind the startup sweep.
+      vi.advanceTimersByTime(6 * 60 * 60 * 1000 - DEFAULT_RECONNECT_GRACE_MS - 1)
+      expect(countArchived()).toBe(0)
+      vi.advanceTimersByTime(1)
+      expect(countArchived()).toBe(0)
+      // One yield: only the startup sweep runs (startup cap = min(500, 500)).
+      await flushYield()
+      expect(countArchived()).toBe(500)
+    } finally {
+      if (prevArchiveWindow === undefined) delete process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS
+      else process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS = prevArchiveWindow
+      if (prevBatchSize === undefined) delete process.env.TRIBE_RETENTION_BATCH_SIZE
+      else process.env.TRIBE_RETENTION_BATCH_SIZE = prevBatchSize
+      await scope[Symbol.asyncDispose]()
+      await runSettled
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it("33937: a shutdown that lands in the drain's yield skips the sweep", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] })
+    const prevArchiveWindow = process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS
+    const prevBatchSize = process.env.TRIBE_RETENTION_BATCH_SIZE
+    process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS = String(3 * DAY)
+    process.env.TRIBE_RETENTION_BATCH_SIZE = "500"
+    const { db, stmts } = setup()
+    const scope = createScope("retention-sweep-shutdown")
+    const ctx = makeContext(db, stmts)
+    const flushYield = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve))
+    // The real composition disposes async resources (socket close, db close)
+    // before the scope's abort defer runs (LIFO). Model one, so this proves the
+    // synchronous shutdown latch — not a same-tick abort — is what stops the sweep.
+    scope.defer(() => new Promise<void>((resolve) => setImmediate(resolve)))
+    db.transaction(() => {
+      const insert = db.prepare(
+        `INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery)
+         VALUES (?, 'notify', '@fable/1', '@chief', 'direct', 'retention-batch-row', ?, 'push')`,
+      )
+      for (let i = 0; i < 1_120; i += 1) insert.run(`ordering-${i}`, Date.now() - 5 * DAY + i)
+    })()
+    const countArchived = (): number =>
+      (
+        db.prepare("SELECT COUNT(*) AS n FROM messages_archive WHERE id LIKE 'ordering-%'").get() as {
+          n: number
+        }
+      ).n
+    let runSettled2: Promise<"resolved" | "rejected"> | undefined
+    try {
+      const registryShape = withClientRegistry()(createBaseTribe({ scope }))
+      const socketShape = withSocketServer()({
+        ...registryShape,
+        config: { socketPath: join(tmpDir, "runtime2.sock"), inheritFd: null },
+        broadcast: { log: () => {} },
+      } as never)
+      const subject2 = withRuntime({
+        plugins: [],
+        buildPluginApi: () => ({}) as never,
+        publishActivePluginNames: () => {},
+        publishStopPlugins: () => {},
+        publishShutdown: () => {},
+      })({
+        ...socketShape,
+        db,
+        stmts,
+        daemonCtx: ctx,
+        recall: null,
+        idleQuit: { stop: () => {} },
+        dispatcher: { shutdown: () => {} },
+      } as never)
+      runSettled2 = subject2.run().then(
+        () => "resolved" as const,
+        () => "rejected" as const,
+      )
+      await expect(socketShape.socket.binding).resolves.toBe("listening")
+      await flushYield()
+      vi.advanceTimersByTime(DEFAULT_RECONNECT_GRACE_MS)
+      expect(countArchived()).toBe(0)
+      subject2.runtime.shutdown()
+      await flushYield()
+      expect(countArchived()).toBe(0)
+    } finally {
+      if (prevArchiveWindow === undefined) delete process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS
+      else process.env.TRIBE_RETENTION_ARCHIVE_WINDOW_MS = prevArchiveWindow
+      if (prevBatchSize === undefined) delete process.env.TRIBE_RETENTION_BATCH_SIZE
+      else process.env.TRIBE_RETENTION_BATCH_SIZE = prevBatchSize
+      await scope[Symbol.asyncDispose]()
+      await runSettled2
+      db.close()
+      vi.useRealTimers()
+    }
+  })
 
   // -------------------------------------------------------------------
   // Archive-move phase

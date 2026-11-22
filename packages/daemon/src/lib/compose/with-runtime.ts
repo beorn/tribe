@@ -310,6 +310,7 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     // grace and the recurring tick share this guard, so a tick that fires
     // mid-drain is skipped rather than stacked.
     let cleanupDrain: Promise<void> | null = null
+    const yieldToLoop = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve))
     const runCleanup = (config: RetentionConfig, batchSize: number): void => {
       if (cleanupDrain !== null || t.scope.signal.aborted) return
       const first = cleanupOldData(t.daemonCtx, {
@@ -318,11 +319,24 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
         shouldStop: () => t.scope.signal.aborted,
       })
       reapStaleTransports()
-      runRetention(config)
-      if (!first.more) return
+      // 33937 (@cto dba4bdab): the seven-day first batch above is committed,
+      // but the expensive retention sweep (14-day archive-move + cold
+      // export/delete) must not run ahead of the first socket-I/O yield. Enter
+      // the drain chain, yield once, re-check shutdown under the one-in-flight
+      // guard, run the sweep, then finish the seven-day backlog (which yields
+      // again before its own first batch).
       cleanupDrain = (async () => {
         try {
-          await continueCleanupDrain(t.daemonCtx, first, { shouldStop: () => t.scope.signal.aborted })
+          await yieldToLoop()
+          // `exited` is the synchronous shutdown latch (set at the very top of
+          // shutdown(), before any teardown awaits): a shutdown that lands in
+          // the yield above must skip the sweep, not wait on scope abort, which
+          // can trail async disposers (socket close, db close).
+          if (exited || t.scope.signal.aborted) return
+          runRetention(config)
+          if (first.more) {
+            await continueCleanupDrain(t.daemonCtx, first, { shouldStop: () => t.scope.signal.aborted })
+          }
         } catch (error) {
           log.error?.(`cleanup drain failed: ${error instanceof Error ? error.message : String(error)}`)
         } finally {
