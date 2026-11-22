@@ -2112,7 +2112,9 @@ export function withDispatcher<
         if (targets.includes("*")) return "broadcast"
         const ungranted = (targets as string[]).filter((target) => !PARTICIPANT_NAMED_SEATS.has(target))
         if (ungranted.length === 0) return null
-        if (type === "response" && targets.length === 1 && repliesToOwnBall(args.reply, targets[0] as string)) return null
+        if (type === "response" && targets.length === 1 && repliesToOwnBall(args.reply, targets[0] as string)) {
+          return null
+        }
         if (PARTICIPANT_NAMED_SEATS.size === 0) {
           return `sending to ${ungranted.join(", ")} (no participant seats declared: ${TRIBE_PARTICIPANT_SEATS_ENV} is unset, so a participant may only answer its own balls)`
         }

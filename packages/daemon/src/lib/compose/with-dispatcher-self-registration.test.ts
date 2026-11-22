@@ -723,7 +723,11 @@ describe("dispatcher operational logging", () => {
     cleanup = harness.dispose
     const client = harness.connectClient()
 
-    expect(logs.filter((event) => event.level === "info")).toEqual([])
+    // #30968 (@cto 51103f9d): the one construction-time line naming the declared participant seats is a startup line,
+    // not per-method INFO; every other INFO stays out.
+    const methodInfo = () =>
+      logs.filter((event) => event.level === "info" && !String(event.message).includes("TRIBE_PARTICIPANT_SEATS"))
+    expect(methodInfo()).toEqual([])
 
     const privatePayload = "message-payload-must-not-enter-logs"
     // Pending CLI and refused requests are real dispatches, but their caller

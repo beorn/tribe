@@ -1,6 +1,12 @@
 /**
  * #30968 (@cto fe467bec item 2): an adapter holding a participant's token file but no launch name refuses to start by
  * name, instead of running unverified as unknown-<rand>. Other launches are untouched.
+ *
+ * @failure  The Mac's adapter, started with its participant token file but no --name, never presents the token and
+ *           runs unverified as unknown-<rand>, able to broadcast (#30968 live proof run 2).
+ * @level    l1
+ * @consumer #30968 / stdio-adapter startup
+ * @testonly none
  */
 import { mkdtempSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
