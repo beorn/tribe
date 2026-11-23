@@ -118,9 +118,11 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
           id: "send-before-register",
           method: "tribe.send",
           params: {
-            to: "@agent/7",
+            to: `pending-${client.connId}`,
             message: "forged attribution attempt",
-            type: "notify",
+            type: "verdict",
+            delivery: "pull",
+            summary: "forged attribution attempt",
             sender: "@chief",
           },
         },
@@ -133,7 +135,7 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
     expect(harness.messageSender(sent.id)).toBe(client.name)
   })
 
-  it("a pending notify without idToken keeps pre-sessionless session_id and sender_authority (#28294)", async () => {
+  it("a pending verdict without idToken keeps pre-sessionless session_id and sender_authority (#28294)", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
     const client = harness.connectClient()
@@ -145,10 +147,11 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
           id: "pending-notify-no-token",
           method: "tribe.send",
           params: {
-            to: "@agent/7",
-            message: "legacy pending notify",
-            type: "notify",
-            summary: "legacy pending notify",
+            to: `pending-${client.connId}`,
+            message: "legacy pending verdict",
+            type: "verdict",
+            delivery: "pull",
+            summary: "legacy pending verdict",
           },
         },
         client.connId,
@@ -267,6 +270,151 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
       ),
     )
     expect(inactive).toEqual({ active: false })
+  })
+
+  it.each([
+    ["broadcast", { to: "*", type: "notify", message: "fleet", summary: "s" }, "broadcast"],
+    ["notify to a seat", { to: "@chief", type: "notify", message: "status", summary: "s" }, "notify"],
+    ["request to a seat", { to: "@chief", type: "request", message: "do this", summary: "s" }, "request"],
+    ["assign to a seat", { to: "@chief", type: "assign", message: "take this", summary: "s" }, "assign"],
+    ["verdict to another seat", { to: "@chief", type: "verdict", message: "v", summary: "s" }, "verdict"],
+    ["request to a mailbox", { to: "receiver", type: "request", message: "do this", summary: "s" }, "request"],
+    ["response to a mailbox", { to: "receiver", type: "response", message: "done", summary: "s" }, "response"],
+    [
+      "an incident anywhere but @chief",
+      {
+        to: "@dev/5",
+        type: "notify",
+        message: "m",
+        summary: "s",
+        incident: { emitter: "andon", subject: "x", condition: "y" },
+      },
+      "incident",
+    ],
+  ])("#38022: an unidentified socket cannot send $0", async (_step, params, what) => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const logs = captureDispatcherLogs()
+    const client = harness.connectClient()
+    const before = (harness.db.prepare("SELECT COUNT(*) AS n FROM messages").get() as { n: number }).n
+
+    const response = JSON.parse(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "pending-bound", method: "tribe.send", params },
+        client.connId,
+      ),
+    ) as { error?: { data?: Record<string, unknown> } }
+    expect(response.error?.data).toMatchObject({
+      kind: "unauthenticated",
+      reason: "unidentified-socket-send-refused",
+      what: expect.stringContaining(what),
+    })
+    expect(
+      logs.filter((event) => event.level === "warn" && event.message.includes("is an unidentified socket")).length,
+    ).toBe(1)
+    expect((harness.db.prepare("SELECT COUNT(*) AS n FROM messages").get() as { n: number }).n).toBe(before)
+  })
+
+  it("#38022: the two kept rights survive the bound — andon to @chief and a verdict to its own pending name", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+
+    const andon = parseResult<{ structuredContent: SendResult }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "pending-andon",
+          method: "tribe.send",
+          params: {
+            to: "@chief",
+            message: "fleet stopped",
+            type: "notify",
+            summary: "active: fleet-stop",
+            incident: { emitter: "andon", subject: "fleet-stop", condition: "active" },
+          },
+        },
+        client.connId,
+      ),
+    ).structuredContent
+    expect(andon.sent).toBe(true)
+    expect(harness.messageSender(andon.id)).toBe(client.name)
+
+    const verdict = parseResult<{ structuredContent: SendResult }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "pending-verdict-bound",
+          method: "tribe.send",
+          params: {
+            to: `pending-${client.connId}`,
+            message: "tribe doctor coordination-rail canary",
+            type: "verdict",
+            delivery: "pull",
+            summary: "doctor rail canary",
+          },
+        },
+        client.connId,
+      ),
+    ).structuredContent
+    expect(verdict.sent).toBe(true)
+  })
+
+  it("#38022: a verdict from a pending socket reaches a canary mailbox another connection registered (doctor shape)", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const receiver = harness.connectClient()
+    const sender = harness.connectClient()
+    await harness.register(receiver.connId, {
+      name: "tribe-doctor-canary",
+      pid: process.pid,
+      project: "/tmp/km",
+    })
+
+    const sent = parseResult<{ structuredContent: SendResult }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "doctor-rail-canary",
+          method: "tribe.send",
+          params: {
+            to: "tribe-doctor-canary",
+            message: "tribe doctor coordination-rail canary",
+            type: "verdict",
+            delivery: "pull",
+            summary: "doctor rail canary",
+          },
+        },
+        sender.connId,
+      ),
+    ).structuredContent
+    expect(sent.sent).toBe(true)
+    expect(harness.messageSender(sent.id)).toBe(sender.name)
+    expect(sender.name).toMatch(/^pending-/u)
+  })
+
+  it("#38022: a call presenting an idToken is not decided by the pending-socket bound", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+    const response = JSON.parse(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "pending-token",
+          method: "tribe.send",
+          params: {
+            to: "@chief",
+            type: "notify",
+            message: "status",
+            summary: "s",
+            idToken: managedToken("@chief", "sid-1"),
+          },
+        },
+        client.connId,
+      ),
+    ) as { error?: { data?: Record<string, unknown> } }
+    expect(response.error?.data?.reason).not.toBe("unidentified-socket-send-refused")
   })
 
   it("persists a startup notification filter before the session becomes connected", async () => {

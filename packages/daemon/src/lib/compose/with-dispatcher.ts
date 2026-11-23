@@ -2206,6 +2206,63 @@ export function withDispatcher<
     }
 
     /**
+     * #38022 (@cto 66dbe7c4 ruling a): a pre-registration `pending-<connId>` socket has no session to attribute a
+     * message to, so it keeps only the two rights the rail depends on — the andon cord, an incident to @chief
+     * (26899, a safety path), and a notify or verdict addressed to a single non-seat mailbox (#28294; the real
+     * canary sends from one socket to a mailbox another socket registered, read.ts probeDoctorRail, and
+     * `tribe send --anonymous` is a shipped CLI right). The bound is no broadcast, no seat recipient, and no
+     * ball-opening type: request/assign/response stay out of reach.
+     */
+    function pendingSocketSendRefusal(args: Record<string, unknown>): string | null {
+      const targets: unknown[] = Array.isArray(args.to) ? args.to : [args.to]
+      if (targets.length === 0 || targets.some((target) => typeof target !== "string" || target.length === 0)) {
+        return "sending to an unnamed address"
+      }
+      if (targets.includes("*")) return "broadcast"
+      if (args.incident !== undefined) {
+        return targets.length === 1 && targets[0] === "@chief"
+          ? null
+          : "raising or clearing an incident anywhere but @chief"
+      }
+      const type = typeof args.type === "string" ? args.type : "notify"
+      if (targets.length !== 1) return `sending a ${type} to ${targets.length} recipients`
+      const target = targets[0] as string
+      // The bound is "no seat recipient": a message may reach a mailbox or another pending socket, never a
+      // seat name, which is the '@'-prefixed roster spelling.
+      if (target.startsWith("@")) return `sending ${type} to the seat ${target}`
+      if (type === "notify" || type === "verdict") return null
+      return `sending ${type} (an unidentified socket opens or settles no ball)`
+    }
+
+    /** #38022: the pending-socket bound, applied at the same seam as the claimed gate (#37676) and skipped for a call
+     *  that presents an `idToken`, whose own verdict path decides it. */
+    function pendingSocketGate(
+      method: string,
+      p: Record<string, unknown>,
+      client: ClientSession,
+      id: number | string,
+    ): string | null {
+      const inner = method === "tools/call" ? (typeof p.name === "string" ? p.name : "") : method
+      if (inner !== TRIBE_COORD_METHODS.send) return null
+      const args =
+        method === "tools/call" && typeof p.arguments === "object" && p.arguments !== null
+          ? (p.arguments as Record<string, unknown>)
+          : p
+      const refusal = pendingSocketSendRefusal(args)
+      if (refusal === null) return null
+      const message =
+        `${inner} refused: ${client.name} is an unidentified socket, and ${refusal} is not one of its rights; an ` +
+        "unidentified socket may only raise the andon cord to @chief or send a notify or verdict to a " +
+        "non-seat mailbox (#38022, @cto 66dbe7c4)"
+      log.warn?.(message)
+      return makeError(id, -32003, message, {
+        kind: "unauthenticated",
+        reason: "unidentified-socket-send-refused",
+        what: refusal,
+      })
+    }
+
+    /**
      * #37676 (@cto 9581cc76): a claimed session — no verified identity token, whether it registered a seat name or
      * arrived as `unknown-<rand>` — may neither broadcast nor open a ball. It keeps exactly one send right: a response
      * settling a ball it already owns. Registration, rename, members, health and its own mailbox stay available.
@@ -2684,12 +2741,15 @@ export function withDispatcher<
           method !== "register" &&
           liveClient !== undefined &&
           liveClient.principalClass !== "participant" &&
-          p.idToken === undefined &&
-          !liveClient.name.startsWith("pending-") &&
-          holderIdentity(liveClient.ctx.sessionId).authority === "claimed"
+          p.idToken === undefined
         ) {
-          const refused = claimedOperationGate(method, p, liveClient, id)
-          if (refused !== null) return refused
+          if (liveClient.name.startsWith("pending-")) {
+            const refused = pendingSocketGate(method, p, liveClient, id)
+            if (refused !== null) return refused
+          } else if (holderIdentity(liveClient.ctx.sessionId).authority === "claimed") {
+            const refused = claimedOperationGate(method, p, liveClient, id)
+            if (refused !== null) return refused
+          }
         }
         switch (method) {
           case "register": {
