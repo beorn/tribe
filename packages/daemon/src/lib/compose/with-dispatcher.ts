@@ -2118,21 +2118,13 @@ export function withDispatcher<
         if (targets.includes("*")) return "broadcast"
         const ungranted = (targets as string[]).filter((target) => !PARTICIPANT_NAMED_SEATS.has(target))
         if (ungranted.length === 0) return null
-        if (type === "response" && targets.length === 1 && repliesToOwnBall(args.reply, targets[0] as string)) {
+        if (type === "response" && targets.length === 1 && repliesToOwnBall(args.reply, self, targets[0] as string)) {
           return null
         }
         if (PARTICIPANT_NAMED_SEATS.size === 0) {
           return `sending to ${ungranted.join(", ")} (no participant seats declared: ${TRIBE_PARTICIPANT_SEATS_ENV} is unset, so a participant may only answer its own balls)`
         }
         return `sending to ${ungranted.join(", ")} (a participant reaches only ${[...PARTICIPANT_NAMED_SEATS].join(", ")}, or the requester of a ball it owns)`
-      }
-      /** True when `reply` names an open ball this participant owns whose requester is `target`. */
-      function repliesToOwnBall(reply: unknown, target: string): boolean {
-        if (typeof reply !== "string" || reply.length === 0) return false
-        const row = db
-          .prepare("SELECT 1 AS hit FROM pending_request WHERE request_id = ? AND recipient = ? AND sender = ? LIMIT 1")
-          .get(reply, self, target) as { hit: number } | null
-        return row !== null
       }
       /** The argument forms of a permitted method that reach past the participant's own mailbox; null when none does. */
       function participantRightRefusal(name: string, args: Record<string, unknown>): string | null {
@@ -2183,6 +2175,68 @@ export function withDispatcher<
       if (refused !== null) return refuseRight(refused)
       if (!PARTICIPANT_PROTECTED_METHODS.has(method)) return null
       return reverifyParticipant(client, method, id)
+    }
+
+    /**
+     * True when `reply` names an open ball `self` owns whose requester is `target`: the own-ball exception the
+     * participant gate grants (#30968 ruling 5) and the claimed gate keeps as its one send right (#37676 ruling 2).
+     */
+    function repliesToOwnBall(reply: unknown, self: string, target: string): boolean {
+      if (typeof reply !== "string" || reply.length === 0) return false
+      const row = db
+        .prepare("SELECT 1 AS hit FROM pending_request WHERE request_id = ? AND recipient = ? AND sender = ? LIMIT 1")
+        .get(reply, self, target) as { hit: number } | null
+      return row !== null
+    }
+
+    /** The right a claimed session's send lacks, or null when it is the own-ball response it keeps (#37676). */
+    function claimedSendRefusal(self: string, args: Record<string, unknown>): string | null {
+      if (args.incident !== undefined) return "incident raise or clear"
+      const type = typeof args.type === "string" ? args.type : "notify"
+      const targets: unknown[] = Array.isArray(args.to) ? args.to : [args.to]
+      if (targets.length === 0 || targets.some((target) => typeof target !== "string" || target.length === 0)) {
+        return "sending to an unnamed address"
+      }
+      if (targets.includes("*")) return "broadcast"
+      if (type !== "response") return `sending ${type} (an unverified session sends no such message)`
+      if (targets.length !== 1) return `sending to ${targets.length} recipients`
+      return repliesToOwnBall(args.reply, self, targets[0] as string)
+        ? null
+        : "a response that settles no open ball of its own"
+    }
+
+    /**
+     * #37676 (@cto 9581cc76): a claimed session — no verified identity token, whether it registered a seat name or
+     * arrived as `unknown-<rand>` — may neither broadcast nor open a ball. It keeps exactly one send right: a response
+     * settling a ball it already owns. Registration, rename, members, health and its own mailbox stay available.
+     *
+     * Two neighbours are deliberately out of its reach: a call that presents an `idToken` has its own verdict path
+     * (a one-shot participant's refusal, or a late checked verdict), and a pre-registration `pending-<connId>` socket
+     * has no session to attribute a message to — its sends name the socket, never a seat (#28294, 26899).
+     */
+    function claimedOperationGate(
+      method: string,
+      p: Record<string, unknown>,
+      client: ClientSession,
+      id: number | string,
+    ): string | null {
+      const inner = method === "tools/call" ? (typeof p.name === "string" ? p.name : "") : method
+      if (inner !== TRIBE_COORD_METHODS.send) return null
+      const args =
+        method === "tools/call" && typeof p.arguments === "object" && p.arguments !== null
+          ? (p.arguments as Record<string, unknown>)
+          : p
+      const refusal = claimedSendRefusal(client.name, args)
+      if (refusal === null) return null
+      const message =
+        `${inner} refused: ${client.name} is an unverified session, and ${refusal} is not one of its rights; an ` +
+        "unverified session may only answer a ball it already owns (#37676, @cto 9581cc76)"
+      log.warn?.(message)
+      return makeError(id, -32003, message, {
+        kind: "unauthenticated",
+        reason: "unverified-session-send-refused",
+        what: refusal,
+      })
     }
 
     function holderIdentity(sessionId: string): {
@@ -2622,6 +2676,19 @@ export function withDispatcher<
         // #30968 rulings 4-5: a participant transport's rights, and its token re-verified at each protected call.
         if (method !== "register" && liveClient?.principalClass === "participant") {
           const refused = await participantOperationGate(method, p, liveClient, id)
+          if (refused !== null) return refused
+        }
+        // #37676 (@cto 9581cc76): the participant gate's send clause, extended to claimed authority, so a session
+        // with no verified token can neither broadcast nor open a ball on a seat.
+        if (
+          method !== "register" &&
+          liveClient !== undefined &&
+          liveClient.principalClass !== "participant" &&
+          p.idToken === undefined &&
+          !liveClient.name.startsWith("pending-") &&
+          holderIdentity(liveClient.ctx.sessionId).authority === "claimed"
+        ) {
+          const refused = claimedOperationGate(method, p, liveClient, id)
           if (refused !== null) return refused
         }
         switch (method) {
