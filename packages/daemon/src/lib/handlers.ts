@@ -34,6 +34,7 @@ import {
 
 const log = createLogger("tribe:handlers")
 import { validateName, sanitizeMessageWithReport, MESSAGE_MAX_LENGTH, type SanitizedMessage } from "./validation.ts"
+import { commandDescriptorByMcpName } from "../../../wire/src/command-descriptors.ts"
 import {
   sendMessage,
   deriveSummary,
@@ -91,7 +92,7 @@ import {
 import { sessionAuthority, type SessionAuthority } from "./identity-verifier.ts"
 import { nearestLiveName, type DirectDeliveryResolution, type DirectDeliveryResolver } from "./delivery-resolution.ts"
 import { bothDeclaredUnrun, type DeclaredRoster } from "./membership-declared-roster.ts"
-import { assignUnknownName, isUnidentifiedSessionName } from "./resolve-name.ts"
+import { isUnidentifiedSessionName } from "./resolve-name.ts"
 
 // ---------------------------------------------------------------------------
 // Canonical tribe-coordination daemon RPC method names.
@@ -686,6 +687,49 @@ function recordExpiredPendingRequests(ctx: TribeContext, now: number): number {
   })()
 }
 
+/**
+ * #37247 (@cto ruling 2026-11-23): the published descriptor's `required` list is the contract, and
+ * handleToolCall is the one boundary every tool call crosses — `tools/call`, the direct coord methods and
+ * the tests alike. Enforced for the one tool whose handler had no validator of its own: join, where a
+ * nameless call used to reach validateName as `undefined` (#38020's "join as unknown-<rand>" reading is
+ * retired). send is deliberately out: its own validator already refuses a missing or non-string message by
+ * name (handlers.ts `tribe.send: invalid message - must be a string`, the #25844/#30165 owner), and a
+ * second guard here would change that canonical one-line shape. No wider tool sweep.
+ */
+const REQUIRED_ARGUMENT_TOOLS = new Set(["join"])
+
+function isMissingValue(value: unknown): boolean {
+  return value === undefined || value === null || (typeof value === "string" && value.trim().length === 0)
+}
+
+function missingRequiredArgument(ctx: TribeContext, method: string, a: ToolArgs, opts: HandlerOpts): ToolResult | null {
+  const tool = method.startsWith("tribe.") ? method.slice("tribe.".length) : method
+  if (!REQUIRED_ARGUMENT_TOOLS.has(tool)) return null
+  const required = commandDescriptorByMcpName(tool)?.mcp.inputSchema.required ?? []
+  // A nameless join carrying an identity token is not automatically anonymous: the token adopts the name
+  // of an inactive prior session (resolveRuntimeJoinIdentity). #37247 acceptance 3 keeps that policy
+  // unchanged, so the decision asks the SAME resolver the handler will use — a token with no prior row
+  // supplies nothing and is still a missing name, not a raw TypeError from validateName(undefined).
+  const tokenSuppliesName = (): boolean => {
+    if (tool !== "join") return false
+    if (a.identity_token === undefined && a.identityToken === undefined) return false
+    return !isMissingValue(resolveRuntimeJoinIdentity(ctx, a, opts.hasActiveTransport).joinName)
+  }
+  const missing = required.filter((field) => {
+    if (!isMissingValue(a[field])) return false
+    if (field === "name") return !tokenSuppliesName()
+    return true
+  })
+  if (missing.length === 0) return null
+  const named = missing.map((field) => `'${field}'`).join(", ")
+  const message =
+    `tribe.${tool}: missing required argument${missing.length === 1 ? "" : "s"} ${named} — the published ` +
+    `tool schema declares ${missing.length === 1 ? "it" : "them"} required, so nothing was ` +
+    `${tool === "join" ? "joined or renamed" : "sent or tracked"}`
+  log.warn?.(message)
+  return jsonResult({ error: message, missing_arguments: missing }, { isError: true })
+}
+
 export function handleToolCall(
   ctx: TribeContext,
   name: string,
@@ -693,6 +737,8 @@ export function handleToolCall(
   opts: HandlerOpts,
   connId?: string,
 ): ToolResult | Promise<ToolResult> {
+  const missing = missingRequiredArgument(ctx, name, a, opts)
+  if (missing !== null) return missing
   const incident = a.incident as { emitter?: unknown; active?: unknown } | undefined
   const rawEmitter =
     name === TRIBE_COORD_METHODS.pending ? a.emitter : name === TRIBE_COORD_METHODS.send ? incident?.emitter : undefined
@@ -4509,17 +4555,9 @@ export function resolveRuntimeJoinIdentity(
   a: ToolArgs,
   hasActiveTransport: HandlerOpts["hasActiveTransport"],
 ): { joinName: string; joinRole: string; identityToken: string | null } {
-  // #38020: a join with no name keeps the session's current name — the `unknown-<rand>` placeholder a
-  // transport registered with — instead of reaching validateName as `undefined` and throwing. A socket
-  // that has not registered yet still carries its `pending-<connId>` transport name, which must never
-  // become a session name: it would read as a pre-registration socket to the send gates.
-  const explicitName = typeof a.name === "string" && a.name.trim().length > 0
-  const currentName = ctx.getName()
-  let joinName = explicitName
-    ? (a.name as string)
-    : currentName.startsWith("pending-")
-      ? assignUnknownName(new Set())
-      : currentName
+  // #37247 (@cto ruling): the required-argument boundary in handleToolCall guarantees `name` is a non-empty
+  // string here; a nameless join is refused before any identity is touched, so there is no placeholder fallback.
+  let joinName = a.name as string
   const joinRole = (a.role as string) ?? ctx.sessionRole
   const identityToken = (a.identity_token as string) ?? (a.identityToken as string) ?? null
   // Identity-token adoption: if the caller supplies a token that matches a
@@ -4534,7 +4572,9 @@ export function resolveRuntimeJoinIdentity(
       id: string
       name: string
     } | null
-    if (prior && !hasActiveTransport(prior.id) && !explicitName) joinName = prior.name
+    if (prior && !hasActiveTransport(prior.id)) {
+      if (!a.name) joinName = prior.name
+    }
   }
   return { joinName, joinRole, identityToken }
 }

@@ -1,19 +1,20 @@
 /**
- * @failure tribe.join called with no name throws a TypeError ("undefined is not an object (evaluating
- *          'name.length')") instead of joining, and a raw socket's `pending-<connId>` transport name
- *          could become a session name that the send gates then read as pre-registration.
+ * @failure tribe.join called with no name returns a raw TypeError (or, worse, silently joins/renames the
+ *          session) instead of a named isError, and tribe.send with no message throws instead of naming it.
  * @level l2
- * @consumer Every agent's first call: the stdio adapter's `tribe.join` (and `/up`), through handlers.ts.
+ * @consumer Every agent's start: the MCP `join` tool and the shared handler boundary every tool call crosses.
  * @testonly none
- * 38020: seen live on the fleet as `unknown-2qe10` — join answered a TypeError while the socket still
- * registered. A named join keeps its explicit name; a nameless one keeps the registered `unknown-<rand>`
- * placeholder, or draws one when the connection is still `pending-<connId>`.
+ * 37247 (@cto ruling 2026-11-23): the published descriptor's `required` list is the contract —
+ * command-descriptors.ts declares name required for join (and to+message for send), so the boundary
+ * refuses a missing argument by name, changes no identity, and a valid explicit call still works.
+ * The retired #38020 reading ("join as unknown-<rand>") is proven dead here.
  */
 import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { setSuppressConsole } from "loggily"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
@@ -23,7 +24,11 @@ import { registerSession } from "./session.ts"
 const SESSION_ID = "sess-join-no-name"
 const PROJECT_ID = "join-no-name-proj"
 
-type ToolJson = Record<string, unknown>
+type ToolResultShape = {
+  isError?: boolean
+  content: Array<{ type: string; text: string }>
+  structuredContent?: Record<string, unknown>
+}
 
 function makeContext(db: Database, stmts: TribeStatements, initialName: string): TribeContext {
   return createTribeContext({
@@ -50,61 +55,122 @@ function makeOpts(): HandlerOpts {
   }
 }
 
-function parseToolJson(result: ReturnType<typeof handleToolCall>): ToolJson {
-  const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "{}"
-  return JSON.parse(text) as ToolJson
+function textOf(result: unknown): string {
+  return ((result as ToolResultShape).content[0]?.text ?? "").trim()
 }
 
-function sessionName(db: Database): string | undefined {
-  return (db.prepare("SELECT name FROM sessions WHERE id = ?").get(SESSION_ID) as { name: string } | null)?.name
-}
-
-describe("#38020: tribe.join with no name", () => {
+describe("#37247: a required argument is refused by name at the shared boundary", () => {
   let db: Database
   let stmts: TribeStatements
   let dir: string
 
   beforeEach(() => {
+    setSuppressConsole(true)
     dir = mkdtempSync(join(tmpdir(), "tribe-join-no-name-"))
     db = openDatabase(join(dir, "tribe.sqlite"))
     stmts = createStatements(db)
   })
 
   afterEach(() => {
+    setSuppressConsole(false)
     db.close()
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it("joins a registered unnamed session under the unknown-<rand> placeholder it already holds", () => {
+  it("a nameless join is an isError naming 'name' and touches no identity", async () => {
+    const ctx = makeContext(db, stmts, "pending-2c4f")
+    const result = (await handleToolCall(ctx, "tribe.join", {}, makeOpts())) as ToolResultShape
+
+    expect(result.isError).toBe(true)
+    expect(textOf(result)).toContain("missing required argument 'name'")
+    expect(ctx.getName()).toBe("pending-2c4f")
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual({ n: 0 })
+  })
+
+  it("a registered session's name survives a nameless join unchanged", async () => {
     const ctx = makeContext(db, stmts, "unknown-x7k2q")
     registerSession(ctx, PROJECT_ID, () => true, null, process.pid, "pull", "/tmp/km")
 
-    const joined = parseToolJson(handleToolCall(ctx, "tribe.join", {}, makeOpts()))
+    const result = (await handleToolCall(ctx, "tribe.join", {}, makeOpts())) as ToolResultShape
 
-    expect(joined.error).toBeUndefined()
-    expect(joined.joined).toBe(true)
-    expect(joined.name).toBe("unknown-x7k2q")
-    expect(sessionName(db)).toBe("unknown-x7k2q")
+    expect(result.isError).toBe(true)
+    expect(ctx.getName()).toBe("unknown-x7k2q")
+    expect(db.prepare("SELECT name FROM sessions WHERE id = ?").get(SESSION_ID)).toEqual({ name: "unknown-x7k2q" })
   })
 
-  it("never adopts the pending-<connId> transport name; a socket that has not registered joins as unknown-<rand>", () => {
+  it("the adapter shape — token but no prior row — is still a named refusal, never validateName(undefined)", async () => {
     const ctx = makeContext(db, stmts, "pending-2c4f")
+    const result = (await handleToolCall(
+      ctx,
+      "tribe.join",
+      { identity_token: "0123456789abcdef", delivery: "pull", role: "member" },
+      makeOpts(),
+    )) as ToolResultShape
 
-    const joined = parseToolJson(handleToolCall(ctx, "tribe.join", {}, makeOpts()))
-
-    expect(joined.error).toBeUndefined()
-    expect(joined.joined).toBe(true)
-    expect(joined.name).toMatch(/^unknown-[a-z0-9]{5}$/u)
-    expect(sessionName(db)).not.toMatch(/^pending-/u)
+    expect(result.isError).toBe(true)
+    expect(textOf(result)).toContain("missing required argument 'name'")
+    expect(textOf(result)).not.toContain("undefined is not an object")
+    expect(ctx.getName()).toBe("pending-2c4f")
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual({ n: 0 })
   })
 
-  it("an explicit name still wins over both defaults", () => {
+  it("the adoption policy is unchanged: a token matching an inactive prior row still supplies the name", async () => {
+    const priorCtx = createTribeContext({
+      db,
+      stmts,
+      sessionId: "sess-prior",
+      sessionRole: "member",
+      initialName: "@agent/prior",
+      domains: [],
+      claudeSessionId: null,
+      claudeSessionName: null,
+    })
+    registerSession(priorCtx, PROJECT_ID, () => false, "tok-adopt", 0, "pull", "/tmp/km")
     const ctx = makeContext(db, stmts, "pending-2c4f")
 
-    const joined = parseToolJson(handleToolCall(ctx, "tribe.join", { name: "@agent/4" }, makeOpts()))
+    const result = (await handleToolCall(
+      ctx,
+      "tribe.join",
+      { identity_token: "tok-adopt" },
+      makeOpts(),
+    )) as ToolResultShape
 
-    expect(joined.error).toBeUndefined()
-    expect(joined.name).toBe("@agent/4")
-    expect(sessionName(db)).toBe("@agent/4")
+    expect(result.isError).toBeUndefined()
+    expect(JSON.parse(textOf(result))).toMatchObject({ joined: true, name: "@agent/prior" })
+  })
+
+  it("the control: an explicit name still joins", async () => {
+    const ctx = makeContext(db, stmts, "pending-2c4f")
+    const result = (await handleToolCall(ctx, "tribe.join", { name: "@agent/4" }, makeOpts())) as ToolResultShape
+
+    expect(result.isError).toBeUndefined()
+    expect(JSON.parse(textOf(result))).toMatchObject({ joined: true, name: "@agent/4" })
+    expect(db.prepare("SELECT name FROM sessions WHERE id = ?").get(SESSION_ID)).toEqual({ name: "@agent/4" })
+  })
+
+  it("the related send case keeps its own canonical refusal: absent message is named, nothing is written", async () => {
+    const ctx = makeContext(db, stmts, "@agent/4")
+    registerSession(ctx, PROJECT_ID, () => true, null, process.pid, "pull", "/tmp/km")
+    const before = db.prepare("SELECT COUNT(*) AS n FROM messages").get()
+
+    const result = (await handleToolCall(ctx, "tribe.send", { to: "@chief" }, makeOpts())) as ToolResultShape
+
+    expect(textOf(result)).toContain("tribe.send: invalid message - must be a string")
+    expect(db.prepare("SELECT COUNT(*) AS n FROM messages").get()).toEqual(before)
+  })
+
+  it("the control: a send with to and message still lands", async () => {
+    const ctx = makeContext(db, stmts, "@agent/4")
+    registerSession(ctx, PROJECT_ID, () => true, null, process.pid, "pull", "/tmp/km")
+
+    const result = (await handleToolCall(
+      ctx,
+      "tribe.send",
+      { to: "@chief", message: "hello", type: "notify", summary: "hi" },
+      makeOpts(),
+    )) as ToolResultShape
+
+    expect(result.isError).toBeUndefined()
+    expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE content = 'hello'").get()).toEqual({ n: 1 })
   })
 })

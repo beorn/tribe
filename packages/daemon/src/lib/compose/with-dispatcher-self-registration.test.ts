@@ -315,6 +315,34 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
     expect((harness.db.prepare("SELECT COUNT(*) AS n FROM messages").get() as { n: number }).n).toBe(before)
   })
 
+  it("#37247: a nameless join at the dispatch boundary is an isError naming 'name' and touches no identity", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    captureDispatcherLogs()
+    const client = harness.connectClient()
+    const before = (harness.db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number }).n
+
+    const response = JSON.parse(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "join-no-name", method: "tribe.join", params: {} },
+        client.connId,
+      ),
+    ) as { result?: { isError?: boolean; content?: Array<{ text: string }> } }
+    expect(response.result?.isError).toBe(true)
+    expect(response.result?.content?.[0]?.text).toContain("missing required argument 'name'")
+    expect((harness.db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number }).n).toBe(before)
+    expect(client.name).toMatch(/^pending-/u)
+    // The control: an explicit name still joins, on the same connection.
+    const ok = JSON.parse(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "join-with-name", method: "tribe.join", params: { name: "@agent/4" } },
+        client.connId,
+      ),
+    ) as { result?: { isError?: boolean; content?: Array<{ text: string }> } }
+    expect(ok.result?.isError).toBeUndefined()
+    expect(JSON.parse(ok.result?.content?.[0]?.text ?? "{}")).toMatchObject({ joined: true, name: "@agent/4" })
+  })
+
   it("#38022: the two kept rights survive the bound — andon to @chief and a verdict to its own pending name", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
