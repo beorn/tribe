@@ -91,7 +91,7 @@ import {
 import { sessionAuthority, type SessionAuthority } from "./identity-verifier.ts"
 import { nearestLiveName, type DirectDeliveryResolution, type DirectDeliveryResolver } from "./delivery-resolution.ts"
 import { bothDeclaredUnrun, type DeclaredRoster } from "./membership-declared-roster.ts"
-import { isUnidentifiedSessionName } from "./resolve-name.ts"
+import { assignUnknownName, isUnidentifiedSessionName } from "./resolve-name.ts"
 
 // ---------------------------------------------------------------------------
 // Canonical tribe-coordination daemon RPC method names.
@@ -4509,7 +4509,17 @@ export function resolveRuntimeJoinIdentity(
   a: ToolArgs,
   hasActiveTransport: HandlerOpts["hasActiveTransport"],
 ): { joinName: string; joinRole: string; identityToken: string | null } {
-  let joinName = a.name as string
+  // #38020: a join with no name keeps the session's current name — the `unknown-<rand>` placeholder a
+  // transport registered with — instead of reaching validateName as `undefined` and throwing. A socket
+  // that has not registered yet still carries its `pending-<connId>` transport name, which must never
+  // become a session name: it would read as a pre-registration socket to the send gates.
+  const explicitName = typeof a.name === "string" && a.name.trim().length > 0
+  const currentName = ctx.getName()
+  let joinName = explicitName
+    ? (a.name as string)
+    : currentName.startsWith("pending-")
+      ? assignUnknownName(new Set())
+      : currentName
   const joinRole = (a.role as string) ?? ctx.sessionRole
   const identityToken = (a.identity_token as string) ?? (a.identityToken as string) ?? null
   // Identity-token adoption: if the caller supplies a token that matches a
@@ -4524,9 +4534,7 @@ export function resolveRuntimeJoinIdentity(
       id: string
       name: string
     } | null
-    if (prior && !hasActiveTransport(prior.id)) {
-      if (!a.name) joinName = prior.name
-    }
+    if (prior && !hasActiveTransport(prior.id) && !explicitName) joinName = prior.name
   }
   return { joinName, joinRole, identityToken }
 }
