@@ -799,7 +799,9 @@ describe("dispatcher operational logging", () => {
         method,
       ).toBe("debug")
     }
-    parseResult<{ structuredContent: SendResult }>(
+    // #37676 (@cto 9581cc76): @agent/6 registered without a verified token, so its send is refused by name now. The
+    // refusal is a real dispatch and its log must still carry no payload.
+    const claimedSend = JSON.parse(
       await harness.dispatcher.handleRequest(
         {
           jsonrpc: "2.0",
@@ -813,7 +815,8 @@ describe("dispatcher operational logging", () => {
         },
         client.connId,
       ),
-    )
+    ) as { error?: { data?: { reason?: string } } }
+    expect(claimedSend.error?.data).toMatchObject({ reason: "unverified-session-send-refused" })
     const hostileOperation = `${privatePayload}\n${"x".repeat(128)}`
     await harness.dispatcher.handleRequest(
       {
