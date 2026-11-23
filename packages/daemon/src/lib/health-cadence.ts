@@ -326,6 +326,29 @@ function inlineGraceExpiredSql(sequence: string): string {
       AND m.ts <= $graceCutoff`
 }
 
+/**
+ * 30649: a non-ball row the socket carried with its body is retired once the seat
+ * acted after it — a later same-session send, or a turn-start receipt recorded
+ * after the row. This is the grace's sibling, not a wider read receipt: the row
+ * was handed to the seat inline, and the seat demonstrably ran a turn afterwards.
+ * `$actedAfter` is the later of the seat's newest non-event send and its newest
+ * turn-start receipt for the current launch; `$sessionStartedAt` keeps a
+ * restarted session's send from retiring a row the previous session was handed.
+ * A pull seat binds `$deliveredSeq = 0`, so nothing here can fire for it.
+ */
+function actedSinceDeliverySql(sequence: string): string {
+  return `${deliveredInlineRowSql(sequence)}
+      AND m.ts >= $sessionStartedAt
+      AND m.ts <= $actedAfter`
+}
+
+type ActedAfterFacts = {
+  /** Later of the seat's newest non-event send and newest turn-start receipt; 0 = none observed. */
+  actedAfter: number
+  /** When the seat's current session registered; 0 = unknown, so no row is pre-session. */
+  sessionStartedAt: number
+}
+
 /** What the page names as the reason: the three disjoint ways a row reaches the count. */
 export type ActionableLagCause = "never-delivered" | "directive-unread" | "delivered-inline-unfetched"
 
@@ -346,6 +369,9 @@ export type ActionableLagReading = LagRow & {
  */
 function actionableLagSql(table: "messages" | "messages_archive"): string {
   const sequence = table === "messages" ? "rowid" : "seq"
+  // 30649: an inline-delivered non-ball row the seat already acted after is not
+  // demand at all — it is neither counted nor held by the grace.
+  const retired = `\n      AND NOT (${actedSinceDeliverySql(sequence)})`
   const graceExempt = inlineGraceExemptSql(sequence)
   const directive = `m.type IN (${BALL_OPENING_TYPES_SQL})`
   const expiredInline = inlineGraceExpiredSql(sequence)
@@ -363,7 +389,7 @@ function actionableLagSql(table: "messages" | "messages_archive"): string {
       COALESCE(SUM(CASE WHEN ${neverDelivered} THEN 1 ELSE 0 END), 0) AS cause_undelivered_rows,
       MIN(CASE WHEN ${neverDelivered} THEN m.ts END) AS cause_undelivered_oldest_ts
     FROM ${table} AS m
-    WHERE ${attentionWhereSql(table, "")}
+    WHERE ${attentionWhereSql(table, retired)}
   `
 }
 
@@ -425,12 +451,21 @@ function combineActionableLag(messagesHalf: ActionableLagHalf, archiveHalf: Acti
 function inlineGraceBindParams(
   session: string,
   grace?: { now: number; delivery: string; lastDeliveredSeq: number },
-): { $session: string; $deliveredSeq: number; $graceCutoff: number } {
+  acted: ActedAfterFacts = { actedAfter: 0, sessionStartedAt: 0 },
+): {
+  $session: string
+  $deliveredSeq: number
+  $graceCutoff: number
+  $actedAfter: number
+  $sessionStartedAt: number
+} {
   return {
     $session: session,
     // Only an acknowledged push seat can have been handed a body over the socket.
     $deliveredSeq: grace !== undefined && grace.delivery === "push" ? grace.lastDeliveredSeq : 0,
     $graceCutoff: grace === undefined ? 0 : grace.now - INLINE_DELIVERY_LAG_GRACE_MS,
+    $actedAfter: acted.actedAfter,
+    $sessionStartedAt: acted.sessionStartedAt,
   }
 }
 
@@ -438,6 +473,7 @@ function readActionableLag(
   db: Database,
   session: string,
   grace?: { now: number; delivery: string; lastDeliveredSeq: number },
+  acted: ActedAfterFacts = { actedAfter: 0, sessionStartedAt: 0 },
 ): ActionableLagReading {
   let queries = preparedActionableLagQueries.get(db)
   if (queries === undefined) {
@@ -447,7 +483,7 @@ function readActionableLag(
     }
     preparedActionableLagQueries.set(db, queries)
   }
-  const params = inlineGraceBindParams(session, grace)
+  const params = inlineGraceBindParams(session, grace, acted)
   return combineActionableLag(
     queries.messages.get(params) as ActionableLagHalf,
     queries.archive.get(params) as ActionableLagHalf,
@@ -747,7 +783,8 @@ function inboxLagProjection(
   excluded: NonNullable<HealthCadenceProjection["inbox_lag_excluded"]>
 } {
   const cursorQuery = db.prepare(`
-    SELECT last_inbox_pull_seq, started_at, delivery, last_delivered_seq, principal_class
+    SELECT last_inbox_pull_seq, started_at, delivery, last_delivered_seq, principal_class,
+           launch_id, launch_parent_pid
     FROM sessions
     WHERE name = $session
     ORDER BY updated_at DESC
@@ -760,6 +797,13 @@ function inboxLagProjection(
     SELECT ts FROM messages
     WHERE sender = $session AND kind != 'event'
     ORDER BY ts DESC LIMIT 1
+  `)
+  // 30649: the same-session turn-start half. `session` holds the seat NAME
+  // (the dispatcher writes `client.name`), and the UNIQUE launch key leads the
+  // index, so this is a seek per seat rather than a scan per row.
+  const lastTurnStartReceiptQuery = db.prepare(`
+    SELECT MAX(received_at) AS ts FROM turn_start_receipts
+    WHERE session = $session AND launch_id = $launchId AND launch_parent_pid = $launchParentPid
   `)
 
   // Below, three statements that used to run once each against
@@ -796,12 +840,15 @@ function inboxLagProjection(
       AND ${lagPredicate}
   `),
   )
-  const waking = `\n      AND ${wakePredicateSql("m")}`
+  // The acted exclusion is per physical table (rowid vs seq), so each half
+  // states it for its own sequence space.
+  const wakingFor = (sequence: string) =>
+    `\n      AND ${wakePredicateSql("m")}\n      AND NOT (${actedSinceDeliverySql(sequence)})`
   const wakingLagQueryMessages = db.prepare(
-    assertSingleStatement(attentionLagSql("messages", waking, { excludeInlineGrace: true })),
+    assertSingleStatement(attentionLagSql("messages", wakingFor("rowid"), { excludeInlineGrace: true })),
   )
   const wakingLagQueryArchive = db.prepare(
-    assertSingleStatement(attentionLagSql("messages_archive", waking, { excludeInlineGrace: true })),
+    assertSingleStatement(attentionLagSql("messages_archive", wakingFor("seq"), { excludeInlineGrace: true })),
   )
   // Selects the shared seq/rowid position too (absent from the original
   // SELECT list, which only ever needed it in ORDER BY against the single
@@ -823,6 +870,7 @@ function inboxLagProjection(
       AND ${unsettledAttentionPredicateSql("m")}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
       AND NOT (${inlineGraceExemptSql("rowid")})
+      AND NOT (${actedSinceDeliverySql("rowid")})
     ORDER BY m.rowid ASC
     LIMIT 1
   `),
@@ -843,6 +891,7 @@ function inboxLagProjection(
       AND ${unsettledAttentionPredicateSql("m")}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
       AND NOT (${inlineGraceExemptSql("seq")})
+      AND NOT (${actedSinceDeliverySql("seq")})
     ORDER BY m.seq ASC
     LIMIT 1
   `),
@@ -857,6 +906,8 @@ function inboxLagProjection(
       delivery: string
       last_delivered_seq: number | null
       principal_class: string
+      launch_id: string | null
+      launch_parent_pid: number | null
     } | null
     const receipt = attentionReceiptQuery.get({ $session: session }) as {
       last_attention_read_at: number | null
@@ -872,8 +923,21 @@ function inboxLagProjection(
     const lagParams = { $cursor: cursor?.last_inbox_pull_seq ?? 0, $session: session }
     const lag = combineJournalCount(lagQueryMessages.get(lagParams) as LagRow, lagQueryArchive.get(lagParams) as LagRow)
     const grace = { now, delivery: cursor?.delivery ?? "pull", lastDeliveredSeq: cursor?.last_delivered_seq ?? 0 }
-    const graceParams = inlineGraceBindParams(session, grace)
-    const actionableLag = readActionableLag(db, session, grace)
+    const lastNonEventSend = lastNonEventSendQuery.get({ $session: session }) as { ts: number } | null
+    const lastTurnStart =
+      cursor?.launch_id != null && cursor.launch_parent_pid != null
+        ? (lastTurnStartReceiptQuery.get({
+            $session: session,
+            $launchId: cursor.launch_id,
+            $launchParentPid: cursor.launch_parent_pid,
+          }) as { ts: number | null } | null)
+        : null
+    const acted = {
+      actedAfter: Math.max(lastNonEventSend?.ts ?? 0, lastTurnStart?.ts ?? 0),
+      sessionStartedAt: cursor?.started_at ?? 0,
+    }
+    const graceParams = inlineGraceBindParams(session, grace, acted)
+    const actionableLag = readActionableLag(db, session, grace, acted)
     const wakingLag = combineJournalCount(
       wakingLagQueryMessages.get(graceParams) as LagRow,
       wakingLagQueryArchive.get(graceParams) as LagRow,
@@ -893,7 +957,6 @@ function inboxLagProjection(
             ts: oldestCandidate.ts,
           }
     const lastAttentionReadAt = receipt?.last_attention_read_at ?? null
-    const lastNonEventSend = lastNonEventSendQuery.get({ $session: session }) as { ts: number } | null
     return [
       {
         as_of_ms: now,
