@@ -308,16 +308,34 @@ export function projectSessionTransportEvidence(input: {
 /** How the existing durable launch check judged its parent: kernel birth where available, otherwise pid-only. */
 export type LaunchParentComparison = "start-time" | "pid-only-row" | "pid-only-platform"
 
+/** Seams for the two facts the judgement reads. Production passes nothing; a caller that already owns a
+ *  liveness probe (or a test that must not touch /proc) hands its own in. */
+export type LaunchParentProbe = {
+  /** Kernel birth read; defaults to readProcessStartTime. */
+  readStartTime?: (pid: number) => string | null | "unsupported"
+  /** Existence probe for the pid-only routes; defaults to probeProcessState. */
+  isAlive?: (pid: number) => boolean
+}
+
 /** Whether a durable row's launch parent is still the process that registered it. A row carrying a start time is
- *  judged by it (a reused pid differs); one without, or on a platform without /proc, by pid alone. */
+ *  judged by it (a reused pid differs); one without, or on a platform without /proc, by pid alone. `reused` is set
+ *  only when the pid HAS a birth time that differs from the stored one — a pid whose stat is unreadable is gone,
+ *  never assumed reused. */
 export function judgeLaunchParent(
   pid: number,
   storedStartTime: string | null,
-): { alive: boolean; comparison: LaunchParentComparison } {
-  const current = readProcessStartTime(pid)
-  if (current === "unsupported") return { alive: probeProcessState(pid) !== "dead", comparison: "pid-only-platform" }
-  if (storedStartTime === null) return { alive: probeProcessState(pid) !== "dead", comparison: "pid-only-row" }
-  return { alive: current === storedStartTime, comparison: "start-time" }
+  probe: LaunchParentProbe = {},
+): { alive: boolean; comparison: LaunchParentComparison; reused?: boolean } {
+  const readStartTime = probe.readStartTime ?? readProcessStartTime
+  const isAlive = probe.isAlive ?? ((candidate: number) => probeProcessState(candidate) !== "dead")
+  const current = readStartTime(pid)
+  if (current === "unsupported") return { alive: isAlive(pid), comparison: "pid-only-platform" }
+  if (storedStartTime === null) return { alive: isAlive(pid), comparison: "pid-only-row" }
+  // readProcessStartTime answers null only when the pid has no readable stat: that process is gone.
+  if (current === null) return { alive: false, comparison: "start-time" }
+  return current === storedStartTime
+    ? { alive: true, comparison: "start-time" }
+    : { alive: false, comparison: "start-time", reused: true }
 }
 
 /**
@@ -328,13 +346,21 @@ export function judgeLaunchParent(
  * never abort the sweep or conclude the launch ended.
  */
 export type LaunchParentJudgement =
-  | { state: "alive" | "gone"; comparison: LaunchParentComparison }
+  | { state: "alive" | "gone"; comparison: LaunchParentComparison; reused?: boolean }
   | { state: "unjudged"; reason: string }
 
-export function judgeLaunchParentSafely(pid: number, storedStartTime: string | null): LaunchParentJudgement {
+export function judgeLaunchParentSafely(
+  pid: number,
+  storedStartTime: string | null,
+  probe: LaunchParentProbe = {},
+): LaunchParentJudgement {
   try {
-    const judged = judgeLaunchParent(pid, storedStartTime)
-    return { state: judged.alive ? "alive" : "gone", comparison: judged.comparison }
+    const judged = judgeLaunchParent(pid, storedStartTime, probe)
+    return {
+      state: judged.alive ? "alive" : "gone",
+      comparison: judged.comparison,
+      ...(judged.reused === true ? { reused: true } : {}),
+    }
   } catch (error) {
     return { state: "unjudged", reason: error instanceof Error ? error.message : String(error) }
   }

@@ -300,6 +300,11 @@ export type HandlerOpts = {
   /** Probe whether a process is still alive. Defaults to pidStillAlive (process.kill(pid, 0)). */
   isPidAlive?: (pid: number) => boolean
   /**
+   * 30649 — kernel birth read for the launch-parent identity check. Defaults to readProcessStartTime; a test that
+   * must not touch /proc supplies its own, so the start-time comparison is exercised without a live pid.
+   */
+  readProcessStartTime?: (pid: number) => string | null | "unsupported"
+  /**
    * 34069 — the registry's reconnect-grace predicate, REQUIRED so a builder that
    * forgets it is a compile error rather than a silent `false`. `tribe health`,
    * its ladder preview and the reap sweep judge a disconnected row by this one
@@ -4743,6 +4748,13 @@ export function readSeatTransportFacts(
   const { liveSessions, discrepancy, rows } = projectHealthMembership(ctx, opts)
   const rowById = new Map(rows.map((row) => [row.id, row]))
   const isAlive = opts.isPidAlive ?? pidStillAlive
+  // 30649: a pid is not owner identity — judge a launch parent by the kernel birth time it registered with, so a
+  // recycled pid reads as the launch it replaced instead of as a lost bridge.
+  const judgeParent = (pid: number, startTime: string | null) =>
+    judgeLaunchParentSafely(pid, startTime, {
+      isAlive,
+      ...(opts.readProcessStartTime === undefined ? {} : { readStartTime: opts.readProcessStartTime }),
+    })
   const roster = opts.getExpectedMembers?.()
   const expectedRecord = roster?.loadedAt
     ? `declared roster tribe-expected-members.json loaded ${new Date(roster.loadedAt).toISOString()}`
@@ -4762,12 +4774,13 @@ export function readSeatTransportFacts(
   for (const launch of discrepancy?.missing ?? []) {
     if (launch.state === "missing-transport") {
       const pid = launch.launch_parent_pid
-      if (pid !== null && pid > 0 && !isAlive(pid)) {
-        exited.set(launch.name, `launch parent ${pid} dead`)
+      const row = rowById.get(launch.member_id)
+      const parent = pid !== null && pid > 0 ? judgeParent(pid, row?.launch_parent_start_time ?? null) : null
+      if (parent?.state === "gone") {
+        exited.set(launch.name, parent.reused === true ? `launch parent ${pid} recycled` : `launch parent ${pid} dead`)
       } else {
         // updated_at is the presence heartbeat every authenticated call touches (19784): a pull seat that answers by
         // calls holds no transport, and its last call is what says its bridge is serving (#30614).
-        const row = rowById.get(launch.member_id)
         missing.push({
           name: launch.name,
           launchParentPid: pid,

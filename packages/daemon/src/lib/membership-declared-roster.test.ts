@@ -309,6 +309,138 @@ describe("membership projection: declared-roster membership is a function of a p
     }
   })
 
+  it("3a. a recycled launch parent pid is exited, never a bridge-lost page (30649)", () => {
+    let now = 30_400_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const ctx = addSession(db, stmts, "exp-3a", "@agent/recycled", { id: "launch-exp-3a", parentPid: 30004 })
+      // The launch registered a kernel birth time; the pid now alive is a different process.
+      db.prepare("UPDATE sessions SET launch_parent_start_time = '111' WHERE id = 'exp-3a'").run()
+      now += 1_000
+      logSessionLeft(ctx, {
+        memberId: "exp-3a",
+        name: "@agent/recycled",
+        role: "member",
+        domains: [],
+        launchId: "launch-exp-3a",
+        launchParentPid: 30004,
+        reason: "transport-closed",
+      })
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+      const seats = readSeatTransportFacts(
+        opCtx,
+        baseOpts({
+          getExpectedMembers: () => roster([{ name: "@agent/recycled", expected: true }]),
+          // Alive by pid, but reborn: the start time differs from the one the launch registered.
+          isPidAlive: () => true,
+          readProcessStartTime: () => "222",
+        }),
+      )
+      expect(seats.missing).toEqual([])
+      expect(seats.exited).toEqual(new Map([["@agent/recycled", "launch parent 30004 recycled"]]))
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it("3b. the same launch still holding its birth time stays a bridge-lost page (30649)", () => {
+    let now = 30_500_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const ctx = addSession(db, stmts, "exp-3b", "@agent/sameprocess", { id: "launch-exp-3b", parentPid: 30005 })
+      db.prepare("UPDATE sessions SET launch_parent_start_time = '111' WHERE id = 'exp-3b'").run()
+      now += 1_000
+      logSessionLeft(ctx, {
+        memberId: "exp-3b",
+        name: "@agent/sameprocess",
+        role: "member",
+        domains: [],
+        launchId: "launch-exp-3b",
+        launchParentPid: 30005,
+        reason: "transport-closed",
+      })
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+      const seats = readSeatTransportFacts(
+        opCtx,
+        baseOpts({
+          getExpectedMembers: () => roster([{ name: "@agent/sameprocess", expected: true }]),
+          isPidAlive: () => true,
+          readProcessStartTime: () => "111",
+        }),
+      )
+      expect(seats.exited).toEqual(new Map())
+      expect(seats.missing.map((seat) => seat.name)).toEqual(["@agent/sameprocess"])
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it("3c. a birth-timed parent whose stat is unreadable is dead, not recycled (30649)", () => {
+    let now = 30_600_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const ctx = addSession(db, stmts, "exp-3c", "@agent/gone", { id: "launch-exp-3c", parentPid: 30006 })
+      db.prepare("UPDATE sessions SET launch_parent_start_time = '111' WHERE id = 'exp-3c'").run()
+      now += 1_000
+      logSessionLeft(ctx, {
+        memberId: "exp-3c",
+        name: "@agent/gone",
+        role: "member",
+        domains: [],
+        launchId: "launch-exp-3c",
+        launchParentPid: 30006,
+        reason: "transport-closed",
+      })
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+      const seats = readSeatTransportFacts(
+        opCtx,
+        baseOpts({
+          getExpectedMembers: () => roster([{ name: "@agent/gone", expected: true }]),
+          isPidAlive: () => true,
+          readProcessStartTime: () => null,
+        }),
+      )
+      expect(seats.missing).toEqual([])
+      expect(seats.exited).toEqual(new Map([["@agent/gone", "launch parent 30006 dead"]]))
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it("3d. an unreadable /proc entry is never death: the row stays a bridge-lost page (30649)", () => {
+    let now = 30_700_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const ctx = addSession(db, stmts, "exp-3d", "@agent/unreadable", { id: "launch-exp-3d", parentPid: 30007 })
+      db.prepare("UPDATE sessions SET launch_parent_start_time = '111' WHERE id = 'exp-3d'").run()
+      now += 1_000
+      logSessionLeft(ctx, {
+        memberId: "exp-3d",
+        name: "@agent/unreadable",
+        role: "member",
+        domains: [],
+        launchId: "launch-exp-3d",
+        launchParentPid: 30007,
+        reason: "transport-closed",
+      })
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+      const seats = readSeatTransportFacts(
+        opCtx,
+        baseOpts({
+          getExpectedMembers: () => roster([{ name: "@agent/unreadable", expected: true }]),
+          isPidAlive: () => true,
+          readProcessStartTime: () => {
+            throw new Error("EACCES: /proc/30007/stat")
+          },
+        }),
+      )
+      expect(seats.exited).toEqual(new Map())
+      expect(seats.missing.map((seat) => seat.name)).toEqual(["@agent/unreadable"])
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
   it("3. expected seat re-registered after the fact stays clean while connected (the 0e2fc4b restart case still holds)", () => {
     let now = 30_200_000
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
