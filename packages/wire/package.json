@@ -236,10 +236,10 @@
     "@bearly/pacing": "^0.2.0 || ^0.3.0",
     "@modelcontextprotocol/sdk": "1.32.1",
     "@silvery/commander": "^0.24.0",
-    "loggily": "^0.11.0 || ^0.14.0",
-    "removely": "^0.4.0"
+    "loggily": "^0.11.0 || ^0.14.0"
   },
   "devDependencies": {
+    "removely": "^0.4.0",
     "tsdown": "0.23.7",
     "typescript": "6.0.3"
   },
@@ -285,7 +285,12 @@
       "src/lib/delivery-report.ts",
       "src/http-adapter.ts"
     ],
-    "format": "esm"
+    "format": "esm",
+    "deps": {
+      "alwaysBundle": [
+        "removely"
+      ]
+    }
   },
   "engines": {
     "bun": ">=1.4.0"
