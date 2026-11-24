@@ -239,7 +239,7 @@
     "loggily": "^0.11.0 || ^0.14.0"
   },
   "devDependencies": {
-    "removely": "^0.4.0",
+    "removely": "0.4.0",
     "tsdown": "0.23.7",
     "typescript": "6.0.3"
   },
