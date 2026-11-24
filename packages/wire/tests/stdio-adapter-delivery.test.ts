@@ -58,6 +58,8 @@ function spawnFakeDaemon(
     membersReply?: Record<string, unknown>
     /** 30082 diagnostic: cut the first actual send RPC, then acknowledge its retry. */
     closeFirstSend?: boolean
+    /** 34204 — the `tribe.rename` reply body, so a test can drive a refused claim rename. */
+    renameReply?: Record<string, unknown>
   } = {},
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
@@ -168,6 +170,14 @@ function spawnFakeDaemon(
           socket.write(
             makeResponse(msg.id, {
               content: [{ type: "text", text: JSON.stringify(opts.pendingResult ?? { balls: [] }) }],
+            }),
+          )
+          return
+        }
+        if (msg.method === "tribe.rename") {
+          socket.write(
+            makeResponse(msg.id, {
+              content: [{ type: "text", text: JSON.stringify(opts.renameReply ?? { ok: true }) }],
             }),
           )
           return
@@ -3881,5 +3891,76 @@ setTimeout(() => process.exit(0), 35000);\n`,
     expect(openParams?.meta?.settled).toBeUndefined()
     expect(openParams?.meta?.settled_by).toBeUndefined()
     expect(openParams?.content).toBe("29327 PROBE CONTROL")
+  })
+
+  // 34204 acceptance — the REAL claim path, not the decision unit alone. A `bead:claimed`
+  // row travels the adapter's own drain, the adapter asks the daemon to rename, the daemon
+  // refuses, and the refusal reaches the log with BOTH identities and the daemon's words.
+  // Silence here is the bug: a seat sat under a name the daemon had rejected, with no trace.
+  it("34204: a claim row through the real drain reports the daemon's refused rename", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const sessionId = "0f3c9a1b-2d4e-4f60-8a91-b2c3d4e5f601"
+    const logPath = join(tmpDir, "adapter.log")
+    daemon = await spawnFakeDaemon(socketPath, {
+      fetchEvents: [
+        {
+          id: "claim-row-34204",
+          type: "bead:claimed",
+          from: "@chief",
+          content: "Claimed: km-storage.foo - the store claims it [by:claude:0f3c9a1b]",
+          ts: new Date().toISOString(),
+        },
+      ],
+      renameReply: { error: "the name km-storage is held by @dev/2" },
+      registerAck: { name: "km-4-x7q" },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "km-4-x7q"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        ...launchEnvironment(""),
+        CLAUDE_SESSION_ID: sessionId,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: logPath,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    // No explicit join: an explicit join/rename sets `autoRenamed`, and the point here is
+    // the unrehearsed claim path a real generated name takes.
+    await waitForCondition(
+      () => daemon!.requests.some((msg) => msg.method === "register"),
+      "adapter registered with the fake daemon",
+    )
+
+    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+
+    // The claim row really travelled the drain to the pane...
+    await waitForStdout(child, stdout, () => stdout.some((line) => JSON.stringify(line).includes("km-storage.foo")))
+    // ...the adapter really asked the daemon for the rename...
+    await waitForCondition(
+      () =>
+        daemon!.requests.some(
+          (msg) =>
+            msg.method === "tribe.rename" &&
+            (msg.params as { new_name?: string } | undefined)?.new_name === "km-storage",
+        ),
+      "adapter asked the daemon to rename",
+      { timeoutMs: 5_000 },
+    )
+    // ...and the refusal is written down with both identities and the daemon's own words.
+    await waitForCondition(
+      () =>
+        existsSync(logPath) &&
+        readFileSync(logPath, "utf8").includes(
+          'auto-rename refused: requested "km-storage", verified "km-4-x7q": the name km-storage is held by @dev/2',
+        ),
+      "refused auto-rename reported at warn with both identities",
+      { timeoutMs: 5_000 },
+    )
   })
 })
