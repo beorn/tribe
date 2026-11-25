@@ -29,6 +29,8 @@ const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..
 let root: string
 let db: Database
 let dbPath: string
+/** The zero-hit answer names the roots it searched on stderr (#38420); captured, never leaked to the runner. */
+const stderrWrites: string[] = []
 
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(fs.realpathSync(require("os").tmpdir()), "recall-migration-witness-"))
@@ -58,6 +60,11 @@ beforeEach(() => {
   vi.spyOn(console, "log").mockImplementation(() => {})
   vi.spyOn(console, "error").mockImplementation(() => {})
   vi.spyOn(console, "warn").mockImplementation(() => {})
+  stderrWrites.length = 0
+  vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+    stderrWrites.push(String(chunk))
+    return true
+  })
 })
 
 afterEach(() => {
@@ -186,6 +193,9 @@ describe("Subagent Migration Witness (CTO Ruling 25158)", () => {
     })
     const subHitExcluded = excludedResult.results.find((r) => r.sessionId === "parent-sess:agent-sub1")
     expect(subHitExcluded).toBeUndefined()
+    // A zero-hit answer says which roots it searched (#38420), so silence cannot read as "nothing exists".
+    expect(stderrWrites.join("")).toContain("searched claude roots")
+    expect(stderrWrites.join("")).toContain(corpus.projects)
   })
 
   test("record with mismatched sessionId logs a loud warning once per file and is never obeyed", async () => {
