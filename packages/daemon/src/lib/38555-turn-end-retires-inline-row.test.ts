@@ -12,7 +12,8 @@
  * receipt is retired in all four readers; a ball opened the same way stays owed, a bodiless directive stays unread,
  * a pull seat's row stays unread, and a row delivered after the receipt waits for the next one.
  */
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync } from "node:fs"
+import { safeRemoveSync } from "removely"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -151,7 +152,7 @@ const ALL_RETIRED = { status: false, wait: false, fetch: false, health: false }
 afterEach(() => {
   for (const item of opened.splice(0)) {
     item.db.close()
-    rmSync(item.dir, { recursive: true, force: true })
+    safeRemoveSync(item.dir, { within: realpathSync(tmpdir()) })
   }
 })
 
