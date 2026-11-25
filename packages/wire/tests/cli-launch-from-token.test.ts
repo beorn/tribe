@@ -62,15 +62,20 @@ afterEach(async () => {
 })
 
 /** The CLI in a child whose identity is exactly `identity`: this test session's own token and names never leak in. */
-function runCli(args: string[], identity: Record<string, string>): Promise<{ code: number | null; stderr: string }> {
+function runCli(
+  args: string[],
+  identity: Record<string, string>,
+): Promise<{ code: number | null; stderr: string; stdout: string }> {
   const env: NodeJS.ProcessEnv = { ...process.env }
   for (const name of tribeAmbientEnvironmentNames()) delete env[name]
   Object.assign(env, { TRIBE_SOCKET: join(dir, "tribe.sock"), TRIBE_NO_AUTOSTART: "1" }, identity)
   return new Promise((done) => {
-    const child = spawn(BUN_BIN, [CLI, ...args], { env, stdio: ["ignore", "ignore", "pipe"], timeout: 15_000 })
+    const child = spawn(BUN_BIN, [CLI, ...args], { env, stdio: ["ignore", "pipe", "pipe"], timeout: 15_000 })
     let stderr = ""
+    let stdout = ""
+    child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
     child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
-    child.on("close", (code) => done({ code, stderr }))
+    child.on("close", (code) => done({ code, stderr, stdout }))
   })
 }
 
@@ -119,6 +124,16 @@ describe("the CLI's managed inbox reads its launch from the identity token (2507
         expect.stringMatching(new RegExp(`^tribe ${verb[0]}: .*HAB_ID_TOKEN`)),
       ])
     }
+    expect(byLaunchCalls()).toEqual([])
+  })
+
+  it("tokenless turn-ended --json prints its failure object, as its help promises (#38555)", async () => {
+    const run = await runCli(["turn-ended", "--json"], { TRIBE_NAME: SEAT })
+    expect(run.code).toBe(1)
+    expect(run.stderr.trim().split("\n")).toEqual([
+      expect.stringMatching(/^tribe turn-ended: no receipt written: .*HAB_ID_TOKEN/),
+    ])
+    expect(JSON.parse(run.stdout)).toEqual({ recorded: false, error: expect.stringMatching(/HAB_ID_TOKEN/) })
     expect(byLaunchCalls()).toEqual([])
   })
 

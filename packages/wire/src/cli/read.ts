@@ -2331,16 +2331,24 @@ interface TurnEndReceipt {
  * one is refused by name before any call (cliInboxTargetParams). A daemon refusal is one stderr line and exit 1.
  */
 async function cmdTurnEnded(opts: { json?: boolean }): Promise<void> {
-  const params = cliInboxTargetParams("turn-ended", undefined)
+  // One failure output for every cause (no token, daemon refusal, no daemon): the help text promises it.
+  const fail = async (cause: string): Promise<void> => {
+    console.error(`tribe turn-ended: no receipt written: ${cause}`)
+    if (opts.json) await writeJsonStdout({ recorded: false, error: cause })
+    process.exitCode = 1
+  }
+  const target = readLaunchInboxTargetFromEnvironment(process.env)
+  if (!target.ok) return fail(target.reason)
+  const params = {
+    launch_id: target.launchId,
+    id_token: target.idToken,
+    ...(target.persona === undefined ? {} : { persona: target.persona }),
+  }
   let receipt: TurnEndReceipt
   try {
     receipt = (await callDaemon("cli_turn_end_receipt_by_launch_v1", params, "throw")) as TurnEndReceipt
   } catch (error) {
-    const cause = error instanceof Error ? error.message : String(error)
-    console.error(`tribe turn-ended: no receipt written: ${cause}`)
-    if (opts.json) await writeJsonStdout({ recorded: false, error: cause })
-    process.exitCode = 1
-    return
+    return fail(error instanceof Error ? error.message : String(error))
   }
   if (opts.json) {
     await writeJsonStdout(receipt)
