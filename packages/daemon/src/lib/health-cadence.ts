@@ -1,6 +1,5 @@
 import { assertSingleStatement } from "@bearly/sqlite"
 import type { Database } from "bun:sqlite"
-import { BALL_OPENING_TYPES } from "tribe-wire/lib/wake-read-directive"
 import {
   ATTENTION_PREDICATE_SQL,
   NON_EVENT_KINDS_SQL,
@@ -10,6 +9,13 @@ import {
   wakePredicateSql,
 } from "./database.ts"
 import { TRIBE_SLA_ROLE_ENV } from "tribe-wire/lib/session-identity-env"
+import {
+  type ActedAfterFacts,
+  actedSinceDeliverySql,
+  BALL_OPENING_TYPES_SQL,
+  deliveredInlineRowSql,
+  readActedAfterFacts,
+} from "./acted-after.ts"
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -42,7 +48,6 @@ const INLINE_DELIVERY_LAG_GRACE_MS = 10 * MINUTE
 const DEFAULT_SLA_TARGET_MS = MINUTE
 
 /** SQL list for the ball-opening types, derived from their one definition. */
-const BALL_OPENING_TYPES_SQL = [...BALL_OPENING_TYPES].map((type) => `'${type}'`).join(", ")
 
 // ---------------------------------------------------------------------------
 // Actionable-response SLA — OPT-IN, host-agnostic.
@@ -295,19 +300,6 @@ export function attentionLagSql(
 }
 
 /**
- * A direct row covered by a completed socket write to this seat: `last_delivered_seq`
- * is written after a successful `socket.write()`, in the rowid/seq space shared by
- * both journal halves (`with-broadcast.ts` `persistDeliveredCursor`). `delivery = 'push'`
- * keeps an inbox-only row out of it — that row was never fanned out, whatever a
- * later delivery raised the high-water mark to.
- */
-function deliveredInlineRowSql(sequence: string): string {
-  return `m.${sequence} <= $deliveredSeq
-      AND m.delivery = 'push'
-      AND m.type NOT IN (${BALL_OPENING_TYPES_SQL})`
-}
-
-/**
  * Inside the grace: written to its socket with its body and still younger than the window, so
  * the seat still has time to read it. `m.ts` (send time) is the bound, not the
  * delivery write, because the journal keeps no per-row delivery timestamp —
@@ -324,29 +316,6 @@ function inlineGraceExemptSql(sequence: string): string {
 function inlineGraceExpiredSql(sequence: string): string {
   return `${deliveredInlineRowSql(sequence)}
       AND m.ts <= $graceCutoff`
-}
-
-/**
- * 30649: a non-ball row the socket carried with its body is retired once the seat
- * acted after it — a later same-session send, or a turn-start receipt recorded
- * after the row. This is the grace's sibling, not a wider read receipt: the row
- * was handed to the seat inline, and the seat demonstrably ran a turn afterwards.
- * `$actedAfter` is the later of the seat's newest non-event send and its newest
- * turn-start receipt for the current launch; `$sessionStartedAt` keeps a
- * restarted session's send from retiring a row the previous session was handed.
- * A pull seat binds `$deliveredSeq = 0`, so nothing here can fire for it.
- */
-function actedSinceDeliverySql(sequence: string): string {
-  return `${deliveredInlineRowSql(sequence)}
-      AND m.ts >= $sessionStartedAt
-      AND m.ts <= $actedAfter`
-}
-
-type ActedAfterFacts = {
-  /** Later of the seat's newest non-event send and newest turn-start receipt; 0 = none observed. */
-  actedAfter: number
-  /** When the seat's current session registered; 0 = unknown, so no row is pre-session. */
-  sessionStartedAt: number
 }
 
 /** What the page names as the reason: the three disjoint ways a row reaches the count. */
@@ -451,7 +420,7 @@ function combineActionableLag(messagesHalf: ActionableLagHalf, archiveHalf: Acti
 function inlineGraceBindParams(
   session: string,
   grace?: { now: number; delivery: string; lastDeliveredSeq: number },
-  acted: ActedAfterFacts = { actedAfter: 0, sessionStartedAt: 0 },
+  acted: Pick<ActedAfterFacts, "actedAfter" | "sessionStartedAt"> = { actedAfter: 0, sessionStartedAt: 0 },
 ): {
   $session: string
   $deliveredSeq: number
@@ -473,7 +442,7 @@ function readActionableLag(
   db: Database,
   session: string,
   grace?: { now: number; delivery: string; lastDeliveredSeq: number },
-  acted: ActedAfterFacts = { actedAfter: 0, sessionStartedAt: 0 },
+  acted: Pick<ActedAfterFacts, "actedAfter" | "sessionStartedAt"> = { actedAfter: 0, sessionStartedAt: 0 },
 ): ActionableLagReading {
   let queries = preparedActionableLagQueries.get(db)
   if (queries === undefined) {
@@ -793,18 +762,6 @@ function inboxLagProjection(
   const attentionReceiptQuery = db.prepare(
     "SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = $session",
   )
-  const lastNonEventSendQuery = db.prepare(`
-    SELECT ts FROM messages
-    WHERE sender = $session AND kind != 'event'
-    ORDER BY ts DESC LIMIT 1
-  `)
-  // 30649: the same-session turn-start half. `session` holds the seat NAME
-  // (the dispatcher writes `client.name`), and the UNIQUE launch key leads the
-  // index, so this is a seek per seat rather than a scan per row.
-  const lastTurnStartReceiptQuery = db.prepare(`
-    SELECT MAX(received_at) AS ts FROM turn_start_receipts
-    WHERE session = $session AND launch_id = $launchId AND launch_parent_pid = $launchParentPid
-  `)
 
   // Below, three statements that used to run once each against
   // `WITH journal AS (messages UNION ALL messages_archive)` are split into a
@@ -923,19 +880,7 @@ function inboxLagProjection(
     const lagParams = { $cursor: cursor?.last_inbox_pull_seq ?? 0, $session: session }
     const lag = combineJournalCount(lagQueryMessages.get(lagParams) as LagRow, lagQueryArchive.get(lagParams) as LagRow)
     const grace = { now, delivery: cursor?.delivery ?? "pull", lastDeliveredSeq: cursor?.last_delivered_seq ?? 0 }
-    const lastNonEventSend = lastNonEventSendQuery.get({ $session: session }) as { ts: number } | null
-    const lastTurnStart =
-      cursor?.launch_id != null && cursor.launch_parent_pid != null
-        ? (lastTurnStartReceiptQuery.get({
-            $session: session,
-            $launchId: cursor.launch_id,
-            $launchParentPid: cursor.launch_parent_pid,
-          }) as { ts: number | null } | null)
-        : null
-    const acted = {
-      actedAfter: Math.max(lastNonEventSend?.ts ?? 0, lastTurnStart?.ts ?? 0),
-      sessionStartedAt: cursor?.started_at ?? 0,
-    }
+    const acted = readActedAfterFacts(db, session, cursor ?? null)
     const graceParams = inlineGraceBindParams(session, grace, acted)
     const actionableLag = readActionableLag(db, session, grace, acted)
     const wakingLag = combineJournalCount(
@@ -983,7 +928,7 @@ function inboxLagProjection(
         tracking_since_ms: cursor?.started_at ?? now,
         last_attention_read_at_ms: lastAttentionReadAt,
         last_attention_read_age_ms: lastAttentionReadAt === null ? null : Math.max(0, now - lastAttentionReadAt),
-        last_non_event_send_at_ms: lastNonEventSend?.ts ?? null,
+        last_non_event_send_at_ms: acted.lastNonEventSendAt,
         oldest_actionable:
           oldestActionable === null
             ? null

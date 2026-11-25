@@ -93,6 +93,7 @@ import { sessionAuthority, type SessionAuthority } from "./identity-verifier.ts"
 import { nearestLiveName, type DirectDeliveryResolution, type DirectDeliveryResolver } from "./delivery-resolution.ts"
 import { bothDeclaredUnrun, type DeclaredRoster } from "./membership-declared-roster.ts"
 import { isUnidentifiedSessionName } from "./resolve-name.ts"
+import { readActedAfterBind } from "./acted-after.ts"
 
 // ---------------------------------------------------------------------------
 // Canonical tribe-coordination daemon RPC method names.
@@ -5950,7 +5951,8 @@ export function readAttentionProjection(
   actionableCount: number
   attention: AttentionProjection
 } {
-  const params = { $name: owner }
+  // #38555: the acted-after rule (acted-after.ts) binds this seat's push high-water mark and its last action.
+  const params = { $name: owner, ...readActedAfterBind(ctx.db, owner) }
   const attentionRows = filterRowsByTrust(ctx, ctx.stmts.selectAttention.all(params) as FetchRow[])
   // 29327 - the tracker's own answer for this batch: which of these rows still
   // own an open ball. A closed ball leaves no tracker row, so what remains is

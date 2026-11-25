@@ -2,6 +2,7 @@
  * Tribe database — schema, migrations, indexes, prepared statements.
  */
 
+import { actedSinceDeliverySql } from "./acted-after.ts"
 import { Database } from "bun:sqlite"
 import { assertSingleStatement } from "@bearly/sqlite"
 import { TRIBE_ACTIONABLE_TYPES, TRIBE_AUTO_TRACK_TYPES } from "../../../wire/src/command-descriptors.ts"
@@ -3744,6 +3745,8 @@ export function createStatements(db: Database) {
           AND ${noOpenIncidentAttentionPredicateSql("m")}
           AND ${unretiredAttentionPredicateSql("m")}
           AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+          -- #38555: a row this seat was handed inline and acted after is handled (acted-after.ts).
+          AND NOT (${actedSinceDeliverySql("rowid")})
         UNION
         SELECT ${TRACKED_ATTENTION_FETCH_COLUMNS_SQL}
         ${TRACKED_ATTENTION_MESSAGE_JOIN_SQL}
