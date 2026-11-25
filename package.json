@@ -29,7 +29,7 @@
     "@bearly/sqlite": "0.1.0",
     "@types/bun": "1.4.3",
     "oxfmt": "0.76.0",
-    "removely": "workspace:*",
+    "removely": "0.5.0",
     "typescript": "6.0.3",
     "vitest": "5.1.0"
   },
