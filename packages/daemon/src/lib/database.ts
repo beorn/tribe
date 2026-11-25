@@ -251,7 +251,7 @@ export function openDatabase(path: string): Database {
   // Identity comes from the token-verified launch row, never the caller, and
   // `received_at` is daemon time. One row per launch: acted-after.ts reads only
   // the newest, so the table grows with launches, not turns.
-  db.run(`CREATE TABLE IF NOT EXISTS ${TURN_END_RECEIPTS_TABLE_SQL}`)
+  db.run(assertSingleStatement(`CREATE TABLE IF NOT EXISTS ${TURN_END_RECEIPTS_TABLE_SQL}`))
 
   // 21757 — retention's prune notice. When the archive-move phase takes an
   // unread direct actionable away from a recipient that has not read its
@@ -1781,7 +1781,7 @@ const MIGRATIONS: readonly Migration[] = [
     name: "turn-end-receipts",
     /** #38555 slice 2: a launch's newest turn-end receipt, one of the acts acted-after.ts reads. */
     up(db) {
-      db.run(`CREATE TABLE IF NOT EXISTS ${TURN_END_RECEIPTS_TABLE_SQL}`)
+      db.run(assertSingleStatement(`CREATE TABLE IF NOT EXISTS ${TURN_END_RECEIPTS_TABLE_SQL}`))
     },
   },
 ]
