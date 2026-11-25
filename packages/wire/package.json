@@ -68,6 +68,7 @@
     "./lib/inbox-wait-gap": "./src/lib/inbox-wait-gap.ts",
     "./lib/delivery-report": "./src/lib/delivery-report.ts",
     "./lib/delivery-ledger": "./src/lib/delivery-ledger.ts",
+    "./lib/github-watchlist": "./src/lib/github-watchlist.ts",
     "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {
@@ -219,6 +220,10 @@
         "types": "./dist/lib/delivery-report.d.mts",
         "import": "./dist/lib/delivery-report.mjs"
       },
+      "./lib/github-watchlist": {
+        "types": "./dist/lib/github-watchlist.d.mts",
+        "import": "./dist/lib/github-watchlist.mjs"
+      },
       "./http": {
         "types": "./dist/http-adapter.d.mts",
         "import": "./dist/http-adapter.mjs"
@@ -283,6 +288,7 @@
       "src/lib/inbox-wait-gap.ts",
       "src/lib/delivery-ledger.ts",
       "src/lib/delivery-report.ts",
+      "src/lib/github-watchlist.ts",
       "src/http-adapter.ts"
     ],
     "format": "esm",

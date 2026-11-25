@@ -24,6 +24,13 @@ import {
   resolveLegacyGitHubCursorPath,
   TRIBE_PROJECT_ROOT_ENV,
 } from "./github-cursor-store.ts"
+import { openGitHubWatchlistCursorStore } from "./github-watchlist-cursor-store.ts"
+import {
+  createWatchlistPoller,
+  GITHUB_WATCHLIST_OPERATOR_SEAT,
+  type WatchlistFetchResult,
+} from "./github-watchlist-poller.ts"
+import { resolveGitHubWatchlistPath, type GitHubWatchEntry } from "tribe-wire/lib/github-watchlist"
 import { createTimers } from "./timers.ts"
 import { startSingleFlightTicker } from "./single-flight-ticker.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
@@ -128,9 +135,9 @@ export interface WorkflowRun {
   actor: { login: string }
 }
 
-// ETag cache — 304 responses don't count against GitHub rate limit
-const etagCache = new Map<string, { etag: string; data: unknown }>()
-const ETAG_CACHE_MAX = 200
+// ETag / Last-Modified cache — 304 responses don't count against GitHub rate limit
+const etagCache = new Map<string, { etag?: string; lastModified?: string; data: unknown }>()
+const ETAG_CACHE_MAX = 400
 
 let apiCallsMade = 0
 let apiCallsSaved = 0
@@ -174,23 +181,37 @@ export function detectRateLimit(res: Response, body: string): RateLimitInfo | nu
   return null
 }
 
-export async function ghFetch<T>(path: string, headers: Record<string, string>): Promise<T> {
+export async function ghFetchWithMeta<T>(
+  path: string,
+  headers: Record<string, string>,
+): Promise<WatchlistFetchResult<T>> {
   const url = path.startsWith("https://") ? path : `https://api.github.com${path}`
   const reqHeaders: Record<string, string> = { ...headers }
   const cached = etagCache.get(url)
   if (cached?.etag) reqHeaders["If-None-Match"] = cached.etag
+  if (cached?.lastModified) reqHeaders["If-Modified-Since"] = cached.lastModified
 
   const res = await fetch(url, { headers: reqHeaders })
 
-  // Track rate limit
-  const remaining = res.headers.get("x-ratelimit-remaining")
-  const limit = res.headers.get("x-ratelimit-limit")
-  if (remaining) rateLimitRemaining = parseInt(remaining, 10)
-  if (limit) rateLimitTotal = parseInt(limit, 10)
+  // Track rate limit & poll interval
+  const remainingRaw = res.headers.get("x-ratelimit-remaining")
+  const limitRaw = res.headers.get("x-ratelimit-limit")
+  const pollIntervalRaw = res.headers.get("x-poll-interval")
+  const parsedRemaining = remainingRaw !== null ? parseInt(remainingRaw, 10) : Number.NaN
+  const parsedTotal = limitRaw !== null ? parseInt(limitRaw, 10) : Number.NaN
+  const parsedPollInterval = pollIntervalRaw !== null ? parseInt(pollIntervalRaw, 10) : Number.NaN
+  if (Number.isFinite(parsedRemaining)) rateLimitRemaining = parsedRemaining
+  if (Number.isFinite(parsedTotal)) rateLimitTotal = parsedTotal
+
+  const meta = {
+    ...(Number.isFinite(parsedRemaining) ? { rateLimitRemaining: parsedRemaining } : {}),
+    ...(Number.isFinite(parsedTotal) ? { rateLimitTotal: parsedTotal } : {}),
+    ...(Number.isFinite(parsedPollInterval) && parsedPollInterval > 0 ? { pollIntervalSec: parsedPollInterval } : {}),
+  }
 
   if (res.status === 304 && cached) {
     apiCallsSaved++
-    return cached.data as T
+    return { data: cached.data as T, ...meta }
   }
 
   apiCallsMade++
@@ -204,15 +225,21 @@ export async function ghFetch<T>(path: string, headers: Record<string, string>):
   }
 
   const data = (await res.json()) as T
-  const etag = res.headers.get("etag")
-  if (etag) {
-    etagCache.set(url, { etag, data })
+  const etag = res.headers.get("etag") ?? undefined
+  const lastModified = res.headers.get("last-modified") ?? undefined
+  if (etag || lastModified) {
+    etagCache.set(url, { etag, lastModified, data })
     if (etagCache.size > ETAG_CACHE_MAX) {
       const oldest = etagCache.keys().next().value
       if (oldest !== undefined) etagCache.delete(oldest)
     }
   }
-  return data
+  return { data, ...meta }
+}
+
+export async function ghFetch<T>(path: string, headers: Record<string, string>): Promise<T> {
+  const result = await ghFetchWithMeta<T>(path, headers)
+  return result.data
 }
 
 async function fetchRepoEvents(repo: string, headers: Record<string, string>): Promise<GitHubEvent[]> {
@@ -320,7 +347,16 @@ export interface PollHealth {
    * Report a completed poll pass for one leg ("events" | "workflows").
    * Owns rate-limit pausing, outage backoff, warn dedup, and recovery notes.
    */
-  report(leg: string, result: { errors: PollError[]; repoCount: number; rateLimit: RateLimitInfo | null }): PollReport
+  report(
+    leg: string,
+    result: {
+      errors: PollError[]
+      repoCount: number
+      rateLimit: RateLimitInfo | null
+      rateLimitRemaining?: number
+      rateLimitTotal?: number
+    },
+  ): PollReport
 }
 
 /**
@@ -373,7 +409,10 @@ export function createPollHealth(now: () => number = Date.now): PollHealth {
       return { skip: false, info: null }
     },
 
-    report(leg, { errors, repoCount, rateLimit }) {
+    report(
+      leg,
+      { errors, repoCount, rateLimit, rateLimitRemaining: reportedRemaining, rateLimitTotal: reportedTotal },
+    ) {
       const state = legs.get(leg) ?? { signature: "", lastWarnAtMs: 0, suppressed: 0 }
       legs.set(leg, state)
 
@@ -390,7 +429,11 @@ export function createPollHealth(now: () => number = Date.now): PollHealth {
         return { warn: null, info }
       }
 
-      const summary = summarizePollErrors(errors, rateLimitRemaining, rateLimitTotal)
+      const summary = summarizePollErrors(
+        errors,
+        reportedRemaining ?? rateLimitRemaining,
+        reportedTotal ?? rateLimitTotal,
+      )
 
       // --- Rate limit: pause polling until the budget resets, warn once ---
       if (rateLimit) {
@@ -997,8 +1040,31 @@ export const githubPlugin: TribePluginApi = {
     log.info?.(formatGitHubPluginStartLine(eventTypes, workflowNotify, incidentOwner, incidentWatchers))
     log.info?.(`cursor: ${cursorPath}`)
 
-    // Shared pause/backoff gate + warn dedup for both polling legs
+    // Shared pause/backoff gate + warn dedup for all polling legs
     const pollHealth = createPollHealth()
+    const watchlistPath = resolveGitHubWatchlistPath()
+    const watchlistCursorStore = openGitHubWatchlistCursorStore({
+      stateDir: dirname(cursorPath),
+    })
+    const watchlistPoller = createWatchlistPoller({
+      watchlistPath,
+      cursorStore: watchlistCursorStore,
+      api: {
+        send: (recipient, content, type, beadId, classification, incident) =>
+          api.send(recipient, content, type, beadId, classification, incident),
+        listOpenIncidents: (emitter, condition) => {
+          if (api.listOpenIncidents === undefined) {
+            throw new Error("githubPlugin requires TribeClientApi.listOpenIncidents for watchlist incident routing")
+          }
+          return api.listOpenIncidents(emitter, condition)
+        },
+      },
+      pollHealth,
+      fetchJson: <T>(path: string) => ghFetchWithMeta<T>(path, githubHeaders),
+      incidentOwner: "@chief",
+      log,
+    })
+    log.info?.(`watchlist: ${watchlistPath}`)
 
     // --- Event polling ---
 
@@ -1006,9 +1072,23 @@ export const githubPlugin: TribePluginApi = {
       const gate = pollHealth.checkGate()
       if (gate.info) log.info?.(gate.info)
       if (gate.skip) return
+      const watchedReposByKey = new Map<string, GitHubWatchEntry>()
+      try {
+        for (const entry of watchlistPoller.readWatchedRepoEntries()) {
+          watchedReposByKey.set(entry.repo.toLowerCase(), entry)
+        }
+      } catch (err) {
+        log.warn?.(
+          `github events: could not read watched repos from ${watchlistPath}: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+      const pollRepos = new Set<string>(repos)
+      for (const entry of watchedReposByKey.values()) {
+        pollRepos.add(entry.repo)
+      }
       const errors: PollError[] = []
       let rateLimit: RateLimitInfo | null = null
-      for (const r of repos) {
+      for (const r of pollRepos) {
         try {
           const events = await fetchRepoEvents(r, githubHeaders)
           const repoCursor = cursorState.repos[r]
@@ -1049,6 +1129,7 @@ export const githubPlugin: TribePluginApi = {
             log.warn?.(formatLateEventsWarning(r, late))
           }
           const deliverable = [...fresh].reverse()
+          const watchedRepo = watchedReposByKey.get(r.toLowerCase())
           for (const event of deliverable) {
             if (seenEventIds.has(event.id)) continue
             seenEventIds.add(event.id)
@@ -1064,13 +1145,31 @@ export const githubPlugin: TribePluginApi = {
             // Skip push events for the local repo — git plugin already broadcasts commits
             if (formatted.type === "push" && r === local) continue
 
-            // km-tribe.event-classification: routine repo activity (push, PR
-            // open, issue, release) is ambient — informational for the tribe
-            // but no agent needs to react.
-            api.broadcast(`${formatted.line} ${formatted.url}`, `github:${formatted.type}`, undefined, {
-              delivery: "pull",
-              topic: `github:${formatted.type}`,
-            })
+            const content = `${formatted.line} ${formatted.url}`
+            if (watchedRepo !== undefined) {
+              api.send(watchedRepo.owner, content, "github:watch", undefined, {
+                delivery: "push",
+                topic: `github:watch:${formatted.type}`,
+                summary: formatted.line,
+              })
+              if (watchedRepo.operatorFollows && watchedRepo.owner !== GITHUB_WATCHLIST_OPERATOR_SEAT) {
+                api.send(GITHUB_WATCHLIST_OPERATOR_SEAT, content, "github:watch", undefined, {
+                  delivery: "push",
+                  topic: `github:watch:${formatted.type}`,
+                  summary: formatted.line,
+                })
+              }
+            }
+
+            if (repos.has(r)) {
+              // km-tribe.event-classification: routine repo activity (push, PR
+              // open, issue, release) is ambient — informational for the tribe
+              // but no agent needs to react.
+              api.broadcast(content, `github:${formatted.type}`, undefined, {
+                delivery: "pull",
+                topic: `github:${formatted.type}`,
+              })
+            }
           }
 
           // Update cursor
@@ -1090,7 +1189,7 @@ export const githubPlugin: TribePluginApi = {
           if (rateLimit) break // budget exhausted — stop hammering remaining repos
         }
       }
-      const report = pollHealth.report("events", { errors, repoCount: repos.size, rateLimit })
+      const report = pollHealth.report("events", { errors, repoCount: pollRepos.size, rateLimit })
       if (report.warn) log.warn?.(report.warn)
       if (report.info) log.info?.(report.info)
     }
@@ -1152,16 +1251,27 @@ export const githubPlugin: TribePluginApi = {
       timers,
       log: { warn: (message) => log.warn?.(message), error: (message) => log.error?.(message) },
     })
+    const watchlistTicker = startSingleFlightTicker({
+      name: "github-watchlist-poll",
+      intervalMs: pollIntervalSec * 1000,
+      run: async () => {
+        await watchlistPoller.pollOnce()
+      },
+      timers,
+      log: { warn: (message) => log.warn?.(message), error: (message) => log.error?.(message) },
+    })
 
     // Initial poll
     eventsTicker.tick()
-    // Initial workflow poll after short delay
+    // Initial watchlist & workflow polls after short delays
+    timers.setTimeout(() => watchlistTicker.tick(), 2_000)
     timers.setTimeout(() => workflowsTicker.tick(), 5_000)
 
     // Cleanup
     return () => {
       ac.abort()
       cursorStore.save(cursorState)
+      watchlistCursorStore.save(watchlistCursorStore.state)
     }
   },
 

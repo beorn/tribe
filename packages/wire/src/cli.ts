@@ -120,8 +120,10 @@ async function runCommanderSubcommands(argv: readonly string[], options: WireCli
 
   const { registerReadCommands } = await import("./cli/read.ts")
   const { registerSendCommands } = await import("./cli/send.ts")
+  const { registerWatchCommands } = await import("./cli/watch.ts")
   registerReadCommands(program, options.doctorSections)
   registerSendCommands(program)
+  registerWatchCommands(program)
 
   // Commander handles --help and unknown-subcommand errors, and answers them as an exit code.
   try {
