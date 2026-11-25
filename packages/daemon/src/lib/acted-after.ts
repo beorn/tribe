@@ -3,12 +3,15 @@
  *
  * A non-ball row the socket carried WITH its body (push delivery, at or below the seat's
  * `last_delivered_seq`) is handled once the same session acted strictly after the row: a later
- * non-event send, or a later turn-start receipt for the current launch. The health page's
+ * non-event send, a later turn-start receipt, or a later turn-end receipt for the current launch
+ * (#38555 slice 2, @cto ac37d401: a row handed inline before a turn ends was read in that turn,
+ * which is how a no-reply verdict handled by text alone is retired). The health page's
  * busy-not-draining reading and the attention projection (inbox-status, default fetch,
  * inbox-wait, and so the Stop hook) all apply this one predicate, so they agree about a row.
  *
  * It is not a read receipt: a pull seat binds `$deliveredSeq = 0`, so nothing here fires for it,
- * and a ball-opening (directive) row never matches, so an open request stays owed until settled.
+ * and neither a ball-opening (directive) row nor a tracked row (`m.request` set, e.g. a verdict
+ * sent with request tracking) ever matches, so an open request stays owed until settled.
  */
 import type { Database } from "bun:sqlite"
 import { BALL_OPENING_TYPES } from "tribe-wire/lib/wake-read-directive"
@@ -33,16 +36,19 @@ export function deliveredInlineRowSql(sequence: string): string {
  * the same session came strictly after it (@cto 8da79000). The journal keeps no per-row delivery
  * time, so the row's send time `m.ts`, never later than its delivery, stands in for it.
  * `$sessionStartedAt` keeps a restarted session's send from retiring a row the previous session
- * was handed.
+ * was handed. A tracked row (`m.request` names the ball it opened) is never retired here: its ball
+ * stays owed until settled (#38555 slice 2, @cto ac37d401). The exclusion lives here, not in
+ * `deliveredInlineRowSql`, so the health page's inline grace and cause split are unchanged.
  */
 export function actedSinceDeliverySql(sequence: string): string {
   return `${deliveredInlineRowSql(sequence)}
+      AND m.request IS NULL
       AND m.ts >= $sessionStartedAt
       AND m.ts < $actedAfter`
 }
 
 export type ActedAfterFacts = {
-  /** Later of the seat's newest non-event send and newest turn-start receipt; 0 = none observed. */
+  /** Latest of the seat's newest non-event send, turn-start receipt and turn-end receipt; 0 = none observed. */
   actedAfter: number
   /** When the seat's current session registered; 0 = unknown, so no row is pre-session. */
   sessionStartedAt: number
@@ -66,6 +72,7 @@ type Statements = {
   session: ReturnType<Database["prepare"]>
   lastNonEventSend: ReturnType<Database["prepare"]>
   lastTurnStart: ReturnType<Database["prepare"]>
+  lastTurnEnd: ReturnType<Database["prepare"]>
 }
 const statements = new WeakMap<Database, Statements>()
 
@@ -86,27 +93,30 @@ function prepared(db: Database): Statements {
         SELECT MAX(received_at) AS ts FROM turn_start_receipts
         WHERE session = $session AND launch_id = $launchId AND launch_parent_pid = $launchParentPid
       `),
+      // One row per launch (primary key), written by cli_turn_end_receipt_by_launch_v1.
+      lastTurnEnd: db.prepare(`
+        SELECT received_at AS ts FROM turn_end_receipts
+        WHERE launch_id = $launchId AND launch_parent_pid = $launchParentPid AND session = $session
+      `),
     }
     statements.set(db, found)
   }
   return found
 }
 
-/** When the seat last acted (send or turn start) and when its session began. */
+/** When the seat last acted (send, turn start or turn end) and when its session began. */
 export function readActedAfterFacts(db: Database, session: string, row?: ActedAfterSession | null): ActedAfterFacts {
   const stmts = prepared(db)
   const cursor = row === undefined ? (stmts.session.get({ $session: session }) as ActedAfterSession | null) : row
   const lastNonEventSend = stmts.lastNonEventSend.get({ $session: session }) as { ts: number } | null
-  const lastTurnStart =
+  const launch =
     cursor?.launch_id != null && cursor.launch_parent_pid != null
-      ? (stmts.lastTurnStart.get({
-          $session: session,
-          $launchId: cursor.launch_id,
-          $launchParentPid: cursor.launch_parent_pid,
-        }) as { ts: number | null } | null)
+      ? { $session: session, $launchId: cursor.launch_id, $launchParentPid: cursor.launch_parent_pid }
       : null
+  const lastTurnStart = launch === null ? null : (stmts.lastTurnStart.get(launch) as { ts: number | null } | null)
+  const lastTurnEnd = launch === null ? null : (stmts.lastTurnEnd.get(launch) as { ts: number } | null)
   return {
-    actedAfter: Math.max(lastNonEventSend?.ts ?? 0, lastTurnStart?.ts ?? 0),
+    actedAfter: Math.max(lastNonEventSend?.ts ?? 0, lastTurnStart?.ts ?? 0, lastTurnEnd?.ts ?? 0),
     sessionStartedAt: cursor?.started_at ?? 0,
     lastNonEventSendAt: lastNonEventSend?.ts ?? null,
   }

@@ -2317,6 +2317,40 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
   console.log(formatInboxStatus(result))
 }
 
+/** The daemon's answer to `cli_turn_end_receipt_by_launch_v1`. */
+interface TurnEndReceipt {
+  recorded: true
+  session: string
+  launch_id: string
+  launch_parent_pid: number
+  received_at: number
+}
+
+/**
+ * #38555 slice 2: record that this launch's turn ended. Identity is the hab token (HAB_ID_TOKEN); a process without
+ * one is refused by name before any call (cliInboxTargetParams). A daemon refusal is one stderr line and exit 1.
+ */
+async function cmdTurnEnded(opts: { json?: boolean }): Promise<void> {
+  const params = cliInboxTargetParams("turn-ended", undefined)
+  let receipt: TurnEndReceipt
+  try {
+    receipt = (await callDaemon("cli_turn_end_receipt_by_launch_v1", params, "throw")) as TurnEndReceipt
+  } catch (error) {
+    const cause = error instanceof Error ? error.message : String(error)
+    console.error(`tribe turn-ended: no receipt written: ${cause}`)
+    if (opts.json) await writeJsonStdout({ recorded: false, error: cause })
+    process.exitCode = 1
+    return
+  }
+  if (opts.json) {
+    await writeJsonStdout(receipt)
+    return
+  }
+  console.log(
+    `${receipt.session}: turn end recorded at ${new Date(receipt.received_at).toISOString()} (launch ${receipt.launch_id}).`,
+  )
+}
+
 function readOperatorCapabilityFromInheritedFd(fdRaw: string | undefined): string | undefined {
   if (fdRaw === undefined) return undefined
   const fd = Number(fdRaw)
@@ -3415,6 +3449,23 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
     .option("--session <name>", "Explicit session to inspect")
     .option("--json", "Emit machine-readable JSON (for hooks)")
     .action((opts: { session?: string; json?: boolean }) => cmdInboxStatus(opts))
+
+  program
+    .command("turn-ended")
+    .description(
+      "Record that this launch's turn ended: writes one turn-end receipt (daemon time) for the caller's own launch",
+    )
+    .addHelpText(
+      "after",
+      "\nWrites: the launch's newest turn-end receipt in the daemon. A non-ball row this push seat was handed with\n" +
+        "  its body before the receipt then reads as handled in inbox-status, fetch, inbox-wait and health.\n" +
+        "  Balls, bodiless directives and pull seats are never retired by it. The Stop hook runs it.\n" +
+        "Identity: the hab launch token (HAB_ID_TOKEN), verified by the daemon; no session, launch or time flag.\n" +
+        "Failure: one line 'tribe turn-ended: <cause>' on stderr and exit 1 (missing or malformed HAB_ID_TOKEN,\n" +
+        "  no daemon, or a daemon refusal); with --json, stdout also carries {recorded:false, error}.\n",
+    )
+    .option("--json", "Emit machine-readable JSON (for hooks)")
+    .action((opts: { json?: boolean }) => cmdTurnEnded(opts))
 
   const inboxWaitSession = cliOption(INBOX_WAIT_CLI, "session")
   const inboxWaitTimeout = cliOption(INBOX_WAIT_CLI, "timeout")

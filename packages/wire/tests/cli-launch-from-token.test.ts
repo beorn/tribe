@@ -2,7 +2,7 @@
  * @failure A process without a hab identity token, holding only a seat's inherited TRIBE_LAUNCH_ID and TRIBE_NAME
  *          (a tokenless child of the controller, measured 2026-09-25), resolves and drains that seat's inbox.
  * @level l2
- * @consumer `tribe inbox-status|inbox-wait|inbox-drain` without --session: the /do authentication step, tent await,
+ * @consumer `tribe inbox-status|inbox-wait|inbox-drain|turn-ended` without --session: the /do authentication step, tent await,
  *           the session hooks (25074 3d-1); `tribe send`'s caller lookup, for a malformed token
  * @testonly none
  *
@@ -93,11 +93,24 @@ describe("the CLI's managed inbox reads its launch from the identity token (2507
     ])
   })
 
+  it("turn-ended writes the receipt for the token's own launch and names no session (#38555)", async () => {
+    const token = launchToken(TOKEN_SID, SEAT)
+    const run = await runCli(["turn-ended", "--json"], { HAB_ID_TOKEN: token, TRIBE_LAUNCH_ID: INHERITED_LAUNCH })
+    expect(run, run.stderr).toMatchObject({ code: 0 })
+    expect(byLaunchCalls()).toEqual([
+      {
+        method: "cli_turn_end_receipt_by_launch_v1",
+        params: { launch_id: TOKEN_SID, id_token: token },
+      },
+    ])
+  })
+
   it("a tokenless process holding a seat's TRIBE_LAUNCH_ID and TRIBE_NAME is refused, and reaches no inbox", async () => {
     const inherited = { TRIBE_LAUNCH_ID: INHERITED_LAUNCH, TRIBE_NAME: "@chief", TRIBE_SESSION_NAME: "@chief" }
     for (const verb of [
       ["inbox-status", "--json"],
       ["inbox-drain", "--json"],
+      ["turn-ended", "--json"],
     ]) {
       const run = await runCli(verb, inherited)
       expect(run.code, `${verb[0]}: ${run.stderr}`).not.toBe(0)

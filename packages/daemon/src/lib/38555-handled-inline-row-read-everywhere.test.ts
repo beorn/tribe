@@ -180,6 +180,14 @@ describe("38555 one acted-after rule, the same answer through every attention re
       unread: true,
     },
     {
+      // slice 2 (@cto ac37d401): a verdict sent with request tracking is a ball too; a send that does not settle it
+      // leaves it owed, including in health's busy-not-draining reading (which retired it before slice 2).
+      kind: "tracked verdict",
+      row: { id: "v-tracked", type: "verdict", ts: NOW - 45 * MINUTE, ball: true },
+      sendAt: NOW - 40 * MINUTE,
+      unread: true,
+    },
+    {
       kind: "directive",
       row: { id: "req-directive", type: "request", ts: NOW - 45 * MINUTE },
       sendAt: NOW - 40 * MINUTE,

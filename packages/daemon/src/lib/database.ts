@@ -11,6 +11,18 @@ import { TRIBE_ACTIONABLE_TYPES, TRIBE_AUTO_TRACK_TYPES } from "../../../wire/sr
 // Schema & migrations
 // ---------------------------------------------------------------------------
 
+/**
+ * #38555 slice 2 — one row per launch holding its newest turn-end receipt. The base schema and migration v48 both
+ * create it from this one definition.
+ */
+const TURN_END_RECEIPTS_TABLE_SQL = `turn_end_receipts (
+		session           TEXT NOT NULL,
+		launch_id         TEXT NOT NULL,
+		launch_parent_pid INTEGER NOT NULL,
+		received_at       INTEGER NOT NULL,
+		PRIMARY KEY (launch_id, launch_parent_pid)
+	)`
+
 export function openDatabase(path: string): Database {
   const db = new Database(path, { create: true })
   db.run("PRAGMA busy_timeout = 5000")
@@ -233,6 +245,13 @@ export function openDatabase(path: string): Database {
 		received_at          INTEGER NOT NULL,
 		UNIQUE (launch_id, launch_parent_pid, provider_session_id, provider_turn_id)
 	)`)
+
+  // #38555 slice 2 — a launch's newest turn-end receipt, written by
+  // `cli_turn_end_receipt_by_launch_v1` (the Stop hook's `tribe turn-ended`).
+  // Identity comes from the token-verified launch row, never the caller, and
+  // `received_at` is daemon time. One row per launch: acted-after.ts reads only
+  // the newest, so the table grows with launches, not turns.
+  db.run(`CREATE TABLE IF NOT EXISTS ${TURN_END_RECEIPTS_TABLE_SQL}`)
 
   // 21757 — retention's prune notice. When the archive-move phase takes an
   // unread direct actionable away from a recipient that has not read its
@@ -1757,6 +1776,14 @@ const MIGRATIONS: readonly Migration[] = [
       if (!columns.has("participant_grant")) db.run("ALTER TABLE sessions ADD COLUMN participant_grant TEXT")
     },
   },
+  {
+    version: 48,
+    name: "turn-end-receipts",
+    /** #38555 slice 2: a launch's newest turn-end receipt, one of the acts acted-after.ts reads. */
+    up(db) {
+      db.run(`CREATE TABLE IF NOT EXISTS ${TURN_END_RECEIPTS_TABLE_SQL}`)
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -3129,6 +3156,15 @@ export function createStatements(db: Database) {
         AND launch_parent_pid = $launch_parent_pid
       ORDER BY receipt_seq DESC
       LIMIT 1
+    `),
+    // #38555 slice 2: keep the launch's newest turn end. The session column follows a runtime rename; received_at
+    // never moves backwards, so a delayed writer cannot un-retire a row.
+    upsertTurnEndReceipt: db.prepare(`
+      INSERT INTO turn_end_receipts (session, launch_id, launch_parent_pid, received_at)
+      VALUES ($session, $launch_id, $launch_parent_pid, $received_at)
+      ON CONFLICT (launch_id, launch_parent_pid) DO UPDATE SET
+        session = excluded.session,
+        received_at = MAX(turn_end_receipts.received_at, excluded.received_at)
     `),
     gcOldLaunchRenames: db.prepare("DELETE FROM launch_renames WHERE renamed_at < $cutoff"),
 

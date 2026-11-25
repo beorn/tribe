@@ -1474,6 +1474,55 @@ describe("dispatcher bounded mailbox drain", () => {
     })
   })
 
+  it("records a turn-end receipt for the token's own launch at daemon time and refuses caller identity or time (#38555)", async () => {
+    const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
+    cleanup = harness.dispose
+    const token = managedToken("@agent/0", "launch-a")
+    const { connId } = harness.connectClient()
+    await harness.register(connId, {
+      name: "@agent/0",
+      pid: liveHolderPid,
+      project: "/tmp/hh",
+      launchId: "launch-a",
+      launchParentPid: process.pid,
+      idToken: token,
+    })
+    const turnEnd = (requestId: string, params: Record<string, unknown>) =>
+      harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: requestId, method: "cli_turn_end_receipt_by_launch_v1", params },
+        "conn-turn-end",
+      )
+    const receipts = () => harness.db.prepare("SELECT * FROM turn_end_receipts").all()
+
+    for (const [label, params, code] of [
+      ["tokenless", { launch_id: "launch-a" }, -32004],
+      ["session override", { launch_id: "launch-a", id_token: token, session: "@chief" }, -32602],
+      ["parent override", { launch_id: "launch-a", id_token: token, launch_parent_pid: 1 }, -32602],
+      ["caller time", { launch_id: "launch-a", id_token: token, received_at: 1 }, -32602],
+      ["another launch", { launch_id: "launch-b", id_token: token }, -32003],
+    ] as const) {
+      expect(parseError(await turnEnd(label, params)).code, label).toBe(code)
+    }
+    expect(receipts()).toEqual([])
+
+    const before = Date.now()
+    const recorded = parseResult<Record<string, unknown>>(
+      await turnEnd("turn-end-1", { launch_id: "launch-a", id_token: token }),
+    )
+    const after = Date.now()
+    expect(recorded).toMatchObject({
+      recorded: true,
+      session: "@agent/0",
+      launch_id: "launch-a",
+      launch_parent_pid: process.pid,
+    })
+    expect(recorded.received_at).toBeGreaterThanOrEqual(before)
+    expect(recorded.received_at).toBeLessThanOrEqual(after)
+    expect(receipts()).toEqual([
+      { session: "@agent/0", launch_id: "launch-a", launch_parent_pid: process.pid, received_at: recorded.received_at },
+    ])
+  })
+
   it("validates daemon-derived launch targets and fails closed on conflicting authorities", async () => {
     const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
     cleanup = harness.dispose

@@ -3839,6 +3839,37 @@ export function withDispatcher<
           }
 
           /**
+           * #38555 slice 2 (@cto ac37d401): the caller's own turn ended. The token-verified launch row names the
+           * session and launch (resolveInboxTarget refuses a caller-supplied session or parent pid), and the receipt
+           * time is the daemon's clock. acted-after.ts reads the newest one as an act, so a non-ball row this push
+           * seat was handed with its body before now is retired; balls, directives and pull seats are untouched.
+           */
+          case "cli_turn_end_receipt_by_launch_v1": {
+            if (Object.prototype.hasOwnProperty.call(p, "received_at")) {
+              return makeError(id, -32602, "Turn-end receipt time is daemon-stamped; received_at is not accepted")
+            }
+            const target = await resolveInboxTarget(p, { mode: "launch" }, connId)
+            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage, target.errorData)
+            if (target.launchId === undefined || target.launchParentPid === undefined) {
+              return makeError(id, -32003, "Turn-end receipt launch authority is incomplete")
+            }
+            const receivedAt = Date.now()
+            stmts.upsertTurnEndReceipt.run({
+              $session: target.sessionName,
+              $launch_id: target.launchId,
+              $launch_parent_pid: target.launchParentPid,
+              $received_at: receivedAt,
+            })
+            return makeResponse(id, {
+              recorded: true,
+              session: target.sessionName,
+              launch_id: target.launchId,
+              launch_parent_pid: target.launchParentPid,
+              received_at: receivedAt,
+            })
+          }
+
+          /**
            * A turn receipt is a liveness fact without mailbox content. Any verified identity may read another
            * session's receipt by explicit name; the by-launch form remains a token-bound self-read. If receipts ever
            * contain message content, the explicit form must inherit mailbox-read authorization.
