@@ -1147,6 +1147,8 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     expect(refusal.message).toContain("HAB_ID_TOKEN")
     expect(refusal.message).toContain("launch through hab")
     expect(refusal.message).toContain("join without a persona name")
+    // #38632: a seat name is not a participant, so the participant cure would be false advice here.
+    expect(refusal.message).not.toContain("hab participant mint")
     expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/9'").get()).toEqual({ n: 0 })
     expect(harness.healthLogs).toEqual([
       { type: "health:identity-token-missing", message: expect.stringContaining("@dev/9") },

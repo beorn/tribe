@@ -587,6 +587,13 @@ describe("generation rollover, siblings and conflicts (ruling 3, F6)", () => {
       protocolVersion: TRIBE_PROTOCOL_VERSION,
     })
     expect(refused.error?.data).toMatchObject({ kind: "identity-token-missing" })
+    // #38632: an outside agent cannot "launch through hab", so its refusal names the participant cure instead —
+    // the declared name, the mint, and the launch name that makes the adapter present the token.
+    expect(refused.error?.message).toContain(`${PARTICIPANT} is a participant, not a hab seat`)
+    expect(refused.error?.message).toContain(`hab participant mint ${PARTICIPANT}`)
+    expect(refused.error?.message).toContain("HAB_ID_TOKEN_FILE=<the file mint prints>")
+    expect(refused.error?.message).toContain(`--name ${PARTICIPANT}`)
+    expect(refused.error?.message).not.toContain("launch through hab")
     expect(h.sessionsNamed()).toBe(1)
     expect((await h.capability(chief.connId))?.mailbox_read_capability.state).toBe("available")
     const asked = await h.tool(chief.connId, "tribe.send", {

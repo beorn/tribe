@@ -49,6 +49,7 @@ import {
   providerLaunchIdOf,
 } from "tribe-wire/lib/persona-launch-identity"
 import { HAB_ID_TOKEN_ENV, MANAGED_INBOX_TOKEN_REQUIRED, readTokenLaunch } from "tribe-wire/lib/identity-token"
+import { HAB_ID_TOKEN_FILE_ENV } from "tribe-wire/lib/hab-session-env"
 import { isExplicitTribePersonaName } from "tribe-wire/lib/persona-name"
 import {
   createLineParser,
@@ -1556,10 +1557,17 @@ export function withDispatcher<
       return saved !== null && allowed.includes(saved.name) ? saved.name : null
     }
 
+    /** The participant namespace (`@ext/<slug>`): an outside principal hab does not launch, so `launch through hab`
+     *  is not its cure and would send it down a path it cannot take (#38632). */
+    const PARTICIPANT_NAME_PREFIX = "@ext/"
+
     function missingPersonaTokenRefusal(claimed: string, reason: PersonaTokenDefect, action: string) {
-      const message =
-        `${action} refused: explicit persona ${claimed} has a ${reason} ${HAB_ID_TOKEN_ENV}; ` +
-        "launch through hab so the token reaches this process, or join without a persona name"
+      const cure = claimed.startsWith(PARTICIPANT_NAME_PREFIX)
+        ? `${claimed} is a participant, not a hab seat: declare it under \`participants\` in the habitat file, run ` +
+          `\`hab participant mint ${claimed}\`, and start its adapter with ${HAB_ID_TOKEN_FILE_ENV}=<the file mint ` +
+          `prints> and --name ${claimed}, since an adapter presents a participant token only under a launch name`
+        : "launch through hab so the token reaches this process, or join without a persona name"
+      const message = `${action} refused: explicit persona ${claimed} has a ${reason} ${HAB_ID_TOKEN_ENV}; ${cure}`
       broadcast.log(`tribe:dispatcher: ${message}`, "health:identity-token-missing")
       return { message, data: { kind: "identity-token-missing", claimed, reason } } as const
     }
