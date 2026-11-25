@@ -24,6 +24,8 @@ const { QUERY_REFRESH_CAP_MS, refreshIndexForQuery, reportQueryRefresh } =
 const { initSchema } = await import("../../src/history/db.ts")
 
 const TOKEN = "query_refresh_needle_7c21"
+/** This suite is about the walk, not about ag: it declares that ag named no profile root, so nothing is spawned. */
+const NO_ROOTS = { roots: [], failures: [] }
 const SESSION_A = "session-alpha"
 const SESSION_B = "session-beta"
 
@@ -90,7 +92,7 @@ describe("query-time index refresh (37777)", () => {
     writeTranscript("projalpha", SESSION_A, "alpha body")
     expect(messageCount()).toBe(0)
 
-    const receipt = await refreshIndexForQuery(db, { capMs: 5_000 })
+    const receipt = await refreshIndexForQuery(db, { profileRoots: NO_ROOTS, capMs: 5_000 })
 
     expect(receipt).toMatchObject({ indexed: 1, notSearched: 0 })
     expect(receipt.stoppedBy).toBeUndefined()
@@ -100,11 +102,11 @@ describe("query-time index refresh (37777)", () => {
 
   test("says indexed N once when it indexed, and nothing at all when nothing was new", async () => {
     writeTranscript("projalpha", SESSION_A, "alpha body")
-    reportQueryRefresh(await refreshIndexForQuery(db, { capMs: 5_000 }))
+    reportQueryRefresh(await refreshIndexForQuery(db, { profileRoots: NO_ROOTS, capMs: 5_000 }))
     expect(stderr()).toMatch(/\[recall\] indexed 1 new transcripts \(\d+ms\)\n/)
 
     stderrSpy.mockClear()
-    const unchanged = await refreshIndexForQuery(db, { capMs: 5_000 })
+    const unchanged = await refreshIndexForQuery(db, { profileRoots: NO_ROOTS, capMs: 5_000 })
     expect(unchanged).toMatchObject({ indexed: 0, notSearched: 0 })
     reportQueryRefresh(unchanged)
     expect(stderr()).toBe("")
@@ -112,10 +114,10 @@ describe("query-time index refresh (37777)", () => {
 
   test("an unchanged transcript is skipped, so a second pass writes nothing", async () => {
     writeTranscript("projalpha", SESSION_A, "alpha body")
-    const first = await refreshIndexForQuery(db, { capMs: 5_000 })
+    const first = await refreshIndexForQuery(db, { profileRoots: NO_ROOTS, capMs: 5_000 })
     expect(first.indexed).toBe(1)
 
-    const second = await refreshIndexForQuery(db, { capMs: 5_000 })
+    const second = await refreshIndexForQuery(db, { profileRoots: NO_ROOTS, capMs: 5_000 })
     expect(second.indexed).toBe(0)
     expect(messageCount()).toBe(1)
   })
@@ -125,7 +127,7 @@ describe("query-time index refresh (37777)", () => {
     writeTranscript("projalpha", "session-gamma", "gamma body")
     writeTranscript("projbeta", SESSION_B, "beta body")
 
-    const receipt = await refreshIndexForQuery(db, { capMs: 0 })
+    const receipt = await refreshIndexForQuery(db, { profileRoots: NO_ROOTS, capMs: 0 })
 
     expect(receipt).toMatchObject({ indexed: 0, notSearched: 3, stoppedBy: "cap" })
     expect(messageCount()).toBe(0)
@@ -147,7 +149,7 @@ describe("query-time index refresh (37777)", () => {
     writeTranscript("projalpha", SESSION_A, "alpha body")
     writeTranscript("projbeta", SESSION_B, "beta body")
 
-    const receipt = await refreshIndexForQuery(db, { projectRoot: "projalpha", capMs: 5_000 })
+    const receipt = await refreshIndexForQuery(db, { profileRoots: NO_ROOTS, projectRoot: "projalpha", capMs: 5_000 })
 
     expect(receipt).toMatchObject({ indexed: 1, notSearched: 0 })
     expect(sessionCount("projalpha")).toBe(1)
@@ -157,11 +159,11 @@ describe("query-time index refresh (37777)", () => {
 
   test("a whole-root pass that reaches the end records that the index is current", async () => {
     writeTranscript("projalpha", SESSION_A, "alpha body")
-    await refreshIndexForQuery(db, { projectRoot: "projalpha", capMs: 5_000 })
+    await refreshIndexForQuery(db, { profileRoots: NO_ROOTS, projectRoot: "projalpha", capMs: 5_000 })
     expect(lastRebuild()).toBeUndefined()
 
     writeTranscript("projbeta", SESSION_B, "beta body")
-    const receipt = await refreshIndexForQuery(db, { capMs: 5_000 })
+    const receipt = await refreshIndexForQuery(db, { profileRoots: NO_ROOTS, capMs: 5_000 })
 
     expect(receipt).toMatchObject({ indexed: 1, notSearched: 0 })
     expect(Number.isFinite(Date.parse(lastRebuild()!))).toBe(true)
@@ -174,7 +176,7 @@ describe("query-time index refresh (37777)", () => {
     })
     expect(lock).not.toBeNull()
 
-    const receipt = await refreshIndexForQuery(db, { capMs: 5_000 })
+    const receipt = await refreshIndexForQuery(db, { profileRoots: NO_ROOTS, capMs: 5_000 })
 
     expect(receipt).toMatchObject({ indexed: 0, notSearched: 1, stoppedBy: "busy" })
     expect(messageCount()).toBe(0)
@@ -185,7 +187,7 @@ describe("query-time index refresh (37777)", () => {
   test("a missing transcript source is reported, never thrown at the caller", async () => {
     safeRemoveSync(projectsDir, { within: realpathSync(tmpdir()) })
 
-    const receipt = await refreshIndexForQuery(db, { capMs: 5_000 })
+    const receipt = await refreshIndexForQuery(db, { profileRoots: NO_ROOTS, capMs: 5_000 })
 
     expect(receipt).toMatchObject({ indexed: 0, notSearched: 0, stoppedBy: "source-missing" })
     reportQueryRefresh(receipt)
@@ -207,7 +209,7 @@ describe("query-time index refresh (37777)", () => {
         "3",
       ],
       {
-        env: { ...process.env, CLAUDE_DIR: claudeDir, RECALL_DB_PATH: dbPath },
+        env: { ...process.env, CLAUDE_DIR: claudeDir, RECALL_DB_PATH: dbPath, RECALL_PROFILE_ROOTS: "off" },
         stdout: "pipe",
         stderr: "pipe",
       },

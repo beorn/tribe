@@ -16,7 +16,12 @@ import {
 } from "./db.ts"
 import type { ContentType } from "./types.ts"
 import { synthesizeResults } from "./synthesize.ts"
-import { refreshIndexForQuery, reportQueryRefresh, type QueryRefreshReceipt } from "./query-refresh.ts"
+import {
+  refreshIndexForQuery,
+  reportQueryRefresh,
+  type QueryRefreshReceipt,
+  type QueryRefreshRoot,
+} from "./query-refresh.ts"
 import { judgeIndexFreshness } from "../lib/staleness.ts"
 import { loadLlm } from "../lib/llm-backend.ts"
 import {
@@ -533,6 +538,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
   // A query's own refresh can bring the index current after the caller judged it; the result carries the later
   // verdict so the printed age line and exit code describe the index this answer actually read (37777).
   let refreshedDetail: IndexProvenanceDetail | undefined
+  /** The claude roots the refresh walked, kept so a zero-hit answer can name what it searched. */
+  let refreshedRoots: QueryRefreshRoot[] | undefined
   const said = (): Pick<
     RecallResult,
     "hookSearch" | "skipped" | "vaultQuery" | "vaultSemantic" | "provenanceDetail"
@@ -559,6 +566,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // say loudly what the cap left unread. Hook mode keeps its wall: it answers a tool prompt, not a person.
     if (!hook) {
       const receipt = await refreshIndexBeforeRead({ refresh: options.refresh, projectRoot: projectFilter }, db)
+      refreshedRoots = receipt?.roots
       // A completed whole-root pass has just recorded the index current, and this is the last moment this connection
       // is open to judge it: recall closes the DB on the way out, so a later read would open an empty one.
       if (receipt?.stoppedBy === undefined && projectFilter === undefined) {
@@ -962,6 +970,16 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // No results — return early
     if (deduped.length === 0) {
       log(`no results found (${Date.now() - startTime}ms total)`)
+      // A zero-hit answer says what it searched: every claude root this pass walked, and every one it could not read
+      // (@cto 96afab5d). Silence here would read as "nothing exists", which is the bug this row was filed for.
+      const roots = refreshedRoots
+      if (!hook && roots !== undefined && roots.length > 0) {
+        process.stderr.write(
+          `[recall] searched claude roots: ${roots
+            .map((entry) => (entry.readable ? entry.root : `${entry.root} [${entry.reason ?? "unreadable"}]`))
+            .join(", ")}\n`,
+        )
+      }
       return {
         query,
         provenance,

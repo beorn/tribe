@@ -16,6 +16,7 @@ import * as path from "node:path"
 import { matchProjectGlob } from "../lib/format.ts"
 import { acquireIndexWriter, getSnapshotPath, IndexWriterBusyError } from "./db.ts"
 import { currentProjectsDir, findSessionFiles, indexSessionFile, projectPathFromRelative } from "./indexer.ts"
+import { profileRootsFromAg, claudeProjectDirs, type ProfileRoots } from "./profile-roots.ts"
 
 /** @cto a78c4127: the foreground share a query may spend on indexing before it must answer from what it has. */
 export const QUERY_REFRESH_CAP_MS = 10_000
@@ -31,6 +32,17 @@ export interface QueryRefreshReceipt {
   /** Transcripts newer than the index that this query did NOT search. */
   notSearched: number
   stoppedBy?: QueryRefreshStop
+  /** Every claude root this pass walked, with what it found, so a thin answer names the roots it read. */
+  roots?: QueryRefreshRoot[]
+}
+
+/** One claude transcript root the query walked: the stock home, and each ag profile home (#38420). */
+export interface QueryRefreshRoot {
+  root: string
+  readable: boolean
+  reason?: string
+  /** Transcripts under this root the index did not already hold. */
+  newer: number
 }
 
 /**
@@ -39,7 +51,7 @@ export interface QueryRefreshReceipt {
  */
 export async function refreshIndexForQuery(
   db: Database,
-  options: { projectRoot?: string; capMs?: number } = {},
+  options: { projectRoot?: string; capMs?: number; agBin?: string; profileRoots?: ProfileRoots } = {},
 ): Promise<QueryRefreshReceipt> {
   const began = Date.now()
   const capMs = options.capMs ?? QUERY_REFRESH_CAP_MS
@@ -60,35 +72,63 @@ export async function refreshIndexForQuery(
   const known = new Map<string, { m: number | null; s: number | null }>()
   for (const row of rows) known.set(row.p, { m: row.m, s: row.s })
 
-  const pdir = currentProjectsDir()
-  // `findSessionFiles` throws for a missing root, and a machine that never ran Claude genuinely has none: the query
-  // still answers from whatever the index holds, and the missing root is reported rather than thrown at the caller.
-  if (!fs.existsSync(pdir)) return receipt({ stoppedBy: "source-missing" })
-  const candidates: Array<{ file: string; stats: fs.Stats }> = []
-  try {
-    for await (const file of findSessionFiles()) {
-      let stats: fs.Stats
-      try {
-        stats = fs.statSync(file)
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
-        throw error
-      }
-      if (options.projectRoot !== undefined) {
-        const relative = path.relative(pdir, file)
-        if (!matchProjectGlob(projectPathFromRelative(relative), options.projectRoot)) continue
-      }
-      const relative = path.relative(pdir, file)
-      const held = known.get(file) ?? known.get(relative)
-      if (held && held.m === stats.mtime.getTime() && held.s === stats.size) continue
-      candidates.push({ file, stats })
+  // A seat launched through ag runs under a provider profile home, so the stock ~/.claude is only one root (#38420).
+  // ag owns that mapping; a root it cannot name is reported, never skipped quietly.
+  const profileRoots = options.profileRoots ?? (await profileRootsFromAg(options.agBin))
+  const roots = [...new Set([currentProjectsDir(), ...claudeProjectDirs(profileRoots)])]
+  const walked: QueryRefreshRoot[] = []
+  const candidates: Array<{ file: string; stats: fs.Stats; projectsDir: string }> = []
+  for (const root of roots) {
+    let readable = false
+    let reason: string | undefined
+    try {
+      readable = fs.statSync(root).isDirectory()
+      if (!readable) reason = "not a directory"
+    } catch (error) {
+      reason = fs.existsSync(root) ? `unreadable: ${(error as Error).message}` : "missing"
     }
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code
-    if (code === "ENOENT" || code === "ENOTDIR") return receipt({ stoppedBy: "source-missing" })
-    throw error
+    const entry: QueryRefreshRoot = { root, readable, reason, newer: 0 }
+    walked.push(entry)
+    if (!readable) continue
+    try {
+      for await (const file of findSessionFiles(root)) {
+        let stats: fs.Stats
+        try {
+          stats = fs.statSync(file)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
+          throw error
+        }
+        const relative = path.relative(root, file)
+        if (options.projectRoot !== undefined) {
+          if (!matchProjectGlob(projectPathFromRelative(relative), options.projectRoot)) continue
+        }
+        const held = known.get(file) ?? known.get(relative)
+        if (held && held.m === stats.mtime.getTime() && held.s === stats.size) continue
+        entry.newer++
+        candidates.push({ file, stats, projectsDir: root })
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        entry.readable = false
+        entry.reason = `disappeared during the walk: ${(error as Error).message}`
+        continue
+      }
+      throw error
+    }
   }
-  if (candidates.length === 0) return receipt()
+  for (const failure of profileRoots.failures) {
+    walked.push({
+      root: failure.provider === "*" ? "every provider root" : `${failure.provider} profile root`,
+      readable: false,
+      reason: failure.reason,
+      newer: 0,
+    })
+  }
+  // A machine that never ran a seat through ag genuinely has no root: answer from what the index holds, and say so.
+  if (!walked.some((entry) => entry.readable)) return receipt({ stoppedBy: "source-missing", roots: walked })
+  if (candidates.length === 0) return receipt({ roots: walked })
   // Oldest first, so the transcripts most likely to be behind the question are the ones a cap still reaches.
   candidates.sort((a, b) => a.stats.mtimeMs - b.stats.mtimeMs)
 
@@ -99,7 +139,7 @@ export async function refreshIndexForQuery(
     const busy =
       error instanceof IndexWriterBusyError ||
       /exceeded the 10m refresh budget|already active/.test(error instanceof Error ? error.message : String(error))
-    if (busy) return receipt({ stoppedBy: "busy", notSearched: candidates.length })
+    if (busy) return receipt({ stoppedBy: "busy", notSearched: candidates.length, roots: walked })
     throw error
   }
 
@@ -134,7 +174,7 @@ export async function refreshIndexForQuery(
   }
 
   const notSearched = candidates.length - next
-  if (notSearched > 0) return { indexed, elapsedMs: Date.now() - began, notSearched, stoppedBy: "cap" }
+  if (notSearched > 0) return { indexed, elapsedMs: Date.now() - began, notSearched, stoppedBy: "cap", roots: walked }
   // A whole-root sweep is the only pass that may claim the index is current; a project-filtered one does not.
   if (options.projectRoot === undefined) {
     db.prepare("INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)").run(
@@ -142,17 +182,32 @@ export async function refreshIndexForQuery(
       new Date().toISOString(),
     )
   }
-  return { indexed, elapsedMs: Date.now() - began, notSearched: 0 }
+  return { indexed, elapsedMs: Date.now() - began, notSearched: 0, roots: walked }
 }
 
 /** One stderr line for the pass, and a loud line for every transcript it left unread. */
 export function reportQueryRefresh(receipt: QueryRefreshReceipt, capMs = QUERY_REFRESH_CAP_MS): void {
   if (receipt.stoppedBy === "source-missing") {
-    process.stderr.write(`[recall] transcript source missing: ${currentProjectsDir()}; the index was not refreshed\n`)
+    const named = (receipt.roots ?? []).map((entry) => `${entry.root} (${entry.reason ?? "unreadable"})`).join("; ")
+    process.stderr.write(
+      `[recall] transcript source missing: no claude root readable (${named || currentProjectsDir()}); the index was not refreshed\n`,
+    )
     return
   }
   if (receipt.indexed > 0) {
     process.stderr.write(`[recall] indexed ${receipt.indexed} new transcripts (${receipt.elapsedMs}ms)\n`)
+  }
+  // Name the roots whenever this pass had something to report: it indexed, left newer transcripts unsearched, or could
+  // not read a root (@cto 96afab5d). A clean, quiet pass stays quiet; a zero-hit search names them at the result.
+  const worthNaming =
+    receipt.indexed > 0 ||
+    receipt.notSearched > 0 ||
+    (receipt.roots ?? []).some((entry) => !entry.readable || entry.newer > 0)
+  if (worthNaming && receipt.roots !== undefined && receipt.roots.length > 0) {
+    const parts = receipt.roots.map((entry) =>
+      entry.readable ? `${entry.root} (${entry.newer} newer)` : `${entry.root} [${entry.reason ?? "unreadable"}]`,
+    )
+    process.stderr.write(`[recall] claude roots: ${parts.join(", ")}\n`)
   }
   if (receipt.notSearched === 0) return
   const plural = receipt.notSearched === 1 ? "transcript was" : "transcripts were"

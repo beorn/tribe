@@ -22,6 +22,16 @@ import {
   type CodexCatalog,
 } from "./codex-indexer.ts"
 import {
+  profileRootsFromAg,
+  claudeProjectDirs,
+  readDeclaredSeats,
+  checkDeclaredSeats,
+  type DeclaredSeatCheck,
+  type DeclaredSeatRead,
+  type ProfileRoots,
+  type SeatWithoutProfile,
+} from "./profile-roots.ts"
+import {
   PROJECTS_DIR,
   MAX_CONTENT_SIZE,
   upsertSession,
@@ -126,6 +136,8 @@ export interface IndexOptions {
   force?: boolean
   path?: string
   agBin?: string
+  /** Prepared profile roots, so a caller (or a test) can supply ag's answer instead of spawning it. */
+  profileRoots?: ProfileRoots
   skipCodex?: boolean
   chunkSize?: number // Number of files per commit chunk (default 50)
   allowLargePrune?: boolean
@@ -157,8 +169,7 @@ export function isTranscriptShape(relativePath: string): boolean {
   return false
 }
 
-export async function* findSessionFiles(): AsyncGenerator<string> {
-  const pdir = currentProjectsDir()
+export async function* findSessionFiles(pdir: string = currentProjectsDir()): AsyncGenerator<string> {
   if (!fs.existsSync(pdir)) {
     throw new Error(`Recall session source is missing: ${pdir}`)
   }
@@ -169,6 +180,19 @@ export async function* findSessionFiles(): AsyncGenerator<string> {
     if (!isTranscriptShape(rel)) continue
     if (isRecallIgnored(file)) continue
     yield file
+  }
+}
+
+/**
+ * Every transcript under every claude root, each file paired with the projects dir that holds it, so a file's session
+ * id is parsed against its own root rather than against the stock home (#38420).
+ */
+export async function* findSessionFilesAcross(
+  dirs: readonly string[],
+): AsyncGenerator<{ file: string; projectsDir: string }> {
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue
+    for await (const file of findSessionFiles(dir)) yield { file, projectsDir: dir }
   }
 }
 
@@ -825,11 +849,38 @@ export async function indexSessionFile(
   }
 }
 
+/** What one claude transcript directory contributed, so "no results" can name the roots it did and did not read. */
+export interface ClaudeRootReport {
+  root: string
+  readable: boolean
+  /** Present when the root was not read: missing, or refused by the filesystem. */
+  reason?: string
+  files: number
+  skippedOld: number
+  skippedUnchanged: number
+  vanished: number
+}
+
 export interface IndexResult {
   files: number
   messages: number
   writes: number
   skippedOld: number
+  /** Every claude transcript directory this run read (stock home plus each ag profile home), with its own counts. */
+  claudeRoots?: ClaudeRootReport[]
+  /** Providers whose root ag could not name, so the caller reports them instead of indexing nothing quietly. */
+  profileRootFailures?: Array<{ provider: string; reason: string }>
+  /** Declared seats checked against ag's profile roots, so a seat whose words cannot be read is named (#38420). */
+  seatProfiles?: {
+    /** Seats the habitat's published plan declares. */
+    declared: number
+    /** Of those, the ones whose provider ag gives a profile root, so a profile could be missing. */
+    checked: number
+    source: string | null
+    /** The plan was found and could not be used: the caller says so rather than reporting "no seats". */
+    failure?: string
+    unreadable: SeatWithoutProfile[]
+  }
   beads: number
   sessionMemory: number
   projectMemory: number
@@ -1122,6 +1173,11 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let prunedCount = 0
   let pruneRefused: IndexResult["pruneRefused"]
   const claudeFailures: ClaudeFailureRecord[] = []
+  /** Every claude root this run considered, and what it gave; the caller prints it so a thin result names its roots. */
+  const claudeRootReports = new Map<string, ClaudeRootReport>()
+  let profileRoots: ProfileRoots = { roots: [], failures: [] }
+  let declaredSeats: DeclaredSeatRead = { seats: [], source: null }
+  let seatCheck: DeclaredSeatCheck = { checked: 0, unreadable: [] }
 
   // Index Claude session files
   if (!options.path) {
@@ -1172,6 +1228,36 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     let inTransaction = false
     let uncommittedFiles = 0
 
+    // #38420: a seat launched through ag runs under a provider profile home, so the stock ~/.claude is only one of
+    // the roots to read. ag owns that mapping; we ask it and never write a path of our own.
+    profileRoots = options.profileRoots ?? (await profileRootsFromAg(options.agBin))
+    // #38420: a seat the habitat declares but whose profile cannot be read is the reason its own words are missing,
+    // so name it in the same run instead of returning a thin answer with no explanation.
+    declaredSeats = readDeclaredSeats()
+    seatCheck = checkDeclaredSeats(declaredSeats.seats, profileRoots)
+    const claudeRoots = [pdir, ...claudeProjectDirs(profileRoots)].filter((dir, at, all) => all.indexOf(dir) === at)
+    for (const root of claudeRoots) {
+      let readable = false
+      let reason: string | undefined
+      try {
+        readable = fs.statSync(root).isDirectory()
+        if (!readable) reason = "not a directory"
+      } catch (err) {
+        reason = fs.existsSync(root) ? `unreadable: ${(err as Error).message}` : "missing"
+      }
+      claudeRootReports.set(root, { root, readable, reason, files: 0, skippedOld: 0, skippedUnchanged: 0, vanished: 0 })
+    }
+    // A missing stock root is only fatal when nothing else is readable: a hosted seat may never have run a stock
+    // claude at all, while a machine with no readable root would publish a fresh empty corpus that reads as
+    // "nothing was ever recorded". A missing profile root is named, never fatal (@cto 96afab5d).
+    if (![...claudeRootReports.values()].some((report) => report.readable)) {
+      throw new Error(`Recall session source is missing: ${pdir}`)
+    }
+    for (const [root, report] of claudeRootReports) {
+      if (report.readable) continue
+      console.warn(`[recall] claude root not read: ${root} (${report.reason ?? "unknown"})`)
+    }
+
     const ensureTransaction = () => {
       if (!inTransaction) {
         db.run("BEGIN IMMEDIATE")
@@ -1189,7 +1275,8 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     }
 
     try {
-      for await (const sessionFile of findSessionFiles()) {
+      for await (const { file: sessionFile, projectsDir } of findSessionFilesAcross(claudeRoots)) {
+        const rootReport = claudeRootReports.get(projectsDir)
         // Skip sessions older than 180 days
         let stats: fs.Stats
         try {
@@ -1197,17 +1284,20 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code === "ENOENT") {
             claudeVanished++
+            if (rootReport !== undefined) rootReport.vanished++
             continue
           }
           throw err
         }
         if (cutoffTime !== undefined && stats.mtime.getTime() < cutoffTime) {
           skippedOld++
+          if (rootReport !== undefined) rootReport.skippedOld++
           continue
         }
 
         totalFiles++
-        const relativePath = path.relative(currentProjectsDir(), sessionFile)
+        if (rootReport !== undefined) rootReport.files++
+        const relativePath = path.relative(projectsDir, sessionFile)
         const sessionInfo = parseSessionPath(relativePath, sessionFile)
         seenSessionIds.add(sessionInfo.id)
 
@@ -1225,6 +1315,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
             existing.size_bytes === stats.size
           ) {
             claudeSkipped++
+            if (rootReport !== undefined) rootReport.skippedUnchanged++
             continue
           }
         }
@@ -1524,6 +1615,15 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     messages: totalMessages,
     writes: totalWrites,
     skippedOld,
+    claudeRoots: [...claudeRootReports.values()],
+    profileRootFailures: profileRoots.failures,
+    seatProfiles: {
+      declared: declaredSeats.seats.length,
+      checked: seatCheck.checked,
+      source: declaredSeats.source,
+      ...(declaredSeats.failure === undefined ? {} : { failure: declaredSeats.failure }),
+      unreadable: seatCheck.unreadable,
+    },
     codexSessions,
     codexMessages,
     codexSkipped,

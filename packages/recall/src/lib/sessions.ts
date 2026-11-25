@@ -14,6 +14,7 @@ import { findSessionTranscriptById } from "./session-discovery"
 import * as os from "os"
 import { acquireIndexWriter, IndexWriterBusyError } from "../history/db.ts"
 import { getVaultDbPath } from "../history/vault-fts.ts"
+import { indexRootsReport } from "./index-roots-report.ts"
 
 // ============================================================================
 // Index
@@ -134,6 +135,11 @@ export async function cmdIndex(opts: {
       if (result.claudeFailures.length > 5) {
         console.log(`    ... and ${result.claudeFailures.length - 5} more`)
       }
+    }
+    for (const line of indexRootsReport(result)) console.log(line)
+    // The first full index is the expensive one; report what it cost once rather than on every incremental tick.
+    if (!opts.incremental) {
+      console.log(`  full index took ${(transcriptMs / 1000).toFixed(1)} s`)
     }
 
     // @ag/recall/three-dark-search-paths: vault embeddings refresh only for a bound --vault-db, inside the same

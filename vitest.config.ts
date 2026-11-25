@@ -16,7 +16,11 @@ export default defineConfig({
     // whose degraded readdir wedges spawned bun subprocesses (see file header).
     // isolate-managed-seat keeps a managed seat's declared roster and launch
     // state directory out of every test daemon and plugin (see file header).
-    setupFiles: ["tests/setup/tmpdir-redirect.ts", "tests/setup/isolate-managed-seat.ts"],
+    setupFiles: [
+      "tests/setup/tmpdir-redirect.ts",
+      "tests/setup/isolate-managed-seat.ts",
+      "tests/setup/no-live-fleet-answers.ts",
+    ],
     // A test that reaches connectOrStart on the guard socket default spawns a
     // DETACHED daemon that outlives the run. This reaps them at the end. It has
     // to be globalSetup: a top-level afterAll in a setupFiles module never runs.
