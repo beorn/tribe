@@ -83,7 +83,14 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
 
   function openBall(
     stmts: TribeStatements,
-    o: { id: string; recipient: string; openedAt: number; expiresAt?: number | null; sender?: string },
+    o: {
+      id: string
+      recipient: string
+      openedAt: number
+      expiresAt?: number | null
+      sender?: string
+      fanout?: "first" | "all"
+    },
   ): void {
     stmts.openPendingRequest.run({
       $request_id: o.id,
@@ -92,7 +99,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       $opened_at: o.openedAt,
       $expires_at: o.expiresAt ?? null,
       $message_id: `${o.id}-msg`,
-      $fanout: "first",
+      $fanout: o.fanout ?? "first",
     })
   }
 
@@ -504,7 +511,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
-  it("explicit close deletes exactly one owner's pending ball", () => {
+  it("explicit close settles the whole fanout:first ball, and only that ball", () => {
     const { db, stmts } = setup()
     try {
       const now = Date.now()
@@ -524,17 +531,56 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
 
       const res = parseToolJson(handleToolCall(ctx, "tribe.pending", { close: "done-msg" }, makeOpts()))
 
-      expect(res).toMatchObject({ owner: "@chief", request_id: "done", closed: 1 })
+      // 38650 — fanout:'first' is ONE ball with two owners: a close settles the
+      // request, so the co-owner's copy is released in the same step (a reply
+      // already did this; the close path was the leak).
+      expect(res).toMatchObject({ owner: "@chief", request_id: "done", closed: 2 })
       expect(openIds(stmts, "@chief")).toEqual(["keep"])
-      expect(openIds(stmts, "@agent/2")).toEqual(["done"])
-      expect(settlementFacts(db)).toEqual([
-        expect.objectContaining({
-          request_id: "done",
-          recipient: "@chief",
-          settlement: "manual-close",
-          settled_by: "@chief",
-        }),
-      ])
+      expect(openIds(stmts, "@agent/2")).toEqual([])
+      expect(settlementFacts(db)).toHaveLength(2)
+      expect(settlementFacts(db)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            request_id: "done",
+            recipient: "@chief",
+            settlement: "manual-close",
+            settled_by: "@chief",
+          }),
+          expect.objectContaining({
+            request_id: "done",
+            recipient: "@agent/2",
+            settlement: "manual-close",
+            settled_by: "@chief",
+          }),
+        ]),
+      )
+    } finally {
+      db.close()
+    }
+  })
+
+  it("explicit close of a fanout:all ball closes only the closer's row", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      openBall(stmts, { id: "each", recipient: "@chief", openedAt: now, fanout: "all" })
+      openBall(stmts, { id: "each", recipient: "@agent/2", openedAt: now, fanout: "all" })
+      const ctx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+
+      const res = parseToolJson(handleToolCall(ctx, "tribe.pending", { close: "each-msg" }, makeOpts()))
+
+      expect(res).toMatchObject({ owner: "@chief", request_id: "each", closed: 1 })
+      expect(openIds(stmts, "@chief")).toEqual([])
+      expect(openIds(stmts, "@agent/2")).toEqual(["each"])
     } finally {
       db.close()
     }

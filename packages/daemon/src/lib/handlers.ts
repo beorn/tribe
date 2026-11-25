@@ -2653,7 +2653,17 @@ function closeOneBall(
         : ctx.getName() === row.sender && ctx.getName() !== owner
           ? "sender-withdrawn"
           : "manual-close"
-  const closed = settlePendingRows(ctx, [row], settlement, ctx.getName(), now, closeEvidence, offlineOwner)
+  // 38650 — one owner settling a fanout:'first' ball settles the REQUEST, not
+  // just their own row: every co-owner's copy is released in the same step, the
+  // way a response's settlement already does it (settleDirectReply). Left
+  // behind, the co-owner's row is an untaken ball the tracked attention branch
+  // re-presents past the mailbox cursor (22203), so it reads as owed forever
+  // and no drain can clear it.
+  const closedRows =
+    row.fanout === "first"
+      ? (ctx.stmts.selectPendingSettlementsForRequest.all({ $request_id: requestId }) as PendingSettlementRow[])
+      : [row]
+  const closed = settlePendingRows(ctx, closedRows, settlement, ctx.getName(), now, closeEvidence, offlineOwner)
   return {
     request_id: requestId,
     closed,
