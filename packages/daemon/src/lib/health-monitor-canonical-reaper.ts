@@ -173,7 +173,7 @@ function updateSuspect(
  * observation time.
  *
  * A row whose ownership is unknown is only ever ANNOUNCED: this reaper escalates by page and never by signal, and
- * `hab reap` refuses a process the census could not attribute exactly as it refuses a blocked one (29561 item 6).
+ * a reap refuses a process the census could not attribute exactly as it refuses a blocked one (29561 item 6).
  */
 export function checkCanonicalReaper(
   observation: CanonicalProcessObservation,
