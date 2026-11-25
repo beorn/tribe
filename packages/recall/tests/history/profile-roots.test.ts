@@ -12,7 +12,7 @@
  * @testonly none
  */
 import { Database } from "bun:sqlite"
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
@@ -145,6 +145,24 @@ describe("ag profile roots are transcript roots (38420)", () => {
       failures: [],
     })
     expect(dirs).toEqual([join("/r/claude/a", "projects")])
+  })
+
+  test("profile homes that link one projects store are read once and reported as one root", async () => {
+    const one = join(root, "profiles", "claude", "one@example.org")
+    const two = join(root, "profiles", "claude", "two@example.org")
+    const shared = join(claudeDir, "projects")
+    transcript(shared, "-hh", "shared-session", "shared")
+    mkdirSync(one, { recursive: true })
+    mkdirSync(two, { recursive: true })
+    symlinkSync(shared, join(one, "projects"))
+    symlinkSync(shared, join(two, "projects"))
+
+    expect(claudeProjectDirs(rootsOf(one, two))).toEqual([realpathSync.native(shared)])
+
+    const receipt = await refreshIndexForQuery(db, { capMs: 5_000, profileRoots: rootsOf(one, two) })
+    expect((receipt.roots ?? []).map((entry) => entry.root)).toEqual([realpathSync.native(shared)])
+    expect(receipt.indexed).toBe(1)
+    expect(found()).toBe(1)
   })
 
   test("a declared seat with no readable profile is named, with the reason it cannot be read", () => {

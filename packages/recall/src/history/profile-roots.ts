@@ -9,7 +9,7 @@
  * `ag transcript roots --json` and never holds a path of its own.
  */
 import { spawn } from "node:child_process"
-import { existsSync, readFileSync, statSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
 import * as path from "node:path"
 import { HAB_SESSION_HABITAT_ROOT_ENV } from "tribe-wire/lib/hab-session-env"
 
@@ -155,14 +155,29 @@ export async function profileRootsFromAg(agBin?: string, env: NodeJS.ProcessEnv 
   }
 }
 
-/** The claude transcript directories to index: each readable profile home's `projects/`, plus the stock home. */
+/**
+ * One root's canonical path, so two names for the same store are read once (#38420).
+ *
+ * Every claude profile home this house publishes links its `projects/` at the stock store; deduping the literal
+ * strings read the same 5,545 files seven times and repointed `jsonl_path` into whichever name came last. A path
+ * that will not resolve (missing, unreadable) is kept literally, so it is still named with its own reason.
+ */
+export function canonicalRootPath(dir: string): string {
+  try {
+    return realpathSync.native(dir)
+  } catch {
+    return dir
+  }
+}
+
+/** The claude transcript directories to index: each profile home's `projects/`, canonical and deduped. */
 export function claudeProjectDirs(roots: ProfileRoots): string[] {
   const dirs: string[] = []
   for (const one of roots.roots) {
     if (one.provider !== "claude") continue
-    for (const profile of one.profiles) dirs.push(path.join(profile.dir, "projects"))
+    for (const profile of one.profiles) dirs.push(canonicalRootPath(path.join(profile.dir, "projects")))
   }
-  return dirs
+  return dirs.filter((dir, at, all) => all.indexOf(dir) === at)
 }
 
 /** A seat the habitat's published plan declares, with the provider and account its launch argv names. */

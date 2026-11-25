@@ -24,6 +24,7 @@ import {
 import {
   profileRootsFromAg,
   claudeProjectDirs,
+  canonicalRootPath,
   readDeclaredSeats,
   checkDeclaredSeats,
   type DeclaredSeatCheck,
@@ -1235,7 +1236,10 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     // so name it in the same run instead of returning a thin answer with no explanation.
     declaredSeats = readDeclaredSeats()
     seatCheck = checkDeclaredSeats(declaredSeats.seats, profileRoots)
-    const claudeRoots = [pdir, ...claudeProjectDirs(profileRoots)].filter((dir, at, all) => all.indexOf(dir) === at)
+    // #38420: profile homes link their `projects/` at one store, so dedupe on the canonical path, never the name.
+    const claudeRoots = [canonicalRootPath(pdir), ...claudeProjectDirs(profileRoots)].filter(
+      (dir, at, all) => all.indexOf(dir) === at,
+    )
     for (const root of claudeRoots) {
       let readable = false
       let reason: string | undefined

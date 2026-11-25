@@ -16,7 +16,7 @@ import * as path from "node:path"
 import { matchProjectGlob } from "../lib/format.ts"
 import { acquireIndexWriter, getSnapshotPath, IndexWriterBusyError } from "./db.ts"
 import { currentProjectsDir, findSessionFiles, indexSessionFile, projectPathFromRelative } from "./indexer.ts"
-import { profileRootsFromAg, claudeProjectDirs, type ProfileRoots } from "./profile-roots.ts"
+import { profileRootsFromAg, claudeProjectDirs, canonicalRootPath, type ProfileRoots } from "./profile-roots.ts"
 
 /** @cto a78c4127: the foreground share a query may spend on indexing before it must answer from what it has. */
 export const QUERY_REFRESH_CAP_MS = 10_000
@@ -75,7 +75,10 @@ export async function refreshIndexForQuery(
   // A seat launched through ag runs under a provider profile home, so the stock ~/.claude is only one root (#38420).
   // ag owns that mapping; a root it cannot name is reported, never skipped quietly.
   const profileRoots = options.profileRoots ?? (await profileRootsFromAg(options.agBin))
-  const roots = [...new Set([currentProjectsDir(), ...claudeProjectDirs(profileRoots)])]
+  // #38420: profile homes link their `projects/` at one store, so dedupe on the canonical path, never the name.
+  const roots = [canonicalRootPath(currentProjectsDir()), ...claudeProjectDirs(profileRoots)].filter(
+    (dir, at, all) => all.indexOf(dir) === at,
+  )
   const walked: QueryRefreshRoot[] = []
   const candidates: Array<{ file: string; stats: fs.Stats; projectsDir: string }> = []
   for (const root of roots) {
