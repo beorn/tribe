@@ -13,6 +13,25 @@ import { deliveryLedgerPath, loadDeliveryLedger } from "../src/lib/delivery-ledg
 import { buildFleetDeliveryReport } from "../src/lib/delivery-report.ts"
 import { launchEnvironment } from "./launch-token.ts"
 
+/**
+ * The environment a spawned fixture runs in: the runner's own, minus every
+ * tribe/hab session variable.
+ *
+ * 38257 — a fixture that spreads `process.env` whole inherits the seat that runs
+ * it. Measured: TRIBE_REQUIRE_JOIN=0 in the caller made an adapter that never
+ * joined look joined (so the 34204 claim row reached the pane), and HAB_ID_TOKEN
+ * gave a register the runner's real token. A test states the session it means;
+ * whoever runs the file no longer decides the result.
+ */
+function fixtureEnv(overrides: Record<string, string> = {}): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith("TRIBE_") || key.startsWith("HAB_")) continue
+    env[key] = value
+  }
+  return { ...env, ...overrides }
+}
+
 const ADAPTER = resolve(dirname(fileURLToPath(import.meta.url)), "../src/stdio-adapter.ts")
 // #28378 — the same adapter entered through a transport fault seam that rejects
 // the first FAULT-ROW channel notification (see notification-fault-entry.ts).
@@ -23,6 +42,8 @@ type FakeDaemon = {
   readonly server: Server
   readonly clients: Socket[]
   readonly requests: Record<string, unknown>[]
+  /** 38257 — the socket that sent a successful `register`; the one a wakeup must reach. */
+  readonly registeredClient: () => Socket | undefined
 }
 
 function spawnFakeDaemon(
@@ -64,6 +85,7 @@ function spawnFakeDaemon(
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
   const requests: Record<string, unknown>[] = []
+  let registeredClient: Socket | undefined
   let registerCount = 0
   let sendCount = 0
   return new Promise((resolveServer) => {
@@ -99,6 +121,7 @@ function spawnFakeDaemon(
             socket.write(makeNotification("wakeup", { reason: "actionable-recovery" }))
           }
           const delivery = (msg.params as Record<string, unknown>)?.delivery
+          registeredClient = socket
           socket.write(
             makeResponse(msg.id, {
               sessionId: "daemon-s1",
@@ -213,7 +236,9 @@ function spawnFakeDaemon(
         /* ignore test socket teardown */
       })
     })
-    server.listen(socketPath, () => resolveServer({ server, clients, requests }))
+    server.listen(socketPath, () =>
+      resolveServer({ server, clients, requests, registeredClient: () => registeredClient }),
+    )
   })
 }
 
@@ -323,11 +348,18 @@ function waitForStdout(
   predicate: () => boolean,
   opts: { timeoutMs?: number } = {},
 ): Promise<void> {
-  const timeoutMs = opts.timeoutMs ?? 2_000
+  // 38257 — this waits on a spawned adapter (start, register, wakeup, drain), not an in-process tick: 2 s expired on a
+  // host under load 48 where the child logged its registration at 10 s. Ten is wide enough for a busy machine.
+  const timeoutMs = opts.timeoutMs ?? 10_000
   return new Promise((resolveWait, reject) => {
     const timer = setTimeout(() => {
       cleanup()
-      reject(new Error(`timed out waiting for stdout condition; saw ${lines.length} json line(s)`))
+      reject(
+        new Error(
+          `timed out waiting for stdout condition; saw ${lines.length} json line(s): ` +
+            lines.map((line) => JSON.stringify(line).slice(0, 160)).join(" | "),
+        ),
+      )
     }, timeoutMs)
     const cleanup = () => {
       clearTimeout(timer)
@@ -431,7 +463,7 @@ describe("stdio adapter delivery modes", () => {
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         ...launchEnvironment(""),
         TRIBE_DELIVERY: "pull",
         TRIBE_NO_AUTOSTART: "1",
@@ -534,7 +566,7 @@ console.log('HOSTED_WAKE_STDOUT_IS_NOT_MCP');\n`,
       child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
         cwd: tmpDir,
         env: {
-          ...process.env,
+          ...fixtureEnv(),
           ...launchEnvironment(""),
           TRIBE_DELIVERY: "push",
           TRIBE_NO_AUTOSTART: "1",
@@ -574,7 +606,7 @@ console.log('HOSTED_WAKE_STDOUT_IS_NOT_MCP');\n`,
       daemon = await spawnFakeDaemon(socketPath)
       child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
         cwd: tmpDir,
-        env: { ...process.env, ...launchEnvironment(""), TRIBE_NO_AUTOSTART: "1", TRIBE_HOSTED_WAKE_ARGV: argv },
+        env: { ...fixtureEnv(), ...launchEnvironment(""), TRIBE_NO_AUTOSTART: "1", TRIBE_HOSTED_WAKE_ARGV: argv },
         stdio: ["pipe", "pipe", "pipe"],
       })
       const stderr = collectStderrText(child)
@@ -614,7 +646,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
       child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
         cwd: tmpDir,
         env: {
-          ...process.env,
+          ...fixtureEnv(),
           ...launchEnvironment(""),
           TRIBE_DELIVERY: "push",
           TRIBE_NO_AUTOSTART: "1",
@@ -695,7 +727,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_REQUIRE_JOIN: "0",
         TRIBE_NO_AUTOSTART: "1",
@@ -741,7 +773,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },
@@ -765,7 +797,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "pull",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -800,7 +832,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "pull",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -833,7 +865,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test", "--role", "watch"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "pull",
         TRIBE_REQUIRE_JOIN: "1",
         TRIBE_NO_AUTOSTART: "1",
@@ -862,7 +894,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_NAME: "@chief",
         TRIBE_DELIVERY: "pull",
         TRIBE_NO_AUTOSTART: "1",
@@ -899,7 +931,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         HAB_ID_TOKEN: "",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -940,7 +972,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         HAB_ID_TOKEN: "",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -977,7 +1009,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_NAME: "@chief/@ci/next",
         TRIBE_REQUIRE_JOIN: "1",
         TRIBE_DELIVERY: "push",
@@ -1007,7 +1039,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "degrade-test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_REQUIRE_JOIN: "1",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -1033,7 +1065,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_NAME: "@Chief Next",
         TRIBE_REQUIRE_JOIN: "1",
         TRIBE_NO_AUTOSTART: "1",
@@ -1060,7 +1092,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@fleet"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_FILTER_MODE: "focus",
         TRIBE_NO_AUTOSTART: "1",
@@ -1083,7 +1115,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@fleet"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_FILTER_MODE: "everything",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -1109,7 +1141,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/9"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "1",
         ...launchEnvironment("provider-launch-a"),
@@ -1136,7 +1168,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/9"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "1",
         ...launchEnvironment(""),
@@ -1164,7 +1196,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/9"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "1",
         TRIBE_LAUNCH_ID: "",
@@ -1191,7 +1223,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "1",
         TRIBE_NO_AUTOSTART: "1",
@@ -1233,7 +1265,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_REQUIRE_JOIN: "0",
         TRIBE_NO_AUTOSTART: "1",
@@ -1290,7 +1322,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_REQUIRE_JOIN: "0",
         TRIBE_NO_AUTOSTART: "1",
@@ -1342,7 +1374,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         // push is what emits Claude-only channel notifications (the banner); with
         // no auto-join the first connect still announces the pre-join pull banner.
         TRIBE_DELIVERY: "push",
@@ -1385,7 +1417,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         // Pin an unjoined fixture even when the caller auto-joins or resumes joined.
         TRIBE_REQUIRE_JOIN: "1",
@@ -1452,7 +1484,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_REQUIRE_JOIN: "0",
         TRIBE_NO_AUTOSTART: "1",
@@ -1492,7 +1524,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_REQUIRE_JOIN: "0",
         TRIBE_NO_AUTOSTART: "1",
@@ -1529,7 +1561,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_REQUIRE_JOIN: "0",
         TRIBE_NO_AUTOSTART: "1",
@@ -1575,7 +1607,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_REQUIRE_JOIN: "0",
         TRIBE_PLUGIN_RESUME_JOINED: "0",
@@ -1691,7 +1723,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "1",
         ...launchEnvironment("provider-launch-a"),
@@ -1727,7 +1759,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/9"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "0",
         TRIBE_NO_AUTOSTART: "1",
@@ -1757,7 +1789,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "pull",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -1777,7 +1809,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "pull",
         TRIBE_PULL_TRANSPORT: "cli",
         TRIBE_NO_AUTOSTART: "1",
@@ -1828,7 +1860,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "pull",
         TRIBE_PULL_TRANSPORT: "cli",
         TRIBE_NO_AUTOSTART: "1",
@@ -1927,7 +1959,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_REQUIRE_JOIN: "1",
         TRIBE_PLUGIN_RESUME_JOINED: "0",
@@ -2000,7 +2032,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_REQUIRE_JOIN: "0",
         TRIBE_PLUGIN_RESUME_JOINED: "0",
@@ -2034,7 +2066,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
       },
@@ -2098,7 +2130,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -2169,7 +2201,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -2260,7 +2292,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -2311,7 +2343,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     })
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
-      env: { ...process.env, TRIBE_DELIVERY: "push", TRIBE_NO_AUTOSTART: "1", DEBUG_LOG: join(tmpDir, "adapter.log") },
+      env: { ...fixtureEnv(), TRIBE_DELIVERY: "push", TRIBE_NO_AUTOSTART: "1", DEBUG_LOG: join(tmpDir, "adapter.log") },
       stdio: ["pipe", "pipe", "pipe"],
     })
     void collectStdoutJson(child)
@@ -2390,7 +2422,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -2465,7 +2497,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -2518,7 +2550,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
       ],
     }
     const env = {
-      ...process.env,
+      ...fixtureEnv(),
       TRIBE_DELIVERY: "push",
       TRIBE_NO_AUTOSTART: "1",
       TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
@@ -2630,7 +2662,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
       })),
     }
     const env = {
-      ...process.env,
+      ...fixtureEnv(),
       TRIBE_DELIVERY: "push",
       TRIBE_NO_AUTOSTART: "1",
       TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
@@ -2697,7 +2729,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
       ],
     }
     const env: NodeJS.ProcessEnv = {
-      ...process.env,
+      ...fixtureEnv(),
       TRIBE_DELIVERY: "push",
       TRIBE_NO_AUTOSTART: "1",
       TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
@@ -2764,7 +2796,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -2829,7 +2861,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
@@ -2891,7 +2923,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         TRIBE_DELIVERY_LEDGER: ledgerPath,
@@ -2978,7 +3010,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [FAULT_ENTRY, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         TRIBE_DELIVERY_LEDGER: ledgerPath,
@@ -3083,7 +3115,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
@@ -3202,7 +3234,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
       child = spawn(BUN_BIN, [ADAPTER, "--socket", opts.socket, "--name", opts.ackName], {
         cwd: tmpDir,
         env: {
-          ...process.env,
+          ...fixtureEnv(),
           TRIBE_DELIVERY: "push",
           TRIBE_NO_AUTOSTART: "1",
           TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
@@ -3313,7 +3345,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
@@ -3388,7 +3420,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
@@ -3451,7 +3483,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     const socketPath = join(tmpDir, "tribe.sock")
     const recentTs = new Date().toISOString()
     const env = {
-      ...process.env,
+      ...fixtureEnv(),
       TRIBE_DELIVERY: "push",
       TRIBE_NO_AUTOSTART: "1",
       TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
@@ -3539,7 +3571,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
       { id: "gap1-ambient-c", type: "notify", from: "@chief", content: "GAP1-AMBIENT-C", ts: recentTs },
     ]
     const env = {
-      ...process.env,
+      ...fixtureEnv(),
       TRIBE_DELIVERY: "push",
       TRIBE_NO_AUTOSTART: "1",
       TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
@@ -3644,7 +3676,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_REQUIRE_JOIN: "1",
         TRIBE_PLUGIN_RESUME_JOINED: "0",
@@ -3701,7 +3733,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         TRIBE_REQUIRE_JOIN: "0",
@@ -3757,7 +3789,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
       child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
         cwd: tmpDir,
         env: {
-          ...process.env,
+          ...fixtureEnv(),
           TRIBE_DELIVERY: "push",
           TRIBE_NO_AUTOSTART: "1",
           TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
@@ -3846,7 +3878,7 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -3917,10 +3949,14 @@ setTimeout(() => process.exit(0), 35000);\n`,
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "km-4-x7q"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...fixtureEnv(),
         ...launchEnvironment(""),
         CLAUDE_SESSION_ID: sessionId,
         TRIBE_DELIVERY: "push",
+        // 38257 — a seat that is already joined, stated here rather than inherited: the claim
+        // row reaches the pane only when this adapter holds the channel and is joined, and an
+        // unjoined adapter would fetch the row, attempt the rename, and drop the envelope.
+        TRIBE_REQUIRE_JOIN: "0",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: logPath,
       },
@@ -3937,7 +3973,11 @@ setTimeout(() => process.exit(0), 35000);\n`,
       "adapter registered with the fake daemon",
     )
 
-    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+    // 38257: clients[0] is whichever connection the adapter opened first, which is not stable across runs; the wakeup
+    // must reach the socket that registered or the drain never runs.
+    const registeredClient = daemon.registeredClient()
+    expect(registeredClient, "adapter registered before its wakeup").toBeDefined()
+    registeredClient?.write(makeNotification("wakeup", {}))
 
     // The claim row really travelled the drain to the pane...
     await waitForStdout(child, stdout, () => stdout.some((line) => JSON.stringify(line).includes("km-storage.foo")))
@@ -3962,5 +4002,6 @@ setTimeout(() => process.exit(0), 35000);\n`,
       "refused auto-rename reported at warn with both identities",
       { timeoutMs: 5_000 },
     )
-  })
+    // 38257: the case drives a spawned adapter and a fake daemon end to end, so it budgets for a slow child start.
+  }, 60_000)
 })
