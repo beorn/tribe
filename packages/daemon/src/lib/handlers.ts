@@ -6670,6 +6670,29 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
         ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: acknowledged, $now: Date.now() })
       }
     }
+  } else if (ids && ids.length > 0 && isReceipt && deliveryAlive()) {
+    // #38555 slice 3 (@cto 8c2f07eb): a receipt-bearing id-fetch marks each
+    // returned actionable row read for its own recipient without moving the
+    // high-water mailbox cursor (which would swallow older unread rows, #31840)
+    // or touching last_attention_read_at. Open tracked balls still stay owed in
+    // pending_balls / Branch 2 until TAKING or reply.
+    const readIds = filtered
+      .filter(
+        (row) =>
+          row.recipient === currentName &&
+          row.sender !== currentName &&
+          row.body_archived !== 1 &&
+          (ACTIONABLE_TYPES_SET.has(row.type) || row.attention_required === 1 || row.wakes_owner === 1),
+      )
+      .map((row) => row.id)
+    if (readIds.length > 0) {
+      const readAt = Date.now()
+      ctx.db.transaction(() => {
+        for (const messageId of readIds) {
+          ctx.stmts.upsertMessageRead.run({ $recipient: currentName, $message_id: messageId, $read_at: readAt })
+        }
+      })()
+    }
   }
 
   // 21626 — only the canonical, identity-bound attention projection is a

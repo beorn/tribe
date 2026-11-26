@@ -23,6 +23,21 @@ const TURN_END_RECEIPTS_TABLE_SQL = `turn_end_receipts (
 		PRIMARY KEY (launch_id, launch_parent_pid)
 	)`
 
+/**
+ * #38555 slice 3 (@cto 8c2f07eb) — per-(recipient, message_id) read marks written by receipt-bearing
+ * `tribe.fetch({ ids })` reads. A high-water cursor cannot mark one id-fetched row read without swallowing older
+ * unread rows (#31840), and `replay` is purely cursor-derived (handlers.ts `shownThrough`), so this table carries
+ * the per-row read mark. The base schema and migration v49 both create it from this one definition.
+ */
+const MESSAGE_READS_TABLE_SQL = `message_reads (
+		recipient   TEXT NOT NULL,
+		message_id  TEXT NOT NULL,
+		read_at     INTEGER NOT NULL,
+		PRIMARY KEY (recipient, message_id)
+	)`
+const MESSAGE_READS_MESSAGE_ID_INDEX_SQL =
+  "CREATE INDEX IF NOT EXISTS idx_message_reads_message_id ON message_reads(message_id)"
+
 export function openDatabase(path: string): Database {
   const db = new Database(path, { create: true })
   db.run("PRAGMA busy_timeout = 5000")
@@ -252,6 +267,11 @@ export function openDatabase(path: string): Database {
   // `received_at` is daemon time. One row per launch: acted-after.ts reads only
   // the newest, so the table grows with launches, not turns.
   db.run(assertSingleStatement(`CREATE TABLE IF NOT EXISTS ${TURN_END_RECEIPTS_TABLE_SQL}`))
+
+  // #38555 slice 3 — per-row id-fetch read marks (IMAP \Seen). Cleaned up by
+  // retention when archived messages are deleted.
+  db.run(assertSingleStatement(`CREATE TABLE IF NOT EXISTS ${MESSAGE_READS_TABLE_SQL}`))
+  db.run(assertSingleStatement(MESSAGE_READS_MESSAGE_ID_INDEX_SQL))
 
   // 21757 — retention's prune notice. When the archive-move phase takes an
   // unread direct actionable away from a recipient that has not read its
@@ -1784,6 +1804,15 @@ const MIGRATIONS: readonly Migration[] = [
       db.run(assertSingleStatement(`CREATE TABLE IF NOT EXISTS ${TURN_END_RECEIPTS_TABLE_SQL}`))
     },
   },
+  {
+    version: 49,
+    name: "message-reads",
+    /** #38555 slice 3 (@cto 8c2f07eb): per-(recipient, message_id) read marks from receipt-bearing id-fetches. */
+    up(db) {
+      db.run(assertSingleStatement(`CREATE TABLE IF NOT EXISTS ${MESSAGE_READS_TABLE_SQL}`))
+      db.run(assertSingleStatement(MESSAGE_READS_MESSAGE_ID_INDEX_SQL))
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1970,11 +1999,18 @@ export function unretiredAttentionPredicateSql(
   const noTakingStatusIn = (table: string, sequence: string, suffix: string) =>
     `${noTakingStatusRefIn(table, sequence, `taking_request_${suffix}`, `${row}request`)}
     AND ${noTakingStatusRefIn(table, sequence, `taking_message_${suffix}`, `${row}id`)}`
+  const noExplicitRead = `NOT EXISTS (
+    SELECT 1
+    FROM message_reads AS mr
+    WHERE mr.recipient = ${row}recipient
+      AND mr.message_id = ${row}id
+  )`
   const noRetirementIn = (table: string, sequence: string, suffix: string) =>
     `${noReplyIn(table, sequence, `reply_${suffix}`)}
     AND ${noTakingStatusIn(table, sequence, suffix)}`
 
-  if (source.relation === "messages") return noRetirementIn("messages", "rowid", "message")
+  if (source.relation === "messages")
+    return `${noRetirementIn("messages", "rowid", "message")}\n    AND ${noExplicitRead}`
 
   // `journal` is a CTE — `messages UNION ALL messages_archive`. Probing it
   // directly forced SQLite to MATERIALISE all ~158k rows and then scan that
@@ -1991,7 +2027,8 @@ export function unretiredAttentionPredicateSql(
   // both tables and recombining in TypeScript — a separate change against an
   // on-demand path, not this one against the continuous burn.
   return `${noRetirementIn("messages", "rowid", "message")}
-    AND ${noRetirementIn("messages_archive", "seq", "archived")}`
+    AND ${noRetirementIn("messages_archive", "seq", "archived")}
+    AND ${noExplicitRead}`
 }
 
 function untakenPendingBallPredicateSql(alias: string, originalSequence: string): string {
@@ -2061,8 +2098,14 @@ function trackedAttentionPredicateSql(ownerParameter = "$name"): string {
  * exemption in full. */
 function trackedResponseCursorGateSql(ownerParameter: string): string {
   return `(COALESCE(m.type, a.type) != 'response'
-    OR ${TRACKED_ATTENTION_SEQUENCE_SQL} > COALESCE(
-      (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ${ownerParameter}), 0))`
+    OR (${TRACKED_ATTENTION_SEQUENCE_SQL} > COALESCE(
+      (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ${ownerParameter}), 0)
+      AND NOT EXISTS (
+        SELECT 1
+        FROM message_reads AS mr
+        WHERE mr.recipient = ${ownerParameter}
+          AND mr.message_id = COALESCE(m.id, a.id)
+      )))`
 }
 
 // 30029: the tracked branch carries no type filter. Pending ownership is the
@@ -3170,6 +3213,13 @@ export function createStatements(db: Database) {
       ON CONFLICT (launch_id, launch_parent_pid) DO UPDATE SET
         session = excluded.session,
         received_at = MAX(turn_end_receipts.received_at, excluded.received_at)
+    `),
+    // #38555 slice 3 (@cto 8c2f07eb): per-(recipient, message_id) read mark from a receipt-bearing id-fetch.
+    upsertMessageRead: db.prepare(`
+      INSERT INTO message_reads (recipient, message_id, read_at)
+      VALUES ($recipient, $message_id, $read_at)
+      ON CONFLICT (recipient, message_id) DO UPDATE SET
+        read_at = MAX(message_reads.read_at, excluded.read_at)
     `),
     gcOldLaunchRenames: db.prepare("DELETE FROM launch_renames WHERE renamed_at < $cutoff"),
 
