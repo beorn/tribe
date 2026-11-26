@@ -319,7 +319,11 @@ function inlineGraceExpiredSql(sequence: string): string {
 }
 
 /** What the page names as the reason: the three disjoint ways a row reaches the count. */
-export type ActionableLagCause = "never-delivered" | "directive-unread" | "delivered-inline-unfetched"
+export type ActionableLagCause =
+  | "never-delivered"
+  | "directive-unread"
+  | "delivered-inline-unfetched"
+  | "pull-unfetched"
 
 export type ActionableLagReading = LagRow & {
   /** Rows inside the inline-delivery grace: not counted, and not yet a page. */
@@ -333,8 +337,9 @@ export type ActionableLagReading = LagRow & {
  * 33213 (@cto 52e27942): the actionable reading the health projection pages on.
  * Same attention set as `attentionLagSql`, plus the grace split — the count is
  * returned whole so a caller can show both "counts now" and "held", and the
- * three causes partition it: directive, delivered-inline-past-grace, and
- * everything else (never written to this seat, or inbox-only by class).
+ * four causes partition it: directive, delivered-inline-past-grace, never written to this seat
+ * (a push row above its cursor, which no socket carried), and inbox-only by class (a pull row,
+ * which by design is never fanned out and waits for the seat to fetch).
  */
 function actionableLagSql(table: "messages" | "messages_archive"): string {
   const sequence = table === "messages" ? "rowid" : "seq"
@@ -344,7 +349,11 @@ function actionableLagSql(table: "messages" | "messages_archive"): string {
   const graceExempt = inlineGraceExemptSql(sequence)
   const directive = `m.type IN (${BALL_OPENING_TYPES_SQL})`
   const expiredInline = inlineGraceExpiredSql(sequence)
-  const neverDelivered = `NOT (${directive}) AND NOT (${deliveredInlineRowSql(sequence)})`
+  // #38676: a pull row is never written to a socket BY DESIGN, so calling it "never written" alarmed
+  // fleet health on healthy pull seats (@dev/3: 2 rows, delivery:pull, connected). It gets its own
+  // cause and its own words; only a push row above the cursor is a delivery that did not happen.
+  const pullOnly = `m.delivery = \x27pull\x27 AND NOT (${directive})`
+  const neverDelivered = `m.delivery = \x27push\x27 AND NOT (${directive}) AND NOT (${deliveredInlineRowSql(sequence)})`
   return `
     SELECT
       COUNT(*) AS rows,
@@ -356,7 +365,9 @@ function actionableLagSql(table: "messages" | "messages_archive"): string {
       COALESCE(SUM(CASE WHEN ${expiredInline} THEN 1 ELSE 0 END), 0) AS cause_inline_rows,
       MIN(CASE WHEN ${expiredInline} THEN m.ts END) AS cause_inline_oldest_ts,
       COALESCE(SUM(CASE WHEN ${neverDelivered} THEN 1 ELSE 0 END), 0) AS cause_undelivered_rows,
-      MIN(CASE WHEN ${neverDelivered} THEN m.ts END) AS cause_undelivered_oldest_ts
+      MIN(CASE WHEN ${neverDelivered} THEN m.ts END) AS cause_undelivered_oldest_ts,
+      COALESCE(SUM(CASE WHEN ${pullOnly} THEN 1 ELSE 0 END), 0) AS cause_pull_rows,
+      MIN(CASE WHEN ${pullOnly} THEN m.ts END) AS cause_pull_oldest_ts
     FROM ${table} AS m
     WHERE ${attentionWhereSql(table, retired)}
   `
@@ -376,6 +387,8 @@ type ActionableLagHalf = LagRow & {
   cause_inline_oldest_ts: number | null
   cause_undelivered_rows: number
   cause_undelivered_oldest_ts: number | null
+  cause_pull_rows: number
+  cause_pull_oldest_ts: number | null
 }
 
 /** `MIN` across two halves that each report NULL for "no such row" (see combineJournalCount). */
@@ -401,6 +414,11 @@ function combineActionableLag(messagesHalf: ActionableLagHalf, archiveHalf: Acti
       "never-delivered",
       messagesHalf.cause_undelivered_rows + archiveHalf.cause_undelivered_rows,
       olderTs(messagesHalf.cause_undelivered_oldest_ts, archiveHalf.cause_undelivered_oldest_ts),
+    ],
+    [
+      "pull-unfetched",
+      messagesHalf.cause_pull_rows + archiveHalf.cause_pull_rows,
+      olderTs(messagesHalf.cause_pull_oldest_ts, archiveHalf.cause_pull_oldest_ts),
     ],
   ]
   return {
@@ -737,6 +755,8 @@ function actionableCauseLabel(entry: { cause: ActionableLagCause; rows: number; 
       return `${entry.rows} written to its socket, unfetched for ${age}`
     case "never-delivered":
       return `${entry.rows} never written to its socket (oldest ${age})`
+    case "pull-unfetched":
+      return `${entry.rows} waiting for the seat's next fetch (oldest ${age})`
   }
 }
 
