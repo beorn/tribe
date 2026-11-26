@@ -872,7 +872,8 @@ describe("19442 mailbox-cursor actionable recovery", () => {
 
     const fetched = fetchJson(live, opts).json
     expect(fetched.attention?.pending_balls).toHaveLength(10)
-    expect(fetched.attention?.pending_balls?.some((ball) => ball.request_id === andon.request_id)).toBe(false)
+    // F22 (@cto c14bce06): incidents lead the preview, so the andon is shown first and two requests are withheld.
+    expect(fetched.attention?.pending_balls?.[0]?.request_id).toBe(andon.request_id)
     expect(fetched.attention?.pending_balls_summary).toEqual({
       total: 12,
       oldest_age_ms: expect.any(Number),
@@ -880,7 +881,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       newest_overdue_due_at: null,
       withheld: {
         total: 2,
-        by_kind: { request: 1, incident: 1 },
+        by_kind: { request: 2, incident: 0 },
       },
     })
     expect(fetched.events?.some((event) => event.id === andon.id)).toBe(true)
@@ -932,8 +933,8 @@ describe("19442 mailbox-cursor actionable recovery", () => {
 
     const fetched = fetchJson(live, opts).json
     expect(fetched.attention?.pending_balls?.map((ball) => ball.request_id)).toEqual([
-      peer.request_id,
       ...incidentIds.slice(0, 9),
+      peer.request_id,
     ])
     expect(fetched.attention?.pending_balls_summary).toEqual({
       total: 11,
@@ -944,6 +945,63 @@ describe("19442 mailbox-cursor actionable recovery", () => {
         total: 1,
         by_kind: { request: 0, incident: 1 },
       },
+    })
+  })
+
+  // F22 (#32907, @cto c14bce06 + 48c36541): one comparator ranks a seat's owed balls for both `tribe pending` and the
+  // default fetch's pending_balls: kind (incidents, then requests/queries/assigns), then status (expired, unanswered,
+  // active), then oldest first.
+  function sendBall(from: TribeContext, args: Record<string, unknown>, openedAgoMs: number): string {
+    const sent = parseToolJson(handleToolCall(from, "tribe.send", { to: NAME, ...args }, opts)) as {
+      request_id: string
+    }
+    db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = ?").run(now - openedAgoMs, sent.request_id)
+    return sent.request_id
+  }
+  function sendIncident(from: TribeContext, subject: string, openedAgoMs: number): string {
+    const incident = { emitter: "wait-watch", subject, condition: "stopped-not-draining" }
+    return sendBall(from, { message: `${subject} is not draining`, incident }, openedAgoMs)
+  }
+
+  it("ranks a mixed pile incidents first, then requests, expired before active, oldest first, in pending and fetch", () => {
+    const live = connectAs("sess-f22-owner", NAME)
+    const watcher = connectAs("sess-f22-watcher", "@fleet")
+    const chief = connectAs("sess-f22-chief", "@chief")
+
+    const request = sendBall(chief, { message: "a request", type: "request", request: "f22-request" }, 9 * 60_000)
+    const query = sendBall(chief, { message: "a query", type: "query", request: "f22-query" }, 8 * 60_000)
+    const assign = sendBall(chief, { message: "an assign", type: "assign", request: "f22-assign" }, 7 * 60_000)
+    const youngIncident = sendIncident(watcher, "@dev/young", 2 * 60_000)
+    const oldIncident = sendIncident(watcher, "@dev/old", 5 * 60_000)
+    const expired = sendBall(chief, { message: "overdue", type: "request", request: "f22-expired" }, 4 * 60_000)
+    db.prepare("UPDATE pending_request SET expires_at = ? WHERE request_id = ?").run(now - 60_000, expired)
+
+    const expected = [oldIncident, youngIncident, expired, request, query, assign]
+    const pending = parseToolJson(handleToolCall(live, "tribe.pending", {}, opts)) as { pending?: AttentionBall[] }
+    expect(pending.pending?.map((ball) => ball.request_id)).toEqual(expected)
+    const fetched = fetchJson(live, opts).json
+    expect(fetched.attention?.pending_balls?.map((ball) => ball.request_id)).toEqual(expected)
+  })
+
+  it("reserves preview slots for requests but never leaves one empty: 10 incidents plus 2 requests shows 8 plus 2", () => {
+    const live = connectAs("sess-f22-reserve-owner", NAME)
+    const watcher = connectAs("sess-f22-reserve-watcher", "@fleet")
+    const chief = connectAs("sess-f22-reserve-chief", "@chief")
+
+    const incidentIds = Array.from({ length: 10 }, (_, i) => sendIncident(watcher, `@dev/r${i}`, (30 - i) * 60_000))
+    const requests = [
+      sendBall(chief, { message: "first", type: "request", request: "f22-r1" }, 3 * 60_000),
+      sendBall(chief, { message: "second", type: "query", request: "f22-r2" }, 2 * 60_000),
+    ]
+
+    const fetched = fetchJson(live, opts).json
+    expect(fetched.attention?.pending_balls?.map((ball) => ball.request_id)).toEqual([
+      ...incidentIds.slice(0, 8),
+      ...requests,
+    ])
+    expect(fetched.attention?.pending_balls_summary?.withheld).toEqual({
+      total: 2,
+      by_kind: { request: 0, incident: 2 },
     })
   })
 
