@@ -193,6 +193,76 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
     expect(String(sent.detail)).toContain("no answer-capable broadcast owner was observed")
   })
 
+  // F23 (@cto 4da05ac8 + GO amendment, 2026-11-26): a request, assign, query or verdict that says only "ok" ships an
+  // empty ball — the recipient sees a long summary in the wake and nothing to act on in the body. The four
+  // answer-owing types must carry their ask in the body; status and notify do not owe an answer and keep the short body.
+  describe("an answer-owing body must carry the ask, not lean on a longer summary", () => {
+    const summary =
+      "Trial-steward alarm: @dev/8 has a wake queued for more than 8 minutes behind a turn that never closed"
+
+    it("refuses a request whose body is only ok", () => {
+      const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
+      const sent = parseToolJson(
+        handleToolCall(
+          sender,
+          "tribe.send",
+          { to: "@chief", message: "ok", type: "request", summary },
+          makeOpts([liveInfo("sess-chief", "@chief")]),
+        ),
+      )
+
+      expect(sent.error).toBe(
+        "tribe.send: message too short for a request - the body is what the recipient acts on, so put the ask there " +
+          "(40 characters or more), not only in the summary",
+      )
+    })
+
+    it("refuses an assign, a query, and a verdict the same way", () => {
+      const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
+      const opts = makeOpts([liveInfo("sess-chief", "@chief")])
+      for (const type of ["assign", "query", "verdict"]) {
+        const sent = parseToolJson(
+          handleToolCall(sender, "tribe.send", { to: "@chief", message: "ok", type, summary }, opts),
+        )
+        expect(String(sent.error)).toContain(`message too short for a ${type}`)
+      }
+      expect((db.prepare("SELECT COUNT(*) AS n FROM messages WHERE kind <> 'event'").get() as { n: number }).n).toBe(0)
+    })
+
+    it("delivers a request whose body carries the ask", () => {
+      const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
+      const sent = parseToolJson(
+        handleToolCall(
+          sender,
+          "tribe.send",
+          {
+            to: "@chief",
+            message:
+              "Please clear the phantom turn on @dev/8 so its queued wake can deliver, then tell me when it is done.",
+            type: "request",
+            summary,
+          },
+          makeOpts([liveInfo("sess-chief", "@chief")]),
+        ),
+      )
+
+      expect(sent.error).toBeUndefined()
+      expect(sent).toMatchObject({ sent: true })
+    })
+
+    it("leaves status and notify free to be short", () => {
+      const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
+      const opts = makeOpts([liveInfo("sess-chief", "@chief")])
+      for (const type of ["status", "notify"]) {
+        const sent = parseToolJson(
+          handleToolCall(sender, "tribe.send", { to: "@chief", message: "ok", type, summary }, opts),
+        )
+        expect(sent.error).toBeUndefined()
+        expect(sent).toMatchObject({ sent: true })
+      }
+    })
+  })
+
   it("pins summary-required refusal to one line for LLM senders omitting summary", () => {
     const sender = makeContext(db, stmts, "sess-llm", "@dev/7", "claude-uuid-1234")
     const sent = parseToolJson(
