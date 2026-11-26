@@ -41,6 +41,8 @@
     "./cli": "./src/cli.ts",
     "./stdio": "./src/stdio-adapter.ts",
     "./lib/socket": "./src/lib/socket.ts",
+    "./lib/incident-send": "./src/lib/incident-send.ts",
+    "./lib/incident-reconciler": "./src/lib/incident-reconciler.ts",
     "./lib/config": "./src/lib/config.ts",
     "./lib/config-light": "./src/lib/config-light.ts",
     "./lib/beads-path": "./src/lib/beads-path.ts",
@@ -111,6 +113,14 @@
       "./lib/socket": {
         "types": "./dist/lib/socket.d.mts",
         "import": "./dist/lib/socket.mjs"
+      },
+      "./lib/incident-send": {
+        "types": "./dist/lib/incident-send.d.mts",
+        "import": "./dist/lib/incident-send.mjs"
+      },
+      "./lib/incident-reconciler": {
+        "types": "./dist/lib/incident-reconciler.d.mts",
+        "import": "./dist/lib/incident-reconciler.mjs"
       },
       "./lib/config": {
         "types": "./dist/lib/config.d.mts",
@@ -261,6 +271,8 @@
       "src/cli.ts",
       "src/stdio-adapter.ts",
       "src/lib/socket.ts",
+      "src/lib/incident-send.ts",
+      "src/lib/incident-reconciler.ts",
       "src/lib/config.ts",
       "src/lib/config-light.ts",
       "src/lib/beads-path.ts",
