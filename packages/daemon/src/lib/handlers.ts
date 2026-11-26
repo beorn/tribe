@@ -6,7 +6,10 @@ import { assertSingleStatement } from "@bearly/sqlite"
 import { createLogger } from "loggily"
 import { randomUUID } from "node:crypto"
 import {
+  ANDON_CONDITION,
+  ANDON_EMITTER,
   ANDON_OWNER,
+  ANDON_SUBJECT,
   ballFactKey,
   describeSettlementConflict,
   foldSettlementFacts,
@@ -3000,16 +3003,23 @@ function allPendingBallsWithContent(ctx: TribeContext, now: number): PendingBall
 }
 
 /**
- * F22 (#32907, @cto c14bce06): the one order of owed balls, shared by `tribe pending` and the default fetch's
- * pending_balls. Kind first, as /do takes them: incidents (alarms, step 2), then requests, queries and assigns
- * (step 3); then status (expired, unanswered, active); then oldest first.
+ * F22 (#32907, @cto c14bce06) and #38770: the one order of owed balls, shared by `tribe pending` and the default
+ * fetch's pending_balls. Class first, as /do takes them: the stop-the-line andon (the one fleet-stop incident key),
+ * then other incidents (alarms, step 2), then requests, queries and assigns (step 3); then status (expired,
+ * unanswered, active); then oldest first.
  */
+const ANDON_REQUEST_ID = incidentKey({ emitter: ANDON_EMITTER, subject: ANDON_SUBJECT, condition: ANDON_CONDITION })
+
+function pendingBallClass(ball: PendingBall): number {
+  if (ball.request_kind === "incident") return ball.request_id === ANDON_REQUEST_ID ? 0 : 1
+  return ball.request_kind === "solicitation" ? 3 : 2
+}
+
 function sortPendingBalls<T extends PendingBall>(rows: readonly T[]): T[] {
-  const kindRank = { incident: 0, request: 1, solicitation: 2 } as const
   const statusRank = { expired: 0, unanswered: 1, active: 2 } as const
   return rows.toSorted(
     (left, right) =>
-      kindRank[left.request_kind ?? "request"] - kindRank[right.request_kind ?? "request"] ||
+      pendingBallClass(left) - pendingBallClass(right) ||
       statusRank[left.status] - statusRank[right.status] ||
       Date.parse(left.opened_at) - Date.parse(right.opened_at) ||
       left.request_id.localeCompare(right.request_id),
