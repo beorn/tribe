@@ -162,7 +162,7 @@ export const TRIBE_JOIN_PRIMER =
   "and automatically open a semantic response ball. Direct `type: verdict` is " +
   "also actionable and wakeable, but does not automatically open another ball. " +
   "Authenticated assign/query/request broadcasts automatically track each admitted recipient. " +
-  "Broadcast fanout defaults to first: one answer settles for everyone; use all when each recipient owes an answer. " +
+  "Multi-recipient assign/query/request requires explicit fanout: all (each owes an answer) or first (any one answer settles it). " +
   "A tracked actionable broadcast is wakeable for each recipient owner until TAKING or settlement. " +
   "Direct `notify`/`status`/`response` rows are inbox-visible and not wakeable by default; " +
   "a waiter may explicitly opt into validated `status`/`response` replies to its own tracked requests. " +
@@ -901,6 +901,9 @@ function activeBroadcastRecipients(ctx: TribeContext, answerableNames: ReadonlyS
   return rows.map((row) => row.name)
 }
 
+const F12_MISSING_FANOUT_ERROR =
+  "tribe.send: several recipients: pass --fanout all (each owes an answer) or --fanout first (any one answer settles it)"
+
 function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
   // The tribe-wire daemon is role-agnostic (F12 of
   // @km/tribe/15496-coordination-drift): every message type is delivered to
@@ -956,7 +959,13 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // a string overrides the id. Response/verdict + reply settle; other types correlate without closing.
   const requestArg = a.request
   const replyArg = a.reply
-  const fanoutArg = a.fanout as "first" | "all" | undefined
+  const rawFanout = a.fanout == null ? undefined : a.fanout
+  if (rawFanout !== undefined && rawFanout !== "first" && rawFanout !== "all") {
+    return jsonResult({
+      error: `tribe.send: invalid fanout '${String(rawFanout)}' - expected one of: first, all`,
+    })
+  }
+  const fanoutArg = rawFanout
   if (requestArg !== undefined && requestArg !== true && typeof requestArg !== "string") {
     return jsonResult({ error: "tribe.send: invalid request - must be true or a non-empty string" })
   }
@@ -983,6 +992,16 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     if (replyArg !== undefined) {
       return jsonResult({ error: "tribe.send: solicitation cannot carry reply - it opens, it does not settle" })
     }
+  }
+  // F12 (#30913, @cto 8b22f164): multi-recipient request/query/assign must name
+  // fanout explicitly so a first reply never silently closes another owner's ball.
+  if (
+    AUTO_TRACK_TYPES_SET.has(msgType) &&
+    solicitationArg !== true &&
+    ((Array.isArray(recipients) && recipients.length > 1) || recipients === "*") &&
+    fanoutArg === undefined
+  ) {
+    return jsonResult({ error: F12_MISSING_FANOUT_ERROR })
   }
   const requestFlag = requestArg === true
   const requestId = typeof requestArg === "string" ? requestArg.trim() : null

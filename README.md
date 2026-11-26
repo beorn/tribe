@@ -310,9 +310,10 @@ tracking — only message type and `request` decide whether a pending ball opens
 **Pending balls & attention.** A direct `request`, `query`, or `assign` message
 opens exactly one recipient-owned "ball". Authenticated broadcasts of these
 types automatically open balls for the admitted recipients. Other message
-types require explicit tracking. Broadcast fanout defaults to `first`: one
-answer settles the request for everyone ("someone take this"). Use `all` when
-each recipient owes an answer (a poll or "every seat do this").
+types require explicit tracking. Multi-recipient `request`, `query`, and
+`assign` messages require explicit `fanout`: `all` when each recipient owes an
+answer (a poll or "every seat do this"), or `first` when any one answer settles
+the request for everyone ("someone take this").
 The ball stores ownership, age, and fanout. Tracked requests and queries receive
 a 20-minute escalation deadline; assignments have no reply-clock default.
 `expires_in_ms` overrides the class policy for one send. `status + ref` is a

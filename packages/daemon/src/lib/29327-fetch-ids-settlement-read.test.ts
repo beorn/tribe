@@ -583,6 +583,7 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
           to: seats,
           type: "request",
           request: true,
+          fanout: "first",
           message: "30743: fanout witness — one answer settles for everyone",
           summary: "30743: fanout witness",
         },
@@ -618,7 +619,11 @@ describe("tribe.fetch ids — the pre-drain settlement read (29327)", () => {
     expect(events(byRequest)).toEqual(events(byMessages))
     expect(events(byRequest)).toHaveLength(seats.length)
     expect(events(byRequest).every((row) => row.settlement === "open")).toBe(true)
-    expect(events(byRequest).map((row) => String(row.id)).sort()).toEqual([...messageIds].sort())
+    expect(
+      events(byRequest)
+        .map((row) => String(row.id))
+        .sort(),
+    ).toEqual([...messageIds].sort())
 
     let pendingTotal = 0
     for (const owner of seats) {

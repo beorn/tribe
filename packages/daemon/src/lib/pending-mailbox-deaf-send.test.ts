@@ -152,14 +152,14 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
     })
   })
 
-  it.each([undefined, "first"])("preserves first-answer settlement with fanout %s", (fanout) => {
+  it("preserves first-answer settlement with explicit fanout first", () => {
     const names = ["@dev/sender", "@dev/a", "@dev/b"] as const
     for (const [i, name] of names.entries()) addSession(db, stmts, `sess-${i}`, name, `sid-${i}`)
     const opts = optsWithLive(names.map((name, i) => liveInfo(`sess-${i}`, name)))
     const contexts = names.map((name, i) => makeContext(db, stmts, `sess-${i}`, name))
     const call = (i: number, args: Record<string, unknown>) =>
       parseToolJson(handleToolCall(contexts[i]!, "tribe.send", args, opts))
-    const sent = call(0, { to: "*", type: "request", message: "someone take this", ...(fanout ? { fanout } : {}) })
+    const sent = call(0, { to: "*", type: "request", message: "someone take this", fanout: "first" })
     expect(sent.sent).toBe(true)
     call(1, { to: names[0], type: "status", message: "TAKING", ref: sent.id })
     // A receipt leaves the sibling eligible; this change does not introduce exclusive claims.
@@ -187,11 +187,13 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
       claudeSessionName: null,
     })
     const sender = makeContext(db, stmts, "sender", "@dev/sender")
-    for (const [ctx, type] of [
-      [anonymous, "request"],
-      [sender, "notify"],
+    for (const [ctx, type, extra] of [
+      [anonymous, "request", { fanout: "first" }],
+      [sender, "notify", {}],
     ] as const) {
-      const sent = parseToolJson(handleToolCall(ctx, "tribe.send", { to: "*", type, message: "ambient" }, opts))
+      const sent = parseToolJson(
+        handleToolCall(ctx, "tribe.send", { to: "*", type, message: "ambient", ...extra }, opts),
+      )
       expect(sent.sent).toBe(true)
       expect(sent).not.toHaveProperty("request_id")
       expect(stmts.selectPendingForRecipient.all({ $recipient: "@dev/a" })).toHaveLength(0)
@@ -210,6 +212,7 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
           to: "*",
           type: "request",
           message: "nobody admitted",
+          fanout: "first",
         },
         opts,
       ),
@@ -226,6 +229,7 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
             type: "request",
             message: "no new opt-out",
             request: false,
+            fanout: "first",
           },
           opts,
         ),
