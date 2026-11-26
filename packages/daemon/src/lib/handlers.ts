@@ -2114,6 +2114,8 @@ type PendingBallSummary = {
 }
 
 const ATTENTION_PENDING_BALL_LIMIT = 10
+/** Preview slots incidents may not take while non-incident balls wait (23188, F22 @cto 48c36541). */
+const ATTENTION_PENDING_BALL_RESERVED_FOR_REQUESTS = 5
 
 /** Examples named in a bounded diagnostic (a pending close-miss, or 27425's abbreviated fetch ids); the count carries the rest. */
 const MISS_WARNING_EXAMPLES = 5
@@ -2970,12 +2972,39 @@ function allPendingBallsWithContent(ctx: TribeContext, now: number): PendingBall
   return sortPendingBalls(rows.map((row) => pendingBallWithContent(row, now)))
 }
 
+/**
+ * F22 (#32907, @cto c14bce06): the one order of owed balls, shared by `tribe pending` and the default fetch's
+ * pending_balls. Kind first, as /do takes them: incidents (alarms, step 2), then requests, queries and assigns
+ * (step 3); then status (expired, unanswered, active); then oldest first.
+ */
 function sortPendingBalls<T extends PendingBall>(rows: readonly T[]): T[] {
+  const kindRank = { incident: 0, request: 1, solicitation: 2 } as const
   const statusRank = { expired: 0, unanswered: 1, active: 2 } as const
-  return rows.toSorted((left, right) => {
-    if (left.status !== right.status) return statusRank[left.status] - statusRank[right.status]
-    return Date.parse(left.opened_at) - Date.parse(right.opened_at) || left.request_id.localeCompare(right.request_id)
-  })
+  return rows.toSorted(
+    (left, right) =>
+      kindRank[left.request_kind ?? "request"] - kindRank[right.request_kind ?? "request"] ||
+      statusRank[left.status] - statusRank[right.status] ||
+      Date.parse(left.opened_at) - Date.parse(right.opened_at) ||
+      left.request_id.localeCompare(right.request_id),
+  )
+}
+
+/**
+ * 23188 + F22 (@cto 48c36541): the bounded fetch preview keeps the shared order, but incidents fill at most
+ * LIMIT - RESERVED slots while non-incident balls wait, so ten alarms never hide a peer's request. A reserved slot
+ * the other kind cannot use goes to incidents: 10 incidents plus 2 requests previews 8 plus 2.
+ */
+function attentionPendingPreview<T extends PendingBall>(sorted: readonly T[]): T[] {
+  const others = sorted.filter((ball) => ball.request_kind !== "incident").length
+  const incidentSlots = ATTENTION_PENDING_BALL_LIMIT - Math.min(others, ATTENTION_PENDING_BALL_RESERVED_FOR_REQUESTS)
+  let incidents = 0
+  return sorted
+    .filter((ball) => {
+      if (ball.request_kind !== "incident") return true
+      incidents += 1
+      return incidents <= incidentSlots
+    })
+    .slice(0, ATTENTION_PENDING_BALL_LIMIT)
 }
 
 function pendingOwnerGroups<T extends PendingBall>(
@@ -6014,13 +6043,10 @@ export function readAttentionProjection(
   // decision above, so count and presentation cannot disagree about `settled`.
   const unreadRows = attentionRows.filter((row) => settlement.labels.get(row.id)?.settled !== true)
   const actionableCount = unreadRows.length
-  const prioritizedPendingBalls = pendingBalls.toSorted((left, right) => {
-    const leftRank = left.request_kind === "incident" ? 1 : 0
-    const rightRank = right.request_kind === "incident" ? 1 : 0
-    return leftRank - rightRank
-  })
-  const pendingPreview = prioritizedPendingBalls.slice(0, ATTENTION_PENDING_BALL_LIMIT)
-  const withheld = prioritizedPendingBalls.slice(ATTENTION_PENDING_BALL_LIMIT)
+  // pendingBalls is already in the shared order (sortPendingBalls); the preview only bounds it.
+  const pendingPreview = attentionPendingPreview(pendingBalls)
+  const shown = new Set(pendingPreview)
+  const withheld = pendingBalls.filter((ball) => !shown.has(ball))
   const withheldRequests = withheld.filter((ball) => ball.request_kind !== "incident").length
   const withheldIncidents = withheld.length - withheldRequests
   // wake removal 1 (@cto 8daafaf6 item 1, then 4d3f3a83 REVISE) — the bounded
