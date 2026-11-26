@@ -26,6 +26,7 @@ import { createLogger } from "loggily"
 import { settlesRequestOpenedBy, type MessageInsertedInfo } from "../context.ts"
 import { activityFromMessage, writeActivity } from "../activity-log.ts"
 import { createCoalescer, type PendingBroadcast } from "../broadcast-coalescer.ts"
+import { readCatchUp } from "../catch-up-on-attach.ts"
 import { ACTIONABLE_TYPES_SET } from "../database.ts"
 import { createHealthLogAdmission } from "../health-log-admission.ts"
 import { deriveReplyHint, sendMessage, type MessageKind, type ReplyHint } from "../messaging.ts"
@@ -172,7 +173,7 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
   t: T,
 ) => T & WithBroadcast {
   return (t) => {
-    const { stmts, daemonCtx, registry } = t
+    const { db, stmts, daemonCtx, registry } = t
     const { clients } = registry
 
     function canFanout(connId: string): boolean {
@@ -367,6 +368,85 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
     })
 
     log.info?.("broadcast pipeline ready (coalescer + scrubber + bounded health admission)")
+
+    // #38676 residual: a wake inserted while this seat had no push transport is durable but was never
+    // fanned out — `toConnected` walks connected clients, so an absent transport means nothing is
+    // queued and nothing retries. One wakeup on attach is enough: a wakeup's only job is to tell the
+    // client to fetch `latest_seq`, and advancing the cursor to the newest undelivered row retires the
+    // older ones exactly as a batched fanout does.
+    const pushConnFor = (sessionId: string) => {
+      for (const [connId, client] of clients) {
+        if (client.ctx.sessionId === sessionId && registry.isPushTransport(connId)) return { connId, client }
+      }
+      return undefined
+    }
+
+    const catchUpOnAttach = (sessionId: string): void => {
+      const target = pushConnFor(sessionId)
+      if (target === undefined) return
+      const reading = readCatchUp(db, sessionId, target.client.name)
+      const newest = reading.newest
+      if (newest === null) return
+      const sessionFilter = stmts.getSessionFilter.get({ $id: sessionId }) as SessionFilter | undefined
+      const wakes =
+        reading.anyActionable ||
+        shouldDeliver(
+          {
+            kind: newest.kind,
+            type: newest.type,
+            replyHint: "optional",
+            topic: newest.topic,
+            settlesOwnRequest: newest.settlesOwnRequest,
+            isIncident: newest.isIncident,
+            wakesOwner: newest.wakesOwner,
+          },
+          sessionFilter,
+        )
+      if (!wakes) return
+      const event: PendingBroadcast = {
+        id: newest.id,
+        ts: newest.ts,
+        rowid: newest.rowid,
+        type: newest.type,
+        sender: newest.sender,
+        content: "",
+        bead_id: null,
+        replyHint: "optional",
+        topic: newest.topic,
+      }
+      if (newest.kind === "direct") {
+        // Direct rows never batch (broadcast-coalescer.ts), so they take the path the tap gives them.
+        try {
+          target.client.socket.write(singleEventNotification(event))
+          persistDeliveredCursor(sessionId, newest.ts, newest.rowid)
+        } catch {
+          // The attach's own socket died between registration and this microtask. The row stays
+          // undelivered and the next attach tries again; say so rather than swallow it.
+          log.warn?.(
+            `catch-up on attach for ${target.client.name}: the direct write failed; rowid ${newest.rowid} stays undelivered`,
+          )
+          return
+        }
+      } else {
+        coalescer.enqueue(target.connId, event)
+      }
+      log.info?.(
+        `catch-up on attach for ${target.client.name}: one wakeup for ${reading.rows} row(s) never fanned out, ` +
+          `newest rowid ${newest.rowid} (${newest.type} from ${newest.sender})`,
+      )
+    }
+
+    const pushStateBySession = new Map<string, boolean>()
+    const stopCatchUp = registry.onTransportsChanged((sessionId) => {
+      const pushing = pushConnFor(sessionId) !== undefined
+      const was = pushStateBySession.get(sessionId) ?? false
+      pushStateBySession.set(sessionId, pushing)
+      if (!pushing || was) return
+      // Outside the registry's own callback: registration is still unwinding, and a write must not run
+      // inside it.
+      queueMicrotask(() => catchUpOnAttach(sessionId))
+    })
+    t.scope.defer(stopCatchUp)
 
     const broadcast: Broadcast = {
       pushToClient,

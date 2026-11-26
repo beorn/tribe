@@ -62,7 +62,9 @@ function createHarness() {
     db,
     stmts,
     daemonCtx,
-    registry: { clients: new Map() },
+    // A registry without push transports: the #38676 catch-up path subscribes here, so the stub
+    // answers both members the real registry has rather than leaving them undefined.
+    registry: { clients: new Map(), isPushTransport: () => false, onTransportsChanged: () => () => {} },
   } as never)
 
   return {
