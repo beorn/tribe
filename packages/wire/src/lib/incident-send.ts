@@ -32,7 +32,6 @@ import {
   type SendOutcome,
 } from "../service-send.ts"
 
-
 /**
  * How long one send may take. A caller that sends while holding a lock (guard 2 holds its run lock) would otherwise
  * hang on a stuck daemon, and every later tick would read as "a run holds the lock" instead of failing loud.
