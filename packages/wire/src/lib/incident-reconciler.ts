@@ -110,7 +110,12 @@ export function planAlertSends<Family extends string>(
       cleared: true,
       revision: entry.revision,
       summary: `${emitter} ${subject}: ${condition} ${alert === undefined ? "cleared" : `moved to ${alert.to}`}`,
-      body: alert === undefined ? "The finding went away." : `This finding now belongs to ${alert.to}.`,
+      // The daemon refuses an answer-owing body under 40 characters whose summary is longer (#32907, 549c7b45), and a
+      // clearing edge is a request: a thin body here left every emitter's incident open for good, refused each pass.
+      body:
+        alert === undefined
+          ? `The finding went away: ${emitter} no longer measures ${condition} on ${subject}, so this ball closes.`
+          : `This finding now belongs to ${alert.to}: ${emitter} closes it here and opens it there.`,
     })
   }
   for (const [key, alert] of wanted) {
