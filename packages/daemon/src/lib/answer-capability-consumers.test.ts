@@ -314,7 +314,7 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
       handleToolCall(
         sender,
         "tribe.send",
-        { to: "*", message: "who can take this", type: "request", request: "req-broadcast" },
+        { to: "*", message: "who can take this", type: "request", request: "req-broadcast", fanout: "first" },
         opts({ resolveDelivery }),
       ),
     )

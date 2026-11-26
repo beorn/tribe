@@ -593,7 +593,7 @@ describe("generic direct-message delivery resolution", () => {
           to: [...to],
           message: content,
           type,
-          ...(type === "request" ? { request } : {}),
+          ...(type === "request" ? { request, fanout: "all" } : {}),
         },
         { ...opts(), resolveDelivery },
       ),
@@ -838,7 +838,7 @@ describe("generic direct-message delivery resolution", () => {
         handleToolCall(
           sender,
           "tribe.send",
-          { to: ["@recent", "@sender"], message, type: "request", request: `req-${message}` },
+          { to: ["@recent", "@sender"], message, type: "request", request: `req-${message}`, fanout: "all" },
           {
             ...opts(),
             resolveDelivery: ({ recipient }) => {
@@ -903,7 +903,7 @@ describe("generic direct-message delivery resolution", () => {
       handleToolCall(
         sender,
         "tribe.send",
-        { to: ["@dev/good", "@bad"], message: "multi-refusal", type: "request" },
+        { to: ["@dev/good", "@bad"], message: "multi-refusal", type: "request", fanout: "all" },
         {
           ...opts(),
           resolveDelivery: ({ recipient }) =>
@@ -920,7 +920,7 @@ describe("generic direct-message delivery resolution", () => {
       handleToolCall(
         sender,
         "tribe.send",
-        { to: ["@dev/one", "@sender"], message: "multi-ok", type: "request", request: "req-multi" },
+        { to: ["@dev/one", "@sender"], message: "multi-ok", type: "request", request: "req-multi", fanout: "all" },
         opts(),
       ),
     )
