@@ -241,8 +241,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "string",
             enum: TRIBE_FANOUTS,
             description:
-              "Several recipients: first = one ball, the first reply settles it; all = one ball per recipient.",
-            default: "first",
+              "Required for multi-recipient request/query/assign: all = each recipient owes an answer; first = any one answer settles it.",
           },
           expires_in_ms: {
             type: "integer",
@@ -433,9 +432,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "fanout",
           flags: "--fanout <mode>",
-          description: `Ball-tracker fanout mode: ${TRIBE_FANOUTS.join("|")} (default: first)`,
+          description: `Ball-tracker fanout mode (${TRIBE_FANOUTS.join("|")}); required for multi-recipient request/query/assign`,
           enum: TRIBE_FANOUTS,
-          default: "first",
         },
         {
           name: "expires-in-ms",
