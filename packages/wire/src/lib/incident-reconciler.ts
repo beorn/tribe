@@ -110,7 +110,12 @@ export function planAlertSends<Family extends string>(
       cleared: true,
       revision: entry.revision,
       summary: `${emitter} ${subject}: ${condition} ${alert === undefined ? "cleared" : `moved to ${alert.to}`}`,
-      body: alert === undefined ? "The finding went away." : `This finding now belongs to ${alert.to}.`,
+      // A clear is sent as a request with an authored summary, so the daemon holds its body to the answer-owing minimum
+      // (F23, 40 characters): the body names what ended and that nothing is owed, never a bare "went away".
+      body:
+        alert === undefined
+          ? `${emitter} no longer finds ${subject} ${condition}; this incident is cleared and nothing is owed.`
+          : `${emitter} ${subject} ${condition} now belongs to ${alert.to}; nothing more is owed by ${recipient}.`,
     })
   }
   for (const [key, alert] of wanted) {

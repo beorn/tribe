@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
+import { planAlertSends } from "../../../wire/src/lib/incident-reconciler.ts"
 import { handleToolCall, type ActiveSessionInfo, type HandlerOpts } from "./handlers.ts"
 import { parseExpectedMembers, type DeclaredRoster } from "./membership-declared-roster.ts"
 import { registerSession } from "./session.ts"
@@ -260,6 +261,60 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
         expect(sent.error).toBeUndefined()
         expect(sent).toMatchObject({ sent: true })
       }
+    })
+  })
+
+  // dark-work exit 6 (2026-11-26 16:38Z, @chief dde669d2): the shared reconciler cleared or moved an incident with a
+  // 22-character body under an authored summary, so the minimum above refused every clear; the ball stayed open and the
+  // gather failed loud on each run. Drives the reconciler's own planned edges through tribe.send, not a copied string.
+  describe("the standing-incident reconciler's clearing and moving edges carry the ask in the body", () => {
+    const key = "dark-work:Owner4h:@dev/3"
+    const opened = {
+      key,
+      class: "Owner4h",
+      subject: "Owner4h",
+      condition: "@dev/3",
+      revision: "r1",
+      summary: "Quiet work items",
+      body: "2 items; oldest 5 h. Commit, write a Continue-from, or record a valid wait on each one.",
+    }
+    const ledger = { reassertedAt: null, open: { [key]: { class: "Owner4h", to: "@dev/3", revision: "r1" } } }
+
+    it.each([
+      ["a cleared finding", [] as (typeof opened & { to: string })[]],
+      ["a finding moved to another owner", [{ ...opened, to: "@dev/luna3", revision: "r2" }]],
+    ])("%s closes the ball it names", (_label, alerts) => {
+      const watcher = makeContext(db, stmts, "sess-dark-work", "dark-work")
+      const opts = makeOpts([liveInfo("sess-dev3", "@dev/3"), liveInfo("sess-luna3", "@dev/luna3")])
+      const identity = { emitter: "dark-work", subject: "Owner4h", condition: "@dev/3" }
+      const open = parseToolJson(
+        handleToolCall(
+          watcher,
+          "tribe.send",
+          { to: "@dev/3", message: opened.body, type: "request", summary: opened.summary, incident: identity },
+          opts,
+        ),
+      )
+      expect(open).toMatchObject({ sent: true })
+
+      const clear = planAlertSends("dark-work", alerts, ledger, new Set()).find((send) => send.cleared)
+      if (clear === undefined) throw new Error("the reconciler planned no clearing edge")
+      const sent = parseToolJson(
+        handleToolCall(
+          watcher,
+          "tribe.send",
+          {
+            to: clear.to,
+            message: clear.body,
+            type: "request",
+            summary: clear.summary,
+            incident: { ...identity, active: false },
+          },
+          opts,
+        ),
+      )
+      expect(sent.error).toBeUndefined()
+      expect(sent).toMatchObject({ sent: true, tracker: { closed: 1 } })
     })
   })
 
