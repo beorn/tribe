@@ -901,6 +901,15 @@ function activeBroadcastRecipients(ctx: TribeContext, answerableNames: ReadonlyS
   return rows.map((row) => row.name)
 }
 
+/**
+ * F23 (@cto 4da05ac8): the send types that owe an answer, whose body must therefore carry the ask itself. A request,
+ * assign or verdict whose body is shorter than {@link ANSWER_OWING_MIN_BODY} while its summary is longer is refused by
+ * name: the summary is what the recipient sees first, the body is what they act on, and an empty body leaves the ball
+ * with no statement of what is asked.
+ */
+const ANSWER_OWING_TYPES: ReadonlySet<string> = new Set(["request", "assign", "verdict"])
+const ANSWER_OWING_MIN_BODY = 40
+
 function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
   // The tribe-wire daemon is role-agnostic (F12 of
   // @km/tribe/15496-coordination-drift): every message type is delivered to
@@ -1162,6 +1171,21 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     : incident !== undefined
       ? incidentConditionSummary(incident)
       : deriveSummary(sanitized)
+  // says only "ok" while the summary says everything ships a ball nobody can act on — the recipient reads the summary
+  // in the wake and finds nothing behind it. `query` is deliberately not in this set: the ruling names these three, and
+  // status/notify owe no answer, so a short body stays legitimate for them.
+  // A DERIVED summary is not the author's ask (a watcher's incident edge takes its condition, a legacy CLI send takes
+  // its body), so only an authored summary longer than a thin body is the failure this refuses.
+  if (!summaryDerived && ANSWER_OWING_TYPES.has(msgType)) {
+    const bodyLength = sanitized.trim().length
+    if (bodyLength < ANSWER_OWING_MIN_BODY && summary.length > bodyLength) {
+      return jsonResult({
+        error:
+          `tribe.send: message too short for a ${msgType} - the body is what the recipient acts on, so put the ask ` +
+          "there (40 characters or more), not only in the summary",
+      })
+    }
+  }
   const classification = {
     summary,
     ...(delivery ? { delivery } : {}),
