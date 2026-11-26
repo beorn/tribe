@@ -2081,6 +2081,11 @@ function unreadAttentionSql(recipient: string): string {
       AND ${ATTENTION_PREDICATE_SQL}
       AND ${noOpenIncidentAttentionPredicateSql("m")}
       AND ${unretiredAttentionPredicateSql("m")}
+      -- 38730 (@cto e324926d): a COUNT only what is owed. A row whose ball was
+      -- closed by hand is still PRESENTED (29327, via selectAttention), but it
+      -- is never unread work again. Keeping this in the count alone is what lets
+      -- the next read still show it labeled settled.
+      AND ${unsettledAttentionPredicateSql("m")}
       AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ${recipient}), 0)
     UNION
     SELECT COALESCE(m.id, a.id) AS id, COALESCE(m.ts, a.ts) AS ts

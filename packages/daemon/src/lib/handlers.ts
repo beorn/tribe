@@ -5955,6 +5955,11 @@ export function readAttentionProjection(
   transportOpts?: Pick<HandlerOpts, "getActiveSessionInfo" | "inboxWait">,
 ): {
   attentionRows: FetchRow[]
+  /** 38730 (@cto e324926d): the rows that are still OWED. A hand-closed ball's
+   *  row stays in `attentionRows` so the fetch still presents it labeled
+   *  `settled` (29327), but it is no longer unread work: counts and the Stop
+   *  hook's inbox-status read this set, never the presentation set. */
+  unreadRows: FetchRow[]
   pendingBalls: PendingBall[]
   untakenPendingBalls: PendingBall[]
   owedPendingBalls: PendingBall[]
@@ -6005,7 +6010,10 @@ export function readAttentionProjection(
   const untakenRequestIds = untakenPendingRequestIds(ctx, owner)
   const untakenPendingBalls = pendingBalls.filter((ball) => untakenRequestIds.has(ball.request_id))
   const owedPendingBalls = pendingBalls.filter((ball) => ballOwed(ball, !untakenRequestIds.has(ball.request_id)))
-  const actionableCount = attentionRows.length
+  // 38730: the count is "what is owed". Applied here, after the one settlement
+  // decision above, so count and presentation cannot disagree about `settled`.
+  const unreadRows = attentionRows.filter((row) => settlement.labels.get(row.id)?.settled !== true)
+  const actionableCount = unreadRows.length
   const prioritizedPendingBalls = pendingBalls.toSorted((left, right) => {
     const leftRank = left.request_kind === "incident" ? 1 : 0
     const rightRank = right.request_kind === "incident" ? 1 : 0
@@ -6050,6 +6058,7 @@ export function readAttentionProjection(
         }
   return {
     attentionRows,
+    unreadRows,
     pendingBalls,
     untakenPendingBalls,
     owedPendingBalls,

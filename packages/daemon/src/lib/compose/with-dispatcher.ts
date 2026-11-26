@@ -517,15 +517,13 @@ export function withDispatcher<
         alarm: boolean
       }>
     } {
-      const { attentionRows, untakenPendingBalls, owedPendingBalls, actionableCount } = readAttentionProjection(
-        daemonCtx,
-        sessionName,
-        Date.now(),
-        0,
-        DAEMON_HANDLER_OPTS,
-      )
-      const oldest = attentionRows[0]
-      const latest = attentionRows.at(-1)
+      const { attentionRows, unreadRows, untakenPendingBalls, owedPendingBalls, actionableCount } =
+        readAttentionProjection(daemonCtx, sessionName, Date.now(), 0, DAEMON_HANDLER_OPTS)
+      // 38730: the count, the ids that explain it and their age all describe the
+      // OWED set. A hand-closed row is still presented by the fetch (29327) but
+      // is not unread work, so it must not re-block the Stop hook.
+      const oldest = unreadRows[0]
+      const latest = unreadRows.at(-1)
       const attentionMessageIds = new Set(attentionRows.map((row) => row.id))
       const oldestTrackedTs = untakenPendingBalls
         .filter((ball) => ball.request_kind !== "incident" && attentionMessageIds.has(ball.message_id))
@@ -550,7 +548,7 @@ export function withDispatcher<
       return {
         session: sessionName,
         unread_count,
-        unread_ids: attentionRows.map((row) => row.id),
+        unread_ids: unreadRows.map((row) => row.id),
         oldest_unread_age_min,
         oldest_unread_ts,
         latest_actionable_seq: latest?.rowid ?? null,

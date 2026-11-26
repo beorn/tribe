@@ -299,6 +299,9 @@ describe("default plugin API attention projection", () => {
         INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, request, ref)
         VALUES ($id, $type, $sender, $recipient, $kind, $id, $ts, 'push', $request, $ref)
       `)
+      // 38730 — the UNTRACKED direct shape: it retires on the mailbox cursor.
+      // A row carrying a request id but no open ball is a hand-closed ball, and
+      // that one never counts as owed (its own test lives in 38730-*).
       insert.run({
         $id: "direct-request",
         $type: "request",
@@ -306,7 +309,7 @@ describe("default plugin API attention projection", () => {
         $recipient: owner,
         $kind: "direct",
         $ts: messageBase - 1_000,
-        $request: "direct-request",
+        $request: null,
         $ref: null,
       })
       insert.run({
