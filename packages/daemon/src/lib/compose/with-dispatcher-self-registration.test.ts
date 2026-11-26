@@ -4555,16 +4555,23 @@ describe("26523 — cli_inbox_status_by_launch_v1 attention-read receipt and del
         identitySid: "sid-chief-26523",
       })
 
-      // Ambient-only mailbox: a broadcast notify and a direct untracked notify are neither in
-      // readAttentionProjection.actionableCount nor in attentionLagSql actionable_rows (the count
-      // 21626 health:inbox-stale and the receipt check read).
+      // Ambient-only mailbox: a pull-only broadcast notify and a direct untracked notify are neither
+      // in readAttentionProjection.actionableCount nor in attentionLagSql actionable_rows (the count
+      // 21626 health:inbox-stale and the receipt check read). Push notify broadcasts from a verified
+      // persona seat enter attention under #38796 (@cto 7767f5fe).
       for (const to of ["*", "@dev/pull"]) {
         await harness.dispatcher.handleRequest(
           {
             jsonrpc: "2.0",
             id: `ambient-${to}`,
             method: "tribe.send",
-            params: { to, type: "notify", message: `ambient ${to}`, summary: `ambient ${to}` },
+            params: {
+              to,
+              type: "notify",
+              ...(to === "*" ? { delivery: "pull" } : {}),
+              message: `ambient ${to}`,
+              summary: `ambient ${to}`,
+            },
           },
           senderClient.connId,
         )

@@ -335,7 +335,8 @@ export function createInboxWaitManager(
     for (const waiter of Array.from(waiters)) {
       const directForWaiter = info.kind === "direct" && waiter.session === info.recipient
       const trackedBroadcastForWaiter = info.pendingOwners?.includes(waiter.session) === true
-      if (!directForWaiter && !trackedBroadcastForWaiter) continue
+      const attentionBroadcastForWaiter = info.kind === "broadcast" && info.attentionRequired === true
+      if (!directForWaiter && !trackedBroadcastForWaiter && !attentionBroadcastForWaiter) continue
       if (info.rowid <= waiter.baselineSeq) continue
       // SQL excludes quiet incidents even from opt-in correlated replies; match that durable qualification.
       // 29541 + 21547: under the opt-in this is the same union the SQL tail arm computes under
@@ -366,6 +367,7 @@ export function createInboxWaitManager(
       if (
         (info.wakesOwner === true ||
           info.pendingOwners?.includes(waiter.session) === true ||
+          attentionBroadcastForWaiter ||
           (ACTIONABLE_TYPES.has(info.type) && info.isIncident !== true)) &&
         info.sender !== waiter.session
       ) {

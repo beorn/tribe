@@ -36,6 +36,7 @@ export type CatchUpRow = {
   readonly topic: string | null
   readonly isIncident: boolean
   readonly wakesOwner: boolean
+  readonly attentionRequired: boolean
   /** The row settles a request this seat opened — the one non-actionable type a focus filter wakes for. */
   readonly settlesOwnRequest: boolean
 }
@@ -82,12 +83,12 @@ function prepared(db: Database): Statements {
         SELECT COUNT(*) AS rows,
                COALESCE(MAX(rowid), 0) AS newest_rowid,
                COALESCE(MAX(ts), 0) AS newest_ts,
-               COALESCE(MAX(CASE WHEN wakes_owner = 1 OR type IN (${ACTIONABLE_TYPES_SQL}) THEN 1 ELSE 0 END), 0)
+               COALESCE(MAX(CASE WHEN wakes_owner = 1 OR type IN (${ACTIONABLE_TYPES_SQL}) OR (kind = 'broadcast' AND attention_required = 1) THEN 1 ELSE 0 END), 0)
                  AS any_actionable
         ${undelivered}
       `),
       newest: db.prepare(`
-        SELECT rowid, id, ts, type, kind, sender, topic, is_incident, wakes_owner,
+        SELECT rowid, id, ts, type, kind, sender, topic, is_incident, wakes_owner, attention_required,
                (correlated_reply_requester = $name) AS settles_own
         ${undelivered}
         ORDER BY rowid DESC
@@ -108,31 +109,34 @@ function prepared(db: Database): Statements {
  */
 export function readCatchUp(db: Database, sessionId: string, name: string): CatchUpReading {
   const stmts = prepared(db)
-  const session = stmts.sessionDelivery.get({ $id: sessionId }) as
-    | { delivery: string | null; last_delivered_seq: number | null }
-    | null
+  const session = stmts.sessionDelivery.get({ $id: sessionId }) as {
+    delivery: string | null
+    last_delivered_seq: number | null
+  } | null
   // A pull seat drains by fetch; its rows are never fanned out by design, so there is nothing to catch up.
   if (session === null || session.delivery === "pull") return NOTHING
   const cursor = session.last_delivered_seq ?? 0
   const bind = { $cursor: cursor, $name: name }
-  const summary = stmts.summary.get(bind) as
-    | { rows: number; newest_rowid: number; newest_ts: number; any_actionable: number }
-    | null
+  const summary = stmts.summary.get(bind) as {
+    rows: number
+    newest_rowid: number
+    newest_ts: number
+    any_actionable: number
+  } | null
   if (summary === null || summary.rows <= 0) return NOTHING
-  const row = stmts.newest.get(bind) as
-    | {
-        rowid: number
-        id: string
-        ts: number
-        type: string
-        kind: string
-        sender: string
-        topic: string | null
-        is_incident: number
-        wakes_owner: number
-        settles_own: number
-      }
-    | null
+  const row = stmts.newest.get(bind) as {
+    rowid: number
+    id: string
+    ts: number
+    type: string
+    kind: string
+    sender: string
+    topic: string | null
+    is_incident: number
+    wakes_owner: number
+    attention_required: number
+    settles_own: number
+  } | null
   if (row === null) return { rows: 0, newest: null, anyActionable: false }
   return {
     rows: summary.rows,
@@ -147,6 +151,7 @@ export function readCatchUp(db: Database, sessionId: string, name: string): Catc
       topic: row.topic,
       isIncident: row.is_incident === 1,
       wakesOwner: row.wakes_owner === 1,
+      attentionRequired: row.attention_required === 1,
       settlesOwnRequest: row.settles_own === 1,
     },
   }

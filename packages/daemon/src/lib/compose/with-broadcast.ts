@@ -87,6 +87,7 @@ export function shouldDeliver(
     settlesOwnRequest: boolean
     isIncident?: boolean
     wakesOwner?: boolean
+    attentionRequired?: boolean
   },
   filter: SessionFilter | undefined,
 ): boolean {
@@ -100,14 +101,20 @@ export function shouldDeliver(
   if (mode === "focus") {
     // Only the canonical actionable classes wake the seat. Plain direct
     // notify/response traffic is informational even though its legacy reply
-    // hint is "yes". The one exception is the reply that settles a request this
-    // seat opened: that is its own answer arriving, not traffic, and without it
-    // an asker slept through the answer (G9 self-inbox P0).
+    // hint is "yes". Two narrow exceptions:
+    //  1. A reply that settles a request this seat opened (G9 self-inbox P0).
+    //  2. A verified persona fleet broadcast classified as attention_required
+    //     (#38796, @cto 7767f5fe) — broadcast-only so direct ref-bound statuses
+    //     stay quiet (#29535).
     //
     // Focus mode suppresses push wakeups for ambient rows while keeping direct
     // rows fetchable on the recipient's next inbox drain (database.ts:3074-3081,
     // pinned at delivery-policy-parity.test.ts:158).
-    return ACTIONABLE_TYPES_SET.has(info.type) || info.settlesOwnRequest
+    return (
+      ACTIONABLE_TYPES_SET.has(info.type) ||
+      info.settlesOwnRequest ||
+      (info.kind === "broadcast" && info.attentionRequired === true)
+    )
   }
   if (info.kind === "direct") return true
   // mode === 'normal' — apply the time-bounded mute when active
@@ -322,6 +329,7 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
                 settlesOwnRequest,
                 isIncident: info.isIncident,
                 wakesOwner: info.wakesOwner,
+                attentionRequired: info.attentionRequired,
               },
               sessionFilter,
             )
@@ -401,6 +409,7 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
             settlesOwnRequest: newest.settlesOwnRequest,
             isIncident: newest.isIncident,
             wakesOwner: newest.wakesOwner,
+            attentionRequired: newest.attentionRequired,
           },
           sessionFilter,
         )

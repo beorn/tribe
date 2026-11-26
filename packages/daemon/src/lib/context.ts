@@ -48,6 +48,9 @@ export type MessageInsertedInfo = {
   wakesOwner?: boolean
   /** Immutable incident identity, including repeat observations and clear; mirrors durable is_incident. */
   isIncident?: boolean
+  /** Mirrors durable messages.attention_required (1 for direct responses, ref-bound persona status/notify,
+   *  and verified persona push broadcasts with topic IS NULL — #38796). */
+  attentionRequired?: boolean
   /** Mailboxes that received an open pending row for this tracked broadcast.
    * Absent for direct, untracked broadcast, and journal-only messages. */
   pendingOwners?: readonly string[]

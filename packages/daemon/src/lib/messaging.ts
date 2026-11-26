@@ -940,6 +940,19 @@ export function sendMessage(
       summary: classification.summary ?? null,
     })
     const wakesOwner = incidentTransition === "opened" || incidentTransition === "changed"
+    const senderAuthority = senderAuthorityOf(ctx, sender)
+    // #38796 (@cto 7767f5fe): a verified persona seat's untopic'd push notify broadcast
+    // (e.g. stop-the-line pause / all-clear / fleet rule change) sets attention_required=1
+    // with no ball opened, while non-persona services (landing*) and topic-bearing daemon
+    // broadcasts stay ambient.
+    const verifiedPersonaBroadcast =
+      resolvedKind === "broadcast" &&
+      recipient === "*" &&
+      type === "notify" &&
+      delivery === "push" &&
+      (classification.topic ?? null) === null &&
+      isExplicitTribePersonaName(sender) &&
+      senderAuthority === "verified"
     const result = ctx.stmts.insertMessage.run({
       $id: id,
       $type: type,
@@ -963,12 +976,12 @@ export function sendMessage(
       $reply: canonicalReplyId,
       $correlated_reply_requester: correlatedReply?.requester ?? null,
       $summary: classification.summary ?? null,
-      $attention_required: classification.attentionRequired === true ? 1 : 0,
+      $attention_required: classification.attentionRequired === true || verifiedPersonaBroadcast ? 1 : 0,
       $wakes_owner: wakesOwner ? 1 : 0,
       $is_incident: incident === undefined ? 0 : 1,
       $incident_data: incidentData,
       $between_personas: isExplicitTribePersonaName(sender) && isExplicitTribePersonaName(recipient) ? 1 : 0,
-      $sender_authority: senderAuthorityOf(ctx, sender),
+      $sender_authority: senderAuthority,
     })
     if (result.changes === 0) {
       const existing = ctx.stmts.selectMessageById.get({ $id: id }) as
@@ -1173,6 +1186,7 @@ export function sendMessage(
     refBoundOpenRequest,
     wakesOwner: wakesOwner === true,
     isIncident: incident !== undefined,
+    attentionRequired,
   })
   return {
     id,

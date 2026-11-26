@@ -1238,9 +1238,17 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       requestId,
     })
   }
+  const hasLiveBroadcastRecipient =
+    recipients === "*" &&
+    (broadcastOwners !== undefined
+      ? broadcastOwners.length > 0
+      : activeBroadcastRecipients(
+          ctx,
+          new Set([...transport.liveTransportNames].filter((name) => !transport.mailboxDeafNames.has(name))),
+        ).length > 0)
   const resolution =
     recipients === "*"
-      ? ({ status: "accepted", state: broadcastOwners === undefined ? "offline" : "online" } as const)
+      ? ({ status: "accepted", state: hasLiveBroadcastRecipient ? "online" : "offline" } as const)
       : resolveRecipient(recipients, willTrack)
   if (resolution.status !== "accepted") {
     if (willTrack) {
@@ -4597,8 +4605,10 @@ function handleRename(
     log.info?.(`attention-recovery: ${recoveredAttention} unacked row(s) await "${newName}" (rename)`)
     opts.notifyWakeupForReplay?.(ctx.sessionId, newName)
   }
-  // Broadcast the rename
-  sendMessage(ctx, "*", `Member "${oldName}" is now "${newName}"`, "notify")
+  // Broadcast the rename (topic-scoped so routine renames stay ambient).
+  sendMessage(ctx, "*", `Member "${oldName}" is now "${newName}"`, "notify", undefined, undefined, "broadcast", {
+    topic: "session:renamed",
+  })
   logEvent(ctx, "session.renamed", undefined, { old_name: oldName, new_name: newName })
   return jsonResult({
     renamed: true,
@@ -6650,7 +6660,12 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
     }
     // 24284 — a read whose response never reaches the caller must not retire
     // the rows it "returned".
-    if (lastAttention > 0 && deliveryAlive()) {
+    // #38796 (@cto 7767f5fe): on an empty canonical default drain (`exhaustedTo !== null`
+    // and `since === undefined`), advance `mailbox_cursors.last_actionable_seq` up to
+    // `exhaustedTo` (still capped by `selectUnreturnedAttention`) so the seat holds a
+    // durable non-zero cursor that survives daemon restarts even before its first DM.
+    const ackTarget = lastAttention > 0 ? lastAttention : exhaustedTo !== null && since === null ? exhaustedTo : 0
+    if (ackTarget > 0 && deliveryAlive()) {
       // 31840 — the cursor is a HIGH-WATER MARK: acknowledging the highest
       // returned row retires EVERY row below it, including direct attention
       // this read never handed the caller (a `from`/`to`/`with`-narrowed
@@ -6661,11 +6676,11 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
       // actually received; the first skipped row caps the move.
       const unreturned = ctx.stmts.selectUnreturnedAttention.all({
         $name: currentName,
-        $upto: lastAttention,
+        $upto: ackTarget,
         $returned: JSON.stringify(returnedAttentionIds),
       }) as Array<Pick<FetchRow, "rowid" | "sender" | "topic">>
       const skipped = filterRowsByTrust(ctx, unreturned)[0]
-      const acknowledged = skipped === undefined ? lastAttention : Math.min(lastAttention, skipped.rowid - 1)
+      const acknowledged = skipped === undefined ? ackTarget : Math.min(ackTarget, skipped.rowid - 1)
       if (acknowledged > 0) {
         ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: acknowledged, $now: Date.now() })
       }
