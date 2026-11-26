@@ -49,6 +49,10 @@ export type CoalescerDeps = {
   /** setTimeout indirection so tests can use fake timers without leaking real ones. */
   setTimer?: (fn: () => void, ms: number) => unknown
   clearTimer?: (t: unknown) => void
+  /** #38676: a flush write failed and its events were kept for retry. Called once per failure, never once per event. */
+  onWriteFailed?: (connId: string, events: readonly PendingBroadcast[], attempt: number) => void
+  /** #38676: the retry ceiling, so a wedged transport retries on a slow beat instead of a hot loop. */
+  maxRetryMs?: number
 }
 
 export type Coalescer = {
@@ -65,13 +69,29 @@ type Queue = {
   timer: TimerHandle | null
 }
 
-export function createCoalescer(opts: { batchMs: number; maxEventsPerBatch: number; deps: CoalescerDeps }): Coalescer {
-  const { batchMs, maxEventsPerBatch } = opts
-  const { singleEvent, batched, write, onDelivered } = opts.deps
+export function createCoalescer(opts: {
+  batchMs: number
+  maxEventsPerBatch: number
+  deps: CoalescerDeps
+  /** #38676: retry ceiling for a failed write; defaults to 5 s. */
+  maxRetryMs?: number
+}): Coalescer {
+  const { batchMs, maxEventsPerBatch, maxRetryMs = 5_000 } = opts
+  const { singleEvent, batched, write, onDelivered, onWriteFailed } = opts.deps
   const setTimer: (fn: () => void, ms: number) => unknown = opts.deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms))
   const clearTimer: (t: unknown) => void =
     opts.deps.clearTimer ?? ((t) => clearTimeout(t as Parameters<typeof clearTimeout>[0]))
   const queues = new Map<string, Queue>()
+
+  /** Consecutive failed flushes per connection; reset by the first write that succeeds (#38676). */
+  const failures = new Map<string, number>()
+
+  function retryDelayMs(attempt: number): number {
+    // Bounded backoff: a transport that is re-attaching comes back in seconds, so the ceiling stays short and the
+    // queue never grows a long-lived timer (the 400 ms window is the floor, not a schedule).
+    const base = batchMs === 0 ? 400 : batchMs
+    return Math.min(base * 2 ** Math.min(attempt, 5), maxRetryMs)
+  }
 
   function flushOne(connId: string): void {
     const q = queues.get(connId)
@@ -82,23 +102,51 @@ export function createCoalescer(opts: { batchMs: number; maxEventsPerBatch: numb
     }
     const events = q.events
     if (events.length === 0) return
-    q.events = []
 
     const kept = events.length > maxEventsPerBatch ? events.slice(0, maxEventsPerBatch) : events
     const dropped = events.length - kept.length
 
     const payload = kept.length === 1 ? singleEvent(kept[0]!) : batched(kept, dropped)
     const ok = write(connId, payload)
-    if (!ok) return
-    for (const ev of kept) onDelivered(connId, ev)
+    if (!ok) {
+      // #38676: a failed write must not lose the wake. The events stay at the head, in order, and a bounded retry is
+      // armed. Before this, the queue was emptied before the write and the timer cleared, so one failed socket write
+      // discarded our own copy with nothing retrying and no line saying so: the row then read "never written to its
+      // socket" until a process restart.
+      q.events = events
+      const attempt = (failures.get(connId) ?? 0) + 1
+      failures.set(connId, attempt)
+      onWriteFailed?.(connId, kept, attempt)
+      q.timer = setTimer(() => flushOne(connId), retryDelayMs(attempt))
+      return
+    }
+    failures.delete(connId)
+    q.events = events.slice(kept.length)
+    // Every event the payload accounted for has been written, including the ones past the per-batch cap: the batched
+    // marker tells the client to drain, so leaving their cursors behind would report them held when they were covered.
+    for (const ev of events) onDelivered(connId, ev)
   }
 
   return {
     enqueue(connId, ev) {
       if (batchMs === 0) {
-        // Batching disabled — write through immediately, no queue entry.
+        // Batching disabled - write through immediately, and on failure keep the event queued for the retry path (#38676).
         const ok = write(connId, singleEvent(ev))
-        if (ok) onDelivered(connId, ev)
+        if (ok) {
+          failures.delete(connId)
+          onDelivered(connId, ev)
+          return
+        }
+        let q = queues.get(connId)
+        if (!q) {
+          q = { events: [], timer: null }
+          queues.set(connId, q)
+        }
+        q.events.push(ev)
+        const attempt = (failures.get(connId) ?? 0) + 1
+        failures.set(connId, attempt)
+        onWriteFailed?.(connId, [ev], attempt)
+        if (!q.timer) q.timer = setTimer(() => flushOne(connId), retryDelayMs(attempt))
         return
       }
       let q = queues.get(connId)

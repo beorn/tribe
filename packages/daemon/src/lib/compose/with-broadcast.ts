@@ -211,12 +211,35 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
         batched: batchedNotification,
         write(connId, payload) {
           const client = clients.get(connId)
+          // #38676: a client that is gone or not our push transport cannot take the wake; say so, so the coalescer
+          // keeps the event and retries instead of discarding it.
           if (!client || !canFanout(connId)) return false
           try {
+            // #38676: `socket.write` answers false under BACKPRESSURE, where the bytes are queued and will flush, so
+            // reporting it as a failure would leave a healthy seat's cursor behind. Only a dead socket is a failure.
             client.socket.write(payload)
-            return true
+            return !client.socket.destroyed
           } catch {
             return false
+          }
+        },
+        onWriteFailed(connId, events, attempt) {
+          // #38676: ONE line per failure burst, naming the session and the rows it could not write, then a slow beat so a
+          // genuinely wedged transport keeps saying so without flooding the journal (NO SILENT ERRORS, no noise).
+          if (attempt !== 1 && attempt % 30 !== 0) return
+          const client = clients.get(connId)
+          const sessionId = client?.ctx.sessionId ?? connId
+          const rowids = events.map((ev) => ev.rowid).join(",")
+          const said = `fanout: could not write ${events.length} wake(s) to ${sessionId} (rows ${rowids}) on attempt ${attempt}; they are kept and retried`
+          try {
+            process.stderr.write(`tribe-daemon: ${said}\n`)
+          } catch {
+            /* stderr gone: the retry and the queue still stand */
+          }
+          try {
+            broadcast.log(said, "warn")
+          } catch {
+            /* the durable line is a nicety; the retry is not */
           }
         },
         onDelivered(connId, ev) {

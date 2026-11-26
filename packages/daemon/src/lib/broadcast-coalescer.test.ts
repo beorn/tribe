@@ -30,19 +30,25 @@ function event(id: string, rowid: number): PendingBroadcast {
   }
 }
 
-function build(opts: { batchMs: number; write: (connId: string, payload: string) => boolean }) {
+function build(opts: {
+  batchMs: number
+  write: (connId: string, payload: string) => boolean
+  maxEventsPerBatch?: number
+}) {
   const singleEvent = (ev: PendingBroadcast) => `single:${ev.id}`
   const batched = (events: PendingBroadcast[], dropped: number) => `batched:${events.length}:${dropped}`
   const onDelivered = vi.fn()
+  const onWriteFailed = vi.fn()
   const timers: Array<() => void> = []
   const coalescer = createCoalescer({
     batchMs: opts.batchMs,
-    maxEventsPerBatch: 50,
+    maxEventsPerBatch: opts.maxEventsPerBatch ?? 50,
     deps: {
       singleEvent,
       batched,
       write: opts.write,
       onDelivered,
+      onWriteFailed,
       setTimer: (fn) => {
         timers.push(fn)
         return timers.length
@@ -50,7 +56,7 @@ function build(opts: { batchMs: number; write: (connId: string, payload: string)
       clearTimer: () => {},
     },
   })
-  return { coalescer, onDelivered, timers }
+  return { coalescer, onDelivered, onWriteFailed, timers }
 }
 
 describe("broadcast-coalescer delivery cursor", () => {
@@ -91,5 +97,54 @@ describe("broadcast-coalescer delivery cursor", () => {
     coalescer.enqueue("conn", event("a", 7))
 
     expect(onDelivered.mock.calls.map((call) => call[1].id)).toEqual(["a"])
+  })
+})
+
+describe("broadcast-coalescer: a failed write never loses the wake (#38676)", () => {
+  // @failure The queue was emptied before the write and its timer cleared, so one failed
+  //   socket write discarded the daemon's own copy with nothing retrying and no line saying
+  //   so: the row then read "never written to its socket" until a process restart.
+  // @level l2 @consumer withBroadcast's queued fanout and sessions.last_delivered_seq
+  it("keeps the events queued and arms a retry when the write returns false", () => {
+    const attemptResults = [false, true]
+    const { coalescer, onDelivered, timers, onWriteFailed } = build({
+      batchMs: 400,
+      write: () => attemptResults.shift() ?? true,
+    })
+
+    coalescer.enqueue("conn", event("a", 7))
+    coalescer.enqueue("conn", event("b", 8))
+    coalescer.flush("conn")
+
+    expect(onDelivered).not.toHaveBeenCalled()
+    expect(coalescer.pendingCount("conn")).toBe(2)
+    expect(onWriteFailed).toHaveBeenCalledTimes(1)
+    expect(onWriteFailed.mock.calls[0]![2]).toBe(1)
+    // The retry the coalescer armed itself, not a caller's flush.
+    expect(timers.length).toBeGreaterThan(0)
+    timers.at(-1)!()
+
+    expect(onDelivered.mock.calls.map((call) => call[1].id)).toEqual(["a", "b"])
+    expect(coalescer.pendingCount("conn")).toBe(0)
+  })
+
+  it("keeps a failed event when batching is off, so its cursor is never advanced", () => {
+    const { coalescer, onDelivered, onWriteFailed } = build({ batchMs: 0, write: () => false })
+
+    coalescer.enqueue("conn", event("a", 7))
+
+    expect(onDelivered).not.toHaveBeenCalled()
+    expect(coalescer.pendingCount("conn")).toBe(1)
+    expect(onWriteFailed).toHaveBeenCalledTimes(1)
+  })
+
+  it("advances the cursor for every event the payload accounted for, past the per-batch cap too", () => {
+    const { coalescer, onDelivered } = build({ batchMs: 400, write: () => true, maxEventsPerBatch: 2 })
+
+    for (const [index, id] of ["a", "b", "c", "d"].entries()) coalescer.enqueue("conn", event(id, 7 + index))
+    coalescer.flush("conn")
+
+    // Two events were written with a "+N more" marker; all four are covered by that write, so all four cursors move.
+    expect(onDelivered.mock.calls.map((call) => call[1].id)).toEqual(["a", "b", "c", "d"])
   })
 })
