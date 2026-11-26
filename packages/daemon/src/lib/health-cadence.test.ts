@@ -225,6 +225,46 @@ describe("20876 Tribe health cadence", () => {
     expect(warning, "and never a delivery that did not happen").not.toContain("never written to its socket")
   })
 
+  // #38676 residual: the seat's own mode decides what a socket could have carried. Senders default to
+  // push, so a healthy pull seat's ordinary traffic was still called "never written to its socket" —
+  // @dev/10 showed 5 such rows at 18:55Z while it was idle 1m39s and its read cursor moved.
+  it("#38676 calls a push-labelled row on a pull seat a pending fetch, not a failed socket write", () => {
+    insertSession(db, { id: "session-pull-push-row", name: "@pull-seat-push-row", role: "member", now })
+    db.prepare("UPDATE sessions SET delivery = 'pull' WHERE id = 'session-pull-push-row'").run()
+    db.prepare(`
+      INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery)
+      VALUES ('pull-seat-push-verdict', 'verdict', '@chief', '@pull-seat-push-row', 'direct', 'body', $ts, 'push')
+    `).run({ $ts: now - 6 * MINUTE })
+
+    const projection = projectHealthCadence(db, { now, connectedSessionNames: ["@pull-seat-push-row"] })
+    const row = projection.inbox_lag.find((entry) => entry.session === "@pull-seat-push-row")
+    expect(row?.actionable_rows).toBe(1)
+    expect(row?.actionable_causes).toEqual([{ cause: "pull-unfetched", rows: 1, oldest_age_ms: 6 * MINUTE }])
+
+    const warning = projection.warnings.find((line) => line.includes("@pull-seat-push-row"))
+    expect(warning, "a pull seat drains by fetch whatever the row's own delivery says").toContain(
+      "waiting for the seat's next fetch",
+    )
+    expect(warning, "and never blames a socket the seat never had").not.toContain("never written to its socket")
+  })
+
+  // The other half of the same split: a row above a PUSH seat's cursor is still a socket write that did
+  // not happen, and the seat-mode fix must not launder it into a pending fetch.
+  it("#38676 still names a push row above a push seat's cursor a delivery that did not happen", () => {
+    insertSession(db, { id: "session-push", name: "@push-seat", role: "member", now })
+    db.prepare(`
+      INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery)
+      VALUES ('push-seat-verdict', 'verdict', '@chief', '@push-seat', 'direct', 'body', $ts, 'push')
+    `).run({ $ts: now - 6 * MINUTE })
+
+    const projection = projectHealthCadence(db, { now, connectedSessionNames: ["@push-seat"] })
+    const row = projection.inbox_lag.find((entry) => entry.session === "@push-seat")
+    expect(row?.actionable_causes).toEqual([{ cause: "never-delivered", rows: 1, oldest_age_ms: 6 * MINUTE }])
+
+    const warning = projection.warnings.find((line) => line.includes("@push-seat"))
+    expect(warning, "a push seat's unwritten row keeps its own words").toContain("never written to its socket")
+  })
+
   // 30786: health eligibility follows principal class and canonical READ history.
   // Existing selector cases do not distinguish never-read services from agents.
   // The projection owns no receipt writes; retained message/cursor facts must not change.

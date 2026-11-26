@@ -198,9 +198,10 @@ describe("30649 an inline-delivered non-ball row the seat acted after is not dem
     deliver(f, { id: "verdict-pull", type: "verdict", ts: NOW - 45 * MINUTE })
     seatSends(f, NOW - 40 * MINUTE)
 
+    // #38676 residual: the row stays, and the seat's own delivery mode names it a pending fetch.
     expect(inboxRow(f)).toMatchObject({
       actionable_rows: 1,
-      actionable_causes: [{ cause: "never-delivered", rows: 1, oldest_age_ms: 45 * MINUTE }],
+      actionable_causes: [{ cause: "pull-unfetched", rows: 1, oldest_age_ms: 45 * MINUTE }],
     })
   })
 

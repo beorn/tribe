@@ -459,13 +459,35 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
     })
     t.scope.defer(stopCatchUp)
 
+    // #38676: at disconnect the caller flushes first, and that flush is what fails on a destroyed socket —
+    // so the "kept and retried" line can be followed one statement later by the queue's own discard. Say
+    // which rows the transport took with it, and that they are not lost: the journal keeps them and the
+    // seat's next attach re-wakes it (catch-up-on-attach).
+    const reportDroppedWakes = (connId: string, dropped: readonly PendingBroadcast[]): void => {
+      if (dropped.length === 0) return
+      const sessionId = clients.get(connId)?.ctx.sessionId ?? connId
+      const rowids = dropped.map((ev) => ev.rowid).join(",")
+      const said = `fanout: dropped ${dropped.length} held wake(s) with the transport of ${sessionId} (rows ${rowids}); the rows stay in the journal and the seat's next attach re-wakes it`
+      try {
+        process.stderr.write(`tribe-daemon: ${said}\n`)
+      } catch {
+        // silent-fallback-allow: the line above is the report and stderr was its channel; a gone channel leaves the
+        // journal rows and the next attach's catch-up as the recovery, exactly as the sentence says.
+      }
+      try {
+        broadcast.log(said, "warn")
+      } catch {
+        // silent-fallback-allow: stderr already carried this same sentence; the durable copy is a nicety.
+      }
+    }
+
     const broadcast: Broadcast = {
       pushToClient,
       persistDeliveredCursor,
       toConnected,
       log: broadcastLogFn,
       flushConnection: (connId) => coalescer.flush(connId),
-      discardConnection: (connId) => coalescer.discard(connId),
+      discardConnection: (connId) => reportDroppedWakes(connId, coalescer.discard(connId)),
       messageTap,
     }
 

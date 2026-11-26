@@ -340,9 +340,21 @@ describe("withBroadcast fanout admission: G9 self-inbox wakeups and 28200 daemon
       expect(fanout.writes).toEqual([])
       expect(watchWrites).toEqual([])
       fanout.registry.setTransportDelivery("conn-seat", "pull")
-      fanout.broadcast.flushConnection("conn-seat")
+      // #38676: a flush that cannot write is kept and named now, so capture that line here instead of
+      // letting it fail the suite's stray-output guard; the assertions below pin the property it still has.
+      const said: string[] = []
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+        said.push(String(chunk))
+        return true
+      })
+      try {
+        fanout.broadcast.flushConnection("conn-seat")
+      } finally {
+        stderr.mockRestore()
+      }
       expect(fanout.writes).toEqual([])
       expect(fanout.delivered).not.toHaveBeenCalled()
+      expect(said.join("")).toContain("kept and retried")
       fanout.broadcast.flushConnection("watch")
       expect(watchWrites).toHaveLength(1)
       expect(fanout.pullWrites).toEqual([])

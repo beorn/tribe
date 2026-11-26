@@ -194,10 +194,12 @@ describe("33213 a body delivered to a push seat is not attention until it goes u
 
     const { row } = inboxRow(f)
 
+    // #38676 residual: the seat drains by fetch, so a row the sender addressed with the default
+    // delivery='push' is a fetch still owed, not a socket write that failed.
     expect(row).toMatchObject({
       actionable_rows: 1,
       actionable_held_rows: 0,
-      actionable_causes: [{ cause: "never-delivered", rows: 1, oldest_age_ms: 30_000 }],
+      actionable_causes: [{ cause: "pull-unfetched", rows: 1, oldest_age_ms: 30_000 }],
     })
   })
 

@@ -59,7 +59,9 @@ export type Coalescer = {
   enqueue(connId: string, ev: PendingBroadcast): void
   flush(connId: string): void
   flushAll(): void
-  discard(connId: string): void
+  /** Drop a connection's queue and hand back the wakes it still held, so the caller can say which rows
+   *  the transport took with it instead of letting them disappear with no line (#38676). */
+  discard(connId: string): PendingBroadcast[]
   pendingCount(connId: string): number
 }
 
@@ -167,9 +169,11 @@ export function createCoalescer(opts: {
     },
     discard(connId) {
       const q = queues.get(connId)
-      if (!q) return
+      failures.delete(connId)
+      if (!q) return []
       if (q.timer) clearTimer(q.timer)
       queues.delete(connId)
+      return q.events
     },
     pendingCount(connId) {
       return queues.get(connId)?.events.length ?? 0

@@ -147,4 +147,19 @@ describe("broadcast-coalescer: a failed write never loses the wake (#38676)", ()
     // Two events were written with a "+N more" marker; all four are covered by that write, so all four cursors move.
     expect(onDelivered.mock.calls.map((call) => call[1].id)).toEqual(["a", "b", "c", "d"])
   })
+
+  // #38676 residual: the disconnect path flushes into a dead socket (the failure line says "kept and
+  // retried") and then discards the connection. Discarding must hand the held wakes back, so the
+  // caller can name the rows instead of letting the queue vanish with no line.
+  it("hands back the wakes it still held when a transport is discarded", () => {
+    const { coalescer } = build({ batchMs: 400, write: () => false })
+
+    coalescer.enqueue("conn", event("a", 7))
+    coalescer.enqueue("conn", event("b", 8))
+    coalescer.flush("conn")
+
+    expect(coalescer.discard("conn").map((ev) => ev.id)).toEqual(["a", "b"])
+    expect(coalescer.pendingCount("conn")).toBe(0)
+    expect(coalescer.discard("conn")).toEqual([])
+  })
 })

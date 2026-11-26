@@ -338,8 +338,8 @@ export type ActionableLagReading = LagRow & {
  * Same attention set as `attentionLagSql`, plus the grace split — the count is
  * returned whole so a caller can show both "counts now" and "held", and the
  * four causes partition it: directive, delivered-inline-past-grace, never written to this seat
- * (a push row above its cursor, which no socket carried), and inbox-only by class (a pull row,
- * which by design is never fanned out and waits for the seat to fetch).
+ * (a push row above a push seat's cursor, which no socket carried), and inbox-only by class (a pull
+ * row, or any row on a pull seat, which by design is never fanned out and waits for the seat to fetch).
  */
 function actionableLagSql(table: "messages" | "messages_archive"): string {
   const sequence = table === "messages" ? "rowid" : "seq"
@@ -352,8 +352,13 @@ function actionableLagSql(table: "messages" | "messages_archive"): string {
   // #38676: a pull row is never written to a socket BY DESIGN, so calling it "never written" alarmed
   // fleet health on healthy pull seats (@dev/3: 2 rows, delivery:pull, connected). It gets its own
   // cause and its own words; only a push row above the cursor is a delivery that did not happen.
-  const pullOnly = `m.delivery = \x27pull\x27 AND NOT (${directive})`
-  const neverDelivered = `m.delivery = \x27push\x27 AND NOT (${directive}) AND NOT (${deliveredInlineRowSql(sequence)})`
+  // #38676 residual: the SEAT's delivery mode decides what a socket could have carried. A pull seat
+  // drains by fetch, so a row sent to it with the default delivery='push' was never going to be
+  // written either; blaming the transport for it paged fleet health on a live codex seat (@dev/10:
+  // 5 such rows at 18:55Z while its own read cursor moved and its turn was live).
+  const seatIsPull = `$seatDelivery = \x27pull\x27`
+  const pullOnly = `(${seatIsPull} OR m.delivery = \x27pull\x27) AND NOT (${directive})`
+  const neverDelivered = `$seatDelivery = \x27push\x27 AND m.delivery = \x27push\x27 AND NOT (${directive}) AND NOT (${deliveredInlineRowSql(sequence)})`
   return `
     SELECT
       COUNT(*) AS rows,
@@ -442,6 +447,7 @@ function inlineGraceBindParams(
 ): {
   $session: string
   $deliveredSeq: number
+  $seatDelivery: string
   $graceCutoff: number
   $actedAfter: number
   $sessionStartedAt: number
@@ -450,6 +456,8 @@ function inlineGraceBindParams(
     $session: session,
     // Only an acknowledged push seat can have been handed a body over the socket.
     $deliveredSeq: grace !== undefined && grace.delivery === "push" ? grace.lastDeliveredSeq : 0,
+    // The seat's own mode, so the cause split can tell a socket that owed a write from a fetch that is simply due.
+    $seatDelivery: grace?.delivery ?? "pull",
     $graceCutoff: grace === undefined ? 0 : grace.now - INLINE_DELIVERY_LAG_GRACE_MS,
     $actedAfter: acted.actedAfter,
     $sessionStartedAt: acted.sessionStartedAt,
