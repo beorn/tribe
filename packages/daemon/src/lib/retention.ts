@@ -353,6 +353,7 @@ function archiveDeleteBatch(db: Database, ids: readonly string[]): number {
     const res = db
       .prepare(assertSingleStatement(`DELETE FROM messages_archive WHERE id IN (${placeholders})`))
       .run(...ids)
+    db.prepare(assertSingleStatement(`DELETE FROM message_reads WHERE message_id IN (${placeholders})`)).run(...ids)
     return res.changes ?? 0
   })()
 }
