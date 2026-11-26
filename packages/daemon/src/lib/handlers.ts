@@ -5670,7 +5670,12 @@ function filterRowsByTrust<Row extends Pick<FetchRow, "sender" | "topic">>(ctx: 
 }
 
 function readUnackedDirectAttentionRows(ctx: TribeContext, owner: string, upto: number, limit: number): FetchRow[] {
-  return ctx.stmts.selectUnackedAttention.all({ $name: owner, $upto: upto, $limit: limit }) as FetchRow[]
+  return ctx.stmts.selectUnackedAttention.all({
+    $name: owner,
+    $upto: upto,
+    $limit: limit,
+    ...readActedAfterBind(ctx.db, owner),
+  }) as FetchRow[]
 }
 
 export function readUnackedAttentionRows(ctx: TribeContext, owner: string, upto: number, limit: number): FetchRow[] {
@@ -6230,7 +6235,7 @@ function querySnapshotRows(
   const query = ctx.db.prepare(
     assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, reply, ts, delivery, topic, room_id, summary,
-             attention_required, wakes_owner, is_incident, sender_authority, session_id
+             attention_required, wakes_owner, is_incident, sender_authority, session_id, request
       FROM messages
       WHERE ${conditions.join("\n        AND ")}
       ORDER BY rowid ${order}
@@ -6684,7 +6689,9 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
     const projectedAttentionIds = new Set(attentionRows.map((row) => row.id))
     for (const row of [...attentionRows, ...filtered]) {
       if (
-        (row.recipient === currentName || (row.recipient === "*" && projectedAttentionIds.has(row.id))) &&
+        (row.recipient === currentName ||
+          (row.recipient === "*" &&
+            (projectedAttentionIds.has(row.id) || (row.attention_required === 1 && row.request == null)))) &&
         row.sender !== currentName &&
         (ACTIONABLE_TYPES_SET.has(row.type) || row.attention_required === 1 || row.wakes_owner === 1)
       ) {
@@ -6712,6 +6719,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
         $name: currentName,
         $upto: ackTarget,
         $returned: JSON.stringify(returnedAttentionIds),
+        ...readActedAfterBind(ctx.db, currentName),
       }) as Array<Pick<FetchRow, "rowid" | "sender" | "topic">>
       const skipped = filterRowsByTrust(ctx, unreturned)[0]
       const acknowledged = skipped === undefined ? ackTarget : Math.min(ackTarget, skipped.rowid - 1)

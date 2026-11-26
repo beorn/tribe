@@ -3612,7 +3612,7 @@ export function createStatements(db: Database) {
       assertSingleStatement(`
 		SELECT m.id, m.rowid, m.type, m.sender, m.recipient, m.content, m.bead_id, m.ref, m.reply, m.ts,
 			m.delivery, m.topic, m.room_id, m.summary, m.attention_required, m.wakes_owner, m.is_incident,
-			m.sender_authority, m.session_id
+			m.sender_authority, m.session_id, m.request
 		FROM messages AS m
 		WHERE m.rowid > $since
 			AND (m.recipient = $name OR m.recipient = '*')
@@ -3747,10 +3747,10 @@ export function createStatements(db: Database) {
     selectUnackedAttention: db.prepare(
       assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, reply, ts, delivery, topic, room_id, summary,
-             attention_required, wakes_owner, is_incident, sender_authority, session_id
+             attention_required, wakes_owner, is_incident, sender_authority, session_id, request
       FROM (
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, reply, ts, delivery, topic, room_id, summary,
-               attention_required, wakes_owner, is_incident, sender_authority, session_id
+               attention_required, wakes_owner, is_incident, sender_authority, session_id, request
         FROM messages AS m
         WHERE m.recipient = $name
           AND m.kind = 'direct'
@@ -3762,9 +3762,10 @@ export function createStatements(db: Database) {
           AND ${unretiredAttentionPredicateSql("m")}
           AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
           AND m.rowid <= $upto
+          AND NOT (${actedSinceDeliverySql("rowid")})
         UNION ALL
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, reply, ts, delivery, topic, room_id, summary,
-               attention_required, wakes_owner, is_incident, sender_authority, session_id
+               attention_required, wakes_owner, is_incident, sender_authority, session_id, request
         FROM messages AS m
         WHERE m.recipient = '*'
           AND m.kind = 'broadcast'
@@ -3773,6 +3774,7 @@ export function createStatements(db: Database) {
           AND ${noOpenIncidentAttentionPredicateSql("m")}
           AND m.rowid > ${broadcastAttentionCursorSql("$name")}
           AND m.rowid <= $upto
+          AND NOT (${actedSinceDeliverySql("rowid")})
       )
       ORDER BY rowid ASC
       LIMIT $limit
@@ -3802,6 +3804,7 @@ export function createStatements(db: Database) {
           AND ${unretiredAttentionPredicateSql("m")}
           AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
           AND m.rowid <= $upto
+          AND NOT (${actedSinceDeliverySql("rowid")})
           AND m.id NOT IN (SELECT value FROM json_each($returned))
         UNION ALL
         SELECT m.rowid, m.sender, m.topic
@@ -3813,6 +3816,7 @@ export function createStatements(db: Database) {
           AND ${noOpenIncidentAttentionPredicateSql("m")}
           AND m.rowid > ${broadcastAttentionCursorSql("$name")}
           AND m.rowid <= $upto
+          AND NOT (${actedSinceDeliverySql("rowid")})
           AND m.id NOT IN (SELECT value FROM json_each($returned))
       )
       ORDER BY rowid ASC
