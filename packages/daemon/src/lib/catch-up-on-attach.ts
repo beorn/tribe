@@ -21,6 +21,7 @@
  *     ones — the same accounting a batched fanout already does.
  */
 import type { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 
 import { ACTIONABLE_TYPES_SET } from "./database.ts"
 import type { MessageKind } from "./messaging.ts"
@@ -79,7 +80,8 @@ function prepared(db: Database): Statements {
       sessionDelivery: db.prepare(`
         SELECT delivery, last_delivered_seq FROM sessions WHERE id = $id ORDER BY updated_at DESC LIMIT 1
       `),
-      summary: db.prepare(`
+      summary: db.prepare(
+        assertSingleStatement(`
         SELECT COUNT(*) AS rows,
                COALESCE(MAX(rowid), 0) AS newest_rowid,
                COALESCE(MAX(ts), 0) AS newest_ts,
@@ -87,13 +89,16 @@ function prepared(db: Database): Statements {
                  AS any_actionable
         ${undelivered}
       `),
-      newest: db.prepare(`
+      ),
+      newest: db.prepare(
+        assertSingleStatement(`
         SELECT rowid, id, ts, type, kind, sender, topic, is_incident, wakes_owner, attention_required,
                (correlated_reply_requester = $name) AS settles_own
         ${undelivered}
         ORDER BY rowid DESC
         LIMIT 1
       `),
+      ),
     }
     statements.set(db, found)
   }
