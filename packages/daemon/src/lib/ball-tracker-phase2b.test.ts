@@ -168,7 +168,9 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
         "tribe.send",
         {
           to: "@chief",
-          message: settles ? "delivered" : "taking; work stays open",
+          message: settles
+            ? "delivered: the repair is on main and its gate is green"
+            : "taking it: the repair work stays open here until I finish it",
           summary: "accepted work disposition",
           type,
           reply: requestId,
