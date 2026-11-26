@@ -235,12 +235,14 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
           try {
             process.stderr.write(`tribe-daemon: ${said}\n`)
           } catch {
-            /* stderr gone: the retry and the queue still stand */
+            // silent-fallback-allow: the line above is the report, and stderr is the channel it was written to; when
+            // that channel itself is gone there is nothing left to say it on, and the kept rows and the retry stand.
           }
           try {
             broadcast.log(said, "warn")
           } catch {
-            /* the durable line is a nicety; the retry is not */
+            // silent-fallback-allow: stderr already carried this same sentence one line above; the durable copy is a
+            // nicety, while the retry that keeps the wake is not, so a journal that cannot take it changes nothing.
           }
         },
         onDelivered(connId, ev) {

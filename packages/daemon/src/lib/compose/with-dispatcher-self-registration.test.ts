@@ -2913,6 +2913,7 @@ describe("dispatcher inbox-wait parsing", () => {
             message: "tracked broadcast work",
             type: "request",
             request: "tracked-broadcast",
+            fanout: "first",
           },
         },
         "conn-sender",

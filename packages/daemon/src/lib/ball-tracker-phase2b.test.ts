@@ -333,7 +333,13 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       handleToolCall(
         observingChief,
         "tribe.send",
-        { to: "*", message: "commit the owners with me", type: "request", request: "req-atomic-broadcast" },
+        {
+          to: "*",
+          message: "commit the owners with me",
+          type: "request",
+          request: "req-atomic-broadcast",
+          fanout: "all",
+        },
         makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
       ),
     )
@@ -363,7 +369,13 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       handleToolCall(
         chief,
         "tribe.send",
-        { to: "*", message: "ack before the next sweep", type: "request", request: "req-default-broadcast" },
+        {
+          to: "*",
+          message: "ack before the next sweep",
+          type: "request",
+          request: "req-default-broadcast",
+          fanout: "all",
+        },
         makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
       ),
     )

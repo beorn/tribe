@@ -19,7 +19,7 @@
  * @failure  Every `pending --expired --owed` call reads the whole journal; on a
  *           cold page cache that blocks the whole Wire for seconds.
  * @level    l1 (handler over a scratch SQLite store, no daemon process)
- * @consumer /inbox expired-owed rail, /do step 3, `tribe pending --expired --owed`
+ * @consumer /inbox expired-owed rail, /do owed-request step, `tribe pending --expired --owed`
  * @testonly none
  */
 import type { Database } from "bun:sqlite"
