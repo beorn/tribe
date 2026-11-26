@@ -825,7 +825,9 @@ export function tryInitialRename(ctx: TribeContext, transcriptPath: string | nul
   const oldName = ctx.getName()
   ctx.stmts.renameSession.run({ $new_name: slug, $session_id: ctx.sessionId, $now: Date.now() })
   ctx.setName(slug)
-  sendMessage(ctx, "*", `Member "${oldName}" is now "${slug}"`, "notify")
+  sendMessage(ctx, "*", `Member "${oldName}" is now "${slug}"`, "notify", undefined, undefined, "broadcast", {
+    topic: "session:renamed",
+  })
   logEvent(ctx, "session.renamed", undefined, { old_name: oldName, new_name: slug, source: "initial-slug" })
   log.info?.(`initial name from /rename: ${oldName} → ${slug}`)
 }

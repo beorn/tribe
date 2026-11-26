@@ -1821,8 +1821,27 @@ export const AUTO_TRACK_TYPES_SET: ReadonlySet<string> = new Set(AUTO_TRACK_TYPE
 export const ACTIONABLE_TYPES_SQL = ACTIONABLE_TYPES.map((t) => `'${t}'`).join(", ")
 export const CORRELATED_REPLY_TYPES_SQL = CORRELATED_REPLY_TYPES.map((type) => `'${type}'`).join(", ")
 /** One canonical durable-attention classification: default-wake actionables
- * plus rows atomically classified at insertion (currently direct responses). */
+ * plus rows atomically classified at insertion (currently direct responses,
+ * ref-bound persona status/notify, and verified persona broadcasts with topic IS NULL — #38796). */
 export const ATTENTION_PREDICATE_SQL = `(type IN (${ACTIONABLE_TYPES_SQL}) OR attention_required = 1)`
+
+/**
+ * #38796 (@cto 7767f5fe): durable cursor floor for verified persona broadcast
+ * attention rows (`recipient = '*'`, `kind = 'broadcast'`, `attention_required = 1`).
+ *
+ * Uses `mailbox_cursors.last_actionable_seq` whenever a non-zero durable cursor
+ * exists (surviving daemon restarts that reset ephemeral `sessions.last_inbox_pull_seq`).
+ * Before a seat has acknowledged any durable cursor (brand-new seat or `advance:false`
+ * read), falls back to its initial `sessions.last_inbox_pull_seq` (tail at first join)
+ * so new seats never inherit historical broadcasts and `mailbox_cursors` stays untouched
+ * until the seat reads its mailbox.
+ */
+export function broadcastAttentionCursorSql(recipientParam = "$name"): string {
+  return `COALESCE(
+    NULLIF((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ${recipientParam}), 0),
+    (SELECT COALESCE(MIN(last_inbox_pull_seq), 0) FROM sessions WHERE name = ${recipientParam})
+  )`
+}
 
 /** 33650: a ball outcome fact's obligation identity is its PAYLOAD request_id —
  * `ref` usually equals it, but legacy facts carry a third id there. A fact with
@@ -3245,15 +3264,27 @@ export function createStatements(db: Database) {
     getLatestActionableAttention: db.prepare(
       assertSingleStatement(`
       SELECT rowid, id, type
-      FROM messages AS m
-      WHERE m.recipient = $name
-        AND m.kind = 'direct'
-        AND m.sender != $name
-        AND ${ATTENTION_PREDICATE_SQL}
-        AND ${noOpenIncidentAttentionPredicateSql("m")}
-        AND ${unretiredAttentionPredicateSql("m")}
-        AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
-      ORDER BY m.rowid DESC
+      FROM (
+        SELECT rowid, id, type
+        FROM messages AS m
+        WHERE m.recipient = $name
+          AND m.kind = 'direct'
+          AND m.sender != $name
+          AND ${ATTENTION_PREDICATE_SQL}
+          AND ${noOpenIncidentAttentionPredicateSql("m")}
+          AND ${unretiredAttentionPredicateSql("m")}
+          AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+        UNION ALL
+        SELECT rowid, id, type
+        FROM messages AS m
+        WHERE m.recipient = '*'
+          AND m.kind = 'broadcast'
+          AND m.attention_required = 1
+          AND m.sender != $name
+          AND ${noOpenIncidentAttentionPredicateSql("m")}
+          AND m.rowid > ${broadcastAttentionCursorSql("$name")}
+      )
+      ORDER BY rowid DESC
       LIMIT 1
     `),
     ),
@@ -3261,59 +3292,85 @@ export function createStatements(db: Database) {
     /** One qualifying-tail predicate with two explicit projections. Fresh
      * waits request the cursor-aware current tail; reconnecting chunks request
      * the durable tail so a row inserted and acknowledged between transports
-     * is still observed relative to the logical wait baseline. */
+     * is still observed relative to the logical wait baseline.
+     *
+     * Kept as two separate descending `LIMIT 1` index seeks (direct + broadcast
+     * attention) combined via `MAX` so SQLite never falls back to a MULTI-INDEX OR
+     * temp B-tree (pinned by `attention-scan-bounded.test.ts`). */
     getLatestInboxWaitMessage: db.prepare(
       assertSingleStatement(`
-      SELECT rowid
-      FROM messages AS m
-      WHERE m.recipient = $name
-        AND m.kind = 'direct'
-        AND m.sender != $name
-        AND (m.wakes_owner = 1 OR ${noOpenIncidentAttentionPredicateSql("m")})
-        AND ${unretiredAttentionPredicateSql("m")}
-        AND (
-          $unacknowledged_only = 0
-          OR m.request IS NULL
-          OR m.is_incident = 1
-          OR EXISTS (
-            SELECT 1 FROM pending_request AS p
-            WHERE p.request_id = m.request AND p.recipient = m.recipient
-          )
-        )
-        AND (
-          ${wakePredicateSql("m")}
-          OR (
-            $include_correlated_replies = 1
-            AND type IN (${CORRELATED_REPLY_TYPES_SQL})
-            AND (
-              (
-                ((m.type = 'response' AND m.is_incident = 0) OR correlated_reply_requester = $name)
-                AND (
-                  $unacknowledged_only = 0
-                  OR m.request IS NOT NULL
-                  OR NOT EXISTS (
-                    SELECT 1
-                    FROM messages AS r INDEXED BY idx_messages_recipient_kind
-                    WHERE r.recipient = m.sender
-                      AND r.kind = 'direct'
-                      AND r.rowid > m.rowid
-                      AND r.sender = $name
+      SELECT NULLIF(
+        MAX(
+          COALESCE((
+            SELECT m.rowid
+            FROM messages AS m
+            WHERE m.recipient = $name
+              AND m.kind = 'direct'
+              AND m.sender != $name
+              AND (m.wakes_owner = 1 OR ${noOpenIncidentAttentionPredicateSql("m")})
+              AND ${unretiredAttentionPredicateSql("m")}
+              AND (
+                $unacknowledged_only = 0
+                OR m.request IS NULL
+                OR m.is_incident = 1
+                OR EXISTS (
+                  SELECT 1 FROM pending_request AS p
+                  WHERE p.request_id = m.request AND p.recipient = m.recipient
+                )
+              )
+              AND (
+                ${wakePredicateSql("m")}
+                OR (
+                  $include_correlated_replies = 1
+                  AND type IN (${CORRELATED_REPLY_TYPES_SQL})
+                  AND (
+                    (
+                      ((m.type = 'response' AND m.is_incident = 0) OR correlated_reply_requester = $name)
+                      AND (
+                        $unacknowledged_only = 0
+                        OR m.request IS NOT NULL
+                        OR NOT EXISTS (
+                          SELECT 1
+                          FROM messages AS r INDEXED BY idx_messages_recipient_kind
+                          WHERE r.recipient = m.sender
+                            AND r.kind = 'direct'
+                            AND r.rowid > m.rowid
+                            AND r.sender = $name
+                        )
+                      )
+                    )
+                    OR (
+                      ${ATTENTION_PREDICATE_SQL}
+                      AND ${refBoundOpenRequestPredicateSql("m.ref", "$name", "requester")}
+                    )
                   )
                 )
               )
-              OR (
-                ${ATTENTION_PREDICATE_SQL}
-                AND ${refBoundOpenRequestPredicateSql("m.ref", "$name", "requester")}
+              AND (
+                $unacknowledged_only = 0
+                OR m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
               )
-            )
-          )
-        )
-        AND (
-          $unacknowledged_only = 0
-          OR m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
-        )
-      ORDER BY m.rowid DESC
-      LIMIT 1
+            ORDER BY m.rowid DESC
+            LIMIT 1
+          ), 0),
+          COALESCE((
+            SELECT m.rowid
+            FROM messages AS m
+            WHERE m.recipient = '*'
+              AND m.kind = 'broadcast'
+              AND m.attention_required = 1
+              AND m.sender != $name
+              AND ${noOpenIncidentAttentionPredicateSql("m")}
+              AND (
+                $unacknowledged_only = 0
+                OR m.rowid > ${broadcastAttentionCursorSql("$name")}
+              )
+            ORDER BY m.rowid DESC
+            LIMIT 1
+          ), 0)
+        ),
+        0
+      ) AS rowid
     `),
     ),
 
@@ -3375,15 +3432,25 @@ export function createStatements(db: Database) {
       SELECT rowid AS seq, id, type, sender, content, bead_id, ref,
              request, reply, ts
       FROM messages AS m
-      WHERE m.recipient = $name
-        AND m.kind = 'direct'
-        AND m.sender != $name
-        AND ${ATTENTION_PREDICATE_SQL}
-        AND ${noOpenIncidentAttentionPredicateSql("m")}
-        AND ${unretiredAttentionPredicateSql("m")}
-        AND m.rowid = $seq
+      WHERE m.rowid = $seq
         AND m.id = $id
-        AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+        AND m.sender != $name
+        AND ${noOpenIncidentAttentionPredicateSql("m")}
+        AND (
+          (
+            m.recipient = $name
+            AND m.kind = 'direct'
+            AND ${ATTENTION_PREDICATE_SQL}
+            AND ${unretiredAttentionPredicateSql("m")}
+            AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+          )
+          OR (
+            m.recipient = '*'
+            AND m.kind = 'broadcast'
+            AND m.attention_required = 1
+            AND m.rowid > ${broadcastAttentionCursorSql("$name")}
+          )
+        )
       LIMIT 1
     `),
     ),
@@ -3512,7 +3579,7 @@ export function createStatements(db: Database) {
 				-- the WAKEUP for a non-actionable direct (shouldDeliver's diet) —
 				-- that is a different question from whether the row reached a socket,
 				-- and the two paths are meant to differ here.
-				OR ($filter_mode = 'focus' AND (m.recipient = $name OR m.type IN (${ACTIONABLE_TYPES_SQL})))
+				OR ($filter_mode = 'focus' AND (m.recipient = $name OR m.type IN (${ACTIONABLE_TYPES_SQL}) OR (m.recipient = '*' AND m.kind = 'broadcast' AND m.attention_required = 1)))
 				OR ($filter_mode = 'normal' AND (
 					m.recipient = $name
 					OR $filter_until IS NULL
@@ -3543,6 +3610,12 @@ export function createStatements(db: Database) {
 					(SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name),
 					0
 				)
+			)
+			AND NOT (
+				m.recipient = '*'
+				AND m.kind = 'broadcast'
+				AND m.attention_required = 1
+				AND m.rowid <= ${broadcastAttentionCursorSql("$name")}
 			)
 		ORDER BY m.rowid ASC
 		LIMIT $limit
@@ -3625,18 +3698,33 @@ export function createStatements(db: Database) {
       assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, reply, ts, delivery, topic, room_id, summary,
              attention_required, wakes_owner, is_incident, sender_authority, session_id
-      FROM messages AS m
-      WHERE m.recipient = $name
-        AND m.kind = 'direct'
-        AND m.sender != $name
-        -- 25662 P3 3: an unacknowledged incident edge is recovered too, so an edge a relay saw (receipt:false) is
-        -- re-offered until the owner's own read acknowledges it, otherwise every fresh inbox-wait would wake on it.
-        AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1 OR m.wakes_owner = 1)
-        AND (m.wakes_owner = 1 OR ${noOpenIncidentAttentionPredicateSql("m")})
-        AND ${unretiredAttentionPredicateSql("m")}
-        AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
-        AND m.rowid <= $upto
-      ORDER BY m.rowid ASC
+      FROM (
+        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, reply, ts, delivery, topic, room_id, summary,
+               attention_required, wakes_owner, is_incident, sender_authority, session_id
+        FROM messages AS m
+        WHERE m.recipient = $name
+          AND m.kind = 'direct'
+          AND m.sender != $name
+          -- 25662 P3 3: an unacknowledged incident edge is recovered too, so an edge a relay saw (receipt:false) is
+          -- re-offered until the owner's own read acknowledges it, otherwise every fresh inbox-wait would wake on it.
+          AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1 OR m.wakes_owner = 1)
+          AND (m.wakes_owner = 1 OR ${noOpenIncidentAttentionPredicateSql("m")})
+          AND ${unretiredAttentionPredicateSql("m")}
+          AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+          AND m.rowid <= $upto
+        UNION ALL
+        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, reply, ts, delivery, topic, room_id, summary,
+               attention_required, wakes_owner, is_incident, sender_authority, session_id
+        FROM messages AS m
+        WHERE m.recipient = '*'
+          AND m.kind = 'broadcast'
+          AND m.attention_required = 1
+          AND m.sender != $name
+          AND ${noOpenIncidentAttentionPredicateSql("m")}
+          AND m.rowid > ${broadcastAttentionCursorSql("$name")}
+          AND m.rowid <= $upto
+      )
+      ORDER BY rowid ASC
       LIMIT $limit
     `),
     ),
@@ -3652,18 +3740,32 @@ export function createStatements(db: Database) {
      */
     selectUnreturnedAttention: db.prepare(
       assertSingleStatement(`
-      SELECT m.rowid, m.sender, m.topic
-      FROM messages AS m
-      WHERE m.recipient = $name
-        AND m.kind = 'direct'
-        AND m.sender != $name
-        AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1 OR m.wakes_owner = 1)
-        AND (m.wakes_owner = 1 OR ${noOpenIncidentAttentionPredicateSql("m")})
-        AND ${unretiredAttentionPredicateSql("m")}
-        AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
-        AND m.rowid <= $upto
-        AND m.id NOT IN (SELECT value FROM json_each($returned))
-      ORDER BY m.rowid ASC
+      SELECT rowid, sender, topic
+      FROM (
+        SELECT m.rowid, m.sender, m.topic
+        FROM messages AS m
+        WHERE m.recipient = $name
+          AND m.kind = 'direct'
+          AND m.sender != $name
+          AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1 OR m.wakes_owner = 1)
+          AND (m.wakes_owner = 1 OR ${noOpenIncidentAttentionPredicateSql("m")})
+          AND ${unretiredAttentionPredicateSql("m")}
+          AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+          AND m.rowid <= $upto
+          AND m.id NOT IN (SELECT value FROM json_each($returned))
+        UNION ALL
+        SELECT m.rowid, m.sender, m.topic
+        FROM messages AS m
+        WHERE m.recipient = '*'
+          AND m.kind = 'broadcast'
+          AND m.attention_required = 1
+          AND m.sender != $name
+          AND ${noOpenIncidentAttentionPredicateSql("m")}
+          AND m.rowid > ${broadcastAttentionCursorSql("$name")}
+          AND m.rowid <= $upto
+          AND m.id NOT IN (SELECT value FROM json_each($returned))
+      )
+      ORDER BY rowid ASC
     `),
     ),
 
@@ -3789,6 +3891,17 @@ export function createStatements(db: Database) {
           -- #38555: a row this seat was handed inline and acted after is handled (acted-after.ts).
           AND NOT (${actedSinceDeliverySql("rowid")})
         UNION
+        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, m.reply AS reply, ts, delivery, topic, room_id, summary,
+               attention_required, is_incident, sender_authority, session_id, m.request AS request
+        FROM messages AS m
+        WHERE m.recipient = '*'
+          AND m.kind = 'broadcast'
+          AND m.attention_required = 1
+          AND m.sender != $name
+          AND ${noOpenIncidentAttentionPredicateSql("m")}
+          AND m.rowid > ${broadcastAttentionCursorSql("$name")}
+          AND NOT (${actedSinceDeliverySql("rowid")})
+        UNION
         SELECT ${TRACKED_ATTENTION_FETCH_COLUMNS_SQL}
         ${TRACKED_ATTENTION_MESSAGE_JOIN_SQL}
         WHERE ${trackedAttentionPredicateSql()}
@@ -3812,6 +3925,15 @@ export function createStatements(db: Database) {
           AND ${noOpenIncidentAttentionPredicateSql("m")}
           AND ${unretiredAttentionPredicateSql("m")}
           AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+        UNION
+        SELECT m.id
+        FROM messages AS m
+        WHERE m.recipient = '*'
+          AND m.kind = 'broadcast'
+          AND m.attention_required = 1
+          AND m.sender != $name
+          AND ${noOpenIncidentAttentionPredicateSql("m")}
+          AND m.rowid > ${broadcastAttentionCursorSql("$name")}
         UNION
         SELECT COALESCE(m.id, a.id) AS id
         ${TRACKED_ATTENTION_MESSAGE_JOIN_SQL}

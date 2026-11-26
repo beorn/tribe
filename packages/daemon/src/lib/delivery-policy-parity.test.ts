@@ -38,14 +38,21 @@ type Row = {
   type: string
   isIncident?: boolean
   wakesOwner?: boolean
+  attentionRequired?: boolean
 }
-type IncidentPolicyInfo = Parameters<typeof shouldDeliver>[0] & { isIncident: boolean; wakesOwner: boolean }
+type IncidentPolicyInfo = Parameters<typeof shouldDeliver>[0] & {
+  isIncident: boolean
+  wakesOwner: boolean
+  attentionRequired: boolean
+}
 type Filter = { filter_mode: string; filter_mute: string | null; filter_until: number | null }
 
 const ROWS: Row[] = [
   { kind: "broadcast", topic: "health:cpu:warning", type: "health:cpu:warning" },
   { kind: "broadcast", topic: "github:push", type: "github:push" },
   { kind: "broadcast", topic: null, type: "status" },
+  { kind: "broadcast", topic: null, type: "notify", attentionRequired: false },
+  { kind: "broadcast", topic: null, type: "notify", attentionRequired: true },
   { kind: "broadcast", topic: null, type: "request" },
   { kind: "broadcast", topic: "ops:thing", type: "verdict" },
   { kind: "direct", topic: null, type: "notify" },
@@ -93,8 +100,8 @@ describe("push filter and pull predicate agree on every subscription case", () =
   function sqlAdmits(row: Row, filter: Filter, index: number): boolean {
     const id = `m-${index}`
     db.prepare(`
-      INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, topic, is_incident, wakes_owner)
-      VALUES (?, ?, '@someone-else', ?, ?, 'body', ?, 'pull', ?, ?, ?)
+      INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, topic, is_incident, wakes_owner, attention_required)
+      VALUES (?, ?, '@someone-else', ?, ?, 'body', ?, 'pull', ?, ?, ?, ?)
     `).run(
       id,
       row.type,
@@ -104,6 +111,7 @@ describe("push filter and pull predicate agree on every subscription case", () =
       row.topic,
       row.isIncident === true ? 1 : 0,
       row.wakesOwner === true ? 1 : 0,
+      row.attentionRequired === true ? 1 : 0,
     )
     const got = stmts.getInboxRows.all({
       $since: 0,
@@ -131,6 +139,7 @@ describe("push filter and pull predicate agree on every subscription case", () =
           settlesOwnRequest: false,
           isIncident: row.isIncident === true,
           wakesOwner: row.wakesOwner === true,
+          attentionRequired: row.attentionRequired === true,
         }
         const push = shouldDeliver(pushInfo, filter)
         const pull = sqlAdmits(row, filter, index)
@@ -183,6 +192,7 @@ describe("push filter and pull predicate agree on every subscription case", () =
         settlesOwnRequest: false,
         isIncident: row.isIncident === true,
         wakesOwner: row.wakesOwner === true,
+        attentionRequired: row.attentionRequired === true,
       }
       expect(shouldDeliver(pushInfo, undefined)).toBe(true)
       expect(sqlAdmits(row, openFilter, index)).toBe(true)
@@ -211,6 +221,7 @@ describe("push filter and pull predicate agree on every subscription case", () =
           settlesOwnRequest: false,
           isIncident: row.isIncident === true,
           wakesOwner: row.wakesOwner === true,
+          attentionRequired: row.attentionRequired === true,
         }
         const push = shouldDeliver(pushInfo, filter)
         const pull = sqlAdmits(row, filter ?? { filter_mode: "normal", filter_mute: null, filter_until: null }, index)
