@@ -1005,6 +1005,24 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     })
   })
 
+  it("#38770: the stop-the-line andon leads pending and fetch, ahead of older alarms and expired requests", () => {
+    const live = connectAs("sess-andon-owner", NAME)
+    const watcher = connectAs("sess-andon-watcher", "@fleet")
+    const chief = connectAs("sess-andon-chief", "@chief")
+
+    const expired = sendBall(chief, { message: "overdue", type: "request", request: "andon-expired" }, 30 * 60_000)
+    db.prepare("UPDATE pending_request SET expires_at = ? WHERE request_id = ?").run(now - 60_000, expired)
+    const oldAlarm = sendIncident(watcher, "@dev/old-alarm", 20 * 60_000)
+    const andonIncident = { emitter: "andon", subject: "fleet-stop", condition: "active" }
+    const andon = sendBall(watcher, { message: "fleet is stopped", incident: andonIncident }, 60_000)
+
+    const expected = [andon, oldAlarm, expired]
+    const pending = parseToolJson(handleToolCall(live, "tribe.pending", {}, opts)) as { pending?: AttentionBall[] }
+    expect(pending.pending?.map((ball) => ball.request_id)).toEqual(expected)
+    const fetched = fetchJson(live, opts).json
+    expect(fetched.attention?.pending_balls?.map((ball) => ball.request_id)).toEqual(expected)
+  })
+
   it("keeps an incident pending-only even when its message type is actionable", () => {
     const live = connectAs("sess-actionable-incident-owner", NAME)
     const watcher = connectAs("sess-actionable-incident-watcher", "@fleet")
