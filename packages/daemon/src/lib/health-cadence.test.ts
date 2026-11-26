@@ -205,6 +205,26 @@ describe("20876 Tribe health cadence", () => {
     expect(baseline.inbox_lag[0]).not.toHaveProperty("transport_state")
   })
 
+  // #38676: a pull row is never fanned out BY DESIGN, so fleet health must not call it a delivery that
+  // never happened. It said "2 never written to its socket" about a connected delivery:pull seat.
+  it("#38676 calls a pull seat's waiting row a pending fetch, not a failed socket write", () => {
+    insertSession(db, { id: "session-pull", name: "@pull-seat", role: "member", now })
+    db.prepare("UPDATE sessions SET delivery = 'pull' WHERE id = 'session-pull'").run()
+    db.prepare(`
+      INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery)
+      VALUES ('pull-verdict', 'verdict', '@chief', '@pull-seat', 'direct', 'body', $ts, 'pull')
+    `).run({ $ts: now - 6 * MINUTE })
+
+    const projection = projectHealthCadence(db, { now, connectedSessionNames: ["@pull-seat"] })
+    const row = projection.inbox_lag.find((entry) => entry.session === "@pull-seat")
+    expect(row?.actionable_rows).toBe(1)
+    expect(row?.actionable_causes).toEqual([{ cause: "pull-unfetched", rows: 1, oldest_age_ms: 6 * MINUTE }])
+
+    const warning = projection.warnings.find((line) => line.includes("@pull-seat"))
+    expect(warning, "a pull seat's waiting row is a pending fetch").toContain("waiting for the seat's next fetch")
+    expect(warning, "and never a delivery that did not happen").not.toContain("never written to its socket")
+  })
+
   // 30786: health eligibility follows principal class and canonical READ history.
   // Existing selector cases do not distinguish never-read services from agents.
   // The projection owns no receipt writes; retained message/cursor facts must not change.
