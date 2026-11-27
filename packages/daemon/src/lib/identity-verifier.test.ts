@@ -540,6 +540,35 @@ describe("participant verdicts (#30968 slice A)", () => {
 })
 
 /**
+ * @failure The plugin's contradicting rule is dropped, so another habitat's token reads as this habitat's member (#38997).
+ * @level l2 — real loader and verifier child.
+ * @consumer registration-refusals.ts, which keys an `aud-is-own-habitat` refusal apart from the member.
+ */
+describe("contradicted verdicts name an optional rule (#38997, @cto c8ac5657)", () => {
+  it("a named rule reaches the daemon; a v1 module that omits it still conforms; an empty rule is outside the contract", async () => {
+    const verdictOf = async (name: string, body: string) =>
+      (
+        await loadIdentityVerifier(
+          moduleAt(
+            `${name}.ts`,
+            `export const IDENTITY_VERIFIER_INTERFACE = 1
+             export async function verifyIdentity() { return ${body} }`,
+          ),
+        )
+      ).verify("t")
+    await expect(
+      verdictOf("rule-named", `{ result: "contradicted", rule: "aud-is-own-habitat", reason: "foreign" }`),
+    ).resolves.toMatchObject({ result: "contradicted", rule: "aud-is-own-habitat", reason: "foreign" })
+    const v1 = await verdictOf("rule-omitted", `{ result: "contradicted", reason: "instance-is-live: gone" }`)
+    expect(v1).toMatchObject({ result: "contradicted", reason: "instance-is-live: gone" })
+    expect("rule" in v1).toBe(false)
+    await expect(verdictOf("rule-empty", `{ result: "contradicted", rule: "", reason: "x" }`)).rejects.toThrow(
+      "returned a verdict outside the contract",
+    )
+  })
+})
+
+/**
  * The bounded verifier (28927, @cto f7046649): the daemon never waits on a raw liveness probe on the
  * dispatcher path. One row per pin of the ruling.
  */

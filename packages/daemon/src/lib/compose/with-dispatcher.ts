@@ -131,6 +131,7 @@ import {
   type LoadedIdentityVerifier,
   type SessionAuthority,
 } from "../identity-verifier.ts"
+import { createRegistrationRefusals } from "../registration-refusals.ts"
 
 const log = createLogger("tribe:dispatcher")
 // Known non-journal operations only: new routes stay visible until classified.
@@ -271,49 +272,8 @@ export function withDispatcher<
   return (t) => {
     const { db, stmts, daemonCtx, recall: recallHandlers, registry, broadcast, socket } = t
     const { clients, socketToClient } = registry
-    // 33946: registrations this daemon REFUSED, by name, with when and why. Health must go red on these.
-    // On 2026-11-12 a reboot left seats unable to re-register (80 NameConflict refusals in 3 min) while
-    // `tribe health` answered healthy: a refused transport leaves no live session for the mailbox-authority
-    // check to read, so the incident's "unavailable managed registration" state had no carrier at all.
-    // Cleared by that name's next successful register; expired by TTL so a one-off refusal cannot hold the
-    // rail red for ever.
-    const registrationRefusals = new Map<string, { kind: string; at: number; pid: number; launchId: string | null }>()
-    const REGISTRATION_REFUSAL_TTL_MS = 10 * 60_000
-    const noteRegistrationRefusal = (
-      name: string,
-      kind: string,
-      identity: { pid: number; launchId: string | null },
-    ): void => {
-      if (!name || name.startsWith("pending-") || name === "(no name)") return
-      registrationRefusals.set(name, { kind, at: Date.now(), pid: identity.pid, launchId: identity.launchId })
-    }
-    /**
-     * Refusals still unresolved because the REFUSED transport never got in. A live holder under the same name is
-     * not resolution: in the 2026-11-12 incident the holder was each seat's own `ag code` process, so "some live
-     * transport holds the name" was exactly the wedge. Resolution is the refused identity registering, or the TTL.
-     */
-    const unresolvedRegistrationRefusals = (
-      now: number,
-      live: ReadonlyArray<{ name: string; pid: number; launchId: string | null }>,
-    ): string[] => {
-      const issues: string[] = []
-      for (const [name, refusal] of registrationRefusals) {
-        const refusedTransportGotIn = live.some(
-          (session) =>
-            session.name === name &&
-            (session.pid === refusal.pid || (refusal.launchId !== null && session.launchId === refusal.launchId)),
-        )
-        if (refusedTransportGotIn || now - refusal.at >= REGISTRATION_REFUSAL_TTL_MS) {
-          registrationRefusals.delete(name)
-          continue
-        }
-        issues.push(
-          `registration refused for ${name} (${refusal.kind}) ${Math.max(1, Math.round((now - refusal.at) / 1000))}s ago; ` +
-            "the refused transport is still not registered",
-        )
-      }
-      return issues.sort()
-    }
+    // 33946 / #38997: the ledger of refused registrations that health reports (registration-refusals.ts).
+    const registrationRefusals = createRegistrationRefusals(10 * 60_000)
     // A stop outcome may update an incident only from the watch that received
     // this exact notice. Several successors can be notified while the first
     // stop is pending; retain each pair until the watch transport expires.
@@ -1650,7 +1610,12 @@ export function withDispatcher<
           return {
             refusal: {
               message: `register refused: the identity token ${claimed} presented is contradicted: ${redactIdentityToken(verdict.reason, token)}`,
-              data: { kind: "identity-contradicted", claimed, reason: redactIdentityToken(verdict.reason, token) },
+              data: {
+                kind: "identity-contradicted",
+                claimed,
+                reason: redactIdentityToken(verdict.reason, token),
+                ...(verdict.rule === undefined ? {} : { rule: verdict.rule }),
+              },
             },
           }
         case "unreadable":
@@ -2403,10 +2368,13 @@ export function withDispatcher<
         refusal.data.kind === "identity-name-mismatch" && typeof refusal.data.actor === "string"
           ? refusal.data.actor
           : undefined
-      noteRegistrationRefusal(presented, refusal.data.kind, {
-        pid: identity.pid,
-        launchId: identity.launch_id,
-      })
+      const rule = typeof refusal.data.rule === "string" ? refusal.data.rule : undefined
+      registrationRefusals.note(
+        presented,
+        refusal.data.kind,
+        { pid: identity.pid, launchId: identity.launch_id },
+        { ...(rule === undefined ? {} : { rule }), ...(reason === undefined ? {} : { reason }) },
+      )
       recordRegisterRefusal(identity.target ?? newestDurableRowId(presented), {
         kind: refusal.data.kind,
         claimed: foreignActor ?? presented,
@@ -4219,7 +4187,7 @@ export function withDispatcher<
             const liveUndeclared = [...new Set(sessions.map((session) => session.name))]
               .filter((name) => !declaredSet.has(name))
               .sort()
-            const registrationIssues = unresolvedRegistrationRefusals(
+            const registrationIssues = registrationRefusals.unresolved(
               now,
               registry.getActiveSessionInfo().map((member) => ({
                 name: member.name,
@@ -5013,7 +4981,7 @@ export function withDispatcher<
         if (err instanceof NameConflictError) {
           // 33946: a refused managed registration is a health fact, not only a log line. The 2026-11-12 reboot
           // held every seat out of the rail this way while `tribe health` said healthy.
-          noteRegistrationRefusal(err.desiredName, "name-conflict", {
+          registrationRefusals.note(err.desiredName, "name-conflict", {
             pid: Number(p.pid ?? 0),
             launchId: typeof p.launchId === "string" ? p.launchId.trim() : null,
           })

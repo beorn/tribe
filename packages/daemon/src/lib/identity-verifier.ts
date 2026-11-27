@@ -68,7 +68,15 @@ export type IdentityVerdict = (
     }
   | { readonly result: "absent" }
   | { readonly result: "unreadable"; readonly reason: string }
-  | { readonly result: "contradicted"; readonly reason: string }
+  | {
+      readonly result: "contradicted"
+      readonly reason: string
+      /**
+       * #38997 (@cto c8ac5657): which of the plugin's own rules contradicted the token, an open string. The daemon
+       * branches only on `aud-is-own-habitat` (registration-refusals.ts); a module that omits it still conforms.
+       */
+      readonly rule?: string
+    }
   /**
    * No verdict yet: the daemon's bounded wrapper synthesises this when a probe outlives the in-path
    * bound (28927). A module never returns it — checkedVerdict rejects it as outside the contract.
@@ -770,9 +778,17 @@ function checkedVerdict(value: unknown, path: string): IdentityVerdict {
     case "absent":
       return { result: "absent", ...diagnostic }
     case "unreadable":
-    case "contradicted":
       if (nonEmpty(verdict.reason)) return { result: verdict.result, reason: verdict.reason, ...diagnostic }
       break
+    case "contradicted":
+      // #38997: `rule` is optional, so a v1 module that never names one still conforms; a named rule must be a word.
+      if (!nonEmpty(verdict.reason) || (verdict.rule !== undefined && !nonEmpty(verdict.rule))) break
+      return {
+        result: "contradicted",
+        reason: verdict.reason,
+        ...(verdict.rule === undefined ? {} : { rule: verdict.rule }),
+        ...diagnostic,
+      }
   }
   throw new Error(`identity verifier ${path} returned a verdict outside the contract: ${JSON.stringify(value)}`)
 }
