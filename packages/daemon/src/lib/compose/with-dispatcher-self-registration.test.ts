@@ -4195,6 +4195,92 @@ describe("managed incident policy availability (28044)", () => {
     expect((await call("tribe.members", {})).error).toBeUndefined()
     expect(harness.db.prepare("SELECT COUNT(*) AS n FROM pending_request").get()).toEqual({ n: 0 })
   })
+
+  /** @failure A process-compose child that runs under its launching service's identity can never raise its
+   *          emitter's incidents, or the journal records the emitter as having authenticated itself, or the policy's
+   *          own refusal reason is replaced by a generic one.
+   * @level l1
+   * @consumer workmon under ahpd-codex-trial-services (#38898, @cto 73deda0b).
+   */
+  it("records the policy's via on a managed incident the runner raises and clears, and refuses with the policy's reason", async () => {
+    const emitter = "workmon"
+    const runner = "ahpd-codex-trial-services"
+    const runs: Readonly<Record<string, readonly string[]>> = { [emitter]: [runner] }
+    let actor = runner
+    const identityVerifier: LoadedIdentityVerifier = {
+      path: "/test/runs-policy.ts",
+      suppliesGen: true,
+      verify: async () => ({ result: "verified", actor, kind: "service", sid: "runner-sid", gen: 1 }),
+      readIncidentPolicy: () => ({
+        emitters: [emitter, "post-merge-tests"],
+        authorize: async (identity, requested) =>
+          identity.actor === requested
+            ? { allow: true, emitters: [emitter, "post-merge-tests"] }
+            : runs[requested]?.includes(identity.actor) === true
+              ? { allow: true, via: identity.actor, emitters: [emitter, "post-merge-tests"] }
+              : {
+                  allow: false,
+                  refusal: `verified identity ${identity.actor} is not authorized for emitter ${requested}: runs.${requested}`,
+                  emitters: [emitter, "post-merge-tests"],
+                },
+      }),
+    }
+    const harness = createDispatcherHarness({
+      identityVerifier,
+      requiredIncidentEmitters: [emitter, "post-merge-tests"],
+    })
+    cleanup = harness.dispose
+    const connection = harness.connectClient()
+    const send = async (params: Record<string, unknown>) =>
+      JSON.parse(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: "runs-send",
+            method: "tribe.send",
+            params: { to: "@chief", type: "notify", idToken: managedToken(actor, "runner-sid"), ...params },
+          },
+          connection.connId,
+        ),
+      ) as { error?: { message: string }; result?: { content: Array<{ text: string }> } }
+    const identity = { emitter, subject: "host", condition: "memory" }
+    const raised = await send({ message: "high memory", incident: identity, if_current: [] })
+    expect(raised.error).toBeUndefined()
+    const raisedId = (JSON.parse(raised.result!.content[0]!.text) as { id: string }).id
+    const cleared = await send({
+      message: "recovered",
+      incident: { ...identity, active: false },
+      if_current: [{ recipient: "@chief", message_id: raisedId }],
+    })
+    expect(cleared.error).toBeUndefined()
+    const clearedId = (JSON.parse(cleared.result!.content[0]!.text) as { id: string }).id
+    const rows = harness.db
+      .prepare("SELECT id, sender, incident_via FROM messages WHERE id IN (?, ?) ORDER BY rowid")
+      .all(raisedId, clearedId)
+    // The journal names the real actor: the runner sent it, as workmon's incident, via the runs grant.
+    expect(rows).toEqual([
+      { id: raisedId, sender: runner, incident_via: runner },
+      { id: clearedId, sender: runner, incident_via: runner },
+    ])
+    const refused = await send({
+      message: "red",
+      incident: { emitter: "post-merge-tests", subject: "main", condition: "red" },
+      if_current: [],
+    })
+    expect(refused.error?.message).toContain(
+      `verified identity ${runner} is not authorized for emitter post-merge-tests: runs.post-merge-tests`,
+    )
+    expect(refused.error?.message).not.toContain("verified identity is not authorized for this emitter")
+    // Control: workmon authenticating as itself records no via, exactly as before the runs map.
+    actor = emitter
+    const direct = await send({ message: "high disk", incident: { ...identity, condition: "disk" }, if_current: [] })
+    expect(direct.error).toBeUndefined()
+    const directId = (JSON.parse(direct.result!.content[0]!.text) as { id: string }).id
+    expect(harness.db.prepare("SELECT sender, incident_via FROM messages WHERE id = ?").get(directId)).toEqual({
+      sender: emitter,
+      incident_via: null,
+    })
+  })
 })
 
 // 24284 — a CLI one-shot read that never reaches the caller must not retire

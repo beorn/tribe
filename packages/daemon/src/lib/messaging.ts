@@ -192,6 +192,8 @@ export type BallTracker = {
   incident?: IncidentIdentity & { active?: boolean }
   /** Opaque JSON observation data, outside the stable incident identity. */
   incidentData?: unknown
+  /** #38898: the verified actor the host policy granted this incident through, when not the emitter itself. */
+  incidentVia?: string
   /** Complete expected holdings for this identity, compared in the mutation transaction. */
   ifCurrent?: readonly IncidentHolding[]
 }
@@ -980,6 +982,7 @@ export function sendMessage(
       $wakes_owner: wakesOwner ? 1 : 0,
       $is_incident: incident === undefined ? 0 : 1,
       $incident_data: incidentData,
+      $incident_via: incident === undefined ? null : (ballTracker.incidentVia ?? null),
       $between_personas: isExplicitTribePersonaName(sender) && isExplicitTribePersonaName(recipient) ? 1 : 0,
       $sender_authority: senderAuthority,
     })

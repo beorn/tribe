@@ -357,8 +357,13 @@ export type HandlerOpts = {
   identityVerifierPath?: string | null
   /** 25074 3c-2a — whether the loaded verifier declares `gen` on its verified verdicts; null with no verifier. */
   identityVerifierSuppliesGen?: boolean | null
-  /** Per-call receipt created only after current launch and host policy authorization. */
-  incidentAuthorization?: { readonly emitter: string; readonly operation: "read" | "raise" | "clear" }
+  /** Per-call receipt created only after current launch and host policy authorization. `via` is the verified actor
+   * the policy granted it through when that actor is not the emitter itself (#38898); the incident's row records it. */
+  incidentAuthorization?: {
+    readonly emitter: string
+    readonly operation: "read" | "raise" | "clear"
+    readonly via?: string
+  }
   requiredIncidentEmitters?: readonly string[]
   /** An active verifier fault issue, restored from its durable incident after a restart. */
   getIdentityVerifierFault?: () => string | null
@@ -1317,6 +1322,9 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
         owners: broadcastOwners,
         incident,
         incidentData: a.incident_data,
+        ...(incident !== undefined && opts.incidentAuthorization?.via !== undefined
+          ? { incidentVia: opts.incidentAuthorization.via }
+          : {}),
         ifCurrent,
         ...(redue === undefined ? {} : { redue }),
       },

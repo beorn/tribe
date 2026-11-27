@@ -155,7 +155,8 @@ export function openDatabase(path: string): Database {
 		wakes_owner INTEGER NOT NULL DEFAULT 0,
 		is_incident INTEGER NOT NULL DEFAULT 0,
 		sender_authority TEXT,
-		incident_data TEXT
+		incident_data TEXT,
+		incident_via TEXT
 	)`)
 
   db.run(`CREATE TABLE IF NOT EXISTS messages_archive (
@@ -182,7 +183,8 @@ export function openDatabase(path: string): Database {
 		wakes_owner INTEGER NOT NULL DEFAULT 0,
 		is_incident INTEGER NOT NULL DEFAULT 0,
 		sender_authority TEXT,
-		incident_data TEXT
+		incident_data TEXT,
+		incident_via TEXT
 	)`)
 
   // Ball-tracker: per-(request_id, recipient) row for every open request.
@@ -1813,6 +1815,24 @@ const MIGRATIONS: readonly Migration[] = [
       db.run(assertSingleStatement(MESSAGE_READS_MESSAGE_ID_INDEX_SQL))
     },
   },
+  {
+    version: 50,
+    name: "incident-via",
+    /**
+     * #38898 (@cto 73deda0b): an incident the host policy granted through an actor other than its emitter (a service
+     * that runs the emitter as its child) records that actor, so the journal never claims the emitter authenticated
+     * itself. Nullable: every earlier row and every direct grant carries NULL.
+     */
+    up(db) {
+      for (const table of ["messages", "messages_archive"]) {
+        const columns = tableColumnNames(db, table)
+        // Fresh stores declare the column above; historical stores upgrade both journals in the same migration.
+        if (columns.size > 0 && !columns.has("incident_via")) {
+          db.run(assertSingleStatement(`ALTER TABLE ${table} ADD COLUMN incident_via TEXT`))
+        }
+      }
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1930,6 +1950,7 @@ export const MESSAGE_ARCHIVE_COLUMNS = [
   "is_incident",
   "sender_authority",
   "incident_data",
+  "incident_via",
 ].join(", ")
 
 type TakingStatusSubjectSql = {
@@ -2028,8 +2049,9 @@ export function unretiredAttentionPredicateSql(
     `${noReplyIn(table, sequence, `reply_${suffix}`)}
     AND ${noTakingStatusIn(table, sequence, suffix)}`
 
-  if (source.relation === "messages")
+  if (source.relation === "messages") {
     return `${noRetirementIn("messages", "rowid", "message")}\n    AND ${noExplicitRead}`
+  }
 
   // `journal` is a CTE — `messages UNION ALL messages_archive`. Probing it
   // directly forced SQLite to MATERIALISE all ~158k rows and then scan that
@@ -2393,7 +2415,7 @@ export function createStatements(db: Database) {
       assertSingleStatement(`
 		INSERT OR IGNORE INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
 			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id, sender_authority,
-			wakes_owner, is_incident, incident_data, attention_required)
+			wakes_owner, is_incident, incident_data, incident_via, attention_required)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
 			$delivery, $topic, $room_id, $request, $reply, $correlated_reply_requester, $summary, $session_id,
 			-- 25074 3d-1a: the sending session's authority at insert (sessionAuthority), NULL for a daemon-originated row.
@@ -2403,6 +2425,8 @@ export function createStatements(db: Database) {
 			COALESCE($wakes_owner, 0),
 			COALESCE($is_incident, 0),
 			$incident_data,
+			-- #38898: the actor a managed incident was granted through, NULL for a direct grant and every other row.
+			$incident_via,
 			CASE
 				WHEN $attention_required = 1 THEN 1
 				WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1

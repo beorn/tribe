@@ -15,7 +15,7 @@
  *   {"op":"hello"}                    -> {"interface":1,"suppliesGen":bool,"emitters":[…],"policyFault":null|string}
  *   {"op":"verify","token":"…"}                                -> one verdict
  *   {"op":"authorize","identity":{…},"emitter":"…","operation":"read|raise|clear"}
- *                                                              -> {"allow":bool,"emitters":[…]}
+ *                                                              -> {"allow":bool,"via"?:"…","refusal"?:"…","emitters":[…]}
  *
  * The `authorize` answer carries the emitter list the CURRENT module declares, so the daemon can notice that its
  * cached copy drifted instead of quietly authorizing against a list nobody re-read.
@@ -107,12 +107,30 @@ export async function answer(request: unknown, modulePath: string): Promise<unkn
       } catch (error) {
         fail(error instanceof Error ? error.message : String(error))
       }
-      const allowed = await policy.authorize(
+      const answered = await policy.authorize(
         identity as Extract<IdentityVerdict, { result: "verified" }>,
         emitter,
         operation as IncidentOperation,
       )
-      return { allow: allowed === true, emitters: policy.emitters }
+      // #38898: a boolean, or a grant naming its via and its refusal reason. A grant whose fields are not what the
+      // contract says is the module's fault, refused by name, never a verdict with the field dropped.
+      if (typeof answered === "boolean") return { allow: answered, emitters: policy.emitters }
+      const grant = answered as { readonly allow?: unknown; readonly via?: unknown; readonly refusal?: unknown } | null
+      if (grant === null || typeof grant !== "object" || typeof grant.allow !== "boolean") {
+        fail(`authorize answered ${JSON.stringify(answered)}: expected a boolean or { allow: boolean, via?, refusal? }`)
+      }
+      for (const field of ["via", "refusal"] as const) {
+        const value = grant[field]
+        if (value !== undefined && (typeof value !== "string" || value.trim() === "")) {
+          fail(`authorize answered ${field} ${JSON.stringify(value)}: ${field} must be a non-empty string`)
+        }
+      }
+      return {
+        allow: grant.allow,
+        ...(grant.via === undefined ? {} : { via: grant.via }),
+        ...(grant.refusal === undefined ? {} : { refusal: grant.refusal }),
+        emitters: policy.emitters,
+      }
     }
     default:
       fail(`unknown op ${JSON.stringify(op)}: expected hello, verify or authorize`)

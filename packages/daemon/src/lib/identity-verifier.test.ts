@@ -178,6 +178,44 @@ describe("loadIdentityVerifier", () => {
     expect(policy.fault).toContain(`incident policy ${path}`)
   })
 
+  /** @failure A grant's via or a refusal's reason is lost crossing the child, so the journal cannot name the real
+   *          actor and the refusal cannot name the policy line that would admit it; or a malformed grant is read
+   *          as a verdict.
+   * @level   l2 — real loader, verifier child and parent normalization.
+   * @consumer The incident dispatcher's via record and refusal text (#38898, @cto 73deda0b).
+   */
+  it("carries an authorize answer's via and refusal through the child, and refuses a malformed one by name", async () => {
+    const path = moduleAt(
+      "policy-via.ts",
+      `export const IDENTITY_VERIFIER_INTERFACE = 1
+       export async function verifyIdentity() { return { result: "absent" } }
+       export const INCIDENT_POLICY = {
+         emitters: ["workmon"],
+         authorize: (identity, emitter) =>
+           identity.actor === emitter ? true
+           : identity.actor === "runner" ? { allow: true, via: "runner" }
+           : identity.actor === "bad-via" ? { allow: true, via: 42 }
+           : { allow: false, refusal: "not in runs." + emitter },
+       }`,
+    )
+    const policy = (await loadIdentityVerifier(path)).readIncidentPolicy!()
+    const as = (actor: string) => ({ result: "verified" as const, actor, kind: "service" as const, sid: "sid" })
+    expect(await policy.authorize(as("workmon"), "workmon", "raise")).toEqual({ allow: true, emitters: ["workmon"] })
+    expect(await policy.authorize(as("runner"), "workmon", "raise")).toEqual({
+      allow: true,
+      via: "runner",
+      emitters: ["workmon"],
+    })
+    expect(await policy.authorize(as("other"), "workmon", "raise")).toEqual({
+      allow: false,
+      refusal: "not in runs.workmon",
+      emitters: ["workmon"],
+    })
+    await expect(policy.authorize(as("bad-via"), "workmon", "raise")).rejects.toThrow(
+      "authorize answered via 42: via must be a non-empty string",
+    )
+  })
+
   /** @failure Membership is decided from the emitter list read at boot, so a landing that ADDS an emitter is
    *          refused before the current module is ever asked.
    * @level   l2

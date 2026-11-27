@@ -84,6 +84,13 @@ export type IdentityVerifyOptions = { readonly fresh?: boolean }
 export type IdentityVerifier = (token: string, options?: IdentityVerifyOptions) => Promise<IdentityVerdict>
 
 export type IncidentOperation = "read" | "raise" | "clear"
+/**
+ * A policy's answer in full (#38898, @cto 73deda0b). `via` names the verified actor a grant was made through when it
+ * is not the emitter itself (a service that runs the emitter as its child); the incident's message row records it, so
+ * the journal never claims the emitter authenticated itself. `refusal` is the policy's own reason for a refusal, which
+ * the daemon reports in place of its generic one. A bare boolean is the same answer with neither.
+ */
+export type IncidentGrant = { readonly allow: boolean; readonly via?: string; readonly refusal?: string }
 export type IncidentPolicy = {
   readonly emitters: readonly string[]
   /**
@@ -94,7 +101,7 @@ export type IncidentPolicy = {
     identity: Extract<IdentityVerdict, { result: "verified" }>,
     emitter: string,
     operation: IncidentOperation,
-  ) => boolean | Promise<boolean>
+  ) => boolean | IncidentGrant | Promise<boolean | IncidentGrant>
 }
 
 /**
@@ -102,8 +109,7 @@ export type IncidentPolicy = {
  * IN THAT SAME ANSWER. Membership is read from here, never from a snapshot, so a promotion that REMOVES an emitter
  * refuses the very next operation instead of granting it from cached bytes.
  */
-export type LoadedIncidentAuthorization = {
-  readonly allow: boolean
+export type LoadedIncidentAuthorization = IncidentGrant & {
   readonly emitters: readonly string[]
 }
 
@@ -455,7 +461,12 @@ type HelloAnswer = {
   readonly emitters?: unknown
   readonly policyFault?: unknown
 }
-type AuthorizeAnswer = { readonly allow?: unknown; readonly emitters?: unknown }
+type AuthorizeAnswer = {
+  readonly allow?: unknown
+  readonly via?: unknown
+  readonly refusal?: unknown
+  readonly emitters?: unknown
+}
 
 /** Exactly one JSON value on stdout, or undefined: a chatty or truncated child is a fault, never a verdict. */
 function exactlyOneJsonValue(stdout: string): unknown | undefined {
@@ -649,7 +660,13 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
           }
           // A fresh verdict proves the CURRENT policy is usable, so a boot-time fault must stop being reported.
           policyFault = null
-          return { allow: answer.allow === true, emitters: reported }
+          // The child validated both (#38898): each is a non-empty string or absent.
+          return {
+            allow: answer.allow === true,
+            ...(typeof answer.via === "string" ? { via: answer.via } : {}),
+            ...(typeof answer.refusal === "string" ? { refusal: answer.refusal } : {}),
+            emitters: reported,
+          }
         },
       }
     },

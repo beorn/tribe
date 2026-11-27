@@ -4048,9 +4048,10 @@ export function withDispatcher<
                     return refuseIncident("emitter is not managed by this host policy")
                   }
                   if (grant.allow !== true) {
-                    return refuseIncident("verified identity is not authorized for this emitter")
+                    // #38898: the policy's own reason names the line that would admit this actor.
+                    return refuseIncident(grant.refusal ?? "verified identity is not authorized for this emitter")
                   }
-                  incidentAuthorization = { emitter, operation }
+                  incidentAuthorization = { emitter, operation, ...(grant.via === undefined ? {} : { via: grant.via }) }
                 } catch (error) {
                   return refuseIncident(error instanceof Error ? error.message : String(error))
                 }
@@ -4089,9 +4090,10 @@ export function withDispatcher<
                   return refuseIncident("emitter is not managed by this host policy")
                 }
                 if (grant.allow !== true) {
-                  return refuseIncident("verified identity is not authorized for this emitter")
+                  // #38898: the policy's own reason names the line that would admit this actor.
+                  return refuseIncident(grant.refusal ?? "verified identity is not authorized for this emitter")
                 }
-                incidentAuthorization = { emitter, operation }
+                incidentAuthorization = { emitter, operation, ...(grant.via === undefined ? {} : { via: grant.via }) }
               } catch (error) {
                 return refuseIncident(error instanceof Error ? error.message : String(error))
               }
