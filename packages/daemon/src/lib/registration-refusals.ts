@@ -29,6 +29,8 @@ export type RegistrationRefusals = {
     identity: { readonly pid: number; readonly launchId: string | null },
     detail?: { readonly rule?: string; readonly reason?: string },
   ): void
+  /** A successful register under `name` clears that member's own refusal; another habitat's expires by TTL only. */
+  registered(name: string): void
   unresolved(
     now: number,
     live: ReadonlyArray<{ readonly name: string; readonly pid: number; readonly launchId: string | null }>,
@@ -49,6 +51,9 @@ export function createRegistrationRefusals(ttlMs: number): RegistrationRefusals 
         launchId: identity.launchId,
         foreignReason: foreign ? (detail?.reason ?? "no reason given") : null,
       })
+    },
+    registered(name) {
+      refusals.delete(name)
     },
     /**
      * Refusals still unresolved because the REFUSED transport never got in. A live holder under the same name is

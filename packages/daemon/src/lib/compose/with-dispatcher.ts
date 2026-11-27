@@ -3668,7 +3668,7 @@ export function withDispatcher<
               .prepare("SELECT key, value FROM coordination WHERE project_id = ?")
               .all(projectId) as Array<{ key: string; value: string | null }>
 
-            registrationRefusals.delete(name)
+            registrationRefusals.registered(name)
             return makeResponse(id, {
               sessionId: clientCtx.sessionId,
               // 25074 3c-2b (@cto b58e4715): the launch identity this register was keyed under (null for a legacy

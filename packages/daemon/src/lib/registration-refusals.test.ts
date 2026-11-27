@@ -20,6 +20,14 @@ describe("registration refusals (33946, #38997)", () => {
     expect(ledger.unresolved(Date.now(), [{ name: "habmod", pid: 7, launchId: null }])).toEqual([])
   })
 
+  it("a successful register clears the member's own refusal, never another habitat's", () => {
+    const ledger = createRegistrationRefusals(TTL)
+    ledger.note("habmod", "name-conflict", { pid: 7, launchId: null })
+    ledger.note("habmod", "identity-contradicted", { pid: 9, launchId: null }, { rule: "aud-is-own-habitat", reason: FOREIGN_REASON })
+    ledger.registered("habmod")
+    expect(ledger.unresolved(Date.now(), [])).toEqual([expect.stringContaining("another habitat's token claiming habmod")])
+  })
+
   it("a v1 verifier verdict that names no rule still keys the refusal by member", () => {
     const ledger = createRegistrationRefusals(TTL)
     ledger.note("habmod", "identity-contradicted", { pid: 7, launchId: null }, { reason: "instance is not live" })
