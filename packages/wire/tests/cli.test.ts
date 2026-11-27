@@ -3025,8 +3025,13 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           resolveListen()
         })
       })
+      // The runner's own launch identity left out, as every other fixture here leaves it: a suite run from a hab
+      // seat or service carries HAB_ID_TOKEN_FILE, which the token reader prefers over the HAB_ID_TOKEN this test
+      // sets, so the managed calls below sent the runner's launch instead of the fixture's.
+      const ambient: NodeJS.ProcessEnv = { ...process.env }
+      for (const name of tribeAmbientEnvironmentNames()) delete ambient[name]
       const explicitEnv = {
-        ...process.env,
+        ...ambient,
         TRIBE_SOCKET: socketPath,
         TRIBE_NO_AUTOSTART: "1",
         TRIBE_OPERATOR_CAPABILITY: "must-not-cross-the-wire",
@@ -3050,7 +3055,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       expect(JSON.parse(wait.stdout)).toEqual({ ...waitResult, waited_ms: expect.any(Number) })
 
       const managedEnv = {
-        ...process.env,
+        ...ambient,
         TRIBE_SOCKET: socketPath,
         ...launchEnvironment("managed-stale-daemon-launch"),
         TRIBE_NAME: "@dev/2",
