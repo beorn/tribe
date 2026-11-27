@@ -149,6 +149,11 @@ program
     "--vault-seed-qmd <index>",
     "One-time: copy complete, hash-current vault vectors from qmd's index.sqlite (needs --vault-db and RECALL_EMBED_MODEL)",
   )
+  .option(
+    "--run-budget-ms <ms>",
+    "The caller's wall-clock budget for this whole run; the vault embed phase then spends only the time the transcript phase left (default: a fresh 240s embed window)",
+    uint,
+  )
   .action(
     async (opts: {
       incremental?: boolean
@@ -160,6 +165,7 @@ program
       projectRoot?: string
       migrate?: boolean
       vaultSeedQmd?: string
+      runBudgetMs?: number
     }) => {
       await cmdIndex({
         ...opts,

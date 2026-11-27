@@ -116,6 +116,41 @@ describe("Recall refresh completion", () => {
     },
   )
 
+  /** @failure The embed phase still took its full 240s window after a long transcript phase, so the
+   *  recall-index wrapper's 600s timeout killed the run (exit 124) instead of the index ending with a report. */
+  test.each([
+    { transcriptMs: 500_000, windowMs: 100_000, timeLeftMs: 100_000 },
+    { transcriptMs: 620_000, windowMs: 0, timeLeftMs: -20_000 },
+  ])(
+    "a 600s run budget leaves the embed pass $windowMs ms after a $transcriptMs ms transcript phase",
+    async ({ transcriptMs, windowMs, timeLeftMs: expectedTimeLeftMs }) => {
+      corpus.vaultDb = dbPath
+      vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(transcriptMs)
+      vi.mocked(runVaultEmbedPass).mockImplementation(async ({ timeLeftMs }) => {
+        expect(timeLeftMs()).toBe(expectedTimeLeftMs)
+        return {
+          generation: 1,
+          published: false,
+          documents: 280,
+          coveredDocuments: 0,
+          embeddedDocuments: 0,
+          embeddedChunks: 0,
+          reusedChunks: 0,
+          uncovered: { "run budget spent": 280 },
+          stoppedEarly: true,
+          tooLarge: { documents: 0, largestChunks: 0 },
+          msPerChunk: { first: null, steadyMedian: null },
+        }
+      })
+      await cmdIndex({ incremental: true, runBudgetMs: 600_000 })
+      expect(runVaultEmbedPass).toHaveBeenCalledOnce()
+      const output = vi.mocked(console.log).mock.calls.flat().join("\n")
+      expect(output).toContain(
+        `transcript phase ${transcriptMs} ms; embed window remaining ${windowMs} ms (rest of the run budget)`,
+      )
+    },
+  )
+
   /** @failure Diagnostic metadata failed after publishing a fresh success marker. */
   test.each(["last_codex_failures", "last_codex_reason_counts"])(
     "%s write failure preserves the prior successful rebuild marker",

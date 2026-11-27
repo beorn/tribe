@@ -36,8 +36,13 @@ export async function cmdIndex(opts: {
   path?: string
   migrate?: boolean
   vaultSeedQmd?: string
+  /** 38987: the caller's own wall-clock budget for the whole run (see recall-index.sh's timeout). */
+  runBudgetMs?: number
 }): Promise<void> {
   const startedAt = Date.now()
+  // 38987: with a caller budget, the vault embed phase spends only what the transcript phase left;
+  // without one the embed phase keeps its fresh window (34234) past whatever the transcripts cost.
+  const runDeadline = opts.runBudgetMs === undefined ? null : startedAt + opts.runBudgetMs
   if (opts.vaultSeedQmd !== undefined && getVaultDbPath() === null) {
     throw new Error("--vault-seed-qmd needs --vault-db: the seed copies vectors for that vault's documents only")
   }
@@ -160,12 +165,19 @@ export async function cmdIndex(opts: {
         )
       }
       const embedStartedAt = Date.now()
-      const embedWindowMs = embedStartedAt + RECALL_VAULT_EMBED_STOP_MS - Date.now()
-      console.log(`  transcript phase ${transcriptMs} ms; embed window remaining ${Math.max(0, embedWindowMs)} ms`)
+      const embedStopAt =
+        runDeadline === null
+          ? embedStartedAt + RECALL_VAULT_EMBED_STOP_MS
+          : Math.min(embedStartedAt + RECALL_VAULT_EMBED_STOP_MS, runDeadline)
+      const embedWindowMs = embedStopAt - embedStartedAt
+      const embedWindowBasis = runDeadline !== null && embedStopAt === runDeadline ? " (rest of the run budget)" : ""
+      console.log(
+        `  transcript phase ${transcriptMs} ms; embed window remaining ${Math.max(0, embedWindowMs)} ms${embedWindowBasis}`,
+      )
       const vault = await runVaultEmbedPass({
         db,
         vaultDbPath,
-        timeLeftMs: () => embedStartedAt + RECALL_VAULT_EMBED_STOP_MS - Date.now(),
+        timeLeftMs: () => embedStopAt - Date.now(),
       })
       const uncoveredCount = Object.values(vault.uncovered).reduce((sum, count) => sum + count, 0)
       const uncovered = Object.entries(vault.uncovered)
