@@ -127,6 +127,30 @@ function insertDirect(
   }
 }
 
+function insertBroadcast(
+  f: Fixture,
+  row: { id: string; type?: string; ts: number; attentionRequired?: boolean },
+): void {
+  f.stmts.insertMessage.run({
+    $id: row.id,
+    $type: row.type ?? "notify",
+    $sender: SENDER,
+    $recipient: "*",
+    $kind: "broadcast",
+    $content: `broadcast body for ${row.id}`,
+    $bead_id: null,
+    $ref: null,
+    $ts: row.ts,
+    $delivery: "pull",
+    $topic: null,
+    $room_id: null,
+    $request: null,
+    $reply: null,
+    $summary: `broadcast summary for ${row.id}`,
+    $attention_required: row.attentionRequired === false ? 0 : 1,
+  })
+}
+
 async function unreadIdsAcrossReaders(f: Fixture): Promise<{
   status: string[]
   wait: string[]
@@ -136,7 +160,12 @@ async function unreadIdsAcrossReaders(f: Fixture): Promise<{
   const projected = readAttentionProjection(f.seatCtx, SEAT, Date.now(), 0, handlerOpts())
   const status = projected.unreadRows.map((r) => r.id)
   const wait = projected.attention.actionable_unread.map((r) => String(r.id))
-  const res = await handleToolCall(f.seatCtx, "tribe.fetch", { limit: 50, receipt: false }, handlerOpts())
+  const res = await handleToolCall(
+    f.seatCtx,
+    "tribe.fetch",
+    { limit: 50, receipt: false, advance: false },
+    handlerOpts(),
+  )
   const text = (res as { content: Array<{ text: string }> }).content[0]?.text ?? "{}"
   const parsed = JSON.parse(text) as { attention?: { actionable_unread?: Array<{ id: string }> } }
   const fetch = (parsed.attention?.actionable_unread ?? []).map((r) => r.id)
@@ -268,4 +297,87 @@ describe("38555 slice 3: tribe.fetch({ ids }) counts as read for that seat acros
       .get() as { name: string } | null
     expect(index?.name).toBe("idx_message_reads_message_id")
   })
+
+  it.each(["push", "pull"] as const)(
+    "#39021 (%s): id-fetch retires an attention broadcast for the reader alone across all attention queries without moving the cursor",
+    async (delivery) => {
+      const f = fixture(delivery)
+      const olderDirectId = "33333333-0000-4000-8000-000000000001"
+      const bcastId = "33333333-0000-4000-8000-000000000002"
+      insertDirect(f, { id: olderDirectId, type: "verdict", ts: NOW - 25 * MINUTE })
+      insertBroadcast(f, { id: bcastId, type: "notify", ts: NOW - 20 * MINUTE, attentionRequired: true })
+
+      // Before id-fetch: SEAT sees both rows, OTHER sees the broadcast.
+      expect(await unreadIdsAcrossReaders(f)).toEqual({
+        status: [olderDirectId, bcastId],
+        wait: [olderDirectId, bcastId],
+        fetch: [olderDirectId, bcastId],
+        healthCount: 1,
+      })
+      expect(f.stmts.countUnackedAttention.get({ $name: SEAT })).toEqual({ count: 2 })
+      expect(f.stmts.getLatestActionableAttention.get({ $name: SEAT })).toMatchObject({ id: bcastId })
+      expect(
+        f.stmts.getLatestInboxWaitMessage.get({
+          $name: SEAT,
+          $unacknowledged_only: 1,
+          $include_correlated_replies: 0,
+        }),
+      ).toMatchObject({ rowid: expect.any(Number) })
+      expect(
+        readAttentionProjection(f.otherCtx, OTHER, Date.now(), 0, handlerOpts()).unreadRows.map((r) => r.id),
+      ).toEqual([bcastId])
+
+      // receipt: false leaves the broadcast unread.
+      await handleToolCall(f.seatCtx, "tribe.fetch", { ids: [bcastId], receipt: false }, handlerOpts())
+      expect(
+        readAttentionProjection(f.seatCtx, SEAT, Date.now(), 0, handlerOpts()).unreadRows.map((r) => r.id),
+      ).toEqual([olderDirectId, bcastId])
+
+      // Receipt-bearing id-fetch retires ONLY the broadcast for SEAT; older direct stays unread, cursor stays 0.
+      await handleToolCall(f.seatCtx, "tribe.fetch", { ids: [bcastId] }, handlerOpts())
+      expect(f.stmts.getMailboxCursor.get({ $recipient: SEAT })).toBeNull()
+      expect(await unreadIdsAcrossReaders(f)).toEqual({
+        status: [olderDirectId],
+        wait: [olderDirectId],
+        fetch: [olderDirectId],
+        healthCount: 1,
+      })
+      expect(f.stmts.countUnackedAttention.get({ $name: SEAT })).toEqual({ count: 1 })
+      expect(f.stmts.getLatestActionableAttention.get({ $name: SEAT })).toMatchObject({ id: olderDirectId })
+
+      // OTHER still sees the broadcast unread (per-reader isolation).
+      expect(
+        readAttentionProjection(f.otherCtx, OTHER, Date.now(), 0, handlerOpts()).unreadRows.map((r) => r.id),
+      ).toEqual([bcastId])
+      expect(f.stmts.countUnackedAttention.get({ $name: OTHER })).toEqual({ count: 1 })
+
+      // Now SEAT reads the older direct by id too: every attention reader (including inbox-wait) drops to zero.
+      await handleToolCall(f.seatCtx, "tribe.fetch", { ids: [olderDirectId] }, handlerOpts())
+      expect(await unreadIdsAcrossReaders(f)).toEqual({
+        status: [],
+        wait: [],
+        fetch: [],
+        healthCount: 0,
+      })
+      expect(f.stmts.countUnackedAttention.get({ $name: SEAT })).toEqual({ count: 0 })
+      expect(f.stmts.getLatestActionableAttention.get({ $name: SEAT })).toBeNull()
+      expect(
+        f.stmts.getLatestInboxWaitMessage.get({
+          $name: SEAT,
+          $unacknowledged_only: 1,
+          $include_correlated_replies: 0,
+        }),
+      ).toEqual({ rowid: null })
+
+      // A later default fetch advances mailbox_cursors cleanly past the already-id-read broadcast
+      // (proving selectUnreturnedAttention does not pin the cursor behind it).
+      const newerDirectId = "33333333-0000-4000-8000-000000000003"
+      insertDirect(f, { id: newerDirectId, type: "verdict", ts: NOW - 5 * MINUTE })
+      const newerRowid = (
+        f.db.prepare("SELECT rowid FROM messages WHERE id = ?").get(newerDirectId) as { rowid: number }
+      ).rowid
+      await handleToolCall(f.seatCtx, "tribe.fetch", {}, handlerOpts())
+      expect(f.stmts.getMailboxCursor.get({ $recipient: SEAT })).toMatchObject({ last_actionable_seq: newerRowid })
+    },
+  )
 })

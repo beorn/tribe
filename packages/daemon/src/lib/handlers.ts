@@ -6744,7 +6744,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
     const readIds = filtered
       .filter(
         (row) =>
-          row.recipient === currentName &&
+          (row.recipient === currentName || (row.recipient === "*" && row.attention_required === 1)) &&
           row.sender !== currentName &&
           row.body_archived !== 1 &&
           (ACTIONABLE_TYPES_SET.has(row.type) || row.attention_required === 1 || row.wakes_owner === 1),

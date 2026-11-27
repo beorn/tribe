@@ -4978,6 +4978,89 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
     expect(readState().mailbox).toBeGreaterThan(0)
   })
 
+  it("#39021: authenticated cli_session_fetch_read_v1 with ids retires both direct and attention-broadcast rows for that reader only", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-dev7")
+    parseResult<RegisterResult>(
+      await harness.register("conn-dev7", {
+        name: "@dev/7",
+        pid: 4701,
+        project: "/tmp/p",
+        launchParentPid: 4700,
+        delivery: "push",
+        idToken: "token-dev7",
+      }),
+    )
+    harness.addPendingClient("conn-dev8")
+    parseResult<RegisterResult>(
+      await harness.register("conn-dev8", {
+        name: "@dev/8",
+        pid: 4702,
+        project: "/tmp/p",
+        launchParentPid: 4700,
+        delivery: "push",
+        idToken: "token-dev8",
+      }),
+    )
+
+    const now = Date.now()
+    const olderDirectId = "44444444-0000-4000-8000-000000000001"
+    const directId = "44444444-0000-4000-8000-000000000002"
+    const bcastId = "44444444-0000-4000-8000-000000000003"
+    for (const [id, recipient, kind, type] of [
+      [olderDirectId, "@dev/7", "direct", "verdict"],
+      [directId, "@dev/7", "direct", "response"],
+      [bcastId, "*", "broadcast", "notify"],
+    ] as const) {
+      harness.stmts.insertMessage.run({
+        $id: id,
+        $type: type,
+        $sender: "@chief",
+        $recipient: recipient,
+        $kind: kind,
+        $content: `body ${id}`,
+        $bead_id: null,
+        $ref: null,
+        $ts: now,
+        $delivery: "pull",
+        $topic: null,
+        $room_id: null,
+        $request: null,
+        $reply: null,
+        $summary: `summary ${id}`,
+        $attention_required: 1,
+      })
+    }
+
+    const statusOf = async (session: string) =>
+      parseResult<{ unread_count: number; unread_ids: string[] }>(
+        await harness.request("cli_inbox_status", { session }),
+      )
+
+    expect(await statusOf("@dev/7")).toMatchObject({ unread_count: 3, unread_ids: [olderDirectId, directId, bcastId] })
+    expect(await statusOf("@dev/8")).toMatchObject({ unread_count: 1, unread_ids: [bcastId] })
+
+    // CLI `tribe fetch --ids <directId>,<bcastId>` (via cli_session_fetch_read_v1) retires both for @dev/7 alone
+    // without advancing @dev/7's high-water mailbox cursor (olderDirectId stays unread) or touching @dev/8.
+    const fetched = parseResult<{ content: Array<{ text: string }> }>(
+      await harness.request("cli_session_fetch_read_v1", {
+        authority: null,
+        idToken: "token-dev7",
+        ids: [directId, bcastId],
+      }),
+    )
+    expect(fetched.content[0]!.text).toContain(directId)
+    expect(fetched.content[0]!.text).toContain(bcastId)
+
+    expect(await statusOf("@dev/7")).toMatchObject({ unread_count: 1, unread_ids: [olderDirectId] })
+    expect(await statusOf("@dev/8")).toMatchObject({ unread_count: 1, unread_ids: [bcastId] })
+    const cursorRow = harness.db
+      .prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = '@dev/7'")
+      .get() as { last_actionable_seq: number } | null
+    expect(cursorRow).toBeNull()
+  })
+
   it("refuses a verified token no session registered under, and a contradicted token", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose

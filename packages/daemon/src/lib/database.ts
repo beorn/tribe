@@ -2005,6 +2005,21 @@ export function protectedUnreadAttentionPredicateSql(alias: string): string {
       )`
 }
 
+/**
+ * #38555 / #39021: per-(recipient, message_id) read mark written by receipt-bearing
+ * `ids` fetches (`handleFetch` / `cli_session_fetch_read_v1`). Direct rows pass the
+ * default `${alias}.recipient`; broadcast rows (`recipient = '*'`) pass the reader
+ * parameter (e.g. `"$name"`) so reading a broadcast retires it for that reader alone.
+ */
+function noExplicitReadPredicateSql(alias: string, recipientExpr = `${alias}.recipient`): string {
+  return `NOT EXISTS (
+    SELECT 1
+    FROM message_reads AS mr
+    WHERE mr.recipient = ${recipientExpr}
+      AND mr.message_id = ${alias}.id
+  )`
+}
+
 export function unretiredAttentionPredicateSql(
   alias: string,
   source: { readonly relation: "messages" | "journal"; readonly sequence: "rowid" | "seq" } = {
@@ -2039,12 +2054,7 @@ export function unretiredAttentionPredicateSql(
   const noTakingStatusIn = (table: string, sequence: string, suffix: string) =>
     `${noTakingStatusRefIn(table, sequence, `taking_request_${suffix}`, `${row}request`)}
     AND ${noTakingStatusRefIn(table, sequence, `taking_message_${suffix}`, `${row}id`)}`
-  const noExplicitRead = `NOT EXISTS (
-    SELECT 1
-    FROM message_reads AS mr
-    WHERE mr.recipient = ${row}recipient
-      AND mr.message_id = ${row}id
-  )`
+  const noExplicitRead = noExplicitReadPredicateSql(alias)
   const noRetirementIn = (table: string, sequence: string, suffix: string) =>
     `${noReplyIn(table, sequence, `reply_${suffix}`)}
     AND ${noTakingStatusIn(table, sequence, suffix)}`
@@ -3356,6 +3366,7 @@ export function createStatements(db: Database) {
           AND m.attention_required = 1
           AND m.sender != $name
           AND ${noOpenIncidentAttentionPredicateSql("m")}
+          AND ${noExplicitReadPredicateSql("m", "$name")}
           AND m.rowid > ${broadcastAttentionCursorSql("$name")}
       )
       ORDER BY rowid DESC
@@ -3435,6 +3446,7 @@ export function createStatements(db: Database) {
               AND m.attention_required = 1
               AND m.sender != $name
               AND ${noOpenIncidentAttentionPredicateSql("m")}
+              AND ${noExplicitReadPredicateSql("m", "$name")}
               AND (
                 $unacknowledged_only = 0
                 OR m.rowid > ${broadcastAttentionCursorSql("$name")}
@@ -3522,6 +3534,7 @@ export function createStatements(db: Database) {
             m.recipient = '*'
             AND m.kind = 'broadcast'
             AND m.attention_required = 1
+            AND ${noExplicitReadPredicateSql("m", "$name")}
             AND m.rowid > ${broadcastAttentionCursorSql("$name")}
           )
         )
@@ -3676,6 +3689,10 @@ export function createStatements(db: Database) {
 				NOT (m.recipient = $name AND m.kind = 'direct' AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1))
 				OR ${unretiredAttentionPredicateSql("m")}
 			)
+			AND (
+				NOT (m.recipient = '*' AND m.kind = 'broadcast' AND m.attention_required = 1)
+				OR ${noExplicitReadPredicateSql("m", "$name")}
+			)
 			AND NOT (
 				m.recipient = $name
 				AND m.kind = 'direct'
@@ -3796,6 +3813,7 @@ export function createStatements(db: Database) {
           AND m.attention_required = 1
           AND m.sender != $name
           AND ${noOpenIncidentAttentionPredicateSql("m")}
+          AND ${noExplicitReadPredicateSql("m", "$name")}
           AND m.rowid > ${broadcastAttentionCursorSql("$name")}
           AND m.rowid <= $upto
           AND NOT (${actedSinceDeliverySql("rowid")})
@@ -3838,6 +3856,7 @@ export function createStatements(db: Database) {
           AND m.attention_required = 1
           AND m.sender != $name
           AND ${noOpenIncidentAttentionPredicateSql("m")}
+          AND ${noExplicitReadPredicateSql("m", "$name")}
           AND m.rowid > ${broadcastAttentionCursorSql("$name")}
           AND m.rowid <= $upto
           AND NOT (${actedSinceDeliverySql("rowid")})
@@ -3977,6 +3996,7 @@ export function createStatements(db: Database) {
           AND m.attention_required = 1
           AND m.sender != $name
           AND ${noOpenIncidentAttentionPredicateSql("m")}
+          AND ${noExplicitReadPredicateSql("m", "$name")}
           AND m.rowid > ${broadcastAttentionCursorSql("$name")}
           AND NOT (${actedSinceDeliverySql("rowid")})
         UNION
@@ -4011,6 +4031,7 @@ export function createStatements(db: Database) {
           AND m.attention_required = 1
           AND m.sender != $name
           AND ${noOpenIncidentAttentionPredicateSql("m")}
+          AND ${noExplicitReadPredicateSql("m", "$name")}
           AND m.rowid > ${broadcastAttentionCursorSql("$name")}
         UNION
         SELECT COALESCE(m.id, a.id) AS id

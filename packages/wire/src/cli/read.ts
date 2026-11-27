@@ -3222,7 +3222,8 @@ export function registerReadCommands(program: Command, doctorSections?: () => Pr
         "  Missing metadata from an older daemon means unknown, even below --limit.\n" +
         "  For large bodies: fetch --from @alice --limit 10 --json-to-file history.json\n" +
         "  Paging measures rows, not downstream output clipping; the file preserves the full payload.\n" +
-        "  IDs are snapshots; history does not acknowledge your inbox. Before a new wait,\n" +
+        "  IDs mark returned direct and attention-broadcast rows read without moving your cursor;\n" +
+        "  history queries (--from/--with/--since/--before/--topics) do not acknowledge your inbox. Before a new wait,\n" +
         "  read your mailbox with inbox --consume --json (or default MCP fetch, receipt on).\n",
     )
     .option(fetchIds.flags, fetchIds.description)
