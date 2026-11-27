@@ -377,15 +377,25 @@ function connectToDaemonOnce(
             // and custom toJSON must not change a retry's payload/message_id.
             const request = makeRequest(id, method, params)
             const pendingCall: PendingCall = { resolve: res, reject: rej }
-            let retried = false
             let lastIdentityRefusal: Error | undefined
+            const startedAt = Date.now()
+            let identityAsks = 0
             const expire = () => {
               if (!pending.delete(id)) return
               clearCallTimers(pendingCall)
               // Only an idle delay has a conclusive no-business-effect result.
               // An unanswered active retry can already have taken effect.
               if (pendingCall.waitingForRetry && lastIdentityRefusal) {
-                rej(lastIdentityRefusal)
+                // The final refusal names how hard it tried (@cto d27b3068); code and data stay the daemon's, so
+                // every classifier of the typed refusal still recognises it.
+                const waitedS = ((Date.now() - startedAt) / 1000).toFixed(1)
+                const refusal = lastIdentityRefusal as Error & { code?: unknown; data?: unknown }
+                rej(
+                  Object.assign(
+                    new Error(`identity undecided after ${identityAsks} asks over ${waitedS} s: ${refusal.message}`),
+                    { code: refusal.code, data: refusal.data, cause: refusal },
+                  ),
+                )
                 return
               }
               const error = new DaemonCallTimeoutError(method, requestTimeoutMs, pendingCall.stallSample)
@@ -398,12 +408,16 @@ function connectToDaemonOnce(
               }
             }
             pendingCall.onIdentityUndecided = (error) => {
-              if (retried) return false
-              retried = true
               lastIdentityRefusal = error
+              identityAsks++
               pendingCall.waitingForRetry = true
-              // One fixed delay, entirely inside the original call budget.
-              if (Date.now() + 250 < requestDeadlineAt) {
+              // #38914/#30030 (@cto d27b3068): re-ask an UNDECIDED refusal (only that typed reason reaches this hook;
+              // a decided deny never does) until the call's own deadline, backing off 250 ms doubling to a 1 s cap.
+              // The daemon keeps probing after it answers undecided and caches the landed verdict, so a re-ask is
+              // served from that cache; one re-ask covered ~2.25 s while the loaded host's p95 was 2.75 s (max 10.6 s).
+              // Past the deadline the call rejects with the counted refusal (expire), never a silent success.
+              const delayMs = Math.min(250 * 2 ** (identityAsks - 1), 1_000)
+              if (Date.now() + delayMs < requestDeadlineAt) {
                 pendingCall.retryTimer = timers.setTimeout(() => {
                   pendingCall.retryTimer = undefined
                   if (pending.get(id) !== pendingCall) return
@@ -420,7 +434,7 @@ function connectToDaemonOnce(
                   pendingCall.waitingForRetry = false
                   pending.set(id, pendingCall)
                   socket.write(`${JSON.stringify({ ...(JSON.parse(request) as JsonRpcRequest), id })}\n`)
-                }, 250)
+                }, delayMs)
               }
               return true
             }

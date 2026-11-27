@@ -46,7 +46,10 @@ function actorOf(token: string): string | undefined {
  * A daemon that keys each register on the launch id it was sent and lists that member, and refuses a register whose
  * token names another actor (identity-name-mismatch, as the daemon's with-dispatcher.ts does); it records every call.
  */
-async function fakeDaemon(registrationRefusal?: string): Promise<{
+async function fakeDaemon(
+  registrationRefusal?: string,
+  undecidedRegisters = 0,
+): Promise<{
   socketPath: string
   calls: Array<{ method: string; params: Record<string, unknown> }>
 }> {
@@ -54,6 +57,7 @@ async function fakeDaemon(registrationRefusal?: string): Promise<{
   const socketPath = join(root, "tribe.sock")
   const calls: Array<{ method: string; params: Record<string, unknown> }> = []
   let registered: Record<string, unknown> = {}
+  let undecidedLeft = undecidedRegisters
   const server: Server = createServer((socket) => {
     let buffer = ""
     socket.on("data", (chunk) => {
@@ -67,6 +71,16 @@ async function fakeDaemon(registrationRefusal?: string): Promise<{
         calls.push({ method: request.method, params })
         let result: unknown = { error: `unexpected call ${request.method}` }
         const actor = typeof params["idToken"] === "string" ? actorOf(params["idToken"]) : undefined
+        if (request.method === "register" && undecidedLeft > 0) {
+          undecidedLeft--
+          const error = {
+            code: -32003,
+            message: "register refused: the identity verdict is undecided (no verdict within 1000ms); retry",
+            data: { kind: "unauthenticated", reason: "identity-undecided" },
+          }
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error })}\n`)
+          continue
+        }
         if (request.method === "register" && registrationRefusal !== undefined) {
           socket.write(
             `${JSON.stringify({
@@ -170,6 +184,23 @@ describe("the one sender registers as what its launch's token names (25074 3d-1c
     }).pendingForEmitter("longproc-reading")
     expect(describeDaemonOutcome(outcome)).toContain(refusal)
     expect(calls.map((call) => call.method)).toEqual(["register"])
+  })
+
+  /**
+   * @failure #38914: a service sender's register is refused as identity-undecided under load and the one-shot fails,
+   * although the daemon has cached the landed verdict by the next ask (component-ci-reader 2026-11-27 02:55Z).
+   * @level l1
+   * @consumer registerLaunchSender's fixed-client path through tribeDaemonCalls (@cto d27b3068)
+   */
+  it("registers a service when its verdict lands on the second ask", async () => {
+    const { socketPath, calls } = await fakeDaemon(undefined, 1)
+    const outcome = await tribeDaemonCalls("component-ci-reader", {
+      socketPath,
+      deadlineMs: 5000,
+      env: { HAB_ID_TOKEN: launchToken("component-ci-reader:launch", "component-ci-reader", "service") },
+    }).pendingForEmitter("component-ci-reader")
+    expect(outcome.kind).toBe("ok")
+    expect(calls.map((call) => call.method)).toEqual(["register", "register", "tribe.members", "tribe.pending"])
   })
 
   // 28044 AC1: handler tests cannot prove that a one-shot caller registers before its emitter read.

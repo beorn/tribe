@@ -117,15 +117,22 @@ describe("connectToDaemon", () => {
    * @consumer DaemonClient.call over its existing native socket
    * Ordinary echo/reconnect tests never return the exact typed refusal or mutate params between attempts.
    */
-  it.each(["verified", "undecided"])(
-    "retries identity-undecided once with frozen params and new RPC ids: %s",
-    async (verdict) => {
+  // #38914/#30030: a loaded host's verdict landed after up to 10.6 s (p95 2.75 s); one re-ask covered ~2.25 s, so the
+  // "verified after 2 refusals" row is the recurrence: a verdict the daemon has cached by the third ask must succeed.
+  it.each([
+    ["verified after 1 refusal", 1],
+    ["verified after 2 refusals", 2],
+    ["undecided until the deadline", Number.POSITIVE_INFINITY],
+  ] as const)(
+    "re-asks identity-undecided until the call deadline with frozen params and new RPC ids: %s",
+    async (_label, refusals) => {
+      const verdict = Number.isFinite(refusals) ? "verified" : "undecided"
       const sock = join(tmpDir, "d.sock")
       const requests: JsonRpcRequest[] = []
       const params = { message_id: "stable-message", nested: { content: "original" } }
       const { server, clients } = await spawnFakeDaemon(sock, (request, socket) => {
         requests.push(request)
-        if (requests.length === 1 || verdict === "undecided") {
+        if (requests.length <= refusals) {
           socket.write(
             makeError(request.id, -32003, "temporary identity refusal", {
               kind: "unauthenticated",
@@ -141,20 +148,63 @@ describe("connectToDaemon", () => {
         client = await connectToDaemon(sock)
         const result = client.call("send", params, { timeoutMs: 2_000 })
         if (verdict === "verified") await expect(result).resolves.toEqual({ sent: true })
-        else await expect(result).rejects.toMatchObject({ code: -32003, data: { reason: "identity-undecided" } })
-        expect(requests).toHaveLength(2)
+        else {
+          await expect(result).rejects.toMatchObject({ code: -32003, data: { reason: "identity-undecided" } })
+          // The final refusal names its asks and wait (@cto d27b3068).
+          await expect(result).rejects.toThrow(/^identity undecided after \d+ asks over \d+\.\d s: /)
+        }
+        // Verified: exactly the refusals plus the answered ask. Undecided: re-asked every 250 ms inside the 2 s budget.
+        if (verdict === "verified") expect(requests).toHaveLength(refusals + 1)
+        else expect(requests.length).toBeGreaterThanOrEqual(3)
         expect(clients).toHaveLength(1)
-        expect(requests[1]!.id).not.toBe(requests[0]!.id)
-        expect(requests.map(({ params }) => params)).toEqual([
-          { message_id: "stable-message", nested: { content: "original" } },
-          { message_id: "stable-message", nested: { content: "original" } },
-        ])
+        expect(new Set(requests.map(({ id }) => id)).size).toBe(requests.length)
+        for (const sent of requests) {
+          expect(sent.params).toEqual({ message_id: "stable-message", nested: { content: "original" } })
+        }
       } finally {
         client?.close()
         for (const socket of clients) socket.destroy()
         await new Promise<void>((resolve) => server.close(() => resolve()))
       }
     },
+  )
+
+  /**
+   * @failure #38914: under load the verdict lands 2.75 s (p95) to 10.6 s (max) after the first ask; a client that stops
+   * re-asking before its own deadline fails a call the daemon could have answered from its verdict cache.
+   * @level l2
+   * @consumer DaemonClient.call within a 10 s call (@cto d27b3068: verdicts at 2.75 s and 9 s are accepted)
+   */
+  it.each([2_750, 9_000])(
+    "accepts a verdict that lands %i ms after the first ask within a 10 s call",
+    async (landsAfterMs) => {
+      const sock = join(tmpDir, "d.sock")
+      let firstAt: number | undefined
+      let asks = 0
+      const { server, clients } = await spawnFakeDaemon(sock, (request, socket) => {
+        asks++
+        firstAt ??= Date.now()
+        if (Date.now() - firstAt < landsAfterMs) {
+          socket.write(
+            makeError(request.id, -32003, "temporary identity refusal", {
+              kind: "unauthenticated",
+              reason: "identity-undecided",
+            }),
+          )
+        } else socket.write(makeResponse(request.id, { registered: true }))
+      })
+      const client = await connectToDaemon(sock)
+      try {
+        await expect(client.call("register", {}, { timeoutMs: 10_000 })).resolves.toEqual({ registered: true })
+        // Backoff 250, 500, then 1 s steps: bounded asks, never a tight loop.
+        expect(asks).toBeLessThanOrEqual(Math.ceil(landsAfterMs / 1_000) + 3)
+      } finally {
+        client.close()
+        for (const socket of clients) socket.destroy()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    },
+    15_000,
   )
 
   /** @failure Generic authentication/registration errors are retried as if definitely pre-business.
@@ -164,6 +214,9 @@ describe("connectToDaemon", () => {
     { code: -32003, data: { kind: "identity-undecided" } },
     { code: -32003, data: { kind: "other", reason: "identity-undecided" } },
     { code: -32003, data: { kind: "unauthenticated", reason: "identity-contradicted" } },
+    // Decided denies are never re-asked (@cto d27b3068).
+    { code: -32003, data: { kind: "unauthenticated", reason: "identity-sid-mismatch" } },
+    { code: -32003, data: { kind: "unauthenticated", reason: "identity-verifier-fault" } },
   ])("keeps nonmatching identity errors terminal: $code $data", async ({ code, data }) => {
     const sock = join(tmpDir, "d.sock")
     let attempts = 0
