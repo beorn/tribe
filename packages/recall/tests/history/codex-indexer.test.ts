@@ -584,7 +584,7 @@ exec bun "${realAgEntry}" "$@"
         writeFileSync(
           summary,
           JSON.stringify({
-            ...JSON.parse(readFileSync(summary, "utf8")),
+            ...(JSON.parse(readFileSync(summary, "utf8")) as Record<string, unknown>),
             created_at: new Date(Date.now() - 10_000).toISOString(),
           }),
         )
@@ -4259,7 +4259,9 @@ if (process.argv.includes("list")) {
 
     test("Acceptance 4: recall --session <bare-uuid> resolves unique codex:<uuid> or refuses naming the required form", async () => {
       vi.stubEnv("RECALL_SKIP_PROVIDER_TRANSCRIPTS", "1")
-      onTestFinished(() => vi.unstubAllEnvs())
+      onTestFinished(() => {
+        vi.unstubAllEnvs()
+      })
       const { cmdSearch } = await import("../../src/lib/search.ts")
       const { setIndexMeta } = await import("../../src/history/db.ts")
       const prevDbPath = process.env.RECALL_DB_PATH
