@@ -538,6 +538,44 @@ exec bun "${realAgEntry}" "$@"
         },
       )
 
+      test.skipIf(!nativeReady)("query refresh makes an appended Grok turn searchable", async () => {
+        const transcript = makeNativeFixture("grok")
+        const realAg = makeRealAg(tempDir)
+        const agBin = makeMockAg(`
+import { statSync } from "node:fs"
+
+const args = process.argv.slice(2)
+if (args[1] !== "list") {
+  const child = Bun.spawn([${JSON.stringify(realAg)}, ...args], { stdio: ["ignore", "inherit", "inherit"] })
+  process.exit(await child.exited)
+}
+
+const path = ${JSON.stringify(transcript)}
+const { size: sizeBytes, mtimeMs } = statSync(path)
+const key = "grok:native-sample"
+for (const row of [
+  { kind: "schema", version: 1 },
+  {
+    kind: "session", provider: "grok", nativeId: "native-sample", canonicalPath: path, status: "canonical", key,
+    copies: [{ path, sizeBytes, mtimeMs, lastEventAtMs: null, decision: "canonical", key }],
+  },
+  { kind: "done", discovered: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0 },
+]) console.log(JSON.stringify(row))
+`)
+        using queryDb = new Database(join(tempDir, "query-index.db"))
+        initSchema(queryDb)
+
+        await indexCodexTranscripts(queryDb, { agBin, incremental: true })
+        expect(ftsSearchWithSnippet(queryDb, "Find the Grok catalog").results).not.toHaveLength(0)
+        const turn = JSON.stringify({ type: "user", content: "queryrefreshgrokfreshturn" })
+        writeFileSync(transcript, turn + "\n", { flag: "a" })
+        expect(ftsSearchWithSnippet(queryDb, "queryrefreshgrokfreshturn").results).toHaveLength(0)
+
+        await refreshIndexForQuery(queryDb, { agBin, profileRoots: { roots: [], failures: [] } })
+
+        expect(ftsSearchWithSnippet(queryDb, "queryrefreshgrokfreshturn").results).toHaveLength(1)
+      })
+
       // Full rebuild must not interpret a failed provider census as permission to prune its old rows.
       test.skipIf(!nativeReady).each(["full", "incremental"] as const)(
         "retains a failed Grok scope through %s rebuild pruning",
