@@ -212,6 +212,20 @@ export async function connectToDaemon(socketPath: string, opts?: ConnectToDaemon
 }
 
 /** One connect attempt. Its deadline is the caller's ABSOLUTE `deadlineAt`, so retries never extend the budget. */
+/**
+ * Whether a refusal is the daemon's typed "no identity verdict yet", the only refusal the client re-asks (#38914).
+ * Two shapes carry it, both proven to have had no business effect: a one-shot call's
+ * `{kind: "unauthenticated", reason: "identity-undecided"}`, and a register's `{kind: "identity-undecided"}`
+ * (with-dispatcher.ts refuses an undecided register before it registers anything). The register shape is accepted for
+ * `register` only, so any other call carrying it stays terminal. #30030: without this, every undecided register was
+ * refused outright while one-shot callers waited for the verdict.
+ */
+function isIdentityUndecidedRefusal(code: unknown, data: unknown, method: string | undefined): boolean {
+  if (code !== -32003 || data === null || typeof data !== "object" || !("kind" in data)) return false
+  if (data.kind === "unauthenticated") return "reason" in data && data.reason === "identity-undecided"
+  return method === "register" && data.kind === "identity-undecided"
+}
+
 function connectToDaemonOnce(
   socketPath: string,
   opts: ConnectToDaemonOpts | undefined,
@@ -230,6 +244,8 @@ function connectToDaemonOnce(
       stallSample?: StallSample
       waitingForRetry?: boolean
       onIdentityUndecided?: (error: Error) => boolean
+      /** The RPC method: only `register` re-asks the register refusal's own undecided shape (#30030). */
+      method?: string
     }
     const pending = new Map<number | string, PendingCall>()
     const notificationHandlers: Array<(method: string, params?: Record<string, unknown>) => void> = []
@@ -290,17 +306,7 @@ function connectToDaemonOnce(
             ? Object.assign(new Error(msg.error.message), { code: msg.error.code, data: msg.error.data })
             : undefined
           const data = msg.error?.data
-          if (
-            error &&
-            msg.error?.code === -32003 &&
-            data !== null &&
-            typeof data === "object" &&
-            "kind" in data &&
-            data.kind === "unauthenticated" &&
-            "reason" in data &&
-            data.reason === "identity-undecided" &&
-            p.onIdentityUndecided?.(error)
-          ) {
+          if (error && isIdentityUndecidedRefusal(msg.error?.code, data, p.method) && p.onIdentityUndecided?.(error)) {
             return
           }
           pending.delete(msg.id)
@@ -376,7 +382,7 @@ function connectToDaemonOnce(
             // Freeze JSON semantics before inserting pending state: caller mutation
             // and custom toJSON must not change a retry's payload/message_id.
             const request = makeRequest(id, method, params)
-            const pendingCall: PendingCall = { resolve: res, reject: rej }
+            const pendingCall: PendingCall = { resolve: res, reject: rej, method }
             let lastIdentityRefusal: Error | undefined
             const startedAt = Date.now()
             let identityAsks = 0

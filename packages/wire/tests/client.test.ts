@@ -211,23 +211,58 @@ describe("connectToDaemon", () => {
    * @level l2 @consumer DaemonClient.call; existing errors have no structured identity envelope. */
   it.each([
     { code: -32002, data: { kind: "unauthenticated", reason: "identity-undecided" } },
-    { code: -32003, data: { kind: "identity-undecided" } },
+    // #30030: the register refusal's own shape is re-asked for `register` only; any other call carrying it stays terminal.
+    { code: -32003, data: { kind: "identity-undecided" }, method: "tribe.members" },
     { code: -32003, data: { kind: "other", reason: "identity-undecided" } },
     { code: -32003, data: { kind: "unauthenticated", reason: "identity-contradicted" } },
     // Decided denies are never re-asked (@cto d27b3068).
     { code: -32003, data: { kind: "unauthenticated", reason: "identity-sid-mismatch" } },
     { code: -32003, data: { kind: "unauthenticated", reason: "identity-verifier-fault" } },
-  ])("keeps nonmatching identity errors terminal: $code $data", async ({ code, data }) => {
+  ] as Array<{ code: number; data: Record<string, unknown>; method?: string }>)(
+    "keeps nonmatching identity errors terminal: $code $data $method",
+    async ({ code, data, method }) => {
+      const sock = join(tmpDir, "d.sock")
+      let attempts = 0
+      const { server, clients } = await spawnFakeDaemon(sock, (request, socket) => {
+        attempts++
+        socket.write(makeError(request.id, code, "identity-undecided", data))
+      })
+      const client = await connectToDaemon(sock)
+      try {
+        await expect(client.call(method ?? "register", {}, { timeoutMs: 1_000 })).rejects.toMatchObject({ code, data })
+        expect(attempts).toBe(1)
+      } finally {
+        client.close()
+        for (const socket of clients) socket.destroy()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    },
+  )
+
+  /** @failure An undecided REGISTER is refused outright while a one-shot caller waits for the same verdict (#30030:
+   * 26 register refusals in a day, all of this shape, after #38914 re-asked only the one-shot shape).
+   * @level l2 @consumer DaemonClient.call("register"); with-dispatcher.ts refuses an undecided register with
+   * {kind: "identity-undecided"} before registering anything. */
+  it("re-asks a register refused as identity-undecided and registers once the verdict lands", async () => {
     const sock = join(tmpDir, "d.sock")
-    let attempts = 0
+    const ids: Array<number | string> = []
     const { server, clients } = await spawnFakeDaemon(sock, (request, socket) => {
-      attempts++
-      socket.write(makeError(request.id, code, "identity-undecided", data))
+      ids.push(request.id)
+      if (ids.length < 3) {
+        socket.write(
+          makeError(request.id, -32003, "register refused: the identity verdict is undecided; retry", {
+            kind: "identity-undecided",
+          }),
+        )
+        return
+      }
+      socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { registered: true } })}\n`)
     })
     const client = await connectToDaemon(sock)
     try {
-      await expect(client.call("register", {}, { timeoutMs: 1_000 })).rejects.toMatchObject({ code, data })
-      expect(attempts).toBe(1)
+      await expect(client.call("register", { name: "x" }, { timeoutMs: 5_000 })).resolves.toEqual({ registered: true })
+      expect(ids).toHaveLength(3)
+      expect(new Set(ids).size).toBe(3)
     } finally {
       client.close()
       for (const socket of clients) socket.destroy()
