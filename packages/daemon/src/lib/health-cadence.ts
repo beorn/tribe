@@ -4,6 +4,7 @@ import {
   ATTENTION_PREDICATE_SQL,
   NON_EVENT_KINDS_SQL,
   noOpenIncidentAttentionPredicateSql,
+  refBoundOpenRequestPredicateSql,
   unretiredAttentionPredicateSql,
   unsettledAttentionPredicateSql,
   wakePredicateSql,
@@ -155,8 +156,7 @@ export type HealthCadenceProjection = ProjectionStamp & {
       actionable_held_rows: number
       /** Which case put each counted row in `actionable_rows` — never-delivered, directive-unread, or delivered-inline-unfetched. */
       actionable_causes: Array<{ cause: ActionableLagCause; rows: number; oldest_age_ms: number }>
-      /** The subset of the actionable rows that wakes the seat's inbox-wait (`wakePredicateSql`); quiet direct
-       * responses and ref-bound statuses count above but not here (27735). */
+      /** Actionable rows that wake the owner or refer to one of the owner's open request balls. */
       waking_rows: number
       waking_oldest_age_ms: number
       /** When this connected seat began being observable for read silence. */
@@ -264,8 +264,8 @@ function combineJournalCount(messagesHalf: LagRow, archiveHalf: LagRow): LagRow 
 }
 
 /**
- * One attention-lag shape, two readings (27735): every unacknowledged direct attention row, and the subset
- * that wakes the seat's inbox-wait. `wakePredicateSql` is the one home for "waking"; nothing here lists types.
+ * Both readings share the same underlying attention rows. The waking reading also checks
+ * the wake type and whether the row belongs to an open request ball.
  */
 function attentionWhereSql(table: "messages" | "messages_archive", extraPredicate: string): string {
   const sequence = table === "messages" ? "rowid" : "seq"
@@ -827,8 +827,9 @@ function inboxLagProjection(
   )
   // The acted exclusion is per physical table (rowid vs seq), so each half
   // states it for its own sequence space.
+  const openRequestRef = refBoundOpenRequestPredicateSql("m.ref", "$session", "either")
   const wakingFor = (sequence: string) =>
-    `\n      AND ${wakePredicateSql("m")}\n      AND NOT (${actedSinceDeliverySql(sequence)})`
+    `\n      AND (${wakePredicateSql("m")} OR (${openRequestRef}))\n      AND NOT (${actedSinceDeliverySql(sequence)})`
   const wakingLagQueryMessages = db.prepare(
     assertSingleStatement(attentionLagSql("messages", wakingFor("rowid"), { excludeInlineGrace: true })),
   )

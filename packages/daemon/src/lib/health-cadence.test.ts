@@ -680,6 +680,37 @@ describe("20876 Tribe health cadence", () => {
       waking_rows: 1,
       waking_oldest_age_ms: 4 * MINUTE,
     })
+
+    stmts.openPendingRequest.run({
+      $request_id: "dev-5-open-question",
+      $recipient: "@cto",
+      $sender: "@dev/5",
+      $opened_at: now - 14 * MINUTE,
+      $expires_at: null,
+      $message_id: "dev-5-question-message",
+      $fanout: "first",
+    })
+    insertMessage(db, {
+      id: "dev-5-open-ref-status",
+      type: "status",
+      sender: "@cto",
+      recipient: "@dev/5",
+      ts: now - 10 * MINUTE,
+      attentionRequired: 1,
+    })
+    db.prepare("UPDATE messages SET ref = ? WHERE id = ?").run("dev-5-open-question", "dev-5-open-ref-status")
+    expect(projectHealthCadence(db, { now, connectedSessionNames: ["@dev/5"] }).inbox_lag[0]).toMatchObject({
+      actionable_rows: 3,
+      waking_rows: 2,
+      waking_oldest_age_ms: 10 * MINUTE,
+    })
+
+    db.prepare("DELETE FROM pending_request WHERE request_id = ?").run("dev-5-open-question")
+    expect(projectHealthCadence(db, { now, connectedSessionNames: ["@dev/5"] }).inbox_lag[0]).toMatchObject({
+      actionable_rows: 2,
+      waking_rows: 1,
+      waking_oldest_age_ms: 4 * MINUTE,
+    })
   })
 
   it("retires replied actionables from cadence without hiding an unrelated older request", () => {
