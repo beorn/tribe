@@ -1736,18 +1736,21 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
   // 33568 (@dev/10): a result with no attention block is a MISSING count, never zero. Defaulting it to
   // 0 would print the same false-settled receipt this issue exists to remove, so the notice must say it
   // has no count and name the check instead of claiming none are owed.
-  it("inbox --consume never claims no balls owed when the read reported no count (33568)", async () => {
-    const payload = { events: [], cursor: 3 }
-    const { result } = await runManagedFetchCliAgainst(["inbox", "--consume", "--json"], () => ({
-      result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
-    }))
-    expect(result.code, result.stderr).toBe(0)
-    expect(result.stderr).toContain("reported no owed count")
-    expect(result.stderr, "no positive claim from a missing count").not.toContain("You owe no open ball")
-    expect(result.stderr).not.toContain("ball(s) you still owe")
-    expect(result.stderr, "the check it names is the one that answers the question").toContain("tribe pending")
-    expect(JSON.parse(result.stdout)).toEqual(payload)
-  })
+  it.each([undefined, { pending_balls_summary: { total: 1 } }])(
+    "inbox --consume does not infer the owed count from missing or total-only attention (33568, 39205)",
+    async (attention) => {
+      const payload = { ...(attention === undefined ? {} : { attention }), events: [], cursor: 3 }
+      const { result } = await runManagedFetchCliAgainst(["inbox", "--consume", "--json"], () => ({
+        result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+      }))
+      expect(result.code, result.stderr).toBe(0)
+      expect(result.stderr).toContain("reported no owed count")
+      expect(result.stderr, "no positive claim from a missing count").not.toContain("You owe no open ball")
+      expect(result.stderr).not.toContain("ball(s) you still owe")
+      expect(result.stderr, "the check it names is the one that answers the question").toContain("tribe pending")
+      expect(JSON.parse(result.stdout)).toEqual(payload)
+    },
+  )
 
   // 33568: the consuming read acknowledges the ROWS; an open ball the seat still owes stays in
   // attention, so the receipt must say that instead of reading as finished.
@@ -1756,7 +1759,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       attention: {
         actionable_unread: [{ id: "a1", from: "@chief", type: "request", content: "answer me" }],
         pending_balls: [{ request_id: "a1", sender: "@chief", summary: "answer me", request_kind: "request" }],
-        pending_balls_summary: { total: 2 },
+        pending_balls_summary: { total: 2, owed_count: 2, acknowledged_incident_count: 0 },
       },
       events: [],
       cursor: 12,
@@ -1772,6 +1775,31 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     // The read still succeeded and the rows are still delivered on stdout: a receipt fix, not a new failure.
     expect(JSON.parse(result.stdout)).toEqual(payload)
   })
+
+  it.each([
+    { flags: ["--json"], receipt: "stderr" },
+    { flags: [], receipt: "stdout" },
+  ] as const)(
+    "inbox --consume reports a quiet incident separately from owed balls in $receipt (39205)",
+    async ({ flags, receipt }) => {
+      const payload = {
+        attention: {
+          actionable_unread: [],
+          pending_balls: [{ request_id: "alarm", request_kind: "incident" }],
+          pending_balls_summary: { total: 1, owed_count: 0, acknowledged_incident_count: 1 },
+        },
+        events: [],
+        cursor: 12,
+      }
+      const { result } = await runManagedFetchCliAgainst(["inbox", "--consume", ...flags], () => ({
+        result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+      }))
+      expect(result.code, result.stderr).toBe(0)
+      expect(result[receipt]).toContain("You owe no open ball.")
+      expect(result[receipt]).toContain("1 acknowledged incident remains open.")
+      expect(result[receipt]).not.toContain("ball(s) you still owe")
+    },
+  )
 
   it("ordinary human inbox inspection leaves the prune notice unacknowledged (30793)", async () => {
     const payload = {

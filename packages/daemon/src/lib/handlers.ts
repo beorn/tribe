@@ -2156,6 +2156,9 @@ type PendingReplyFactRow = {
 
 type PendingBallSummary = {
   total: number
+  /** Measured for owned attention. An outbound summary has neither count. */
+  owed_count?: number
+  acknowledged_incident_count?: number
   oldest_age_ms: number
   truncated: boolean
   /** The LATEST due time (epoch ms) among owned balls overdue at projection
@@ -6114,7 +6117,15 @@ export function readAttentionProjection(
   const sentPreview = sentOfflineBalls.slice(0, ATTENTION_PENDING_BALL_LIMIT)
   const untakenRequestIds = untakenPendingRequestIds(ctx, owner)
   const untakenPendingBalls = pendingBalls.filter((ball) => untakenRequestIds.has(ball.request_id))
-  const owedPendingBalls = pendingBalls.filter((ball) => ballOwed(ball, !untakenRequestIds.has(ball.request_id)))
+  const owedPendingBalls: PendingBall[] = []
+  let acknowledgedIncidentCount = 0
+  for (const ball of pendingBalls) {
+    if (ballOwed(ball, !untakenRequestIds.has(ball.request_id))) {
+      owedPendingBalls.push(ball)
+    } else if (ball.request_kind === "incident") {
+      acknowledgedIncidentCount++
+    }
+  }
   // 38730: the count is "what is owed". Applied here, after the one settlement
   // decision above, so count and presentation cannot disagree about `settled`.
   const unreadRows = attentionRows.filter((row) => settlement.labels.get(row.id)?.settled !== true)
@@ -6180,6 +6191,8 @@ export function readAttentionProjection(
       },
       pending_balls_summary: {
         total: pendingBalls.length,
+        owed_count: owedPendingBalls.length,
+        acknowledged_incident_count: acknowledgedIncidentCount,
         oldest_age_ms: pendingBalls.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0),
         truncated: withheld.length > 0,
         newest_overdue_due_at: newestOverdueDueAt,

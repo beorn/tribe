@@ -207,6 +207,8 @@ describe("Tribe command descriptors", () => {
           required: ["total", "oldest_age_ms", "truncated"],
           properties: {
             total: { type: "number" },
+            owed_count: { type: "integer", minimum: 0 },
+            acknowledged_incident_count: { type: "integer", minimum: 0 },
             oldest_age_ms: { type: "number" },
             truncated: { type: "boolean" },
             withheld: {

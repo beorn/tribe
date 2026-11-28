@@ -132,10 +132,20 @@ const ATTENTION_SCHEMA = {
     pending_balls_summary: {
       type: "object",
       description:
-        "Lossless size, oldest-age and overdue-watermark summary of the full pending-ball set, taken before the 10-row preview cap.",
+        "Counts, oldest age and overdue watermark for the full pending-ball set before the 10-row preview cap.",
       required: ["total", "oldest_age_ms", "truncated"],
       properties: {
         total: { type: "number", description: "Open tracked requests this seat owns." },
+        owed_count: {
+          type: "integer",
+          minimum: 0,
+          description: "Open balls that still require action from this seat.",
+        },
+        acknowledged_incident_count: {
+          type: "integer",
+          minimum: 0,
+          description: "Open incidents the seat acknowledged whose next check is still in the future.",
+        },
         oldest_age_ms: { type: "number", description: "Age of the oldest, in milliseconds." },
         truncated: { type: "boolean", description: "True when pending_balls is a bounded preview." },
         newest_overdue_due_at: {

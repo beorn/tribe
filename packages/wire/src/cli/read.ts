@@ -2420,6 +2420,12 @@ interface SelfInboxEvent {
   content?: string
 }
 
+interface InboxPendingBallSummary {
+  total?: number
+  owed_count?: number
+  acknowledged_incident_count?: number
+}
+
 interface SelfInboxResult {
   attention?: {
     /** 21757 — retention archived unread actionables while this seat was dormant. */
@@ -2431,7 +2437,7 @@ interface SelfInboxResult {
       summary?: string
       request_kind?: "request" | "incident"
     }>
-    pending_balls_summary?: { total?: number }
+    pending_balls_summary?: InboxPendingBallSummary
     sent_offline_balls?: Array<{
       request_id: string
       recipient: string
@@ -2469,21 +2475,29 @@ export function formatPendingBallLine(ball: {
  * "messages consumed", which reads as finished, so the receipt now names the balls that remain owed in
  * the same line. The first sentence is unchanged for callers that match on it.
  *
- * `owedBalls` is deliberately `undefined`-able: a result with no attention block or no summary is a
- * MISSING COUNT, never zero, and defaulting it to 0 would print the same false-settled receipt this
- * issue exists to remove (@dev/10, 33568). Absent, the notice says it has no count and names the check.
+ * 39205: open obligations include acknowledged incidents. The daemon reports their count and the
+ * owed count before capping the preview. An older daemon's open total cannot answer either question.
  */
-function inboxConsumeNotice(owedBalls: number | undefined): string {
+function inboxConsumeNotice(summary: InboxPendingBallSummary | undefined): string {
   const notice =
     "tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming."
-  if (owedBalls === undefined) {
-    return `${notice} This read reported no owed count, so it does not claim one; check with: tribe pending`
+  const owedBalls = summary?.owed_count
+  if (typeof owedBalls !== "number" || !Number.isSafeInteger(owedBalls) || owedBalls < 0) {
+    return `${notice} This read reported no owed count. Check with tribe pending.`
   }
   const owed =
     owedBalls === 0
       ? " You owe no open ball."
-      : ` ${owedBalls} ball(s) you still owe remain in attention; answer them with: tribe pending`
-  return `${notice}${owed}`
+      : ` ${owedBalls} ball(s) you still owe remain in attention. Answer them with tribe pending.`
+  const acknowledged = summary?.acknowledged_incident_count
+  if (typeof acknowledged !== "number" || !Number.isSafeInteger(acknowledged) || acknowledged < 0) {
+    return `${notice}${owed} This read reported no acknowledged incident count. Check with tribe pending.`
+  }
+  const incidents =
+    acknowledged === 0
+      ? ""
+      : ` ${acknowledged} acknowledged incident${acknowledged === 1 ? " remains" : "s remain"} open.`
+  return `${notice}${owed}${incidents}`
 }
 
 /**
@@ -2549,6 +2563,7 @@ async function cmdInbox(opts: {
   }
   const raw = await callDaemon("cli_self_inbox_v1", { idToken, limit: opts.limit ?? 50, peek: !consume })
   const result = mcpJsonContent(raw) as SelfInboxResult
+  const consumeNotice = consume ? inboxConsumeNotice(result.attention?.pending_balls_summary) : undefined
   if (opts.jsonToFile !== undefined) {
     // 28909 — the rows a mailbox read produced: the actionable directs plus the
     // chronological events window (the same rows the human view prints).
@@ -2563,16 +2578,16 @@ async function cmdInbox(opts: {
     })
     // Explicit consumption carries the same warning in file and stdout modes
     // (on stderr; file mode keeps stdout to the single summary line).
-    if (written && consume) {
-      console.error(inboxConsumeNotice(result.attention?.pending_balls_summary?.total))
+    if (written && consumeNotice !== undefined) {
+      console.error(consumeNotice)
     } else if (written) {
       warnPeekNotAcknowledged(result)
     }
     return
   }
   if (opts.json) {
-    if (consume) {
-      console.error(inboxConsumeNotice(result.attention?.pending_balls_summary?.total))
+    if (consumeNotice !== undefined) {
+      console.error(consumeNotice)
     } else {
       warnPeekNotAcknowledged(result)
     }
@@ -2618,7 +2633,7 @@ async function cmdInbox(opts: {
     )
   }
 
-  if (!consume) {
+  if (consumeNotice === undefined) {
     console.log(
       `inbox (PEEK): ${actionable.length} actionable unread; ${pendingTotal} pending ball(s); cursor ${result.cursor ?? 0}.`,
     )
@@ -2632,9 +2647,7 @@ async function cmdInbox(opts: {
         `Acknowledged actionables: ${actionable.map((event) => `${event.id ?? "(id unavailable)"} ${event.type ?? "(type unavailable)"} from ${event.from ?? "(sender unavailable)"}`).join("; ")}.`,
       )
     }
-    console.log(
-      `\n(Note: this read consumed the messages and advanced the cursor. Use --peek to read without consuming.)`,
-    )
+    console.log(`\n${consumeNotice}`)
   }
 }
 

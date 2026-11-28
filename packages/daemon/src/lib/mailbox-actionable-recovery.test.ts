@@ -771,6 +771,8 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     )
     expect(fetched.attention?.pending_balls_summary).toEqual({
       total,
+      owed_count: total,
+      acknowledged_incident_count: 0,
       oldest_age_ms: expect.any(Number),
       truncated: true,
       newest_overdue_due_at: null,
@@ -876,6 +878,8 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetched.attention?.pending_balls?.[0]?.request_id).toBe(andon.request_id)
     expect(fetched.attention?.pending_balls_summary).toEqual({
       total: 12,
+      owed_count: 12,
+      acknowledged_incident_count: 0,
       oldest_age_ms: expect.any(Number),
       truncated: true,
       newest_overdue_due_at: null,
@@ -938,6 +942,8 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     ])
     expect(fetched.attention?.pending_balls_summary).toEqual({
       total: 11,
+      owed_count: 11,
+      acknowledged_incident_count: 0,
       oldest_age_ms: expect.any(Number),
       truncated: true,
       newest_overdue_due_at: null,
@@ -1049,6 +1055,31 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetched.attention?.pending_balls).toEqual([
       expect.objectContaining({ request_id: sent.request_id, request_kind: "incident" }),
     ])
+    expect(fetched.attention?.pending_balls_summary).toMatchObject({
+      total: 1,
+      owed_count: 1,
+      acknowledged_incident_count: 0,
+    })
+
+    parseToolJson(
+      handleToolCall(
+        live,
+        "tribe.send",
+        {
+          to: "@fleet",
+          message: "Checked, next review in one minute",
+          type: "status",
+          ref: sent.request_id,
+          expires_in_ms: 60_000,
+        },
+        opts,
+      ),
+    )
+    expect(fetchJson(live, opts).json.attention?.pending_balls_summary).toMatchObject({
+      total: 1,
+      owed_count: 0,
+      acknowledged_incident_count: 1,
+    })
     expect(stmts.getUnreadDms.get({ $name: NAME })).toMatchObject({ count: 0 })
   })
 
