@@ -92,11 +92,12 @@ export async function refreshIndexForQuery(
       if ("error" in result) throw result.error
       const { agBin, catalog } = result.discovered
       for (const provider of providers) {
-        if (catalog.failedProviders?.includes(provider))
+        if (catalog.failedProviders?.includes(provider)) {
           partial.set(provider, "Ag reported unreadable transcript sources")
+        }
       }
 
-      using lock = acquireIndexWriter(db)
+      using _writer = acquireIndexWriter(db)
       const heldByPath = db.prepare("SELECT id FROM sessions WHERE jsonl_path = ?")
       const heldAliases = db.prepare("SELECT id FROM sessions WHERE id >= ? AND id < ?")
       const sessions = catalog.sessions.filter((session) => {
