@@ -83,6 +83,15 @@ const SEATS: readonly Seat[] = [
     expected: { capability: "not-observed", reason: "mailbox-read-unavailable", state: "offline" },
   },
   {
+    name: "@pull/deaf-without-read",
+    delivery: "pull",
+    connected: true,
+    readableMailbox: false,
+    ownerWaiting: true,
+    lastReadAgeMs: null,
+    expected: { capability: "not-observed", reason: "mailbox-read-unavailable", state: "offline" },
+  },
+  {
     name: "@pull/gone",
     delivery: "pull",
     connected: false,
@@ -243,7 +252,8 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
 
     for (const seat of SEATS) {
       const { capability, reason, state } = seat.expected
-      expect(membersByName.get(seat.name), `members ${seat.name}`).toMatchObject({
+      const member = membersByName.get(seat.name)
+      expect(member, `members ${seat.name}`).toMatchObject({
         transport_state: seat.connected ? "connected" : "disconnected",
         mailbox_read_capability: expect.objectContaining({ state: seat.readableMailbox ? "available" : "unavailable" }),
         mailbox_progress:
@@ -264,6 +274,7 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
                 last_attention_read_age_ms: seat.lastReadAgeMs,
               },
       })
+      expect(member, `members ${seat.name}`).not.toHaveProperty("last_mailbox_read_age_ms")
       expect(pendingByOwner.get(seat.name), `pending ${seat.name}`).toMatchObject({
         owner_answer_capability: capability,
         owner_transport_reason: reason,
