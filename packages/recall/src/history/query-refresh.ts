@@ -1,19 +1,16 @@
 /**
- * Query-time incremental transcript index (#37777 option (a), @cto a78c4127 via @chief).
+ * Query-time incremental transcript refresh between scheduled index runs (#37777, #38515).
  *
- * The 4 h timer leaves a query up to four hours behind the session that asked it. Before a search, read the
- * transcripts under the queried roots that the index does not already hold, in the foreground, and stop at a cap
- * rather than delay the answer. A stop is LOUD: the caller prints how many newer transcripts were NOT searched, so a
- * short answer is never mistaken for a complete one. No timer is added, no gate, and the scheduled pass keeps its own
- * work; this only fills the gap between two passes.
- *
- * The transcript walk and the per-file skip rule are the timer's own (`findSessionFiles` + `indexSessionFile` with
- * `incremental`), so a transcript this pass skips is exactly one the next pass would also skip.
+ * Read changed Claude, Codex and Grok transcripts using the scheduled indexers and a shared foreground deadline.
+ * The receipt records coverage gaps. The scheduled rebuild owns the global freshness watermark.
  */
 import type { Database } from "bun:sqlite"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { matchProjectGlob } from "../lib/format.ts"
+import { parseThreshold, RECALL_INDEX_CADENCE } from "../lib/staleness.ts"
+import { excludedTranscriptProviders, fetchCodexCatalog, indexCodexTranscripts, resolveAgBin } from "./codex-indexer.ts"
+import { getIndexMeta } from "./db-queries.ts"
 import { acquireIndexWriter, getSnapshotPath, IndexWriterBusyError } from "./db.ts"
 import { currentProjectsDir, findSessionFiles, indexSessionFile, projectPathFromRelative } from "./indexer.ts"
 import { profileRootsFromAg, claudeProjectDirs, canonicalRootPath, type ProfileRoots } from "./profile-roots.ts"
@@ -22,6 +19,7 @@ import { profileRootsFromAg, claudeProjectDirs, canonicalRootPath, type ProfileR
 export const QUERY_REFRESH_CAP_MS = 10_000
 /** Commit work as it lands, so a cap that stops the pass keeps everything indexed before it. */
 const CHUNK_FILES = 20
+const PROVIDER_ACTIVITY_WINDOW_MS = parseThreshold(RECALL_INDEX_CADENCE)
 
 export type QueryRefreshStop = "cap" | "busy" | "source-missing"
 
@@ -34,6 +32,7 @@ export interface QueryRefreshReceipt {
   stoppedBy?: QueryRefreshStop
   /** Every claude root this pass walked, with what it found, so a thin answer names the roots it read. */
   roots?: QueryRefreshRoot[]
+  providerPartial?: { provider: "codex" | "grok"; reason: string }[]
 }
 
 /** One claude transcript root the query walked: the stock home, and each ag profile home (#38420). */
@@ -45,26 +44,134 @@ export interface QueryRefreshRoot {
   newer: number
 }
 
+type QueryRefreshOptions = { projectRoot?: string; capMs?: number; agBin?: string; profileRoots?: ProfileRoots }
+
 /**
- * Index the transcripts under `projectRoot` that the index does not already hold, stopping at `capMs` from entry
- * (the transcript walk counts against the cap: it is work the query pays for).
+ * Refresh changed transcripts before search, with Claude discovery narrowed by `projectRoot` when supplied.
  */
 export async function refreshIndexForQuery(
   db: Database,
-  options: { projectRoot?: string; capMs?: number; agBin?: string; profileRoots?: ProfileRoots } = {},
+  options: QueryRefreshOptions = {},
 ): Promise<QueryRefreshReceipt> {
   const began = Date.now()
   const capMs = options.capMs ?? QUERY_REFRESH_CAP_MS
+  if (db.filename === ":memory:" || getSnapshotPath() !== null) {
+    return { indexed: 0, elapsedMs: Date.now() - began, notSearched: 0 }
+  }
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), capMs)
+  const excluded = excludedTranscriptProviders()
+  const providers = (["codex", "grok"] as const).filter((provider) => !excluded.has(provider))
+  const refreshProviders = async () => {
+    const lastRebuild = Date.parse(getIndexMeta(db, "last_rebuild") ?? "")
+    const recent = began - PROVIDER_ACTIVITY_WINDOW_MS
+    const changedSince = new Date(Number.isFinite(lastRebuild) ? Math.min(lastRebuild, recent) : recent).toISOString()
+    const agBin = resolveAgBin(options.agBin)
+    const catalog = await fetchCodexCatalog(agBin, { changedSince, signal: controller.signal })
+    return { agBin, catalog } as const
+  }
+  const discovery =
+    providers.length > 0
+      ? refreshProviders().then(
+          (discovered) => ({ discovered }),
+          (error: unknown) => ({ error }),
+        )
+      : undefined
+
+  try {
+    const claude = await refreshClaudeForQuery(db, options, began, capMs)
+    if (discovery === undefined) return claude
+    const partial = new Map<(typeof providers)[number], string>()
+    const providerPartial = () => Array.from(partial, ([provider, reason]) => ({ provider, reason }))
+    let indexed = claude.indexed
+    try {
+      const result = await discovery
+      if (Date.now() - began >= capMs) controller.abort()
+      controller.signal.throwIfAborted()
+      if ("error" in result) throw result.error
+      const { agBin, catalog } = result.discovered
+      for (const provider of providers) {
+        if (catalog.failedProviders?.includes(provider))
+          partial.set(provider, "Ag reported unreadable transcript sources")
+      }
+
+      using lock = acquireIndexWriter(db)
+      const heldByPath = db.prepare("SELECT id FROM sessions WHERE jsonl_path = ?")
+      const heldAliases = db.prepare("SELECT id FROM sessions WHERE id >= ? AND id < ?")
+      const sessions = catalog.sessions.filter((session) => {
+        if (session.provider === "agy" || excluded.has(session.provider)) return false
+        const nativeKey = `${session.provider}:${session.nativeId}`
+        const copies =
+          session.status === "ambiguous"
+            ? session.copies.map((copy) => ({ path: copy.path, key: copy.key }))
+            : [
+                {
+                  path: session.canonicalPath ?? session.copies[0]?.path,
+                  key: session.key ?? session.sessionKey ?? nativeKey,
+                },
+              ]
+        const keys = new Set(copies.map((copy) => copy.key))
+        // Ambiguous keys start with nativeKey + "@". This range uses the session primary key.
+        const remapped = (heldAliases.all(`${nativeKey}@`, `${nativeKey}A`) as { id: string }[]).some(
+          (row) => !keys.has(row.id),
+        )
+        const incompleteScope = catalog.failedProviders?.includes(session.provider)
+        const safe =
+          !remapped &&
+          copies.every((copy) => {
+            if (!copy.path) return false
+            const held = heldByPath.get(copy.path) as { id: string } | null
+            return held ? held.id === copy.key || (!incompleteScope && held.id === nativeKey) : !incompleteScope
+          })
+        if (!safe && !incompleteScope) partial.set(session.provider, "a transcript copy group needs reconciliation")
+        return safe
+      })
+      if (sessions.length > 0) {
+        const result = await indexCodexTranscripts(
+          db,
+          {
+            agBin,
+            incremental: true,
+            catalog: { ...catalog, sessions, failures: [] },
+            signal: controller.signal,
+          },
+          excluded,
+        )
+        indexed += result.sessions
+        if (result.errors > 0 || result.unreadable > 0) {
+          for (const { provider } of sessions) {
+            if (provider !== "agy") partial.set(provider, Object.keys(result.reasonCounts).join(", "))
+          }
+        }
+      }
+    } catch (error) {
+      const reason = controller.signal.aborted
+        ? `the refresh reached its ${capMs / 1000}s cap`
+        : error instanceof Error
+          ? error.message
+          : String(error)
+      for (const provider of providers) partial.set(provider, reason)
+    }
+    return { ...claude, indexed, providerPartial: providerPartial(), elapsedMs: Date.now() - began }
+  } finally {
+    clearTimeout(timer)
+    controller.abort()
+  }
+}
+
+async function refreshClaudeForQuery(
+  db: Database,
+  options: QueryRefreshOptions,
+  began: number,
+  capMs: number,
+): Promise<QueryRefreshReceipt> {
   const receipt = (extra: Partial<QueryRefreshReceipt> = {}): QueryRefreshReceipt => ({
     indexed: 0,
     elapsedMs: Date.now() - began,
     notSearched: 0,
     ...extra,
   })
-  // An in-memory database holds seeded rows and cannot be shared with another process: nothing to read, nothing to guard.
-  if (db.filename === ":memory:") return receipt()
-  // A snapshot is an immutable file: there is nothing to refresh, and a write to it must never be attempted.
-  if (getSnapshotPath() !== null) return receipt()
 
   const rows = db
     .prepare("SELECT jsonl_path AS p, mtime_ms AS m, size_bytes AS s FROM sessions WHERE jsonl_path IS NOT NULL")
@@ -178,27 +285,25 @@ export async function refreshIndexForQuery(
 
   const notSearched = candidates.length - next
   if (notSearched > 0) return { indexed, elapsedMs: Date.now() - began, notSearched, stoppedBy: "cap", roots: walked }
-  // A whole-root sweep is the only pass that may claim the index is current; a project-filtered one does not.
-  if (options.projectRoot === undefined) {
-    db.prepare("INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)").run(
-      "last_rebuild",
-      new Date().toISOString(),
-    )
-  }
   return { indexed, elapsedMs: Date.now() - began, notSearched: 0, roots: walked }
 }
 
 /** One stderr line for the pass, and a loud line for every transcript it left unread. */
 export function reportQueryRefresh(receipt: QueryRefreshReceipt, capMs = QUERY_REFRESH_CAP_MS): void {
+  if (receipt.indexed > 0) {
+    process.stderr.write(`[recall] indexed ${receipt.indexed} new transcripts (${receipt.elapsedMs}ms)\n`)
+  }
+  for (const { provider, reason } of receipt.providerPartial ?? []) {
+    process.stderr.write(
+      `[recall] ${provider} transcript refresh partial (${reason}). Run recall index --incremental to refresh the full scope.\n`,
+    )
+  }
   if (receipt.stoppedBy === "source-missing") {
     const named = (receipt.roots ?? []).map((entry) => `${entry.root} (${entry.reason ?? "unreadable"})`).join("; ")
     process.stderr.write(
-      `[recall] transcript source missing: no claude root readable (${named || currentProjectsDir()}); the index was not refreshed\n`,
+      `[recall] transcript source missing: no claude root readable (${named || currentProjectsDir()}); the Claude index was not refreshed\n`,
     )
     return
-  }
-  if (receipt.indexed > 0) {
-    process.stderr.write(`[recall] indexed ${receipt.indexed} new transcripts (${receipt.elapsedMs}ms)\n`)
   }
   // Name the roots whenever this pass had something to report: it indexed, left newer transcripts unsearched, or could
   // not read a root (@cto 96afab5d). A clean, quiet pass stays quiet; a zero-hit search names them at the result.

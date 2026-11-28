@@ -141,6 +141,7 @@ export interface CodexIndexOptions {
   projectRoot?: string
   agBin?: string
   catalog?: CodexCatalog
+  signal?: AbortSignal
   skipCodex?: boolean
   cutoffTime?: number
   onProgress?: (progress: { sessionsProcessed: number; messagesIndexed: number; currentSession?: string }) => void
@@ -335,10 +336,18 @@ export function resolveAgBin(explicitBin?: string): string {
 /**
  * Fetch the provider catalog using `ag transcript list --provider all --json`.
  */
-export async function fetchCodexCatalog(agBin: string): Promise<CodexCatalog> {
+export async function fetchCodexCatalog(
+  agBin: string,
+  options: { changedSince?: string; signal?: AbortSignal } = {},
+): Promise<CodexCatalog> {
+  options.signal?.throwIfAborted()
+  const args = ["transcript", "list", "--provider", "all", "--json"]
+  if (options.changedSince !== undefined) args.push("--changed-since", options.changedSince)
   return new Promise((resolve, reject) => {
-    const child = spawn(agBin, ["transcript", "list", "--provider", "all", "--json"], {
+    const child = spawn(agBin, args, {
       stdio: ["ignore", "pipe", "pipe"],
+      signal: options.signal,
+      killSignal: "SIGKILL",
     })
 
     const sessions: TranscriptCatalogSession[] = []
@@ -421,6 +430,7 @@ export async function fetchCodexCatalog(agBin: string): Promise<CodexCatalog> {
 
     const decoder = new StringDecoder("utf8")
     child.stdout.on("data", (chunk: Buffer) => {
+      if (options.signal?.aborted) return
       buffer += decoder.write(chunk)
       let idx: number
       while ((idx = buffer.indexOf("\n")) !== -1) {
@@ -431,6 +441,10 @@ export async function fetchCodexCatalog(agBin: string): Promise<CodexCatalog> {
     })
 
     child.on("close", (code) => {
+      if (options.signal?.aborted) {
+        reject(options.signal.reason)
+        return
+      }
       buffer += decoder.end()
       if (buffer.trim()) {
         if (!handleLine(buffer)) return
@@ -749,6 +763,8 @@ export async function indexCodexTranscripts(
     }>((resolve, reject) => {
       const child = spawn(agBin, exportArgs, {
         stdio: ["ignore", "pipe", "pipe"],
+        signal: options.signal,
+        killSignal: "SIGKILL",
       })
 
       const batchIndexedSessionIds: string[] = []
@@ -1303,6 +1319,7 @@ export async function indexCodexTranscripts(
 
       const decoder = new StringDecoder("utf8")
       child.stdout.on("data", (chunk: Buffer) => {
+        if (options.signal?.aborted) return
         buffer += decoder.write(chunk)
         let idx: number
         while ((idx = buffer.indexOf("\n")) !== -1) {
@@ -1313,6 +1330,12 @@ export async function indexCodexTranscripts(
       })
 
       child.on("close", (code, signal) => {
+        if (options.signal?.aborted) {
+          if (inTx) safeRollback(db)
+          inTx = false
+          reject(options.signal.reason)
+          return
+        }
         buffer += decoder.end()
         if (buffer.trim()) {
           if (!handleLine(buffer)) return
@@ -1370,6 +1393,7 @@ export async function indexCodexTranscripts(
     })
 
   for (const args of exportBatches) {
+    options.signal?.throwIfAborted()
     const result = await exportBatch(args)
     batchResult.sessions += result.sessions
     batchResult.rows += result.rows

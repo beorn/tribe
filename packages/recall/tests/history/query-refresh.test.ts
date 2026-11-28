@@ -67,6 +67,7 @@ const lastRebuild = () =>
   (db.prepare("SELECT value FROM index_meta WHERE key = 'last_rebuild'").get() as { value: string } | undefined)?.value
 
 beforeEach(() => {
+  vi.stubEnv("RECALL_SKIP_PROVIDER_TRANSCRIPTS", "1")
   root = mkdtempSync(join(realpathSync(tmpdir()), "recall-query-refresh-"))
   claudeDir = join(root, "claude")
   projectsDir = join(claudeDir, "projects")
@@ -84,6 +85,7 @@ afterEach(() => {
   else process.env.CLAUDE_DIR = previousClaudeDir
   db.close()
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
   safeRemoveSync(root, { within: realpathSync(tmpdir()) })
 })
 
@@ -157,16 +159,15 @@ describe("query-time index refresh (37777)", () => {
     expect(lastRebuild()).toBeUndefined()
   })
 
-  test("a whole-root pass that reaches the end records that the index is current", async () => {
+  test("a whole-root query pass preserves the scheduled index watermark", async () => {
     writeTranscript("projalpha", SESSION_A, "alpha body")
-    await refreshIndexForQuery(db, { profileRoots: NO_ROOTS, projectRoot: "projalpha", capMs: 5_000 })
-    expect(lastRebuild()).toBeUndefined()
+    const lastScheduled = "2026-11-21T11:00:00.000Z"
+    db.prepare("INSERT INTO index_meta (key, value) VALUES ('last_rebuild', ?)").run(lastScheduled)
 
-    writeTranscript("projbeta", SESSION_B, "beta body")
     const receipt = await refreshIndexForQuery(db, { profileRoots: NO_ROOTS, capMs: 5_000 })
 
     expect(receipt).toMatchObject({ indexed: 1, notSearched: 0 })
-    expect(Number.isFinite(Date.parse(lastRebuild()!))).toBe(true)
+    expect(lastRebuild()).toBe(lastScheduled)
   })
 
   test("a held writer lock reports busy with the count instead of blocking or throwing", async () => {
@@ -192,13 +193,14 @@ describe("query-time index refresh (37777)", () => {
     expect(receipt).toMatchObject({ indexed: 0, notSearched: 0, stoppedBy: "source-missing" })
     reportQueryRefresh(receipt)
     expect(stderr()).toContain("transcript source missing")
-    expect(stderr()).toContain("the index was not refreshed")
+    expect(stderr()).toContain("the Claude index was not refreshed")
   })
 
   // The bead's own reproduction ran `recall <text> --raw`, which reads the index through a second CLI path: a refresh
   // wired only into synthesis mode would leave the reported symptom exactly as it was.
   test("--raw refreshes the index before it reads", async () => {
     writeTranscript("projalpha", SESSION_A, "alpha body")
+    db.prepare("INSERT INTO index_meta (key, value) VALUES ('last_rebuild', ?)").run(new Date().toISOString())
     const child = Bun.spawn(
       [
         process.execPath,

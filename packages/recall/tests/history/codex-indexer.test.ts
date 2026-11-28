@@ -14,8 +14,9 @@ import {
 } from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir, homedir } from "node:os"
-import { join, resolve } from "node:path"
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
+import { dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+import { afterEach, beforeEach, describe, expect, onTestFinished, test, vi } from "vitest"
 import { initSchema } from "../../src/history/db-schema.ts"
 import { getSession, upsertSession, insertMessage, ftsSearchWithSnippet } from "../../src/history/db-queries.ts"
 import { getSessionStatus } from "../helpers/db-queries.ts"
@@ -94,6 +95,25 @@ ${content}
     return scriptPath
   }
 
+  async function searchRefreshedProvider(db: Database, agBin: string, query: string): Promise<void> {
+    db.prepare("INSERT INTO index_meta (key, value) VALUES ('last_rebuild', ?)").run(new Date().toISOString())
+    const child = Bun.spawn(
+      [process.execPath, fileURLToPath(new URL("../../src/cli.ts", import.meta.url)), query, "--raw", "--json"],
+      {
+        env: { ...process.env, AG_BIN: agBin, RECALL_DB_PATH: db.filename, RECALL_PROFILE_ROOTS: "off" },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+    expect(code, stderr).toBe(0)
+    expect(JSON.parse(stdout)).toMatchObject({ total: 1, results: [{ snippet: expect.stringContaining(query) }] })
+  }
+
   test("query refresh makes an appended Codex turn searchable before the scheduled index", async () => {
     const transcript = join(tempDir, "rollout-query-refresh.jsonl")
     const timestamp = new Date().toISOString()
@@ -114,9 +134,29 @@ ${content}
     writeFileSync(transcript, older + turn("queryrefreshfreshturn") + "\n")
     expect(ftsSearchWithSnippet(queryDb, "queryrefreshfreshturn").results).toHaveLength(0)
 
-    await refreshIndexForQuery(queryDb, { agBin, profileRoots: { roots: [], failures: [] } })
+    await searchRefreshedProvider(queryDb, agBin, "queryrefreshfreshturn")
 
     expect(ftsSearchWithSnippet(queryDb, "queryrefreshfreshturn").results).toHaveLength(1)
+  })
+
+  test("query refresh reports both provider scopes when the Ag catalog reaches the cap", async () => {
+    const agBin = makeMockAg(`
+if (!process.argv.includes("--changed-since")) throw new Error("expected bounded catalog")
+await Bun.sleep(30_000)
+`)
+    using queryDb = new Database(join(tempDir, "query-index.db"))
+    initSchema(queryDb)
+
+    const refreshed = await refreshIndexForQuery(queryDb, {
+      agBin,
+      capMs: 150,
+      profileRoots: { roots: [], failures: [] },
+    })
+
+    expect(refreshed.providerPartial).toEqual([
+      { provider: "codex", reason: "the refresh reached its 0.15s cap" },
+      { provider: "grok", reason: "the refresh reached its 0.15s cap" },
+    ])
   })
 
   function makeFixtureProducer(isolatedHome?: string): string {
@@ -540,6 +580,14 @@ exec bun "${realAgEntry}" "$@"
 
       test.skipIf(!nativeReady)("query refresh makes an appended Grok turn searchable", async () => {
         const transcript = makeNativeFixture("grok")
+        const summary = join(dirname(transcript), "summary.json")
+        writeFileSync(
+          summary,
+          JSON.stringify({
+            ...JSON.parse(readFileSync(summary, "utf8")),
+            created_at: new Date(Date.now() - 10_000).toISOString(),
+          }),
+        )
         const realAg = makeRealAg(tempDir)
         const agBin = makeMockAg(`
 import { statSync } from "node:fs"
@@ -567,11 +615,15 @@ for (const row of [
 
         await indexCodexTranscripts(queryDb, { agBin, incremental: true })
         expect(ftsSearchWithSnippet(queryDb, "Find the Grok catalog").results).not.toHaveLength(0)
-        const turn = JSON.stringify({ type: "user", content: "queryrefreshgrokfreshturn" })
+        const turn = JSON.stringify({
+          type: "user",
+          content: "queryrefreshgrokfreshturn",
+          timestamp: new Date().toISOString(),
+        })
         writeFileSync(transcript, turn + "\n", { flag: "a" })
         expect(ftsSearchWithSnippet(queryDb, "queryrefreshgrokfreshturn").results).toHaveLength(0)
 
-        await refreshIndexForQuery(queryDb, { agBin, profileRoots: { roots: [], failures: [] } })
+        await searchRefreshedProvider(queryDb, agBin, "queryrefreshgrokfreshturn")
 
         expect(ftsSearchWithSnippet(queryDb, "queryrefreshgrokfreshturn").results).toHaveLength(1)
       })
@@ -4206,6 +4258,8 @@ if (process.argv.includes("list")) {
     })
 
     test("Acceptance 4: recall --session <bare-uuid> resolves unique codex:<uuid> or refuses naming the required form", async () => {
+      vi.stubEnv("RECALL_SKIP_PROVIDER_TRANSCRIPTS", "1")
+      onTestFinished(() => vi.unstubAllEnvs())
       const { cmdSearch } = await import("../../src/lib/search.ts")
       const { setIndexMeta } = await import("../../src/history/db.ts")
       const prevDbPath = process.env.RECALL_DB_PATH

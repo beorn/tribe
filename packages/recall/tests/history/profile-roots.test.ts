@@ -55,6 +55,7 @@ const found = () =>
   (db.prepare("SELECT COUNT(*) AS c FROM messages WHERE content LIKE ?").get(`%${TOKEN}%`) as { c: number }).c
 
 beforeEach(() => {
+  vi.stubEnv("RECALL_SKIP_PROVIDER_TRANSCRIPTS", "1")
   root = mkdtempSync(join(realpathSync(tmpdir()), "recall-profile-roots-"))
   claudeDir = join(root, "claude")
   profileHome = join(root, "profiles", "claude", "seat@example.org")
@@ -72,6 +73,7 @@ afterEach(() => {
   else process.env.CLAUDE_DIR = previousClaudeDir
   db.close()
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
   safeRemoveSync(root, { within: realpathSync(tmpdir()) })
 })
 

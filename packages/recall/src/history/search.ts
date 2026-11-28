@@ -567,8 +567,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     if (!hook) {
       const receipt = await refreshIndexBeforeRead({ refresh: options.refresh, projectRoot: projectFilter }, db)
       refreshedRoots = receipt?.roots
-      // A completed whole-root pass has just recorded the index current, and this is the last moment this connection
-      // is open to judge it: recall closes the DB on the way out, so a later read would open an empty one.
+      // Judge the scheduled watermark while this connection is still open.
       if (receipt?.stoppedBy === undefined && projectFilter === undefined) {
         refreshedDetail = judgeIndexFreshness(getIndexMeta(db, "last_rebuild") ?? null)
         provenance = refreshedDetail.provenance
