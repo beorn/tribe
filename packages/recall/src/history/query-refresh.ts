@@ -91,6 +91,7 @@ export async function refreshIndexForQuery(
     const partial = new Map<(typeof providers)[number], string>()
     const providerPartial = () => Array.from(partial, ([provider, reason]) => ({ provider, reason }))
     let indexed = claude.indexed
+    let pendingProviders = providers
     try {
       const result = await discovery
       if (Date.now() - began >= capMs) controller.abort()
@@ -102,6 +103,9 @@ export async function refreshIndexForQuery(
           partial.set(provider, "Ag reported unreadable transcript sources")
         }
       }
+      pendingProviders = providers.filter((provider) =>
+        catalog.sessions.some((session) => session.provider === provider),
+      )
 
       using _writer = acquireIndexWriter(db)
       const heldByPath = db.prepare("SELECT id FROM sessions WHERE jsonl_path = ?")
@@ -168,7 +172,7 @@ export async function refreshIndexForQuery(
         : error instanceof Error
           ? error.message
           : String(error)
-      for (const provider of providers) {
+      for (const provider of pendingProviders) {
         if (!partial.has(provider)) partial.set(provider, reason)
       }
     }

@@ -192,7 +192,7 @@ process.exit(await child.exited)
       profileRoots: { roots: [], failures: [] },
     })
 
-    expect(refreshed).toMatchObject({ indexed: 1, providerPartial: [{ provider: "codex" }, { provider: "grok" }] })
+    expect(refreshed).toMatchObject({ indexed: 1, providerPartial: [{ provider: "codex" }] })
     expect(ftsSearchWithSnippet(queryDb, "priorityrefreshneedle").results).toMatchObject([
       { session_id: "codex:requested" },
     ])
