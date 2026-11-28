@@ -42,6 +42,7 @@ let pruneOldSessions: typeof Indexer.pruneOldSessions
 let isRecallIgnored: typeof Indexer.isRecallIgnored
 import { getPersistedFailedSessions } from "../../src/lib/status.ts"
 import { cmdIndex } from "../../src/lib/sessions.ts"
+import { refreshIndexForQuery } from "../../src/history/query-refresh.ts"
 
 const runReal = Boolean(
   process.env.TEST_REAL_PRODUCER === "1" ||
@@ -92,6 +93,31 @@ ${content}
     chmodSync(scriptPath, 0o755)
     return scriptPath
   }
+
+  test("query refresh makes an appended Codex turn searchable before the scheduled index", async () => {
+    const transcript = join(tempDir, "rollout-query-refresh.jsonl")
+    const timestamp = new Date().toISOString()
+    const header = JSON.stringify({
+      type: "session_meta",
+      payload: { id: "query-refresh-provider", cwd: "/fixture", timestamp },
+    })
+    const turn = (message: string) =>
+      JSON.stringify({ type: "event_msg", timestamp, payload: { type: "user_message", message } })
+    const older = [header, turn("queryrefresholdercontrol")].join("\n") + "\n"
+    writeFileSync(transcript, older)
+    const agBin = makeFixtureProducer()
+    using queryDb = new Database(join(tempDir, "query-index.db"))
+    initSchema(queryDb)
+
+    await indexCodexTranscripts(queryDb, { agBin, incremental: true })
+    expect(ftsSearchWithSnippet(queryDb, "queryrefresholdercontrol").results).toHaveLength(1)
+    writeFileSync(transcript, older + turn("queryrefreshfreshturn") + "\n")
+    expect(ftsSearchWithSnippet(queryDb, "queryrefreshfreshturn").results).toHaveLength(0)
+
+    await refreshIndexForQuery(queryDb, { agBin, profileRoots: { roots: [], failures: [] } })
+
+    expect(ftsSearchWithSnippet(queryDb, "queryrefreshfreshturn").results).toHaveLength(1)
+  })
 
   function makeFixtureProducer(isolatedHome?: string): string {
     const homeVal = isolatedHome ?? tempDir
