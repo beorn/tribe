@@ -473,11 +473,11 @@ export async function retrieveCandidatesYielding(
  * prompt, not a person waiting on a search.
  */
 export async function refreshIndexBeforeRead(
-  options: { refresh?: boolean; projectRoot?: string },
+  options: { refresh?: boolean; projectRoot?: string; session?: string },
   db: Database = getDb(),
 ): Promise<QueryRefreshReceipt | undefined> {
   if (options.refresh === false) return undefined
-  const receipt = await refreshIndexForQuery(db, { projectRoot: options.projectRoot })
+  const receipt = await refreshIndexForQuery(db, { projectRoot: options.projectRoot, session: options.session })
   reportQueryRefresh(receipt)
   return receipt
 }

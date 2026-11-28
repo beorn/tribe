@@ -716,7 +716,8 @@ export async function indexCodexTranscripts(
     }
   }
 
-  // Group calls toward 64 KiB (CTO 2026-11-05); a session's copies must stay together.
+  // Group scheduled calls toward 64 KiB (CTO 2026-11-05); a session's copies must stay together.
+  // Under a deadline, let each group finish before Ag prepares the next group.
   // An oversized session goes alone, retaining the existing loud OS spawn limit.
   // Count UTF-8 arguments and NULs, leaving ample kernel/environment headroom.
   const argvBudget = 64 * 1024
@@ -727,7 +728,7 @@ export async function indexCodexTranscripts(
   let argvBytes = fixedBytes
   for (const group of pathsToExport) {
     const groupBytes = group.reduce((bytes, p) => bytes + Buffer.byteLength(p) + 1 + 7, 0)
-    if (exportArgs.length > fixedArgs.length && argvBytes + groupBytes > argvBudget) {
+    if (exportArgs.length > fixedArgs.length && (options.signal !== undefined || argvBytes + groupBytes > argvBudget)) {
       exportBatches.push(exportArgs)
       exportArgs = [...fixedArgs]
       argvBytes = fixedBytes

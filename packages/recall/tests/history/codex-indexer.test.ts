@@ -159,6 +159,45 @@ await Bun.sleep(30_000)
     ])
   })
 
+  test("query refresh commits the requested session before an unrelated export exhausts the budget", async () => {
+    const blocked = join(tempDir, "rollout-blocked.jsonl")
+    const requested = join(tempDir, "rollout-requested.jsonl")
+    const now = new Date()
+    const timestamp = now.toISOString()
+    for (const [file, id] of [
+      [blocked, "blocked"],
+      [requested, "requested"],
+    ] as const) {
+      const rows = [
+        { type: "session_meta", payload: { id, cwd: "/fixture", timestamp } },
+        { type: "event_msg", timestamp, payload: { type: "user_message", message: "priorityrefreshneedle" } },
+      ]
+      writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n")
+    }
+    utimesSync(requested, now, new Date(now.getTime() - 10_000))
+    const fixtureAg = makeFixtureProducer()
+    const agBin = makeMockAg(`
+const args = process.argv.slice(2)
+if (args.includes("export") && args.includes(${JSON.stringify(blocked)})) await Bun.sleep(30_000)
+const child = Bun.spawn([${JSON.stringify(fixtureAg)}, ...args], { stdio: ["ignore", "inherit", "inherit"] })
+process.exit(await child.exited)
+`)
+    using queryDb = new Database(join(tempDir, "query-index.db"))
+    initSchema(queryDb)
+
+    const refreshed = await refreshIndexForQuery(queryDb, {
+      agBin,
+      session: "codex:requested",
+      capMs: 1_500,
+      profileRoots: { roots: [], failures: [] },
+    })
+
+    expect(refreshed).toMatchObject({ indexed: 1, providerPartial: [{ provider: "codex" }, { provider: "grok" }] })
+    expect(ftsSearchWithSnippet(queryDb, "priorityrefreshneedle").results).toMatchObject([
+      { session_id: "codex:requested" },
+    ])
+  })
+
   function makeFixtureProducer(isolatedHome?: string): string {
     const homeVal = isolatedHome ?? tempDir
     const tsPath = join(tempDir, `fixture-ag-${Math.random().toString(36).slice(2)}.ts`)

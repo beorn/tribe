@@ -929,7 +929,7 @@ async function rawSearch(query: string | undefined, options: RawSearchOptions): 
 
   // 37777: `--raw` is the read most callers use, and the bead's own repro ran through it. It answers from the same
   // index, so it takes the same foreground refresh — capped, and loud about whatever the cap left unread.
-  await refreshIndexBeforeRead({ refresh: options.refresh, projectRoot: project }, db)
+  await refreshIndexBeforeRead({ refresh: options.refresh, projectRoot: project, session }, db)
   // The refresh may have brought the index up to date; the printed suffix and age line describe the index just read.
   const afterRefresh = readIndexFreshness({ refresh: options.refresh })
   provenance = afterRefresh.provenance

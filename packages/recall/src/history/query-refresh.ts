@@ -44,7 +44,13 @@ export interface QueryRefreshRoot {
   newer: number
 }
 
-type QueryRefreshOptions = { projectRoot?: string; capMs?: number; agBin?: string; profileRoots?: ProfileRoots }
+type QueryRefreshOptions = {
+  projectRoot?: string
+  session?: string
+  capMs?: number
+  agBin?: string
+  profileRoots?: ProfileRoots
+}
 
 /**
  * Refresh changed transcripts before search, with Claude discovery narrowed by `projectRoot` when supplied.
@@ -129,6 +135,13 @@ export async function refreshIndexForQuery(
         return safe
       })
       if (sessions.length > 0) {
+        const requested = (session: (typeof sessions)[number]) =>
+          options.session === session.nativeId ||
+          options.session === session.key ||
+          session.copies.some((copy) => options.session === copy.key)
+        const activity = (session: (typeof sessions)[number]) =>
+          session.copies.reduce((latest, copy) => Math.max(latest, copy.mtimeMs), 0)
+        sessions.sort((a, b) => Number(requested(b)) - Number(requested(a)) || activity(b) - activity(a))
         const result = await indexCodexTranscripts(
           db,
           {
@@ -136,10 +149,13 @@ export async function refreshIndexForQuery(
             incremental: true,
             catalog: { ...catalog, sessions, failures: [] },
             signal: controller.signal,
+            onProgress: ({ sessionsProcessed }) => {
+              indexed = claude.indexed + sessionsProcessed
+            },
           },
           excluded,
         )
-        indexed += result.sessions
+        indexed = claude.indexed + result.sessions
         if (result.errors > 0 || result.unreadable > 0) {
           for (const { provider } of sessions) {
             if (provider !== "agy") partial.set(provider, Object.keys(result.reasonCounts).join(", "))
@@ -152,7 +168,9 @@ export async function refreshIndexForQuery(
         : error instanceof Error
           ? error.message
           : String(error)
-      for (const provider of providers) partial.set(provider, reason)
+      for (const provider of providers) {
+        if (!partial.has(provider)) partial.set(provider, reason)
+      }
     }
     return { ...claude, indexed, providerPartial: providerPartial(), elapsedMs: Date.now() - began }
   } finally {
